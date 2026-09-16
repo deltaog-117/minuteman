@@ -14,6 +14,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | Workspace Architecture      | Feature-first Cargo workspace (10 crates)    | ✅ Confirmed |
 | 2026-09-16 | Config Keybinding Schema    | Action-to-keys mapping (`Vec<String>` per action) | ✅ Confirmed |
 | 2026-09-16 | v0.1.0 Local Vfs            | Synchronous `std::fs`, no `tokio` yet        | ✅ Confirmed |
+| 2026-09-16 | Core File Operations        | Extend `Vfs` trait with mutating methods     | ✅ Confirmed |
 
 ---
 
@@ -125,6 +126,54 @@ Deferred. A single `read_dir` call for a miller-column pane is not a workload th
 async, and pulling in `tokio` before there's an actual concurrent/long-running operation to
 schedule would be unused complexity. `tokio` will be introduced when `file_ops` implements bulk
 copy/move/delete with live progress reporting — the point where it earns its place.
+
+---
+
+### Core File Operations: Extend `Vfs` Trait with Mutating Methods
+
+**Date:** 2026-09-16
+**Status:** Confirmed
+
+#### Context / Background
+
+`file_ops` needed copy/move/delete/create/rename. The `Vfs` trait was read-only
+(`list_dir`/`is_dir`), so the question was where the mutating operations should live relative to
+it.
+
+#### Options Considered
+
+**Option A: Extend `Vfs` itself** with mutating methods (`copy_file`, `create_dir`,
+`create_file`, `rename`, `remove_file`, `remove_dir_all`, `exists`), implemented for `LocalVfs`;
+`file_ops` becomes thin orchestration on top *(chosen)* — one trait boundary, pulls the
+already-planned "VFS abstraction hardening" roadmap item forward, keeps `file_ops`
+backend-agnostic so it works over `vfs_ssh` once that lands with no changes.
+
+**Option B: Bypass the trait**, have `file_ops` call `std::fs` directly — fastest short-term, but
+directly contradicts the project's stated goal and repeats the exact per-backend duplication
+problem the workspace-architecture decision already solved for reads.
+
+**Option C: A separate `VfsOps: Vfs` trait**, keeping `Vfs` read-only-only — mirrors `Read`/
+`Write`, but doubles the trait every future backend must implement for a safety benefit that
+doesn't apply here (nothing constructs a `Vfs` trait object and hands it to untrusted code).
+
+#### Decision & Rationale
+
+Chose A. `file_ops::{copy, mv, delete, create_directory, create_new_file, rename}` all take
+`&dyn Vfs` and call only trait methods — no direct `std::fs` in `file_ops` itself.
+
+**Trade-offs accepted:**
+- `copy_file` and `rename` in `LocalVfs` manually check `dst.exists()` before calling
+  `std::fs::copy`/`std::fs::rename`, since both silently overwrite/replace an existing
+  destination. This has a narrow TOCTOU window (another process could create `dst` between the
+  check and the actual syscall); acceptable for a single-user desktop file manager, and no worse
+  than Ranger/nnn's own behavior. Revisit with `renameat2(..., RENAME_NOREPLACE)` (via a new
+  `libc`/`rustix` dependency) if this ever needs to be race-free.
+- `mv` has no cross-filesystem fallback yet — a rename across devices just returns the
+  underlying io error. Deferred to the async bulk-ops cycle, where a copy+delete fallback
+  naturally needs the same progress-reporting plumbing being built for that feature anyway.
+- "View" (from the roadmap's "view, copy, move, delete, create, rename" wording) was treated as
+  out of scope for `file_ops` — reading file contents for display is `preview`'s job, not a
+  mutating filesystem operation.
 
 ---
 

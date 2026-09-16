@@ -28,6 +28,28 @@ pub struct DirEntryInfo {
 pub trait Vfs {
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>, VfsError>;
     fn is_dir(&self, path: &Path) -> bool;
+    fn exists(&self, path: &Path) -> bool;
+
+    /// Creates a single directory. Fails with `VfsError::AlreadyExists` if `path` already
+    /// exists, and does not create missing parents (mirrors `std::fs::create_dir`).
+    fn create_dir(&self, path: &Path) -> Result<(), VfsError>;
+
+    /// Creates a new, empty file. Fails with `VfsError::AlreadyExists` rather than truncating
+    /// an existing file at `path`.
+    fn create_file(&self, path: &Path) -> Result<(), VfsError>;
+
+    /// Copies a single file. Fails with `VfsError::AlreadyExists` if `dst` already exists —
+    /// never silently overwrites.
+    fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), VfsError>;
+
+    /// Renames/moves `src` to `dst` in one filesystem operation. Fails with
+    /// `VfsError::AlreadyExists` if `dst` already exists, rather than replacing it.
+    fn rename(&self, src: &Path, dst: &Path) -> Result<(), VfsError>;
+
+    fn remove_file(&self, path: &Path) -> Result<(), VfsError>;
+
+    /// Removes a directory and everything under it.
+    fn remove_dir_all(&self, path: &Path) -> Result<(), VfsError>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -71,6 +93,62 @@ impl Vfs for LocalVfs {
     fn is_dir(&self, path: &Path) -> bool {
         path.is_dir()
     }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn create_dir(&self, path: &Path) -> Result<(), VfsError> {
+        std::fs::create_dir(path).map_err(|source| map_io_err(path, source))
+    }
+
+    fn create_file(&self, path: &Path) -> Result<(), VfsError> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map(|_| ())
+            .map_err(|source| map_io_err(path, source))
+    }
+
+    fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
+        // `std::fs::copy` silently overwrites an existing `dst`; check first so a conflicting
+        // destination is reported instead of clobbered.
+        if dst.exists() {
+            return Err(VfsError::AlreadyExists(dst.to_path_buf()));
+        }
+        std::fs::copy(src, dst)
+            .map(|_| ())
+            .map_err(|source| map_io_err(src, source))
+    }
+
+    fn rename(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
+        // `std::fs::rename` replaces an existing `dst` on most platforms; check first for the
+        // same reason as `copy_file`.
+        if dst.exists() {
+            return Err(VfsError::AlreadyExists(dst.to_path_buf()));
+        }
+        std::fs::rename(src, dst).map_err(|source| map_io_err(src, source))
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), VfsError> {
+        std::fs::remove_file(path).map_err(|source| map_io_err(path, source))
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> Result<(), VfsError> {
+        std::fs::remove_dir_all(path).map_err(|source| map_io_err(path, source))
+    }
+}
+
+fn map_io_err(path: &Path, source: std::io::Error) -> VfsError {
+    match source.kind() {
+        std::io::ErrorKind::NotFound => VfsError::NotFound(path.to_path_buf()),
+        std::io::ErrorKind::AlreadyExists => VfsError::AlreadyExists(path.to_path_buf()),
+        _ => VfsError::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -104,5 +182,93 @@ mod tests {
         assert!(matches!(result, Err(VfsError::NotADirectory(_))));
 
         std::fs::remove_file(&tmp).unwrap();
+    }
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "minuteman-vfs-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn create_file_fails_instead_of_truncating_existing_file() {
+        let dir = scratch_dir("create-file");
+        let target = dir.join("f.txt");
+        std::fs::write(&target, b"keep me").unwrap();
+
+        let vfs = LocalVfs;
+        let result = vfs.create_file(&target);
+
+        assert!(matches!(result, Err(VfsError::AlreadyExists(_))));
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn copy_file_fails_instead_of_overwriting_existing_destination() {
+        let dir = scratch_dir("copy-file");
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"keep me").unwrap();
+
+        let vfs = LocalVfs;
+        let result = vfs.copy_file(&src, &dst);
+
+        assert!(matches!(result, Err(VfsError::AlreadyExists(_))));
+        assert_eq!(std::fs::read(&dst).unwrap(), b"keep me");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rename_fails_instead_of_replacing_existing_destination() {
+        let dir = scratch_dir("rename");
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"keep me").unwrap();
+
+        let vfs = LocalVfs;
+        let result = vfs.rename(&src, &dst);
+
+        assert!(matches!(result, Err(VfsError::AlreadyExists(_))));
+        assert_eq!(std::fs::read(&dst).unwrap(), b"keep me");
+        assert!(src.exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn remove_dir_all_deletes_nested_contents() {
+        let dir = scratch_dir("remove-dir-all");
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("nested").join("f.txt"), b"hi").unwrap();
+
+        let vfs = LocalVfs;
+        vfs.remove_dir_all(&dir).unwrap();
+
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn missing_paths_map_to_not_found() {
+        let dir = scratch_dir("not-found");
+        let missing = dir.join("nope.txt");
+
+        let vfs = LocalVfs;
+        assert!(matches!(
+            vfs.remove_file(&missing),
+            Err(VfsError::NotFound(_))
+        ));
+        assert!(!vfs.exists(&missing));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

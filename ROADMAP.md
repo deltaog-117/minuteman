@@ -18,12 +18,16 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `~/.config/minuteman/config.toml` (action-to-keys mapping), falling back per-field to built-in
   defaults (`j`/`k`/`h`/`l`/`enter`/`q`) when the file is missing or a field is unspecified. A
   malformed config never prevents startup — it logs and falls back to defaults.
+- ✅ **Core file operations (sync)** – `Vfs` extended with `copy_file`/`create_dir`/
+  `create_file`/`rename`/`remove_file`/`remove_dir_all`/`exists`; `file_ops` orchestrates
+  copy/move/delete/create/rename on top, recursing for directories, rejecting a destination
+  inside its own source, and never silently overwriting an existing destination. Not yet wired
+  into the TUI (no keybindings/UI for these ops yet), and no cross-filesystem move fallback.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-- **Core file operations** – view, copy, move, delete, create, rename, on the local filesystem.
 - **Async bulk file operations with progress** – tokio + a thread pool driving copy/move/delete
   for large batches, with a live progress UI. This is the core motivation for the whole project
   (Ranger is painfully slow here).
@@ -35,6 +39,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟡 Medium Priority (Important)
 
+- **Wire file operations into the TUI** – keybindings + a command prompt (new file/dir name,
+  rename target) driving the `file_ops` functions, plus a conflict-resolution prompt (overwrite/
+  skip/abort) surfaced when a destination already exists, since `file_ops` currently just errors
+  out on conflicts rather than asking.
 - **Interactive shell overlay** – summon a real, fully interactive `$SHELL` subprocess by
   suspending the TUI (not Ranger's auto-close-after-one-command behavior); the user controls
   when it reopens/closes.
@@ -75,9 +83,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui -- <optional-start-dir>` to try v0.1.0 interactively (`j`/`k` move,
-   `l`/Enter enter a directory, `h` leave, `q` quit).
-2. Commit v0.1.0 (step 8 of the dev loop).
-3. Pick the next roadmap item — recommended: **core file operations** in `file_ops`
-   (copy/move/delete/create/rename against the `Vfs` trait), since bulk-op speed is the
-   project's core motivation.
+1. `cargo test -p shared -p file_ops` to verify the new file-ops layer (17 tests).
+2. Commit this cycle (step 8 of the dev loop).
+3. Pick the next roadmap item — recommended: **async bulk file operations with progress**,
+   now that `file_ops` has sync primitives to make async, since bulk-op speed is the project's
+   core motivation. Wiring `file_ops` into the TUI is the other strong candidate.

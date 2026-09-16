@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over the local filesystem, with vim-style navigation (`j`/`k`/`h`/`l`/Enter/`q`) resolved
   through the config-driven keymap. Terminal state (raw mode, alternate screen) is always
   restored on exit via an RAII guard.
+- `shared`: `Vfs` trait extended with `exists`, `create_dir`, `create_file`, `copy_file`,
+  `rename`, `remove_file`, `remove_dir_all`; `LocalVfs` implements all of them over `std::fs`,
+  never silently truncating an existing file or overwriting an existing copy/rename destination.
+  New `VfsError::NotFound` / `VfsError::AlreadyExists` variants.
+- `file_ops`: `copy`/`mv`/`delete`/`create_directory`/`create_new_file`/`rename` orchestration on
+  top of `Vfs` — recursive directory copy, a guard against a destination nested inside its own
+  source, and a guard against a no-op same-path operation. Not yet wired into the TUI.
 
 ## [0.1.0] - 2026-09-16
 

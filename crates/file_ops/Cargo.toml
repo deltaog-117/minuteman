@@ -6,3 +6,5 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+shared = { path = "../shared" }
+thiserror = "2.0.20"

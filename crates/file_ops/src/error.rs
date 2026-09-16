@@ -16,18 +16,16 @@
 
 use std::path::PathBuf;
 
+use shared::VfsError;
+
 #[derive(Debug, thiserror::Error)]
-pub enum VfsError {
-    #[error("io error at {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("not a directory: {0}")]
-    NotADirectory(PathBuf),
-    #[error("not found: {0}")]
-    NotFound(PathBuf),
-    #[error("already exists: {0}")]
-    AlreadyExists(PathBuf),
+pub enum FileOpsError {
+    #[error(transparent)]
+    Vfs(#[from] VfsError),
+    #[error("source and destination are the same path: {0}")]
+    SameLocation(PathBuf),
+    #[error("destination '{dst}' is inside source '{src}'")]
+    RecursiveDestination { src: PathBuf, dst: PathBuf },
+    #[error("path has no parent directory: {0}")]
+    NoParent(PathBuf),
 }
