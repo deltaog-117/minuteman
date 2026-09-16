@@ -30,15 +30,24 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `file_ops::ConflictPolicy`. Verified against the real compiled binary via two scripted PTY
   sessions (create/yank/paste/rename/delete, and cut+conflict-abort+conflict-overwrite),
   checking actual filesystem end-state — not just unit tests.
+- ✅ **Async bulk file operations with progress** – paste and delete now run on a `tokio`
+  blocking thread pool (`tokio::runtime::Handle::spawn_blocking`) instead of inline, so the TUI
+  never freezes during a large copy/move/delete. `file_ops` gained `copy_with_progress`/
+  `mv_with_progress` (the old `copy`/`mv` are now thin wrappers — zero signature-break for
+  existing callers/tests) plus the cross-filesystem move fallback (copy+delete on
+  `ErrorKind::CrossesDevices`) promised last cycle. Copy/move report one progress tick per file
+  and are cancellable mid-flight (`Esc`); delete has no per-file hook (`Vfs::remove_dir_all` is
+  one opaque call) so it just runs off-thread with an indeterminate "deleting…" status and no
+  cancel. While an operation is in flight, all other actions (including quit) are blocked except
+  `Esc`, so the app can't exit mid-write and leave a partial file. Verified against the real
+  compiled binary: a 4000-file copy cancelled after ~1 file (proving the main loop stayed
+  responsive during background I/O), the same copy run to completion (all 4000 landed), and a
+  4000-file delete via the background path.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-- **Async bulk file operations with progress** – tokio + a thread pool driving copy/move/delete
-  for large batches, with a live progress UI. This is the core motivation for the whole project
-  (Ranger is painfully slow here). `file_ops` and the TUI's clipboard/prompt flow from this cycle
-  are the synchronous foundation this builds on.
 - **Full theme system** – extend `theming::Theme` beyond the current two-color stub (selection
   bg/fg) into a real palette (borders, headers, file-type colors) with at least one alternate
   theme to prove the system works end-to-end.
@@ -70,6 +79,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   simple commands, layered alongside the WASM plugin system.
 - **Fuzzy find / search within the browser.**
 - **Multi-tab / multi-pane workspaces.**
+- **Multi-select (mark several entries for one bulk op)** – `BrowserState` only tracks a single
+  selection today; yank/cut/paste/delete all operate on one entry. `file_ops::ConflictPolicy`
+  already has `Skip` (vs. `Abort`) specifically for when a batch needs to continue past one
+  conflicting item instead of stopping — that distinction is currently unobservable in the TUI
+  since there's never more than one item in flight.
+- **Byte-level/percentage progress for large single files** – current progress is one tick per
+  *file*, so a single huge file shows no movement until it's done. Needs `Vfs::copy_file` to
+  support a streaming copy with periodic callbacks instead of one atomic `std::fs::copy` call.
 
 ---
 
@@ -87,10 +104,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui -- <dir>` to try the new keybindings interactively: `y` yank, `m` cut,
-   `p` paste, `d` delete (confirms `y`/N), `r` rename, `n` create (trailing `/` = directory).
-2. `cargo test --workspace` (25 tests) to verify everything still passes.
+1. `cargo run -p tui -- <dir>` and try a paste/delete on a large directory: the app should stay
+   responsive (try `Esc` mid-copy to cancel) instead of freezing like Ranger.
+2. `cargo test --workspace` (28 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Pick the next roadmap item — recommended: **async bulk file operations with progress**, now
-   that both the sync primitives (`file_ops`) and a TUI entry point (clipboard/prompt flow) exist
-   to make async and show progress for, since bulk-op speed is the project's core motivation.
+4. Pick the next roadmap item — recommended: **full theme system**, now that the two biggest
+   architectural items (file ops, async) are done; it's self-contained and doesn't block on
+   anything else in flight.

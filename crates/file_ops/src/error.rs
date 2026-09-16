@@ -28,4 +28,6 @@ pub enum FileOpsError {
     RecursiveDestination { src: PathBuf, dst: PathBuf },
     #[error("path has no parent directory: {0}")]
     NoParent(PathBuf),
+    #[error("operation cancelled")]
+    Cancelled,
 }

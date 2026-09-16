@@ -18,11 +18,12 @@ mod app;
 
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use app::App;
 use browser::BrowserState;
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -64,7 +65,12 @@ fn main() -> Result<()> {
     let config = Config::load();
     let vfs = LocalVfs;
     let mut browser = BrowserState::new(&vfs, start_dir)?;
-    let mut app = App::default();
+
+    // Backs the blocking thread pool that copy/move/delete run on so a large operation never
+    // freezes the render loop. Kept alive for the rest of `main` — dropping it would shut the
+    // pool down out from under any operation still running.
+    let runtime = tokio::runtime::Runtime::new()?;
+    let mut app = App::new(runtime.handle().clone());
 
     let guard = TerminalGuard::new()?;
     let backend = CrosstermBackend::new(io::stdout());
@@ -84,7 +90,14 @@ fn run(
     config: &Config,
 ) -> Result<()> {
     loop {
+        app.poll_bulk(browser, vfs)?;
         terminal.draw(|frame| draw(frame, browser, app, vfs, config))?;
+
+        // A timed poll (rather than a blocking read) so the loop keeps ticking — and picking up
+        // background-operation progress — even while the user isn't pressing anything.
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
@@ -96,6 +109,13 @@ fn run(
                 continue;
             }
 
+            if app.is_busy() {
+                if key.code == KeyCode::Esc {
+                    app.cancel_bulk();
+                }
+                continue;
+            }
+
             match config.keys.resolve(key.code) {
                 Some(Action::Quit) => return Ok(()),
                 Some(Action::MoveDown) => browser.move_down(),
@@ -104,7 +124,7 @@ fn run(
                 Some(Action::Leave) => browser.leave(vfs)?,
                 Some(Action::Yank) => app.yank(browser),
                 Some(Action::Cut) => app.cut(browser),
-                Some(Action::Paste) => app.begin_paste(vfs, browser)?,
+                Some(Action::Paste) => app.begin_paste(browser),
                 Some(Action::Delete) => app.begin_delete(browser),
                 Some(Action::Rename) => app.begin_rename(browser),
                 Some(Action::Create) => app.begin_create(),

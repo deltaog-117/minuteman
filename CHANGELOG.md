@@ -41,6 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the current name, and create prompts for a name (trailing `/` makes a directory). A conflicting
   paste/rename surfaces an overwrite/skip/abort prompt. A new bottom status/prompt bar in the TUI
   shows the active prompt or the last operation's result.
+- `file_ops`: `copy_with_progress`/`mv_with_progress` — the same copy/move logic with a
+  `&mut dyn FnMut(&Path) -> ControlFlow<()>` callback fired once per file/directory processed;
+  returning `ControlFlow::Break(())` aborts with the new `FileOpsError::Cancelled`. `copy`/`mv`
+  are now thin wrappers over these with a no-op callback (unchanged signatures/behavior).
+- `file_ops`: `mv`/`mv_with_progress` now fall back to copy + delete when `Vfs::rename` fails
+  with `ErrorKind::CrossesDevices` (moving across filesystems), instead of just erroring.
+- `tui`: paste and delete now run on a `tokio::runtime::Handle::spawn_blocking` thread pool
+  instead of inline, so a large copy/move/delete no longer freezes the render loop. The event
+  loop switched from a blocking `event::read()` to a 100ms `event::poll` so it keeps redrawing
+  progress even without a keypress. Copy/move show live "N done (name)" progress and are
+  cancellable with `Esc`; delete shows an indeterminate "deleting…" status (no per-file hook to
+  report through). While an operation is in flight, all other actions — including quit — are
+  blocked except `Esc`, so the process can't exit mid-write.
 
 ## [0.1.0] - 2026-09-16
 

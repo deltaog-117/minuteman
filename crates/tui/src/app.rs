@@ -14,17 +14,26 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Clipboard + prompt state driving `file_ops` from the TUI. Keeps `main.rs`'s event loop a
-//! thin `Action -> App method` dispatcher, the same way `browser::BrowserState` keeps it thin
-//! for navigation.
+//! Clipboard + prompt + background-operation state driving `file_ops` from the TUI. Keeps
+//! `main.rs`'s event loop a thin `Action -> App method` dispatcher, the same way
+//! `browser::BrowserState` keeps it thin for navigation.
+//!
+//! Paste and delete run on `tokio`'s blocking thread pool (via `Handle::spawn_blocking`) rather
+//! than inline, so a large copy/move/delete never freezes the render loop. Rename and create
+//! stay synchronous — both are single, near-instant metadata operations (rename never crosses
+//! filesystems: `file_ops::rename` always targets the same parent directory).
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use browser::BrowserState;
 use crossterm::event::KeyCode;
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
-use shared::{Vfs, VfsError};
+use shared::{LocalVfs, Vfs, VfsError};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardMode {
@@ -73,18 +82,160 @@ impl Prompt {
     }
 }
 
-#[derive(Debug, Default)]
+/// What a running background operation is doing, and what it needs to retry with if it turns
+/// out to hit a conflict (only `Paste` can — `Delete` never has an `AlreadyExists` case).
+#[derive(Debug)]
+enum BulkKind {
+    Paste { clip: Clipboard, dst: PathBuf },
+    Delete { target: PathBuf },
+}
+
+impl BulkKind {
+    fn progressing_label(&self) -> &'static str {
+        match self {
+            BulkKind::Paste { clip, .. } => match clip.mode {
+                ClipboardMode::Copy => "copying",
+                ClipboardMode::Move => "moving",
+            },
+            BulkKind::Delete { .. } => "deleting",
+        }
+    }
+
+    fn past_label(&self) -> &'static str {
+        match self {
+            BulkKind::Paste { clip, .. } => match clip.mode {
+                ClipboardMode::Copy => "copy",
+                ClipboardMode::Move => "move",
+            },
+            BulkKind::Delete { .. } => "delete",
+        }
+    }
+}
+
+enum BulkMsg {
+    Progress { path: String },
+    Done(Result<Outcome, FileOpsError>),
+}
+
+/// A background operation in flight. `cancel` is `None` for `Delete`, since
+/// `Vfs::remove_dir_all` is one opaque blocking call with no per-item hook to check against.
+struct BulkOp {
+    kind: BulkKind,
+    items_done: u64,
+    current: String,
+    cancel: Option<Arc<AtomicBool>>,
+    rx: UnboundedReceiver<BulkMsg>,
+}
+
 pub struct App {
     pub clipboard: Option<Clipboard>,
     pub prompt: Option<Prompt>,
     pub status: Option<String>,
+    bulk: Option<BulkOp>,
+    handle: tokio::runtime::Handle,
 }
 
 impl App {
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            clipboard: None,
+            prompt: None,
+            status: None,
+            bulk: None,
+            handle,
+        }
+    }
+
     pub fn status_line(&self) -> String {
+        if let Some(bulk) = &self.bulk {
+            return match &bulk.kind {
+                BulkKind::Delete { target } => format!(
+                    "{}… {}",
+                    bulk.kind.progressing_label(),
+                    display_name(target)
+                ),
+                BulkKind::Paste { .. } => {
+                    let cancel_hint = if bulk.cancel.is_some() {
+                        " — Esc to cancel"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{}… {} done ({}){cancel_hint}",
+                        bulk.kind.progressing_label(),
+                        bulk.items_done,
+                        bulk.current
+                    )
+                }
+            };
+        }
         match &self.prompt {
             Some(prompt) => prompt.display(),
             None => self.status.clone().unwrap_or_default(),
+        }
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.bulk.is_some()
+    }
+
+    /// Drains any progress/completion messages from the running background operation, if any.
+    /// Call once per render tick.
+    pub fn poll_bulk(&mut self, browser: &mut BrowserState, vfs: &dyn Vfs) -> Result<()> {
+        let Some(bulk) = self.bulk.as_mut() else {
+            return Ok(());
+        };
+
+        let mut done = None;
+        while let Ok(msg) = bulk.rx.try_recv() {
+            match msg {
+                BulkMsg::Progress { path } => {
+                    bulk.items_done += 1;
+                    bulk.current = path;
+                }
+                BulkMsg::Done(result) => done = Some(result),
+            }
+        }
+
+        let Some(result) = done else {
+            return Ok(());
+        };
+        let bulk = self.bulk.take().expect("checked Some above");
+        let past_label = bulk.kind.past_label();
+
+        match result {
+            Ok(Outcome::Completed) => {
+                browser.reload(vfs)?;
+                if let BulkKind::Paste { clip, .. } = &bulk.kind
+                    && clip.mode == ClipboardMode::Move
+                {
+                    self.clipboard = None;
+                }
+                self.status = Some(format!("{past_label} complete"));
+            }
+            Ok(Outcome::Skipped) => self.status = Some(format!("{past_label} skipped")),
+            Err(FileOpsError::Cancelled) => self.status = Some(format!("{past_label} cancelled")),
+            Err(FileOpsError::Vfs(VfsError::AlreadyExists(_))) => match bulk.kind {
+                BulkKind::Paste { clip, dst } => {
+                    self.prompt = Some(Prompt::Conflict(ConflictSource::Paste { clip, dst }));
+                }
+                BulkKind::Delete { .. } => {
+                    self.status = Some("delete failed: unexpected conflict".into());
+                }
+            },
+            Err(e) => self.status = Some(format!("{past_label} failed: {e}")),
+        }
+        Ok(())
+    }
+
+    /// Requests cancellation of the running background operation, if it supports it.
+    pub fn cancel_bulk(&mut self) {
+        match self.bulk.as_ref().and_then(|b| b.cancel.as_ref()) {
+            Some(cancel) => {
+                cancel.store(true, Ordering::Relaxed);
+                self.status = Some("cancelling…".into());
+            }
+            None => self.status = Some("nothing cancellable in progress".into()),
         }
     }
 
@@ -143,17 +294,21 @@ impl App {
         });
     }
 
-    pub fn begin_paste(&mut self, vfs: &dyn Vfs, browser: &mut BrowserState) -> Result<()> {
+    pub fn begin_paste(&mut self, browser: &BrowserState) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
         let Some(clip) = self.clipboard.clone() else {
             self.status = Some("clipboard is empty".into());
-            return Ok(());
+            return;
         };
         let Some(name) = clip.path.file_name() else {
             self.status = Some("clipboard entry has no file name".into());
-            return Ok(());
+            return;
         };
         let dst = browser.current_dir().join(name);
-        self.perform_paste(vfs, browser, clip, dst, ConflictPolicy::Abort)
+        self.spawn_paste(clip, dst, ConflictPolicy::Abort);
     }
 
     /// Routes a raw key to the active prompt. No-op if there is no active prompt.
@@ -203,21 +358,15 @@ impl App {
                 _ => self.prompt = Some(Prompt::CreateInput { buffer }),
             },
             Prompt::ConfirmDelete { target } => match code {
-                KeyCode::Char('y') => match file_ops::delete(vfs, &target) {
-                    Ok(()) => {
-                        browser.reload(vfs)?;
-                        self.status = Some(format!("deleted {}", display_name(&target)));
-                    }
-                    Err(e) => self.status = Some(format!("delete failed: {e}")),
-                },
+                KeyCode::Char('y') => self.spawn_delete(target),
                 _ => self.status = Some("delete cancelled".into()),
             },
             Prompt::Conflict(source) => match code {
                 KeyCode::Char('o') => {
-                    self.resolve_conflict(vfs, browser, source, ConflictPolicy::Overwrite)?;
+                    self.resolve_conflict(vfs, browser, source, ConflictPolicy::Overwrite)?
                 }
                 KeyCode::Char('s') => {
-                    self.resolve_conflict(vfs, browser, source, ConflictPolicy::Skip)?;
+                    self.resolve_conflict(vfs, browser, source, ConflictPolicy::Skip)?
                 }
                 _ => self.status = Some("aborted".into()),
             },
@@ -234,7 +383,8 @@ impl App {
     ) -> Result<()> {
         match source {
             ConflictSource::Paste { clip, dst } => {
-                self.perform_paste(vfs, browser, clip, dst, policy)
+                self.spawn_paste(clip, dst, policy);
+                Ok(())
             }
             ConflictSource::Rename { target, new_name } => {
                 self.finish_rename(vfs, browser, target, new_name, policy)
@@ -242,34 +392,72 @@ impl App {
         }
     }
 
-    fn perform_paste(
-        &mut self,
-        vfs: &dyn Vfs,
-        browser: &mut BrowserState,
-        clip: Clipboard,
-        dst: PathBuf,
-        policy: ConflictPolicy,
-    ) -> Result<()> {
-        let result = match clip.mode {
-            ClipboardMode::Copy => file_ops::copy(vfs, &clip.path, &dst, policy),
-            ClipboardMode::Move => file_ops::mv(vfs, &clip.path, &dst, policy),
-        };
+    /// Spawns a copy or move on tokio's blocking thread pool. Progress and the final result
+    /// arrive later via `poll_bulk` — this call itself never blocks.
+    fn spawn_paste(&mut self, clip: Clipboard, dst: PathBuf, policy: ConflictPolicy) {
+        let (tx, rx): (UnboundedSender<BulkMsg>, _) = unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_bg = Arc::clone(&cancel);
+        let src = clip.path.clone();
+        let mode = clip.mode;
+        let dst_bg = dst.clone();
 
-        match result {
-            Ok(Outcome::Completed) => {
-                browser.reload(vfs)?;
-                self.status = Some(format!("pasted {}", display_name(&dst)));
-                if clip.mode == ClipboardMode::Move {
-                    self.clipboard = None;
+        self.handle.spawn_blocking(move || {
+            let vfs = LocalVfs;
+            let progress_tx = tx.clone();
+            let mut on_progress = move |path: &Path| -> ControlFlow<()> {
+                let _ = progress_tx.send(BulkMsg::Progress {
+                    path: display_name(path),
+                });
+                if cancel_bg.load(Ordering::Relaxed) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
                 }
-            }
-            Ok(Outcome::Skipped) => self.status = Some("paste skipped".into()),
-            Err(FileOpsError::Vfs(VfsError::AlreadyExists(_))) => {
-                self.prompt = Some(Prompt::Conflict(ConflictSource::Paste { clip, dst }));
-            }
-            Err(e) => self.status = Some(format!("paste failed: {e}")),
+            };
+            let result = match mode {
+                ClipboardMode::Copy => {
+                    file_ops::copy_with_progress(&vfs, &src, &dst_bg, policy, &mut on_progress)
+                }
+                ClipboardMode::Move => {
+                    file_ops::mv_with_progress(&vfs, &src, &dst_bg, policy, &mut on_progress)
+                }
+            };
+            let _ = tx.send(BulkMsg::Done(result));
+        });
+
+        self.bulk = Some(BulkOp {
+            kind: BulkKind::Paste { clip, dst },
+            items_done: 0,
+            current: String::new(),
+            cancel: Some(cancel),
+            rx,
+        });
+    }
+
+    /// Spawns a delete on tokio's blocking thread pool. No per-item progress (see `BulkOp`
+    /// doc), but it still keeps a large recursive delete from freezing the render loop.
+    fn spawn_delete(&mut self, target: PathBuf) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
         }
-        Ok(())
+        let (tx, rx) = unbounded_channel();
+        let target_bg = target.clone();
+
+        self.handle.spawn_blocking(move || {
+            let vfs = LocalVfs;
+            let result = file_ops::delete(&vfs, &target_bg).map(|()| Outcome::Completed);
+            let _ = tx.send(BulkMsg::Done(result));
+        });
+
+        self.bulk = Some(BulkOp {
+            kind: BulkKind::Delete { target },
+            items_done: 0,
+            current: String::new(),
+            cancel: None,
+            rx,
+        });
     }
 
     fn finish_rename(

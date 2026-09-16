@@ -23,9 +23,10 @@ shell overlay, native SSH/SFTP browsing, and a stable multi-language sandboxed p
 
 - 🔹 **3-pane miller-column browser** – Ranger-style parent / current / selection-preview layout.
 - 🔹 **Vim-style navigation** – `j`/`k`/`h`/`l`/Enter/`q`.
-- 🔹 **Core file operations** – yank/cut/paste, permanent delete (with confirmation), rename, and
-  create file/directory, all driven from the keyboard with an overwrite/skip/abort prompt on
-  conflicts.
+- 🔹 **Async bulk file operations** – paste and delete run in the background (`tokio`), so a
+  large copy/move/delete never freezes the app; copy/move show live progress and are cancellable
+  with `Esc`. Permanent delete (with confirmation), rename, and create file/directory round out
+  the core operations, with an overwrite/skip/abort prompt on conflicts.
 - 🔹 **Config-driven keybindings** – read from `~/.config/minuteman/config.toml`, with per-field
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
 
@@ -73,7 +74,9 @@ cargo run -p tui -- /path/to/dir
 | `n`         | create — trailing `/` makes a directory       |
 
 While a prompt is active (rename/create/delete-confirm/conflict), `Enter` submits and `Esc`
-cancels; the keybindings above are not resolved until the prompt closes.
+cancels; the keybindings above are not resolved until the prompt closes. While a paste or delete
+is running in the background, every key except `Esc` (cancel — copy/move only; delete can't be
+cancelled mid-flight) is ignored until it finishes, including `q`.
 
 ---
 
@@ -113,7 +116,7 @@ crates/
 ├── browser/          # miller-column navigation state
 ├── theming/           # config/keybinding/theme loading
 ├── tui/                # binary crate — render loop, input dispatch, wiring
-├── file_ops/           # copy/move/delete/create/rename orchestration on top of Vfs
+├── file_ops/           # copy/move/delete/create/rename on Vfs, with progress/cancel support
 ├── preview/            # (stub, WIP) text + image preview
 ├── shell_overlay/      # (stub, WIP) interactive $SHELL overlay
 ├── trash/              # (stub, WIP) trash + undo history

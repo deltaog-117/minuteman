@@ -16,6 +16,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | v0.1.0 Local Vfs            | Synchronous `std::fs`, no `tokio` yet        | ✅ Confirmed |
 | 2026-09-16 | Core File Operations        | Extend `Vfs` trait with mutating methods     | ✅ Confirmed |
 | 2026-09-16 | Conflict Resolution UX      | `ConflictPolicy` enum in `file_ops`, not `Vfs` | ✅ Confirmed |
+| 2026-09-16 | Async Bulk Ops Concurrency  | `spawn_blocking` + poll loop, not a full async rewrite | ✅ Confirmed |
 
 ---
 
@@ -214,6 +215,80 @@ no separate `exists()` pre-check, so no new TOCTOU window beyond the one already
 - Verified against the compiled binary (not just unit tests) using two scripted PTY sessions
   driving real key sequences and asserting on actual filesystem end-state, since `cargo test`
   alone can't exercise the terminal event loop, prompt-mode key capture, or the conflict prompt.
+
+---
+
+### Async Bulk Ops Concurrency: `spawn_blocking` + Poll Loop, Not a Full Async Rewrite
+
+**Date:** 2026-09-16
+**Status:** Confirmed
+
+#### Context / Background
+
+The project's core motivation — fixing Ranger's slow bulk file operations — meant the whole TUI
+needed to stop being purely synchronous. Everything up to this point (`Vfs`, `file_ops`, the
+`browser`/`tui` event loop) was blocking `std::fs` on the main thread. Three approaches were
+considered (see the "Which concurrency architecture" question resolved with the user this
+cycle):
+
+**Option A: `tokio::task::spawn_blocking` + a non-blocking poll loop** *(chosen)* — one
+`tokio::runtime::Runtime` constructed in `main`, its `Handle` stored on `tui::app::App`. A bulk
+op spawns the existing synchronous `file_ops` walk (now progress-callback-aware) onto tokio's
+blocking thread pool; progress flows back over `tokio::sync::mpsc`. `run()`'s loop switched from
+a blocking `crossterm::event::read()` to `event::poll(Duration::from_millis(100))`, so it drains
+the channel and redraws even with no keypress — this is ratatui's own documented pattern for
+background tasks.
+
+**Option B: a fully async event loop** (`#[tokio::main]`, `crossterm::event::EventStream` +
+`tokio::select!` for everything) — the "textbook" async TUI architecture, but a full rewrite of
+the already-working, already-tested event loop for a payoff (easier future async I/O for
+`vfs_ssh`) nothing needs yet.
+
+**Option C: raw `std::thread::spawn` + `std::sync::mpsc`, no tokio at all** — simplest, zero new
+dependencies, and sufficient for "one background thread + a channel" since there's no actual
+async I/O multiplexing happening (`std::fs` is blocking either way). Rejected because it
+contradicts `ROADMAP.md`'s explicit "tokio + a thread pool" wording (written into the plan
+before this cycle) and defers the tokio adoption `vfs_ssh`'s real async network I/O will need
+eventually — introducing it twice instead of once.
+
+#### Decision & Rationale
+
+Chose A. `spawn_blocking` is the textbook-correct tool for wrapping blocking `std::fs` work
+inside a tokio context, and it keeps the blast radius contained: `Vfs`, `browser`, and every
+single-item synchronous path (rename, create) are untouched. `file_ops` grew additively
+(`copy_with_progress`/`mv_with_progress`; the old `copy`/`mv` became thin wrappers calling them
+with a no-op callback), so none of last cycle's 13 tests needed to change.
+
+**Design choices made along the way:**
+- **Progress granularity is per-file, not per-byte.** A callback (`&mut dyn FnMut(&Path) ->
+  ControlFlow<()>`) fires once per file/directory finished. This needs no change to
+  `Vfs::copy_file` (still one atomic `std::fs::copy` call) and avoids a separate counting pass
+  over the tree before copying (which would double the directory-listing I/O). A large *single*
+  file shows no incremental movement until it's done — logged in `ROADMAP.md`'s low-priority
+  list as a follow-up requiring a streaming `Vfs::copy_file`.
+- **Cancellation is the progress callback's return value**, not a separate parameter — the
+  callback returns `ControlFlow::Break(())` when it observes a shared `AtomicBool` flip (set by
+  `Esc`), so one closure carries both "report progress" and "should I stop" without a second
+  parameter threaded through every layer.
+- **Delete has no per-file progress or cancel.** `Vfs::remove_dir_all` is one opaque
+  `std::fs::remove_dir_all` call with no hook to report through; rewriting it into a manual
+  recursive walk (like `copy_dir`) just for progress cosmetics wasn't worth it, since deletion
+  (unlinking) is normally far cheaper than copying (writing data) — the actual bottleneck
+  `ROADMAP.md` names. Delete still runs on `spawn_blocking` so it doesn't freeze the UI, just
+  shows an indeterminate "deleting…" status.
+- **The cross-filesystem move fallback** (copy + delete when `vfs.rename` fails with
+  `ErrorKind::CrossesDevices`, stabilized in Rust 1.83) was implemented this cycle as promised in
+  the "Core File Operations" entry above, reusing the same `copy_with_progress` plumbing.
+- **While a bulk op is running, all other actions are blocked except `Esc`** (checked before the
+  keymap is even resolved) — including quit. Letting the process exit mid-write could leave a
+  truncated file at the destination; the user must let the operation finish or cancel it first.
+- **Rename stays fully synchronous**, calling the plain `mv` (not `mv_with_progress`) — it always
+  targets the same parent directory (same filesystem, same mount), so it's an O(1) metadata
+  operation with no cross-device case and nothing worth reporting progress on.
+- Verified against the compiled binary (not just `cargo test`) with three scripted PTY sessions
+  against a 4000-file directory: cancelling a copy after ~1 file (proving the main loop kept
+  processing input while the background thread was writing), running the same copy to
+  completion, and deleting the 4000-file tree via the background path.
 
 ---
 
