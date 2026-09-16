@@ -21,8 +21,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - ✅ **Core file operations (sync)** – `Vfs` extended with `copy_file`/`create_dir`/
   `create_file`/`rename`/`remove_file`/`remove_dir_all`/`exists`; `file_ops` orchestrates
   copy/move/delete/create/rename on top, recursing for directories, rejecting a destination
-  inside its own source, and never silently overwriting an existing destination. Not yet wired
-  into the TUI (no keybindings/UI for these ops yet), and no cross-filesystem move fallback.
+  inside its own source, and never silently overwriting an existing destination. No
+  cross-filesystem move fallback yet.
+- ✅ **File operations wired into the TUI** – `y`/`m`/`p`/`d`/`r`/`n` (yank, cut, paste, delete,
+  rename, create) drive `file_ops` through a new `tui::app::App` (clipboard + prompt state) and
+  a bottom status/prompt bar. Delete asks for `y`/N confirmation (no trash yet, so this is
+  permanent); a conflicting paste/rename surfaces an overwrite/skip/abort prompt backed by
+  `file_ops::ConflictPolicy`. Verified against the real compiled binary via two scripted PTY
+  sessions (create/yank/paste/rename/delete, and cut+conflict-abort+conflict-overwrite),
+  checking actual filesystem end-state — not just unit tests.
 
 ---
 
@@ -30,7 +37,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 - **Async bulk file operations with progress** – tokio + a thread pool driving copy/move/delete
   for large batches, with a live progress UI. This is the core motivation for the whole project
-  (Ranger is painfully slow here).
+  (Ranger is painfully slow here). `file_ops` and the TUI's clipboard/prompt flow from this cycle
+  are the synchronous foundation this builds on.
 - **Full theme system** – extend `theming::Theme` beyond the current two-color stub (selection
   bg/fg) into a real palette (borders, headers, file-type colors) with at least one alternate
   theme to prove the system works end-to-end.
@@ -39,10 +47,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟡 Medium Priority (Important)
 
-- **Wire file operations into the TUI** – keybindings + a command prompt (new file/dir name,
-  rename target) driving the `file_ops` functions, plus a conflict-resolution prompt (overwrite/
-  skip/abort) surfaced when a destination already exists, since `file_ops` currently just errors
-  out on conflicts rather than asking.
 - **Interactive shell overlay** – summon a real, fully interactive `$SHELL` subprocess by
   suspending the TUI (not Ranger's auto-close-after-one-command behavior); the user controls
   when it reopens/closes.
@@ -83,8 +87,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo test -p shared -p file_ops` to verify the new file-ops layer (17 tests).
-2. Commit this cycle (step 8 of the dev loop).
-3. Pick the next roadmap item — recommended: **async bulk file operations with progress**,
-   now that `file_ops` has sync primitives to make async, since bulk-op speed is the project's
-   core motivation. Wiring `file_ops` into the TUI is the other strong candidate.
+1. `cargo run -p tui -- <dir>` to try the new keybindings interactively: `y` yank, `m` cut,
+   `p` paste, `d` delete (confirms `y`/N), `r` rename, `n` create (trailing `/` = directory).
+2. `cargo test --workspace` (25 tests) to verify everything still passes.
+3. Commit this cycle (step 8 of the dev loop).
+4. Pick the next roadmap item — recommended: **async bulk file operations with progress**, now
+   that both the sync primitives (`file_ops`) and a TUI entry point (clipboard/prompt flow) exist
+   to make async and show progress for, since bulk-op speed is the project's core motivation.

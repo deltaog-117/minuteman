@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 shared = { path = "../shared" }
 browser = { path = "../browser" }
+file_ops = { path = "../file_ops" }
 theming = { path = "../theming" }
 ratatui = "0.30.2"
 crossterm = "0.29.0"

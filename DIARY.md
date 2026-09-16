@@ -15,6 +15,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | Config Keybinding Schema    | Action-to-keys mapping (`Vec<String>` per action) | ✅ Confirmed |
 | 2026-09-16 | v0.1.0 Local Vfs            | Synchronous `std::fs`, no `tokio` yet        | ✅ Confirmed |
 | 2026-09-16 | Core File Operations        | Extend `Vfs` trait with mutating methods     | ✅ Confirmed |
+| 2026-09-16 | Conflict Resolution UX      | `ConflictPolicy` enum in `file_ops`, not `Vfs` | ✅ Confirmed |
 
 ---
 
@@ -174,6 +175,45 @@ Chose A. `file_ops::{copy, mv, delete, create_directory, create_new_file, rename
 - "View" (from the roadmap's "view, copy, move, delete, create, rename" wording) was treated as
   out of scope for `file_ops` — reading file contents for display is `preview`'s job, not a
   mutating filesystem operation.
+
+---
+
+### Conflict Resolution UX: `ConflictPolicy` Enum in `file_ops`, Not `Vfs`
+
+**Date:** 2026-09-16
+**Status:** Confirmed
+
+#### Context / Background
+
+Wiring `file_ops` into the TUI needed an overwrite/skip/abort prompt for paste and rename
+conflicts, but `copy`/`mv`/`rename` always errored on an existing destination (a deliberate
+hardening decision from the previous cycle). See the "Core File Operations" entry above for the
+three options considered (extend `file_ops` signatures vs. push overwrite into `Vfs` vs. handle
+it ad hoc in the TUI).
+
+#### Decision & Rationale
+
+Chose to add `file_ops::ConflictPolicy` (`Abort`/`Skip`/`Overwrite`) and `file_ops::Outcome`
+(`Completed`/`Skipped`), threaded through `copy`/`mv`/`rename`. `Overwrite` is implemented by
+deleting the existing destination (via the existing `delete()`) and retrying the same operation,
+triggered off the real `VfsError::AlreadyExists` the underlying filesystem call already reports —
+no separate `exists()` pre-check, so no new TOCTOU window beyond the one already accepted for
+`copy_file`/`rename` in `LocalVfs`. `Vfs` itself did not change.
+
+**Trade-offs accepted:**
+- `Skip` and `Abort` behave identically in the current TUI (both leave everything untouched and
+  report a status message) because `BrowserState` only supports a single selection — there is no
+  batch of remaining files for `Skip` to continue past. The distinction exists in `file_ops` for
+  when multi-select/batch paste lands (see ROADMAP's low-priority "Multi-tab / multi-pane
+  workspaces" and any future batch-copy work), so that feature won't need another `file_ops`
+  signature change.
+- The TUI's `app::App` holds clipboard + prompt state as its own module (`tui/src/app.rs`)
+  rather than in `browser::BrowserState`, since `browser` is scoped to navigation only (per the
+  Workspace Architecture entry above) and clipboard/prompt state is UI-interaction state, not
+  navigation state. `main.rs` stays a thin `Action -> App method` dispatcher.
+- Verified against the compiled binary (not just unit tests) using two scripted PTY sessions
+  driving real key sequences and asserting on actual filesystem end-state, since `cargo test`
+  alone can't exercise the terminal event loop, prompt-mode key capture, or the conflict prompt.
 
 ---
 

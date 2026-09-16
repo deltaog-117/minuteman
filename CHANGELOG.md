@@ -27,7 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   New `VfsError::NotFound` / `VfsError::AlreadyExists` variants.
 - `file_ops`: `copy`/`mv`/`delete`/`create_directory`/`create_new_file`/`rename` orchestration on
   top of `Vfs` — recursive directory copy, a guard against a destination nested inside its own
-  source, and a guard against a no-op same-path operation. Not yet wired into the TUI.
+  source, and a guard against a no-op same-path operation.
+- `file_ops`: `ConflictPolicy` (`Abort`/`Skip`/`Overwrite`) and `Outcome` (`Completed`/`Skipped`),
+  threaded through `copy`/`mv`/`rename` so callers can resolve an existing-destination conflict
+  instead of just erroring.
+- `theming`: six new keybindable actions — `Yank`, `Cut`, `Paste`, `Delete`, `Rename`, `Create` —
+  with defaults `y`/`m`/`p`/`d`/`r`/`n`.
+- `browser`: `BrowserState::reload` — re-lists the current/parent directories after a filesystem
+  mutation made outside `BrowserState` (copy/move/delete/create/rename).
+- `tui`: new `app` module (`App`, `Clipboard`, `Prompt`) driving `file_ops` from the keyboard —
+  yank/cut mark a clipboard entry, paste copies or moves it into the current directory, delete
+  asks for `y`/N confirmation (permanent — no trash yet), rename opens a prompt pre-filled with
+  the current name, and create prompts for a name (trailing `/` makes a directory). A conflicting
+  paste/rename surfaces an overwrite/skip/abort prompt. A new bottom status/prompt bar in the TUI
+  shows the active prompt or the last operation's result.
 
 ## [0.1.0] - 2026-09-16
 

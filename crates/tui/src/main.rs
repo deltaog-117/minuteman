@@ -14,10 +14,13 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+mod app;
+
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 
 use anyhow::Result;
+use app::App;
 use browser::BrowserState;
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
@@ -28,7 +31,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use shared::{DirEntryInfo, LocalVfs};
 use theming::{Action, Config};
 
@@ -61,12 +64,13 @@ fn main() -> Result<()> {
     let config = Config::load();
     let vfs = LocalVfs;
     let mut browser = BrowserState::new(&vfs, start_dir)?;
+    let mut app = App::default();
 
     let guard = TerminalGuard::new()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, &vfs, &mut browser, &config);
+    let result = run(&mut terminal, &vfs, &mut browser, &mut app, &config);
 
     drop(guard);
     result
@@ -76,28 +80,52 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     vfs: &LocalVfs,
     browser: &mut BrowserState,
+    app: &mut App,
     config: &Config,
 ) -> Result<()> {
     loop {
-        terminal.draw(|frame| draw(frame, browser, vfs, config))?;
+        terminal.draw(|frame| draw(frame, browser, app, vfs, config))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+
+            if app.prompt.is_some() {
+                app.handle_prompt_key(key.code, vfs, browser)?;
+                continue;
+            }
+
             match config.keys.resolve(key.code) {
                 Some(Action::Quit) => return Ok(()),
                 Some(Action::MoveDown) => browser.move_down(),
                 Some(Action::MoveUp) => browser.move_up(),
                 Some(Action::Enter) => browser.enter(vfs)?,
                 Some(Action::Leave) => browser.leave(vfs)?,
+                Some(Action::Yank) => app.yank(browser),
+                Some(Action::Cut) => app.cut(browser),
+                Some(Action::Paste) => app.begin_paste(vfs, browser)?,
+                Some(Action::Delete) => app.begin_delete(browser),
+                Some(Action::Rename) => app.begin_rename(browser),
+                Some(Action::Create) => app.begin_create(),
                 None => {}
             }
         }
     }
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, browser: &BrowserState, vfs: &LocalVfs, config: &Config) {
+fn draw(
+    frame: &mut ratatui::Frame<'_>,
+    browser: &BrowserState,
+    app: &App,
+    vfs: &LocalVfs,
+    config: &Config,
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(frame.area());
+
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -105,7 +133,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, browser: &BrowserState, vfs: &LocalVfs, 
             Constraint::Percentage(40),
             Constraint::Percentage(40),
         ])
-        .split(frame.area());
+        .split(rows[0]);
 
     let selection_style = Style::default()
         .bg(color_from_name(&config.theme.selection_bg))
@@ -159,6 +187,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, browser: &BrowserState, vfs: &LocalVfs, 
             .block(Block::default().borders(Borders::ALL).title("preview"))
     };
     frame.render_widget(preview_widget, columns[2]);
+
+    frame.render_widget(Paragraph::new(app.status_line()), rows[1]);
 }
 
 fn entry_label(entry: &DirEntryInfo) -> String {

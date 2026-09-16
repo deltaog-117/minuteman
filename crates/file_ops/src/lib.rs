@@ -23,12 +23,47 @@ pub use error::FileOpsError;
 
 use std::path::Path;
 
-use shared::Vfs;
+use shared::{Vfs, VfsError};
 
-pub fn copy(vfs: &dyn Vfs, src: &Path, dst: &Path) -> Result<(), FileOpsError> {
+/// What to do when an operation's destination already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    /// Fail with `FileOpsError::Vfs(VfsError::AlreadyExists(_))`, leaving both paths untouched.
+    Abort,
+    /// Leave the destination as-is and report `Outcome::Skipped` rather than erroring.
+    Skip,
+    /// Delete the existing destination first, then perform the operation.
+    Overwrite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Completed,
+    Skipped,
+}
+
+pub fn copy(
+    vfs: &dyn Vfs,
+    src: &Path,
+    dst: &Path,
+    policy: ConflictPolicy,
+) -> Result<Outcome, FileOpsError> {
     guard_distinct(src, dst)?;
     guard_not_recursive(src, dst)?;
 
+    match copy_uncontested(vfs, src, dst) {
+        Ok(()) => Ok(Outcome::Completed),
+        Err(FileOpsError::Vfs(VfsError::AlreadyExists(conflict))) => {
+            resolve_conflict(policy, conflict, || {
+                delete(vfs, dst)?;
+                copy_uncontested(vfs, src, dst)
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn copy_uncontested(vfs: &dyn Vfs, src: &Path, dst: &Path) -> Result<(), FileOpsError> {
     if vfs.is_dir(src) {
         copy_dir(vfs, src, dst)
     } else {
@@ -53,11 +88,40 @@ fn copy_dir(vfs: &dyn Vfs, src: &Path, dst: &Path) -> Result<(), FileOpsError> {
 /// fails because `src` and `dst` live on different devices) are not yet supported — that
 /// needs a copy+delete fallback, deferred to the async bulk-ops cycle where progress reporting
 /// for the copy phase actually matters.
-pub fn mv(vfs: &dyn Vfs, src: &Path, dst: &Path) -> Result<(), FileOpsError> {
+pub fn mv(
+    vfs: &dyn Vfs,
+    src: &Path,
+    dst: &Path,
+    policy: ConflictPolicy,
+) -> Result<Outcome, FileOpsError> {
     guard_distinct(src, dst)?;
     guard_not_recursive(src, dst)?;
 
-    vfs.rename(src, dst).map_err(Into::into)
+    match vfs.rename(src, dst) {
+        Ok(()) => Ok(Outcome::Completed),
+        Err(VfsError::AlreadyExists(conflict)) => resolve_conflict(policy, conflict, || {
+            delete(vfs, dst)?;
+            vfs.rename(src, dst).map_err(Into::into)
+        }),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Applies `policy` to a detected conflict at `conflict`, running `retry` only for
+/// `ConflictPolicy::Overwrite`.
+fn resolve_conflict(
+    policy: ConflictPolicy,
+    conflict: std::path::PathBuf,
+    retry: impl FnOnce() -> Result<(), FileOpsError>,
+) -> Result<Outcome, FileOpsError> {
+    match policy {
+        ConflictPolicy::Abort => Err(FileOpsError::Vfs(VfsError::AlreadyExists(conflict))),
+        ConflictPolicy::Skip => Ok(Outcome::Skipped),
+        ConflictPolicy::Overwrite => {
+            retry()?;
+            Ok(Outcome::Completed)
+        }
+    }
 }
 
 pub fn delete(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
@@ -77,12 +141,17 @@ pub fn create_new_file(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
 }
 
 /// Renames `path` to `new_name` within the same parent directory.
-pub fn rename(vfs: &dyn Vfs, path: &Path, new_name: &str) -> Result<(), FileOpsError> {
+pub fn rename(
+    vfs: &dyn Vfs,
+    path: &Path,
+    new_name: &str,
+    policy: ConflictPolicy,
+) -> Result<Outcome, FileOpsError> {
     let parent = path
         .parent()
         .ok_or_else(|| FileOpsError::NoParent(path.to_path_buf()))?;
     let dst = parent.join(new_name);
-    mv(vfs, path, &dst)
+    mv(vfs, path, &dst, policy)
 }
 
 fn guard_distinct(src: &Path, dst: &Path) -> Result<(), FileOpsError> {
@@ -126,7 +195,7 @@ mod tests {
         let dst = dir.join("b.txt");
         std::fs::write(&src, b"hello").unwrap();
 
-        copy(&LocalVfs, &src, &dst).unwrap();
+        copy(&LocalVfs, &src, &dst, ConflictPolicy::Abort).unwrap();
 
         assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
         assert!(src.exists());
@@ -142,7 +211,7 @@ mod tests {
         std::fs::create_dir_all(src.join("nested")).unwrap();
         std::fs::write(src.join("nested").join("f.txt"), b"hi").unwrap();
 
-        copy(&LocalVfs, &src, &dst).unwrap();
+        copy(&LocalVfs, &src, &dst, ConflictPolicy::Abort).unwrap();
 
         assert_eq!(
             std::fs::read(dst.join("nested").join("f.txt")).unwrap(),
@@ -159,7 +228,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         let dst = src.join("nested");
 
-        let result = copy(&LocalVfs, &src, &dst);
+        let result = copy(&LocalVfs, &src, &dst, ConflictPolicy::Abort);
 
         assert!(matches!(
             result,
@@ -176,7 +245,7 @@ mod tests {
         let dst = dir.join("b.txt");
         std::fs::write(&src, b"hello").unwrap();
 
-        mv(&LocalVfs, &src, &dst).unwrap();
+        mv(&LocalVfs, &src, &dst, ConflictPolicy::Abort).unwrap();
 
         assert!(!src.exists());
         assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
@@ -185,20 +254,73 @@ mod tests {
     }
 
     #[test]
-    fn mv_fails_instead_of_replacing_existing_destination() {
-        let dir = scratch_dir("mv-conflict");
+    fn mv_aborts_instead_of_replacing_existing_destination() {
+        let dir = scratch_dir("mv-conflict-abort");
         let src = dir.join("a.txt");
         let dst = dir.join("b.txt");
         std::fs::write(&src, b"new").unwrap();
         std::fs::write(&dst, b"keep me").unwrap();
 
-        let result = mv(&LocalVfs, &src, &dst);
+        let result = mv(&LocalVfs, &src, &dst, ConflictPolicy::Abort);
 
         assert!(matches!(
             result,
             Err(FileOpsError::Vfs(VfsError::AlreadyExists(_)))
         ));
         assert_eq!(std::fs::read(&dst).unwrap(), b"keep me");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mv_skips_instead_of_replacing_existing_destination() {
+        let dir = scratch_dir("mv-conflict-skip");
+        let src = dir.join("a.txt");
+        let dst = dir.join("b.txt");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"keep me").unwrap();
+
+        let outcome = mv(&LocalVfs, &src, &dst, ConflictPolicy::Skip).unwrap();
+
+        assert_eq!(outcome, Outcome::Skipped);
+        assert!(src.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"keep me");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mv_overwrite_replaces_existing_destination() {
+        let dir = scratch_dir("mv-conflict-overwrite");
+        let src = dir.join("a.txt");
+        let dst = dir.join("b.txt");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"stale").unwrap();
+
+        let outcome = mv(&LocalVfs, &src, &dst, ConflictPolicy::Overwrite).unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"new");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn copy_overwrite_replaces_existing_directory() {
+        let dir = scratch_dir("copy-conflict-overwrite");
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("f.txt"), b"new").unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("stale.txt"), b"stale").unwrap();
+
+        let outcome = copy(&LocalVfs, &src, &dst, ConflictPolicy::Overwrite).unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert!(!dst.join("stale.txt").exists());
+        assert_eq!(std::fs::read(dst.join("f.txt")).unwrap(), b"new");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -256,7 +378,7 @@ mod tests {
         let src = dir.join("old.txt");
         std::fs::write(&src, b"hi").unwrap();
 
-        rename(&LocalVfs, &src, "new.txt").unwrap();
+        rename(&LocalVfs, &src, "new.txt", ConflictPolicy::Abort).unwrap();
 
         assert!(!src.exists());
         assert_eq!(std::fs::read(dir.join("new.txt")).unwrap(), b"hi");
@@ -270,7 +392,7 @@ mod tests {
         let path = dir.join("a.txt");
         std::fs::write(&path, b"hi").unwrap();
 
-        let result = mv(&LocalVfs, &path, &path);
+        let result = mv(&LocalVfs, &path, &path, ConflictPolicy::Abort);
 
         assert!(matches!(result, Err(FileOpsError::SameLocation(_))));
 

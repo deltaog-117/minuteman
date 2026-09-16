@@ -111,6 +111,13 @@ impl BrowserState {
         Ok(())
     }
 
+    /// Re-lists the current and parent directories, clamping the selection if the entry count
+    /// shrank. Call after a filesystem mutation made outside `BrowserState` (copy/move/delete/
+    /// create/rename), since those don't otherwise update this state.
+    pub fn reload(&mut self, vfs: &dyn Vfs) -> Result<(), VfsError> {
+        self.refresh(vfs)
+    }
+
     fn refresh(&mut self, vfs: &dyn Vfs) -> Result<(), VfsError> {
         self.current_entries = vfs.list_dir(&self.current_dir)?;
         self.selected = self

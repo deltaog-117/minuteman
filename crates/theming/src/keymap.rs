@@ -26,6 +26,16 @@ pub enum Action {
     Enter,
     Leave,
     Quit,
+    /// Mark the selection to be duplicated on the next `Paste`.
+    Yank,
+    /// Mark the selection to be relocated on the next `Paste`.
+    Cut,
+    Paste,
+    /// Permanently delete the selection (asks for confirmation first — there is no trash yet).
+    Delete,
+    Rename,
+    /// Prompts for a name; a trailing `/` creates a directory, otherwise a file.
+    Create,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +46,12 @@ pub struct RawKeyMap {
     pub enter: Vec<String>,
     pub leave: Vec<String>,
     pub quit: Vec<String>,
+    pub yank: Vec<String>,
+    pub cut: Vec<String>,
+    pub paste: Vec<String>,
+    pub delete: Vec<String>,
+    pub rename: Vec<String>,
+    pub create: Vec<String>,
 }
 
 impl Default for RawKeyMap {
@@ -46,6 +62,12 @@ impl Default for RawKeyMap {
             enter: vec!["l".into(), "enter".into()],
             leave: vec!["h".into()],
             quit: vec!["q".into()],
+            yank: vec!["y".into()],
+            cut: vec!["m".into()],
+            paste: vec!["p".into()],
+            delete: vec!["d".into()],
+            rename: vec!["r".into()],
+            create: vec!["n".into()],
         }
     }
 }
@@ -77,6 +99,12 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.enter, Action::Enter);
         bind_all(&raw.leave, Action::Leave);
         bind_all(&raw.quit, Action::Quit);
+        bind_all(&raw.yank, Action::Yank);
+        bind_all(&raw.cut, Action::Cut);
+        bind_all(&raw.paste, Action::Paste);
+        bind_all(&raw.delete, Action::Delete);
+        bind_all(&raw.rename, Action::Rename);
+        bind_all(&raw.create, Action::Create);
 
         Self { bindings }
     }
@@ -117,6 +145,12 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Enter), Some(Action::Enter));
         assert_eq!(keymap.resolve(KeyCode::Char('h')), Some(Action::Leave));
         assert_eq!(keymap.resolve(KeyCode::Char('q')), Some(Action::Quit));
+        assert_eq!(keymap.resolve(KeyCode::Char('y')), Some(Action::Yank));
+        assert_eq!(keymap.resolve(KeyCode::Char('m')), Some(Action::Cut));
+        assert_eq!(keymap.resolve(KeyCode::Char('p')), Some(Action::Paste));
+        assert_eq!(keymap.resolve(KeyCode::Char('d')), Some(Action::Delete));
+        assert_eq!(keymap.resolve(KeyCode::Char('r')), Some(Action::Rename));
+        assert_eq!(keymap.resolve(KeyCode::Char('n')), Some(Action::Create));
         assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
     }
 

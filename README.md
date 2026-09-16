@@ -23,6 +23,9 @@ shell overlay, native SSH/SFTP browsing, and a stable multi-language sandboxed p
 
 - 🔹 **3-pane miller-column browser** – Ranger-style parent / current / selection-preview layout.
 - 🔹 **Vim-style navigation** – `j`/`k`/`h`/`l`/Enter/`q`.
+- 🔹 **Core file operations** – yank/cut/paste, permanent delete (with confirmation), rename, and
+  create file/directory, all driven from the keyboard with an overwrite/skip/abort prompt on
+  conflicts.
 - 🔹 **Config-driven keybindings** – read from `~/.config/minuteman/config.toml`, with per-field
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
 
@@ -55,13 +58,22 @@ cargo run -p tui -- /path/to/dir
 
 ### Default keybindings
 
-| Key         | Action           |
-|-------------|------------------|
-| `j`         | move down        |
-| `k`         | move up          |
-| `l` / Enter | enter directory  |
-| `h`         | leave directory  |
-| `q`         | quit             |
+| Key         | Action                                       |
+|-------------|-----------------------------------------------|
+| `j`         | move down                                     |
+| `k`         | move up                                       |
+| `l` / Enter | enter directory                               |
+| `h`         | leave directory                               |
+| `q`         | quit                                          |
+| `y`         | yank (copy) selection                         |
+| `m`         | cut (move) selection                          |
+| `p`         | paste                                         |
+| `d`         | delete selection permanently (confirm `y`/N)  |
+| `r`         | rename selection                              |
+| `n`         | create — trailing `/` makes a directory       |
+
+While a prompt is active (rename/create/delete-confirm/conflict), `Enter` submits and `Esc`
+cancels; the keybindings above are not resolved until the prompt closes.
 
 ---
 
@@ -77,6 +89,12 @@ move_up = ["k"]
 enter = ["l", "enter"]
 leave = ["h"]
 quit = ["q"]
+yank = ["y"]
+cut = ["m"]
+paste = ["p"]
+delete = ["d"]
+rename = ["r"]
+create = ["n"]
 
 [theme]
 selection_bg = "blue"
@@ -95,7 +113,7 @@ crates/
 ├── browser/          # miller-column navigation state
 ├── theming/           # config/keybinding/theme loading
 ├── tui/                # binary crate — render loop, input dispatch, wiring
-├── file_ops/           # (stub, WIP) copy/move/delete/create/rename
+├── file_ops/           # copy/move/delete/create/rename orchestration on top of Vfs
 ├── preview/            # (stub, WIP) text + image preview
 ├── shell_overlay/      # (stub, WIP) interactive $SHELL overlay
 ├── trash/              # (stub, WIP) trash + undo history
