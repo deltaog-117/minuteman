@@ -14,8 +14,10 @@ shared = { path = "../shared" }
 browser = { path = "../browser" }
 file_ops = { path = "../file_ops" }
 shell_overlay = { path = "../shell_overlay" }
+preview = { path = "../preview" }
 theming = { path = "../theming" }
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 anyhow = "1.0.104"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+ratatui-image = { version = "11.0.8", default-features = false, features = ["crossterm", "tokio"] }

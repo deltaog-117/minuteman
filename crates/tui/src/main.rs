@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 mod app;
+mod image_preview;
 
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -28,12 +29,14 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use image_preview::{ImagePreview, PreviewStatus};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui_image::StatefulImage;
 use shared::{DirEntryInfo, LocalVfs};
 use theming::{Action, Config};
 
@@ -90,10 +93,21 @@ fn main() -> Result<()> {
     let mut app = App::new(runtime.handle().clone());
 
     let guard = TerminalGuard::new()?;
+    // Must run after entering the alternate screen but before the event loop reads any input —
+    // it briefly reads/writes stdio itself to probe the terminal's graphics-protocol support.
+    let mut image_preview = ImagePreview::new(runtime.handle().clone());
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, &guard, &vfs, &mut browser, &mut app, &config);
+    let result = run(
+        &mut terminal,
+        &guard,
+        &vfs,
+        &mut browser,
+        &mut app,
+        &mut image_preview,
+        &config,
+    );
 
     drop(guard);
     result
@@ -105,11 +119,13 @@ fn run(
     vfs: &LocalVfs,
     browser: &mut BrowserState,
     app: &mut App,
+    image_preview: &mut ImagePreview,
     config: &Config,
 ) -> Result<()> {
     loop {
         app.poll_bulk(browser, vfs)?;
-        terminal.draw(|frame| draw(frame, browser, app, vfs, config))?;
+        image_preview.update(browser.selected_entry().map(|e| e.path.as_path()));
+        terminal.draw(|frame| draw(frame, browser, app, image_preview, vfs, config))?;
 
         // A timed poll (rather than a blocking read) so the loop keeps ticking — and picking up
         // background-operation progress — even while the user isn't pressing anything.
@@ -174,6 +190,7 @@ fn draw(
     frame: &mut ratatui::Frame<'_>,
     browser: &BrowserState,
     app: &App,
+    image_preview: &mut ImagePreview,
     vfs: &LocalVfs,
     config: &Config,
 ) {
@@ -225,25 +242,54 @@ fn draw(
         &mut current_state,
     );
 
-    // Preview pane — children of the selected directory, or the file's name as a placeholder
-    // (real text/image preview content arrives with the `preview` crate later in the roadmap).
-    let preview_widget = if browser.selected_entry().map(|e| e.is_dir).unwrap_or(false) {
+    // Preview pane — an inline image for image files, children of a selected directory, or the
+    // file's name as a placeholder (text preview is a future roadmap item).
+    let is_selected_image = browser
+        .selected_entry()
+        .is_some_and(|e| !e.is_dir && preview::is_image(&e.path));
+
+    if is_selected_image {
+        let block = themed_block(config, "preview");
+        let inner = block.inner(columns[2]);
+        frame.render_widget(block, columns[2]);
+        match image_preview.status() {
+            PreviewStatus::Ready => {
+                frame.render_stateful_widget(
+                    StatefulImage::default(),
+                    inner,
+                    image_preview.protocol_mut(),
+                );
+            }
+            PreviewStatus::Loading => {
+                frame.render_widget(Paragraph::new("loading preview…"), inner);
+            }
+            PreviewStatus::Failed => {
+                frame.render_widget(Paragraph::new("preview failed"), inner);
+            }
+            PreviewStatus::Empty => {}
+        }
+    } else if browser.selected_entry().map(|e| e.is_dir).unwrap_or(false) {
         let items: Vec<ListItem> = browser
             .preview_entries(vfs)
             .iter()
             .map(|e| entry_item(e, config))
             .collect();
-        List::new(items).block(themed_block(config, "preview"))
+        frame.render_widget(
+            List::new(items).block(themed_block(config, "preview")),
+            columns[2],
+        );
     } else {
         let label = browser
             .selected_entry()
             .map(|e| e.name.clone())
             .unwrap_or_default();
         let style = Style::default().fg(color_from_name(&config.theme.file_fg));
-        List::new(vec![ListItem::new(Span::styled(label, style))])
-            .block(themed_block(config, "preview"))
-    };
-    frame.render_widget(preview_widget, columns[2]);
+        frame.render_widget(
+            List::new(vec![ListItem::new(Span::styled(label, style))])
+                .block(themed_block(config, "preview")),
+            columns[2],
+        );
+    }
 
     let status_style = Style::default().fg(color_from_name(&config.theme.status_fg));
     frame.render_widget(

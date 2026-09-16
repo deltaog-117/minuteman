@@ -20,6 +20,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | Shell Overlay Mechanism     | Direct stdio inheritance, no pty multiplexing | ✅ Confirmed |
 | 2026-09-16 | Post-Shell Redraw           | `Terminal::resize`, not `Terminal::clear`    | ✅ Confirmed |
 | 2026-09-16 | Theme Selection Model       | Named base palette + per-field override layering | ✅ Confirmed |
+| 2026-09-16 | Image Preview Concurrency   | `ThreadProtocol` + `spawn_blocking`, not the naive `StatefulProtocol` | ✅ Confirmed |
 
 ---
 
@@ -426,6 +427,56 @@ different rendered colors, the two palettes were checked against the actual comp
 decoding the raw ANSI escape codes from a scripted PTY session confirmed the exact color-index
 change expected for every themed element (border, title/directory color, selection highlight,
 status bar) between the default and dracula runs.
+
+---
+
+### Image Preview Concurrency: `ThreadProtocol` + `spawn_blocking`, Not Naive `StatefulProtocol`
+
+**Date:** 2026-09-16
+**Status:** Confirmed
+
+#### Context / Background
+
+`ratatui-image`'s adaptive `StatefulImage` widget resizes and encodes the image for the
+terminal's graphics protocol *inside* its `render()` call. Its own docs are explicit: **"Do not
+use it without `ThreadProtocol` in a reactive UI — rendering the widget will block the UI
+thread."** This is the same class of problem the project spent all of the async-bulk-ops cycle
+eliminating for file operations, so it needed the same scrutiny before writing any code (see the
+"Which concurrency architecture" question resolved with the user this cycle for the 3 options
+considered: naive blocking `StatefulProtocol`, `ThreadProtocol` + a background worker, or forcing
+halfblocks-only to sidestep the cost).
+
+#### Decision & Rationale
+
+Chose `ThreadProtocol` + `tokio::runtime::Handle::spawn_blocking`, reusing the exact pattern
+already built and tested for bulk file operations (`tui::app::App`'s `BulkOp`): a channel carries
+`ResizeRequest`s out to the blocking pool and `ResizeResponse`s back, drained once per render
+tick in `ImagePreview::update`. The *decode* step (`preview::load_image`, a separate blocking
+cost `ratatui-image` doesn't manage at all) got the same treatment via a second, smaller channel.
+`ThreadProtocol::replace_protocol` (not constructing a fresh `ThreadProtocol` per image) is
+important here: it correctly invalidates any in-flight resize request for a since-abandoned
+selection via its internal `id` counter, so a stale response can never clobber a newer image if
+the user navigates quickly.
+
+**Verification finding (not a code change, but worth recording):** the first attempt at PTY
+verification for this feature found navigation keystrokes vanishing intermittently right after
+startup. Root cause: `Picker::from_query_stdio()` probes the terminal for Kitty/Sixel/font-size
+support by writing several escape-code queries (including a Device Status Report, `\x1b[5n`,
+chosen by the crate's own author specifically because — per its source comment — "[DSR is]
+implemented by all terminals, ensure there is some response and we don't hang reading forever").
+The *main* thread that calls `from_query_stdio()` handles a non-response correctly (falls back to
+`fallback_picker` after a 2s timeout, matching this project's established "must never block
+startup" rule). The problem is the *background thread* it spawns to do the actual blocking stdin
+read: nothing tells it to stop when the main thread times out — a "fire and forget" by the
+crate's own design — so it keeps reading (and silently discarding) all subsequent stdin bytes
+forever if the terminal never answers even the DSR probe. A synthetic dumb pty (no terminal
+emulation at all, used for this project's PTY-based verification) never answers, so it reliably
+hit this; a real terminal emulator answers DSR in microseconds, since virtually every terminal
+emulator has implemented it since the VT100 era, so this is not a practical concern for actual
+users. Documented here rather than worked around, since there is no way to cancel that thread
+through the crate's public API, and the realistic risk to real users is effectively nil. The PTY
+test harness itself was fixed to emulate a DSR reply, which is what let verification proceed and
+confirm the actual feature (not just the harness limitation).
 
 ---
 

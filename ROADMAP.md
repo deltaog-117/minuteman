@@ -64,6 +64,22 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   PTY session, decoded the actual ANSI color codes emitted, and confirmed every themed element
   (border, title/dir color, selection highlight, status bar) genuinely changed between the two —
   not just that the config parsed.
+- ✅ **Inline image preview** – the preview pane renders the selected image via `ratatui-image`
+  (Kitty/iTerm2/Sixel, falling back to Unicode halfblocks when unsupported), extension-whitelisted
+  (`png`/`jpg`/`jpeg`/`gif`/`bmp`/`ico`/`tiff`/`tif`/`webp`) via the new `preview` crate. Decoding
+  and resize/encoding both run on `tokio::runtime::Handle::spawn_blocking` via `ratatui-image`'s
+  `ThreadProtocol` (new `tui::image_preview` module) — the library's own docs say its adaptive
+  widget "will block the UI thread" without this, so it gets the same never-block-the-render-loop
+  treatment as bulk file ops. A failed/corrupt decode falls back to a "preview failed" message
+  rather than an error. Verified against the real compiled binary via a scripted PTY session: a
+  real 4×4 PNG rendered as genuine halfblock output with its actual pixel color present in the
+  emitted truecolor escape codes, a mislabeled non-image file correctly showed "preview failed,"
+  and navigation kept working throughout (proving the async pipeline never blocked input). This
+  verification also surfaced a real (if narrow) finding, written up in `DIARY.md`: the crate's
+  `Picker::from_query_stdio()` terminal-capability probe leaves its stdin-reading thread running
+  if the terminal never answers *any* escape query — real terminals all answer instantly, so this
+  isn't a practical concern for actual users, but it fully explained an early false negative
+  during this cycle's own testing.
 
 ---
 
@@ -75,8 +91,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟡 Medium Priority (Important)
 
-- **Inline image preview** – render images directly in the preview pane via `ratatui-image`
-  (Kitty/iTerm2/Sixel graphics protocols), falling back to Unicode blocks when unsupported.
 - **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
   operations, with no plugin required.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
@@ -127,6 +141,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Byte-level/percentage progress for large single files** – current progress is one tick per
   *file*, so a single huge file shows no movement until it's done. Needs `Vfs::copy_file` to
   support a streaming copy with periodic callbacks instead of one atomic `std::fs::copy` call.
+- **Text file preview** – the preview pane still just shows a selected non-image file's name; the
+  `preview` crate's own module doc has called out "text + image preview" as its scope since v0.1.0,
+  and only the image half is built. Should reuse the same extension-whitelist + fallback shape
+  `is_image`/`load_image` already established.
 
 ---
 
@@ -144,10 +162,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui -- <dir>`, and try `~/.config/minuteman/config.toml` with `[theme]` /
-   `name = "dracula"` to see the alternate palette; individual color fields still override it.
-2. `cargo test --workspace` (33 tests) to verify everything still passes.
+1. `cargo run -p tui -- <dir-with-images>` and select a `.png`/`.jpg`/etc. file — it should render
+   inline (Kitty/Sixel/iTerm2 if your terminal supports one, halfblocks otherwise).
+2. `cargo test --workspace` (36 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Pick the next roadmap item — every High Priority item is now done, so this is the first cycle
-   choosing from 🟡 Medium Priority: inline image preview, built-in trash + undo history, or VFS
-   abstraction hardening are all reasonable next picks.
+4. Pick the next roadmap item from 🟡 Medium Priority: built-in trash + undo history or VFS
+   abstraction hardening are the remaining candidates.

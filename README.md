@@ -13,10 +13,10 @@ you're moving many files or large ones. It's named after the American Minutemen 
 for being combat-ready at a moment's notice — the same idea applied to file operations.
 
 This is early — v0.1.0 established the project's architecture, and every High Priority roadmap
-item (core file operations, async bulk ops with progress, the interactive shell overlay, and the
-full theme system) is now built. It is **not yet** a daily-driver replacement for Ranger or Yazi.
-See [ROADMAP.md](ROADMAP.md) for what's still ahead (inline image preview, built-in trash,
-native SSH/SFTP browsing, and a stable multi-language sandboxed plugin system).
+item (core file operations, async bulk ops with progress, the interactive shell overlay, the full
+theme system, and inline image preview) is now built. It is **not yet** a daily-driver
+replacement for Ranger or Yazi. See [ROADMAP.md](ROADMAP.md) for what's still ahead (built-in
+trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin system).
 
 ---
 
@@ -34,6 +34,9 @@ native SSH/SFTP browsing, and a stable multi-language sandboxed plugin system).
 - 🔹 **Themeable UI** – a real palette (borders, titles, directory/file colors, selection
   highlight, status bar), not just two colors. `[theme] name = "dracula"` swaps the whole
   palette; individual color fields still override it.
+- 🔹 **Inline image preview** – select a `.png`/`.jpg`/`.gif`/etc. file and it renders directly in
+  the preview pane, using your terminal's best available graphics protocol (Kitty, iTerm2,
+  Sixel) or Unicode halfblocks as a universal fallback. Decoding and rendering never block the UI.
 - 🔹 **Config-driven keybindings** – read from `~/.config/minuteman/config.toml`, with per-field
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
 
@@ -138,7 +141,7 @@ crates/
 ├── tui/                # binary crate — render loop, input dispatch, wiring
 ├── file_ops/           # copy/move/delete/create/rename on Vfs, with progress/cancel support
 ├── shell_overlay/      # spawns a real, interactive $SHELL, inheriting stdio directly
-├── preview/            # (stub, WIP) text + image preview
+├── preview/            # detects + decodes image files (terminal-agnostic; text preview: WIP)
 ├── trash/              # (stub, WIP) trash + undo history
 ├── plugins/            # (stub, WIP) WASM (Extism) multi-language plugin host
 └── vfs_ssh/             # (stub, WIP) native SSH/SFTP remote browsing

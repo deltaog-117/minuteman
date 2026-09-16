@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tui`: every pane's border and title, each directory/file entry, and the status bar are now
   themed (previously only the selection highlight was). New `themed_block`/`entry_item` helpers
   in `main.rs`.
+- `preview`: `is_image(path) -> bool` (extension whitelist: png/jpg/jpeg/gif/bmp/ico/tiff/tif/
+  webp) and `load_image(path) -> Option<DynamicImage>` (returns `None` rather than erroring on any
+  I/O or decode failure) — pure, terminal-agnostic building blocks for image preview.
+- `tui`: new `image_preview` module (`ImagePreview`, `PreviewStatus`) — renders the selected
+  image inline via `ratatui-image` (Kitty/iTerm2/Sixel, falling back to Unicode halfblocks).
+  Decoding and resize/encoding both run on `tokio::runtime::Handle::spawn_blocking` via
+  `ratatui-image`'s `ThreadProtocol`, so a large or slow-to-encode image never blocks the render
+  loop. The preview pane shows "loading preview…" while decoding and "preview failed" if the
+  file doesn't actually decode as an image despite its extension.
 
 ## [0.1.0] - 2026-09-16
 
