@@ -1,0 +1,18 @@
+[package]
+name = "tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "minuteman"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+browser = { path = "../browser" }
+theming = { path = "../theming" }
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+anyhow = "1.0.104"

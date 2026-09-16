@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/shared",
+    "crates/vfs_ssh",
+    "crates/browser",
+    "crates/file_ops",
+    "crates/preview",
+    "crates/shell_overlay",
+    "crates/trash",
+    "crates/plugins",
+    "crates/theming",
+    "crates/tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["deltaog-117"]
