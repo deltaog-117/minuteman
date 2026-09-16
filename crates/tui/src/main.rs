@@ -32,6 +32,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
+use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use shared::{DirEntryInfo, LocalVfs};
 use theming::{Action, Config};
@@ -198,10 +199,10 @@ fn draw(
     let parent_items: Vec<ListItem> = browser
         .parent_entries()
         .iter()
-        .map(|e| ListItem::new(entry_label(e)))
+        .map(|e| entry_item(e, config))
         .collect();
     frame.render_widget(
-        List::new(parent_items).block(Block::default().borders(Borders::ALL).title("..")),
+        List::new(parent_items).block(themed_block(config, "..")),
         columns[0],
     );
 
@@ -209,7 +210,7 @@ fn draw(
     let current_items: Vec<ListItem> = browser
         .current_entries()
         .iter()
-        .map(|e| ListItem::new(entry_label(e)))
+        .map(|e| entry_item(e, config))
         .collect();
     let mut current_state = ListState::default();
     if !browser.current_entries().is_empty() {
@@ -218,7 +219,7 @@ fn draw(
     let title = browser.current_dir().to_string_lossy().into_owned();
     frame.render_stateful_widget(
         List::new(current_items)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(themed_block(config, &title))
             .highlight_style(selection_style),
         columns[1],
         &mut current_state,
@@ -230,20 +231,44 @@ fn draw(
         let items: Vec<ListItem> = browser
             .preview_entries(vfs)
             .iter()
-            .map(|e| ListItem::new(entry_label(e)))
+            .map(|e| entry_item(e, config))
             .collect();
-        List::new(items).block(Block::default().borders(Borders::ALL).title("preview"))
+        List::new(items).block(themed_block(config, "preview"))
     } else {
         let label = browser
             .selected_entry()
             .map(|e| e.name.clone())
             .unwrap_or_default();
-        List::new(vec![ListItem::new(label)])
-            .block(Block::default().borders(Borders::ALL).title("preview"))
+        let style = Style::default().fg(color_from_name(&config.theme.file_fg));
+        List::new(vec![ListItem::new(Span::styled(label, style))])
+            .block(themed_block(config, "preview"))
     };
     frame.render_widget(preview_widget, columns[2]);
 
-    frame.render_widget(Paragraph::new(app.status_line()), rows[1]);
+    let status_style = Style::default().fg(color_from_name(&config.theme.status_fg));
+    frame.render_widget(
+        Paragraph::new(app.status_line()).style(status_style),
+        rows[1],
+    );
+}
+
+/// A pane `Block` styled with the theme's border/title colors — every pane uses the same frame.
+fn themed_block<'a>(config: &Config, title: &'a str) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color_from_name(&config.theme.border_fg)))
+        .title(title)
+        .title_style(Style::default().fg(color_from_name(&config.theme.title_fg)))
+}
+
+fn entry_item(entry: &DirEntryInfo, config: &Config) -> ListItem<'static> {
+    let label = entry_label(entry);
+    let color = if entry.is_dir {
+        color_from_name(&config.theme.dir_fg)
+    } else {
+        color_from_name(&config.theme.file_fg)
+    };
+    ListItem::new(Span::styled(label, Style::default().fg(color)))
 }
 
 fn entry_label(entry: &DirEntryInfo) -> String {

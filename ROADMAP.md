@@ -54,14 +54,22 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   real shell commands (`touch`, `pwd`, `exit`), confirmed the marker file and captured `pwd`
   landed in the browsed directory, and confirmed the TUI was still fully interactive afterward
   (navigated and quit normally).
+- ✅ **Full theme system** – `theming::Theme` grew from 2 fields to 7 (`selection_bg`/`fg`,
+  `border_fg`, `title_fg`, `dir_fg`, `file_fg`, `status_fg`), applied to every pane's border,
+  title, per-entry directory/file color, and the status bar. `[theme] name = "..."` selects a
+  built-in base palette (`"default"` or `"dracula"`, unknown names fall back to `"default"`
+  rather than failing config load); any individually specified color field still overrides that
+  palette's value, layered the same way `RawKeyMap` layers keybinding overrides. Verified against
+  the real compiled binary: ran with the default theme and with `name = "dracula"` via a scripted
+  PTY session, decoded the actual ANSI color codes emitted, and confirmed every themed element
+  (border, title/dir color, selection highlight, status bar) genuinely changed between the two —
+  not just that the config parsed.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-- **Full theme system** – extend `theming::Theme` beyond the current two-color stub (selection
-  bg/fg) into a real palette (borders, headers, file-type colors) with at least one alternate
-  theme to prove the system works end-to-end.
+*(none — all High Priority items are done; see Medium Priority below for what's next.)*
 
 ---
 
@@ -112,9 +120,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui -- <dir>` and press `s` to drop into a shell in the browsed directory;
-   `exit` to return — the TUI should resume cleanly and stay fully interactive.
-2. `cargo test --workspace` (29 tests) to verify everything still passes.
+1. `cargo run -p tui -- <dir>`, and try `~/.config/minuteman/config.toml` with `[theme]` /
+   `name = "dracula"` to see the alternate palette; individual color fields still override it.
+2. `cargo test --workspace` (33 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Pick the next roadmap item — recommended: **full theme system**, the only remaining High
-   Priority item; it's self-contained and doesn't block on anything else in flight.
+4. Pick the next roadmap item — every High Priority item is now done, so this is the first cycle
+   choosing from 🟡 Medium Priority: inline image preview, built-in trash + undo history, or VFS
+   abstraction hardening are all reasonable next picks.

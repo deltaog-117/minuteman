@@ -19,13 +19,13 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::keymap::{KeyMap, RawKeyMap};
-use crate::theme::Theme;
+use crate::theme::{RawTheme, Theme};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 struct RawConfig {
     keys: RawKeyMap,
-    theme: Theme,
+    theme: RawTheme,
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +52,7 @@ impl Config {
 
         Self {
             keys: raw.keys.into(),
-            theme: raw.theme,
+            theme: raw.theme.into(),
         }
     }
 
@@ -72,6 +72,8 @@ mod tests {
         assert_eq!(raw.keys.move_down, vec!["n".to_string()]);
         // move_up was not specified, so it keeps the default.
         assert_eq!(raw.keys.move_up, vec!["k".to_string()]);
-        assert_eq!(raw.theme.selection_bg, "blue");
+
+        let theme: Theme = raw.theme.into();
+        assert_eq!(theme.selection_bg, "blue");
     }
 }

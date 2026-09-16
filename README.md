@@ -12,10 +12,11 @@ but built in Rust to fix the thing that makes Ranger painful in practice: it get
 you're moving many files or large ones. It's named after the American Minutemen militia, prized
 for being combat-ready at a moment's notice — the same idea applied to file operations.
 
-This is early — v0.1.0 is a bare-bones, runnable local filesystem browser that establishes the
-project's architecture. It is **not yet** a daily-driver replacement for Ranger or Yazi. See
-[ROADMAP.md](ROADMAP.md) for the full plan (async bulk file ops, image preview, an interactive
-shell overlay, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin system).
+This is early — v0.1.0 established the project's architecture, and every High Priority roadmap
+item (core file operations, async bulk ops with progress, the interactive shell overlay, and the
+full theme system) is now built. It is **not yet** a daily-driver replacement for Ranger or Yazi.
+See [ROADMAP.md](ROADMAP.md) for what's still ahead (inline image preview, built-in trash,
+native SSH/SFTP browsing, and a stable multi-language sandboxed plugin system).
 
 ---
 
@@ -30,6 +31,9 @@ shell overlay, native SSH/SFTP browsing, and a stable multi-language sandboxed p
 - 🔹 **Interactive shell overlay** – `s` drops you into a real, fully interactive `$SHELL` in the
   browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
   auto-close-after-one-command.
+- 🔹 **Themeable UI** – a real palette (borders, titles, directory/file colors, selection
+  highlight, status bar), not just two colors. `[theme] name = "dracula"` swaps the whole
+  palette; individual color fields still override it.
 - 🔹 **Config-driven keybindings** – read from `~/.config/minuteman/config.toml`, with per-field
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
 
@@ -105,9 +109,20 @@ create = ["n"]
 shell = ["s"]
 
 [theme]
+# Selects a built-in base palette ("default" or "dracula"); an unrecognised name falls back
+# to "default". Any color field below overrides just that field on top of the chosen palette.
+name = "default"
 selection_bg = "blue"
 selection_fg = "white"
+border_fg = "gray"
+title_fg = "white"
+dir_fg = "blue"
+file_fg = "white"
+status_fg = "gray"
 ```
+
+Colors are one of: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`
+(`grey` also works). An unrecognised color name resets to the terminal's default.
 
 ---
 

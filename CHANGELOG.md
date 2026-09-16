@@ -61,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browser's current directory, then resumes and forces a full redraw via `Terminal::resize`
   (not `Terminal::clear`, which depends on a cursor-position query that can hang — see
   `DIARY.md`). `TerminalGuard` gained `suspend`/`resume` methods for this.
+- `theming`: `Theme` grew from 2 fields to 7 — `selection_bg`/`fg`, `border_fg`, `title_fg`,
+  `dir_fg`, `file_fg`, `status_fg`. New `RawTheme` (`name: Option<String>` plus every color field
+  optional) resolves via `Theme::named` (built-in `"default"`/`"dracula"` palettes, unrecognized
+  names fall back to `"default"`) as a base, with individually specified fields overriding it.
+- `tui`: every pane's border and title, each directory/file entry, and the status bar are now
+  themed (previously only the selection highlight was). New `themed_block`/`entry_item` helpers
+  in `main.rs`.
 
 ## [0.1.0] - 2026-09-16
 

@@ -19,6 +19,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | Async Bulk Ops Concurrency  | `spawn_blocking` + poll loop, not a full async rewrite | ✅ Confirmed |
 | 2026-09-16 | Shell Overlay Mechanism     | Direct stdio inheritance, no pty multiplexing | ✅ Confirmed |
 | 2026-09-16 | Post-Shell Redraw           | `Terminal::resize`, not `Terminal::clear`    | ✅ Confirmed |
+| 2026-09-16 | Theme Selection Model       | Named base palette + per-field override layering | ✅ Confirmed |
 
 ---
 
@@ -370,6 +371,61 @@ which doesn't require the emulator to answer an escape code and so can't hang th
 **Trade-offs accepted:** `resize` is a slightly less obviously-named tool for "force a redraw"
 than `clear` — worth a comment at the call site (present in `main.rs`) so a future reader doesn't
 "simplify" it back to `clear()` and reintroduce the hang.
+
+---
+
+### Theme Selection Model: Named Base Palette + Per-Field Override Layering
+
+**Date:** 2026-09-16
+**Status:** Confirmed
+
+#### Context / Background
+
+`Theme` was a 2-field stub (`selection_bg`/`selection_fg`) with per-field config fallback via
+serde's container-level `#[serde(default)]`, the same shape as `RawKeyMap`. Growing it into a
+real palette (borders, headers, file-type colors) raised a question `RawKeyMap` never had to
+answer: the roadmap explicitly wanted "at least one alternate theme to prove the system works
+end-to-end," which a flat set of individually-overridable color fields doesn't really deliver —
+proving a full *palette* swap needs more than a README snippet showing seven colors to paste.
+
+#### Options Considered
+
+**Option A: keep the flat per-field-only model**, just with more fields, and document a second
+palette as an example TOML block in the README for users to copy. Simplest, but "prove the
+system works end-to-end" would rest on documentation, not code — nothing in the binary actually
+demonstrates a full theme swap.
+
+**Option B: a named-theme registry with per-field override layering** *(chosen)* — `[theme]
+name = "dracula"` selects a built-in base palette; any individually specified color field still
+overrides that palette's value for just that field. One config line proves the whole system
+swaps correctly, while power users keep the existing fine-grained override behavior on top.
+
+**Option C: theme files** (e.g. a `themes/dracula.toml` users drop into the config directory,
+loaded by filename) — matches how some other terminal tools do it, but is meaningfully more
+implementation for a project with exactly two built-in palettes today; nothing yet needs
+user-authored theme *files* as opposed to a user-authored theme *name* plus overrides.
+
+#### Decision & Rationale
+
+Chose B. Implemented as `RawTheme` (all fields `Option<String>`, including `name`) converting to
+`Theme` (all fields always populated) via `Theme::named(name)` as the base, then
+`raw.field.unwrap_or(base.field)` per field — the same two-step "resolve a base, then layer
+explicit overrides on top" shape used for `ConflictPolicy` resolution in `file_ops`, just applied
+to config instead of a filesystem conflict. `Theme::named` falls back to `"default"` for any
+unrecognized name, matching the project's standing rule that a config typo must never block
+startup (same reasoning as `parse_key`'s silent-skip and `Config::load`'s parse-failure
+fallback).
+
+**Trade-offs accepted:** only two built-in palettes exist today (`"default"`, `"dracula"`); a
+third would just be another `match` arm in `Theme::named`, so this scales fine short-term but
+would want Option C's file-based approach if the built-in set grew large enough to be unwieldy
+in a single `match`.
+
+**Verification note:** rather than trusting that TOML parsing + struct fields "should" produce
+different rendered colors, the two palettes were checked against the actual compiled binary —
+decoding the raw ANSI escape codes from a scripted PTY session confirmed the exact color-index
+change expected for every themed element (border, title/directory color, selection highlight,
+status bar) between the default and dracula runs.
 
 ---
 
