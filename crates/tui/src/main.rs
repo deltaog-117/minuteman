@@ -46,6 +46,22 @@ impl TerminalGuard {
         execute!(io::stdout(), EnterAlternateScreen)?;
         Ok(Self)
     }
+
+    /// Hands the real terminal back to normal (cooked) mode, e.g. so a child process like an
+    /// interactive shell can use it directly. Pair with `resume`.
+    fn suspend(&self) -> Result<()> {
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen)?;
+        Ok(())
+    }
+
+    /// Reverses `suspend`. The caller must also force a full redraw (`Terminal::clear`)
+    /// afterward — ratatui's diffing buffer doesn't know the screen was replaced meanwhile.
+    fn resume(&self) -> Result<()> {
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        enable_raw_mode()?;
+        Ok(())
+    }
 }
 
 impl Drop for TerminalGuard {
@@ -76,7 +92,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, &vfs, &mut browser, &mut app, &config);
+    let result = run(&mut terminal, &guard, &vfs, &mut browser, &mut app, &config);
 
     drop(guard);
     result
@@ -84,6 +100,7 @@ fn main() -> Result<()> {
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    guard: &TerminalGuard,
     vfs: &LocalVfs,
     browser: &mut BrowserState,
     app: &mut App,
@@ -128,6 +145,24 @@ fn run(
                 Some(Action::Delete) => app.begin_delete(browser),
                 Some(Action::Rename) => app.begin_rename(browser),
                 Some(Action::Create) => app.begin_create(),
+                Some(Action::Shell) => {
+                    guard.suspend()?;
+                    let result = shell_overlay::spawn_shell(browser.current_dir());
+                    guard.resume()?;
+                    // Force a full redraw of every cell, since the shell left arbitrary content
+                    // on screen. `resize` to the current size does this (and resets ratatui's
+                    // diffing buffer) without `clear`'s cursor-position query, which needs the
+                    // terminal to answer an escape-code probe and can time out on some
+                    // terminals/multiplexers — not worth risking a crash right after the user
+                    // returns from their shell.
+                    let area = terminal.size()?.into();
+                    terminal.resize(area)?;
+                    app.status = Some(match result {
+                        Ok(status) if status.success() => "shell exited".into(),
+                        Ok(status) => format!("shell exited: {status}"),
+                        Err(e) => format!("failed to start shell: {e}"),
+                    });
+                }
                 None => {}
             }
         }

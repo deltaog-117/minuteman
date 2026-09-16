@@ -17,6 +17,8 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | Core File Operations        | Extend `Vfs` trait with mutating methods     | ✅ Confirmed |
 | 2026-09-16 | Conflict Resolution UX      | `ConflictPolicy` enum in `file_ops`, not `Vfs` | ✅ Confirmed |
 | 2026-09-16 | Async Bulk Ops Concurrency  | `spawn_blocking` + poll loop, not a full async rewrite | ✅ Confirmed |
+| 2026-09-16 | Shell Overlay Mechanism     | Direct stdio inheritance, no pty multiplexing | ✅ Confirmed |
+| 2026-09-16 | Post-Shell Redraw           | `Terminal::resize`, not `Terminal::clear`    | ✅ Confirmed |
 
 ---
 
@@ -289,6 +291,85 @@ with a no-op callback), so none of last cycle's 13 tests needed to change.
   against a 4000-file directory: cancelling a copy after ~1 file (proving the main loop kept
   processing input while the background thread was writing), running the same copy to
   completion, and deleting the 4000-file tree via the background path.
+
+---
+
+### Shell Overlay Mechanism: Direct Stdio Inheritance, No Pty Multiplexing
+
+**Date:** 2026-09-16
+**Status:** Confirmed
+
+#### Context / Background
+
+The roadmap called for a "real, fully interactive `$SHELL` subprocess" via suspending the TUI —
+Ranger's own shell command auto-closes after one command, which this project explicitly rejects.
+The only real question was mechanism: does the child shell get a brand-new pseudo-terminal that
+minuteman manages (a `portable-pty`-style approach), or does it just inherit the process's actual
+stdio?
+
+#### Decision & Rationale
+
+Chose direct inheritance: `std::process::Command::new(shell).current_dir(cwd).status()` with
+default (inherited) stdin/stdout/stderr, after the caller (`tui`) disables raw mode and leaves
+the alternate screen. This works because minuteman is *already* running inside a real terminal —
+raw mode is just a mode flag on that same terminal, not a separate pty layer minuteman owns.
+Once raw mode is off, handing the exact same file descriptors straight to the child shell makes
+it behave exactly like a normal shell session, because as far as the real terminal emulator is
+concerned, it is one. A pty-multiplexing approach would only earn its keep if minuteman needed to
+capture the shell's output or run something alongside it — neither applies to "get out of the
+way until the user types `exit`."
+
+**Implementation:** new `shell_overlay` crate, `pub fn spawn_shell(cwd: &Path) ->
+io::Result<ExitStatus>` — reads `$SHELL` (falling back to `/bin/sh`), sets `cwd`, blocks until
+exit. It does not touch raw mode/the alternate screen itself; `tui` owns that via
+`TerminalGuard::suspend`/`resume`, keeping the crate boundary the same shape as `file_ops`
+(does the work) vs. `tui` (owns the terminal).
+
+**Trade-offs accepted:** the child shell has no sandboxing or capability restriction — it runs
+with minuteman's own privileges, which is correct for the actual use case (a personal shell
+escape, exactly like every other terminal app's `:sh`/`!`) but would need reconsidering before
+any future plugin could trigger this path un-prompted.
+
+---
+
+### Post-Shell Redraw: `Terminal::resize`, Not `Terminal::clear`
+
+**Date:** 2026-09-16
+**Status:** Confirmed
+
+#### Context / Background
+
+After resuming from the shell overlay, the screen has arbitrary leftover content from whatever
+the shell printed, and ratatui's internal diff buffer doesn't know that — the obvious fix is
+forcing a full redraw. The first implementation called `Terminal::clear()`, which crashed the
+whole app on return from the shell during PTY-based verification testing, with `crossterm`
+error: "the cursor position could not be read within a normal duration."
+
+#### Root Cause
+
+`Terminal::clear()` (ratatui-core `terminal/buffers.rs`) calls `self.backend.get_cursor_position()`
+*before* clearing, purely to restore the cursor afterward — and `get_cursor_position()`
+(`ratatui-crossterm`) shells out to `crossterm::cursor::position()`, which writes a `ESC[6n`
+device-status-report escape sequence and blocks reading stdin for the terminal emulator's
+response. A real terminal emulator answers this instantly; the PTY-based test harness used to
+verify this feature doesn't emulate that protocol, so the read timed out and `clear()` returned
+`Err`, which was propagated with `?` — crashing the app immediately after the user's shell
+session, the worst possible moment for a crash. This is not purely a test-harness artifact: any
+real terminal/multiplexer slow to answer the DSR query (a laggy SSH session, an unusual
+emulator) would hit the same failure in production.
+
+#### Decision & Rationale
+
+Switched to `terminal.resize(terminal.size()?.into())` — same current size, so nothing visually
+moves, but `Terminal::resize` calls `clear_viewport()` internally (full `ClearType::All` +
+back-buffer reset) *without* ever querying cursor position, since that's only needed by `clear()`
+to restore the cursor afterward, something not worth doing right before a full redraw anyway.
+`terminal.size()` itself just reads the terminal's dimensions via a `TIOCGWINSZ`-style ioctl,
+which doesn't require the emulator to answer an escape code and so can't hang the same way.
+
+**Trade-offs accepted:** `resize` is a slightly less obviously-named tool for "force a redraw"
+than `clear` — worth a comment at the call site (present in `main.rs`) so a future reader doesn't
+"simplify" it back to `clear()` and reintroduce the hang.
 
 ---
 

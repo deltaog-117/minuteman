@@ -27,6 +27,9 @@ shell overlay, native SSH/SFTP browsing, and a stable multi-language sandboxed p
   large copy/move/delete never freezes the app; copy/move show live progress and are cancellable
   with `Esc`. Permanent delete (with confirmation), rename, and create file/directory round out
   the core operations, with an overwrite/skip/abort prompt on conflicts.
+- 🔹 **Interactive shell overlay** – `s` drops you into a real, fully interactive `$SHELL` in the
+  browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
+  auto-close-after-one-command.
 - 🔹 **Config-driven keybindings** – read from `~/.config/minuteman/config.toml`, with per-field
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
 
@@ -72,6 +75,7 @@ cargo run -p tui -- /path/to/dir
 | `d`         | delete selection permanently (confirm `y`/N)  |
 | `r`         | rename selection                              |
 | `n`         | create — trailing `/` makes a directory       |
+| `s`         | shell — drop into `$SHELL` in the current dir |
 
 While a prompt is active (rename/create/delete-confirm/conflict), `Enter` submits and `Esc`
 cancels; the keybindings above are not resolved until the prompt closes. While a paste or delete
@@ -98,6 +102,7 @@ paste = ["p"]
 delete = ["d"]
 rename = ["r"]
 create = ["n"]
+shell = ["s"]
 
 [theme]
 selection_bg = "blue"
@@ -117,8 +122,8 @@ crates/
 ├── theming/           # config/keybinding/theme loading
 ├── tui/                # binary crate — render loop, input dispatch, wiring
 ├── file_ops/           # copy/move/delete/create/rename on Vfs, with progress/cancel support
+├── shell_overlay/      # spawns a real, interactive $SHELL, inheriting stdio directly
 ├── preview/            # (stub, WIP) text + image preview
-├── shell_overlay/      # (stub, WIP) interactive $SHELL overlay
 ├── trash/              # (stub, WIP) trash + undo history
 ├── plugins/            # (stub, WIP) WASM (Extism) multi-language plugin host
 └── vfs_ssh/             # (stub, WIP) native SSH/SFTP remote browsing

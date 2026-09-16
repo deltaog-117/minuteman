@@ -36,6 +36,8 @@ pub enum Action {
     Rename,
     /// Prompts for a name; a trailing `/` creates a directory, otherwise a file.
     Create,
+    /// Suspends the TUI and drops into a real, interactive `$SHELL` in the current directory.
+    Shell,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +54,7 @@ pub struct RawKeyMap {
     pub delete: Vec<String>,
     pub rename: Vec<String>,
     pub create: Vec<String>,
+    pub shell: Vec<String>,
 }
 
 impl Default for RawKeyMap {
@@ -68,6 +71,7 @@ impl Default for RawKeyMap {
             delete: vec!["d".into()],
             rename: vec!["r".into()],
             create: vec!["n".into()],
+            shell: vec!["s".into()],
         }
     }
 }
@@ -105,6 +109,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.delete, Action::Delete);
         bind_all(&raw.rename, Action::Rename);
         bind_all(&raw.create, Action::Create);
+        bind_all(&raw.shell, Action::Shell);
 
         Self { bindings }
     }
@@ -151,6 +156,7 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('d')), Some(Action::Delete));
         assert_eq!(keymap.resolve(KeyCode::Char('r')), Some(Action::Rename));
         assert_eq!(keymap.resolve(KeyCode::Char('n')), Some(Action::Create));
+        assert_eq!(keymap.resolve(KeyCode::Char('s')), Some(Action::Shell));
         assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
     }
 

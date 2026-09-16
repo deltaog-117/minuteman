@@ -43,6 +43,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   compiled binary: a 4000-file copy cancelled after ~1 file (proving the main loop stayed
   responsive during background I/O), the same copy run to completion (all 4000 landed), and a
   4000-file delete via the background path.
+- ✅ **Interactive shell overlay** – `s` suspends the TUI (raw mode + alternate screen) and
+  spawns `$SHELL` (falling back to `/bin/sh`) as a real, fully interactive child process
+  inheriting stdio directly, with its cwd set to the browser's current directory; the user
+  controls when it closes (`exit`, not Ranger's auto-close-after-one-command). New `shell_overlay`
+  crate owns spawning; `tui` owns suspending/resuming raw mode and forcing a full redraw
+  afterward via `Terminal::resize` (not `Terminal::clear`, which depends on a cursor-position
+  query that can hang on some terminals — found via the PTY verification below, before it could
+  ever hit a real user). Verified against the compiled binary via a scripted PTY session: typed
+  real shell commands (`touch`, `pwd`, `exit`), confirmed the marker file and captured `pwd`
+  landed in the browsed directory, and confirmed the TUI was still fully interactive afterward
+  (navigated and quit normally).
 
 ---
 
@@ -56,9 +67,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟡 Medium Priority (Important)
 
-- **Interactive shell overlay** – summon a real, fully interactive `$SHELL` subprocess by
-  suspending the TUI (not Ranger's auto-close-after-one-command behavior); the user controls
-  when it reopens/closes.
 - **Inline image preview** – render images directly in the preview pane via `ratatui-image`
   (Kitty/iTerm2/Sixel graphics protocols), falling back to Unicode blocks when unsupported.
 - **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
@@ -104,10 +112,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui -- <dir>` and try a paste/delete on a large directory: the app should stay
-   responsive (try `Esc` mid-copy to cancel) instead of freezing like Ranger.
-2. `cargo test --workspace` (28 tests) to verify everything still passes.
+1. `cargo run -p tui -- <dir>` and press `s` to drop into a shell in the browsed directory;
+   `exit` to return — the TUI should resume cleanly and stay fully interactive.
+2. `cargo test --workspace` (29 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Pick the next roadmap item — recommended: **full theme system**, now that the two biggest
-   architectural items (file ops, async) are done; it's self-contained and doesn't block on
-   anything else in flight.
+4. Pick the next roadmap item — recommended: **full theme system**, the only remaining High
+   Priority item; it's self-contained and doesn't block on anything else in flight.

@@ -54,6 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancellable with `Esc`; delete shows an indeterminate "deleting…" status (no per-file hook to
   report through). While an operation is in flight, all other actions — including quit — are
   blocked except `Esc`, so the process can't exit mid-write.
+- `shell_overlay`: new crate — `spawn_shell(cwd: &Path) -> io::Result<ExitStatus>` spawns
+  `$SHELL` (falling back to `/bin/sh`) inheriting stdio directly, blocking until it exits.
+- `theming`: new `Shell` keybindable action, default `s`.
+- `tui`: `s` suspends raw mode/the alternate screen, drops into a real interactive shell in the
+  browser's current directory, then resumes and forces a full redraw via `Terminal::resize`
+  (not `Terminal::clear`, which depends on a cursor-position query that can hang — see
+  `DIARY.md`). `TerminalGuard` gained `suspend`/`resume` methods for this.
 
 ## [0.1.0] - 2026-09-16
 
