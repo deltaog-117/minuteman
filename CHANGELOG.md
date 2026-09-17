@@ -87,6 +87,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restores the original selection on `Esc`; `:` opens a command prompt supporting `:q`/`:quit`
   (exit the app) and `:cd <path>` (jump to a directory). `handle_prompt_key` now returns
   `ControlFlow<()>` so a `:q`/`:quit` command can signal the app to exit.
+- `preview`: `is_text(path) -> bool` (extension whitelist covering common source/config/doc
+  formats, plus a filename whitelist for extensionless files like `Makefile`/`.gitignore`) and
+  `load_text(path) -> Option<String>` (returns `None` for a file over 1 MiB, containing a null
+  byte, or not valid UTF-8) — pure, terminal-agnostic building blocks for text/code preview,
+  mirroring `is_image`/`load_image`'s shape.
+- `tui`: new `text_preview` module (`TextPreview`, `PreviewStatus`) — reads the selected text/code
+  file off `tokio::runtime::Handle::spawn_blocking` and renders it, word-wrapped, in the preview
+  pane, the same never-block-the-render-loop treatment `image_preview` gives image decoding.
+  Shows "loading preview…" while reading and "preview failed" for anything over the size cap or
+  not valid UTF-8 despite a text-like name.
+- `tui`: `ImagePreview` and `TextPreview` are now constructed and driven together via a new
+  `Previews` struct, keeping `run`/`draw`'s argument counts down now that there are two preview
+  pipelines instead of one.
 
 ## [0.1.0] - 2026-09-16
 

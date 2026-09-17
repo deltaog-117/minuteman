@@ -22,6 +22,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | Theme Selection Model       | Named base palette + per-field override layering | ✅ Confirmed |
 | 2026-09-16 | Image Preview Concurrency   | `ThreadProtocol` + `spawn_blocking`, not the naive `StatefulProtocol` | ✅ Confirmed |
 | 2026-09-17 | Command/Search Bar Mechanism | Extend the existing `Prompt` enum, not a new `Mode` state machine | ✅ Confirmed |
+| 2026-09-17 | Text Preview Concurrency    | `spawn_blocking` read, mirroring `ImagePreview`'s decode pipeline | ✅ Confirmed |
 
 ---
 
@@ -524,6 +525,67 @@ non-diffed redraw before capturing — changing the pty's reported size and send
 triggers exactly the same `Terminal::resize`-driven full-buffer redraw this codebase already
 relies on after the shell overlay closes (see the Post-Shell Redraw entry above) — then capture
 that one frame instead of the raw incremental stream.
+
+---
+
+### Text Preview Concurrency: `spawn_blocking` Read, Mirroring `ImagePreview`'s Decode Pipeline
+
+**Date:** 2026-09-17
+**Status:** Confirmed
+
+#### Context / Background
+
+The `preview` crate's own module doc has called out "text + image preview" as its scope since
+v0.1.0, but only the image half existed. Three options were considered for the read itself: (A) a
+plain synchronous `std::fs::read` call inline in `draw`, since reading a small text file is fast;
+(B) the same `tokio::runtime::Handle::spawn_blocking` + channel pipeline `ImagePreview` already
+uses for decoding, adapted for a plain read instead of a decode; (C) memory-map the file instead
+of reading it fully, to avoid copying large files into a `String`.
+
+#### Decision & Rationale
+
+Chose **B**. This project's established rule (first applied to bulk file ops, then to image
+decoding) is that no I/O capable of stalling — however rarely — belongs on the render thread, and
+a text file is not exempt just because it's *usually* small: a slow or network-backed filesystem
+can make even a small read block for an unbounded time, and the failure mode (a frozen TUI) is
+identical regardless of why the read is slow. Reusing the exact channel-based
+target-changed/spawn/drain shape `ImagePreview::update` already established (new `TextPreview` in
+`crates/tui/src/text_preview.rs`) means the two preview pipelines read the same to a future
+maintainer, at the cost of one more `PreviewStatus` enum and channel pair. Rejected C: memory
+mapping serves a materially larger workload than a preview pane will ever show, and adds an
+`unsafe`-adjacent dependency for no benefit the `MAX_TEXT_PREVIEW_BYTES` size cap doesn't already
+solve more simply.
+
+`preview::is_text`/`load_text` mirror `is_image`/`load_image`'s exact shape: extension-based
+eligibility (plus a small filename whitelist for extensionless files like `Makefile`/
+`.gitignore`), and a `None` return — never an error — on any read/decode failure, so the caller's
+existing "preview failed" fallback needed no new branch. `load_text` treats a null byte anywhere
+in the file, invalid UTF-8, or a size over 1 MiB as failure, so a binary file mislabeled with a
+text-like extension degrades exactly like a corrupt image does today, rather than dumping garbage
+or stalling on a huge log file. `ImagePreview` and `TextPreview` are now constructed and updated
+together through a new `Previews` struct in `tui::main` — a direct, in-scope fix for the
+`clippy::too_many_arguments` warning that adding a second preview pipeline's parameters to `run`/
+`draw` would otherwise have triggered (8 arguments, one over the default limit), not an unrelated
+refactor.
+
+**Verification finding (harness bug, not an app bug):** the first PTY verification attempts for
+this feature saw every keystroke sent after startup vanish with zero effect — no selection
+movement, no screen change at all. Root cause, once isolated: `ratatui-image`'s
+`Picker::from_query_stdio()` (already in use for image preview, and already the subject of a
+`Verification finding` in the Image Preview Concurrency entry above) spawns a background thread to
+read its terminal-capability query's response and never stops that thread if nothing answers —
+this project's synthetic PTY test harness deliberately never answers unless told to. That
+lingering thread keeps consuming stdin bytes forever, racing the app's own event-loop thread for
+the same fd, so it silently stole every subsequent keystroke the test harness sent. The fix
+(harness-only, documented rather than worked around in application code, per the same reasoning as
+the earlier entry): have the harness answer the Device Status Report query (`\x1b[5n` → `\x1b[0n`)
+itself right after startup, which lets that background thread finish and stop competing for
+stdin. A second, unrelated harness gap surfaced alongside it: raw-diffed escape-code output can
+split a single line of rendered text across multiple writes with cursor-repositioning escapes in
+between (ratatui skips re-writing a cell whose content is unchanged from the previous frame, even
+mid-word), so a naive substring search over the raw byte stream can miss text that is genuinely on
+screen. Switching the harness to feed the raw stream through a `pyte` terminal emulator and
+searching its reconstructed screen buffer instead fixed this reliably.
 
 ---
 

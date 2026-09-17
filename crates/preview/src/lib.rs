@@ -14,9 +14,9 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Decides whether a file can be shown as an inline image preview, and decodes it. Pure and
-//! terminal-agnostic — `tui` owns the graphics-protocol rendering and background threading built
-//! on top of this.
+//! Decides whether a file can be shown as an inline image or text preview, and loads it. Pure
+//! and terminal-agnostic — `tui` owns the graphics-protocol rendering and background threading
+//! built on top of this.
 
 use std::path::Path;
 
@@ -41,6 +41,76 @@ pub fn is_image(path: &Path) -> bool {
 /// unsupported image.
 pub fn load_image(path: &Path) -> Option<DynamicImage> {
     image::ImageReader::open(path).ok()?.decode().ok()
+}
+
+const TEXT_EXTENSIONS: &[&str] = &[
+    "txt", "md", "markdown", "rst", "tex", "csv", "tsv", "log", "diff", "patch", "rs", "py", "js",
+    "mjs", "cjs", "jsx", "ts", "tsx", "go", "c", "h", "cpp", "cc", "cxx", "hpp", "hxx", "java",
+    "kt", "kts", "swift", "rb", "php", "pl", "pm", "lua", "sh", "bash", "zsh", "fish", "ps1",
+    "sql", "css", "scss", "sass", "less", "html", "htm", "xml", "svg", "json", "jsonc", "yaml",
+    "yml", "toml", "ini", "cfg", "conf", "env", "vue", "svelte", "r", "jl", "hs", "ex", "exs",
+    "erl", "clj", "cljs", "scala", "dart", "nim", "zig", "vim", "el", "asm", "s", "proto",
+    "graphql", "gql", "cmake", "gradle",
+];
+
+/// Files that are plain text despite carrying no extension (or an extension not covered by
+/// [`TEXT_EXTENSIONS`]), matched case-insensitively against the full file name.
+const TEXT_FILENAMES: &[&str] = &[
+    "makefile",
+    "dockerfile",
+    "containerfile",
+    "vagrantfile",
+    "rakefile",
+    "gemfile",
+    "license",
+    "readme",
+    "changelog",
+    "authors",
+    "contributing",
+    ".gitignore",
+    ".gitattributes",
+    ".env",
+    ".bashrc",
+    ".zshrc",
+    ".vimrc",
+    ".editorconfig",
+];
+
+/// Caps how much of a file [`load_text`] will read into memory for a preview — large enough for
+/// any normal source/config file, small enough that a huge log or data file can't stall the
+/// background read thread or bloat the render buffer.
+const MAX_TEXT_PREVIEW_BYTES: u64 = 1 << 20;
+
+/// Whether `path` looks like plain text minuteman can preview: a known text/code extension, or a
+/// known extensionless filename (`Makefile`, `.gitignore`, ...). Extension/name-based, not
+/// content-sniffed — a mislabeled or binary file just fails in [`load_text`] and the caller falls
+/// back to the plain listing/name preview, same as any other read failure.
+pub fn is_text(path: &Path) -> bool {
+    let has_text_extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| TEXT_EXTENSIONS.contains(&ext.to_lowercase().as_str()));
+    if has_text_extension {
+        return true;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| TEXT_FILENAMES.contains(&name.to_lowercase().as_str()))
+}
+
+/// Reads `path` as UTF-8 text. Returns `None` if the file exceeds [`MAX_TEXT_PREVIEW_BYTES`],
+/// contains a null byte (a binary file mislabeled with a text-like name), or isn't valid UTF-8 —
+/// the caller falls back to the plain file-name preview rather than surfacing an error.
+pub fn load_text(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.len() > MAX_TEXT_PREVIEW_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 #[cfg(test)]
@@ -88,6 +158,49 @@ mod tests {
 
         let decoded = load_image(&path).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (1, 1));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recognises_text_extensions_and_extensionless_filenames_case_insensitively() {
+        assert!(is_text(Path::new("main.RS")));
+        assert!(is_text(Path::new("notes.md")));
+        assert!(is_text(Path::new("Makefile")));
+        assert!(is_text(Path::new(".gitignore")));
+        assert!(!is_text(Path::new("photo.png")));
+        assert!(!is_text(Path::new("no_extension")));
+    }
+
+    #[test]
+    fn load_text_reads_a_real_text_file() {
+        let dir = scratch_dir("real-text");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "hello, minuteman").unwrap();
+
+        assert_eq!(load_text(&path).unwrap(), "hello, minuteman");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_text_returns_none_for_binary_content() {
+        let dir = scratch_dir("binary-content");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, [0u8, 159, 146, 150]).unwrap();
+
+        assert!(load_text(&path).is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_text_returns_none_for_a_file_over_the_size_cap() {
+        let dir = scratch_dir("oversized-text");
+        let path = dir.join("huge.txt");
+        std::fs::write(&path, vec![b'a'; (MAX_TEXT_PREVIEW_BYTES + 1) as usize]).unwrap();
+
+        assert!(load_text(&path).is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

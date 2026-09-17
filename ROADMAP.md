@@ -97,6 +97,30 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   zero-area rect, and a raw keystroke-by-keystroke capture never contains typed text as one
   contiguous string since ratatui only rewrites changed cells — a forced full redraw (resize +
   `SIGWINCH`) is needed before asserting on rendered text.
+- ✅ **Text file preview** – the preview pane now renders a selected code/text file's actual
+  contents (word-wrapped) instead of just its name, closing out the "text + image preview" scope
+  the `preview` crate's module doc has called out since v0.1.0. New `preview::is_text`/`load_text`
+  mirror `is_image`/`load_image`'s shape: an extension whitelist (plus a filename whitelist for
+  extensionless files like `Makefile`/`.gitignore`) decides eligibility, and `load_text` returns
+  `None` — falling back to "preview failed" — for a file over a 1 MiB cap, containing a null byte,
+  or not valid UTF-8, so a binary file mislabeled with a text-like name degrades the same way a
+  corrupt image does. New `tui::text_preview` module reads the file on
+  `tokio::runtime::Handle::spawn_blocking`, the same never-block-the-render-loop treatment
+  `image_preview` gives image decoding; `ImagePreview` and `TextPreview` are now constructed and
+  driven together via a new `Previews` struct so `run`/`draw` don't grow an unbounded argument
+  list as more preview pipelines are added. Verified against the real compiled binary via a
+  scripted PTY session (using `pyte` to reconstruct the actual rendered screen rather than
+  pattern-matching the raw diffed escape-code stream, which splits a single line of text across
+  several writes and made naive substring checks unreliable): a real text file showed its actual
+  source content in the preview pane, a `.rs` file containing binary bytes showed "preview
+  failed," a file over the 1 MiB cap showed "preview failed," a corrupted `.png` still hit the
+  existing image-decode-failure path rather than the new text path, and navigation (including
+  back onto a previously-previewed file) and `q`-to-quit kept working throughout. This surfaced a
+  harness-only finding written up in `DIARY.md`: `ratatui-image`'s terminal-capability probe
+  leaves a background thread reading stdin forever if nothing ever answers its query, which on
+  this project's synthetic (non-responding) PTY test harness silently swallowed every keystroke
+  sent after startup until the harness was fixed to answer the probe itself — not a bug in
+  minuteman.
 
 ---
 
@@ -162,10 +186,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Byte-level/percentage progress for large single files** – current progress is one tick per
   *file*, so a single huge file shows no movement until it's done. Needs `Vfs::copy_file` to
   support a streaming copy with periodic callbacks instead of one atomic `std::fs::copy` call.
-- **Text file preview** – the preview pane still just shows a selected non-image file's name; the
-  `preview` crate's own module doc has called out "text + image preview" as its scope since v0.1.0,
-  and only the image half is built. Should reuse the same extension-whitelist + fallback shape
-  `is_image`/`load_image` already established.
 
 ---
 
@@ -183,9 +203,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui` — press `/` and type a filename to jump to it, `Esc` to cancel; press `:`
-   and type `cd <path>` or `q` to try the command bar.
-2. `cargo test --workspace` (40 tests) to verify everything still passes.
+1. `cargo run -p tui` — select a source/text file (e.g. `Cargo.toml` or any `.rs` file) and
+   confirm its contents render in the preview pane.
+2. `cargo test --workspace` (47 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks are
    the remaining candidates.

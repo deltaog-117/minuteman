@@ -16,9 +16,10 @@
 
 mod app;
 mod image_preview;
+mod text_preview;
 
 use std::io::{self, Stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -29,15 +30,16 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use image_preview::{ImagePreview, PreviewStatus};
+use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::StatefulImage;
 use shared::{DirEntryInfo, LocalVfs};
+use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
 use theming::{Action, Config};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
@@ -75,6 +77,27 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// The image and text preview pipelines, bundled together since every call site drives both in
+/// lockstep off the same selected entry.
+struct Previews {
+    image: ImagePreview,
+    text: TextPreview,
+}
+
+impl Previews {
+    fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            image: ImagePreview::new(handle.clone()),
+            text: TextPreview::new(handle),
+        }
+    }
+
+    fn update(&mut self, selected: Option<&Path>) {
+        self.image.update(selected);
+        self.text.update(selected);
+    }
+}
+
 fn main() -> Result<()> {
     let start_dir = std::env::args()
         .nth(1)
@@ -95,7 +118,7 @@ fn main() -> Result<()> {
     let guard = TerminalGuard::new()?;
     // Must run after entering the alternate screen but before the event loop reads any input —
     // it briefly reads/writes stdio itself to probe the terminal's graphics-protocol support.
-    let mut image_preview = ImagePreview::new(runtime.handle().clone());
+    let mut previews = Previews::new(runtime.handle().clone());
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -105,7 +128,7 @@ fn main() -> Result<()> {
         &vfs,
         &mut browser,
         &mut app,
-        &mut image_preview,
+        &mut previews,
         &config,
     );
 
@@ -119,13 +142,13 @@ fn run(
     vfs: &LocalVfs,
     browser: &mut BrowserState,
     app: &mut App,
-    image_preview: &mut ImagePreview,
+    previews: &mut Previews,
     config: &Config,
 ) -> Result<()> {
     loop {
         app.poll_bulk(browser, vfs)?;
-        image_preview.update(browser.selected_entry().map(|e| e.path.as_path()));
-        terminal.draw(|frame| draw(frame, browser, app, image_preview, vfs, config))?;
+        previews.update(browser.selected_entry().map(|e| e.path.as_path()));
+        terminal.draw(|frame| draw(frame, browser, app, previews, vfs, config))?;
 
         // A timed poll (rather than a blocking read) so the loop keeps ticking — and picking up
         // background-operation progress — even while the user isn't pressing anything.
@@ -194,7 +217,7 @@ fn draw(
     frame: &mut ratatui::Frame<'_>,
     browser: &BrowserState,
     app: &App,
-    image_preview: &mut ImagePreview,
+    previews: &mut Previews,
     vfs: &LocalVfs,
     config: &Config,
 ) {
@@ -246,31 +269,56 @@ fn draw(
         &mut current_state,
     );
 
-    // Preview pane — an inline image for image files, children of a selected directory, or the
-    // file's name as a placeholder (text preview is a future roadmap item).
+    // Preview pane — an inline image for image files, rendered text for code/text files,
+    // children of a selected directory, or the file's name as a placeholder for anything else.
     let is_selected_image = browser
         .selected_entry()
         .is_some_and(|e| !e.is_dir && preview::is_image(&e.path));
+    let is_selected_text = browser
+        .selected_entry()
+        .is_some_and(|e| !e.is_dir && preview::is_text(&e.path));
 
     if is_selected_image {
         let block = themed_block(config, "preview");
         let inner = block.inner(columns[2]);
         frame.render_widget(block, columns[2]);
-        match image_preview.status() {
-            PreviewStatus::Ready => {
+        match previews.image.status() {
+            ImagePreviewStatus::Ready => {
                 frame.render_stateful_widget(
                     StatefulImage::default(),
                     inner,
-                    image_preview.protocol_mut(),
+                    previews.image.protocol_mut(),
                 );
             }
-            PreviewStatus::Loading => {
+            ImagePreviewStatus::Loading => {
                 frame.render_widget(Paragraph::new("loading preview…"), inner);
             }
-            PreviewStatus::Failed => {
+            ImagePreviewStatus::Failed => {
                 frame.render_widget(Paragraph::new("preview failed"), inner);
             }
-            PreviewStatus::Empty => {}
+            ImagePreviewStatus::Empty => {}
+        }
+    } else if is_selected_text {
+        let block = themed_block(config, "preview");
+        let inner = block.inner(columns[2]);
+        frame.render_widget(block, columns[2]);
+        let style = Style::default().fg(color_from_name(&config.theme.file_fg));
+        match previews.text.status() {
+            TextPreviewStatus::Ready => {
+                frame.render_widget(
+                    Paragraph::new(previews.text.content())
+                        .style(style)
+                        .wrap(Wrap { trim: false }),
+                    inner,
+                );
+            }
+            TextPreviewStatus::Loading => {
+                frame.render_widget(Paragraph::new("loading preview…"), inner);
+            }
+            TextPreviewStatus::Failed => {
+                frame.render_widget(Paragraph::new("preview failed"), inner);
+            }
+            TextPreviewStatus::Empty => {}
         }
     } else if browser.selected_entry().map(|e| e.is_dir).unwrap_or(false) {
         let items: Vec<ListItem> = browser
