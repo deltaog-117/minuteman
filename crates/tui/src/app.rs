@@ -55,10 +55,26 @@ pub enum ConflictSource {
 
 #[derive(Debug)]
 pub enum Prompt {
-    RenameInput { target: PathBuf, buffer: String },
-    CreateInput { buffer: String },
-    ConfirmDelete { target: PathBuf },
+    RenameInput {
+        target: PathBuf,
+        buffer: String,
+    },
+    CreateInput {
+        buffer: String,
+    },
+    ConfirmDelete {
+        target: PathBuf,
+    },
     Conflict(ConflictSource),
+    /// Incremental filename search (`/`). `origin` is the selection index to restore on `Esc`.
+    SearchInput {
+        buffer: String,
+        origin: usize,
+    },
+    /// The `:`-command prompt (`:q`, `:cd <path>`, ...).
+    CommandInput {
+        buffer: String,
+    },
 }
 
 impl Prompt {
@@ -78,6 +94,8 @@ impl Prompt {
             Prompt::Conflict(ConflictSource::Rename { new_name, .. }) => {
                 format!("'{new_name}' already exists — overwrite / skip / abort? (o/s/a)")
             }
+            Prompt::SearchInput { buffer, .. } => format!("/{buffer}"),
+            Prompt::CommandInput { buffer } => format!(":{buffer}"),
         }
     }
 }
@@ -294,6 +312,19 @@ impl App {
         });
     }
 
+    pub fn begin_search(&mut self, browser: &BrowserState) {
+        self.prompt = Some(Prompt::SearchInput {
+            buffer: String::new(),
+            origin: browser.selected_index(),
+        });
+    }
+
+    pub fn begin_command(&mut self) {
+        self.prompt = Some(Prompt::CommandInput {
+            buffer: String::new(),
+        });
+    }
+
     pub fn begin_paste(&mut self, browser: &BrowserState) {
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
@@ -311,17 +342,19 @@ impl App {
         self.spawn_paste(clip, dst, ConflictPolicy::Abort);
     }
 
-    /// Routes a raw key to the active prompt. No-op if there is no active prompt.
+    /// Routes a raw key to the active prompt. No-op if there is no active prompt. Returns
+    /// `ControlFlow::Break` if a `:`-command (`:q`/`:quit`) requested the app exit.
     pub fn handle_prompt_key(
         &mut self,
         code: KeyCode,
         vfs: &dyn Vfs,
         browser: &mut BrowserState,
-    ) -> Result<()> {
+    ) -> Result<ControlFlow<()>> {
         let Some(prompt) = self.prompt.take() else {
-            return Ok(());
+            return Ok(ControlFlow::Continue(()));
         };
 
+        let mut flow = ControlFlow::Continue(());
         match prompt {
             Prompt::RenameInput { target, mut buffer } => match code {
                 KeyCode::Esc => self.status = Some("rename cancelled".into()),
@@ -370,8 +403,71 @@ impl App {
                 }
                 _ => self.status = Some("aborted".into()),
             },
+            Prompt::SearchInput { mut buffer, origin } => match code {
+                KeyCode::Esc => {
+                    browser.select_index(origin);
+                    self.status = Some("search cancelled".into());
+                }
+                KeyCode::Enter => {}
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    match browser.find_match(&buffer) {
+                        Some(idx) => browser.select_index(idx),
+                        None if buffer.is_empty() => browser.select_index(origin),
+                        None => {}
+                    }
+                    self.prompt = Some(Prompt::SearchInput { buffer, origin });
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    if let Some(idx) = browser.find_match(&buffer) {
+                        browser.select_index(idx);
+                    }
+                    self.prompt = Some(Prompt::SearchInput { buffer, origin });
+                }
+                _ => self.prompt = Some(Prompt::SearchInput { buffer, origin }),
+            },
+            Prompt::CommandInput { mut buffer } => match code {
+                KeyCode::Esc => self.status = Some("command cancelled".into()),
+                KeyCode::Enter => flow = self.run_command(vfs, browser, &buffer)?,
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    self.prompt = Some(Prompt::CommandInput { buffer });
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    self.prompt = Some(Prompt::CommandInput { buffer });
+                }
+                _ => self.prompt = Some(Prompt::CommandInput { buffer }),
+            },
         }
-        Ok(())
+        Ok(flow)
+    }
+
+    /// Parses and runs a `:`-command buffer (without the leading `:`). Unknown commands surface
+    /// as a status message rather than an error — a typo shouldn't need a `Result` unwind.
+    fn run_command(
+        &mut self,
+        vfs: &dyn Vfs,
+        browser: &mut BrowserState,
+        buffer: &str,
+    ) -> Result<ControlFlow<()>> {
+        let mut parts = buffer.split_whitespace();
+        let Some(cmd) = parts.next() else {
+            return Ok(ControlFlow::Continue(()));
+        };
+        let rest = parts.collect::<Vec<_>>().join(" ");
+
+        match cmd {
+            "q" | "quit" => return Ok(ControlFlow::Break(())),
+            "cd" if !rest.is_empty() => match browser.goto(vfs, Path::new(&rest)) {
+                Ok(()) => self.status = Some(format!("cd {rest}")),
+                Err(e) => self.status = Some(format!("cd failed: {e}")),
+            },
+            "cd" => self.status = Some("cd: missing path".into()),
+            other => self.status = Some(format!("unknown command: {other}")),
+        }
+        Ok(ControlFlow::Continue(()))
     }
 
     fn resolve_conflict(

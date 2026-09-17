@@ -38,6 +38,10 @@ pub enum Action {
     Create,
     /// Suspends the TUI and drops into a real, interactive `$SHELL` in the current directory.
     Shell,
+    /// Opens the incremental filename-search prompt (`/`).
+    Search,
+    /// Opens the `:`-command prompt.
+    Command,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +59,8 @@ pub struct RawKeyMap {
     pub rename: Vec<String>,
     pub create: Vec<String>,
     pub shell: Vec<String>,
+    pub search: Vec<String>,
+    pub command: Vec<String>,
 }
 
 impl Default for RawKeyMap {
@@ -72,6 +78,8 @@ impl Default for RawKeyMap {
             rename: vec!["r".into()],
             create: vec!["n".into()],
             shell: vec!["s".into()],
+            search: vec!["/".into()],
+            command: vec![":".into()],
         }
     }
 }
@@ -110,6 +118,8 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.rename, Action::Rename);
         bind_all(&raw.create, Action::Create);
         bind_all(&raw.shell, Action::Shell);
+        bind_all(&raw.search, Action::Search);
+        bind_all(&raw.command, Action::Command);
 
         Self { bindings }
     }
@@ -157,6 +167,8 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('r')), Some(Action::Rename));
         assert_eq!(keymap.resolve(KeyCode::Char('n')), Some(Action::Create));
         assert_eq!(keymap.resolve(KeyCode::Char('s')), Some(Action::Shell));
+        assert_eq!(keymap.resolve(KeyCode::Char('/')), Some(Action::Search));
+        assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
         assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
     }
 

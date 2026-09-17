@@ -21,6 +21,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | Post-Shell Redraw           | `Terminal::resize`, not `Terminal::clear`    | ✅ Confirmed |
 | 2026-09-16 | Theme Selection Model       | Named base palette + per-field override layering | ✅ Confirmed |
 | 2026-09-16 | Image Preview Concurrency   | `ThreadProtocol` + `spawn_blocking`, not the naive `StatefulProtocol` | ✅ Confirmed |
+| 2026-09-17 | Command/Search Bar Mechanism | Extend the existing `Prompt` enum, not a new `Mode` state machine | ✅ Confirmed |
 
 ---
 
@@ -477,6 +478,52 @@ users. Documented here rather than worked around, since there is no way to cance
 through the crate's public API, and the realistic risk to real users is effectively nil. The PTY
 test harness itself was fixed to emulate a DSR reply, which is what let verification proceed and
 confirm the actual feature (not just the harness limitation).
+
+---
+
+### Command/Search Bar Mechanism: Extend the Existing `Prompt` Enum, Not a New `Mode` State Machine
+
+**Date:** 2026-09-17
+**Status:** Confirmed
+
+#### Context / Background
+
+The TUI needed a Ranger/lf-style `:`-command bar and `/`-incremental-search, the first two of
+three TUI-polish items (alongside bookmarks/marks) identified as high priority. Three options
+were considered: (A) add `SearchInput`/`CommandInput` variants to `tui::app::Prompt`, reusing the
+`handle_prompt_key` dispatch already built for rename/create/delete-confirm/conflict; (B) a new
+`Mode` state machine with a small command-registry trait, so future commands register instead of
+piling into one `match`; (C) pull in an external line-editor crate (e.g. `tui-input`) for real
+cursor movement instead of the existing char-append/backspace-only buffer editing.
+
+#### Decision & Rationale
+
+Chose **A**. It reuses the exact machinery already rendering/editing the other four prompt kinds
+(`Prompt::display()` feeds the same status-bar line, so no new rendering code was needed at all),
+and it doesn't foreclose B or C later — a command registry or a real line-editor are both things
+to layer on once there's enough command variety or editing complexity to justify them, not
+something to decide up front for an initial `:q`/`:cd` command set. `handle_prompt_key` changed
+its return type from `Result<()>` to `Result<ControlFlow<()>>` so a `:q`/`:quit` command can
+signal the app to exit — the only new plumbing this cycle needed, everywhere else unchanged.
+`BrowserState` gained three small, independently-testable methods to back this:
+`select_index` (clamped jump, used by both `/`'s live match-jump and `Esc`'s restore-to-origin),
+`find_match` (case-insensitive substring search, always from the top so backspacing a query
+re-finds the same match deterministically), and `goto` (arbitrary-directory jump backing `:cd`,
+resolving a relative path against the current directory).
+
+**Verification finding (harness bugs, not app bugs):** the first PTY verification attempts for
+this feature appeared to hang or find nothing, and both causes were in the test harness, not the
+app. First, `pty.openpty()` leaves the pty at its default 0x0 window size unless
+`ioctl(TIOCSWINSZ)` is called explicitly; ratatui then lays out every pane as a zero-area rect and
+draws only per-tick escape-code boilerplate (cursor-hide, default-color reset) forever, which
+looks exactly like a hang from the outside. Second, once the window size was fixed, a raw
+keystroke-by-keystroke capture never contained the typed text as one contiguous string — ratatui
+only rewrites *changed* cells between frames, so e.g. typing `/bravo` one character at a time
+mostly emits single-cell diffs, not a re-write of the whole line. The fix: force a genuinely full,
+non-diffed redraw before capturing — changing the pty's reported size and sending `SIGWINCH`
+triggers exactly the same `Terminal::resize`-driven full-buffer redraw this codebase already
+relies on after the shell overlay closes (see the Post-Shell Redraw entry above) — then capture
+that one frame instead of the raw incremental stream.
 
 ---
 

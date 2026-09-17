@@ -83,9 +83,12 @@ cargo run -p tui -- /path/to/dir
 | `r`         | rename selection                              |
 | `n`         | create — trailing `/` makes a directory       |
 | `s`         | shell — drop into `$SHELL` in the current dir |
+| `/`         | search — jump to the first matching entry as you type |
+| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory |
 
-While a prompt is active (rename/create/delete-confirm/conflict), `Enter` submits and `Esc`
-cancels; the keybindings above are not resolved until the prompt closes. While a paste or delete
+While a prompt is active (rename/create/delete-confirm/conflict/search/command), `Enter` submits
+and `Esc` cancels; the keybindings above are not resolved until the prompt closes. `Esc` while
+searching also restores the selection you had before the search started. While a paste or delete
 is running in the background, every key except `Esc` (cancel — copy/move only; delete can't be
 cancelled mid-flight) is ignored until it finishes, including `q`.
 
@@ -110,6 +113,8 @@ delete = ["d"]
 rename = ["r"]
 create = ["n"]
 shell = ["s"]
+search = ["/"]
+command = [":"]
 
 [theme]
 # Selects a built-in base palette ("default" or "dracula"); an unrecognised name falls back

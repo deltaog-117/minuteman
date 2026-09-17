@@ -80,12 +80,33 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   if the terminal never answers *any* escape query — real terminals all answer instantly, so this
   isn't a practical concern for actual users, but it fully explained an early false negative
   during this cycle's own testing.
+- ✅ **Command/search bar** – a Ranger/lf-style `:`/`/` bottom input line, reusing the existing
+  `tui::app::Prompt` machinery (new `SearchInput`/`CommandInput` variants) rather than a new
+  state machine. `/` opens incremental filename search: the selection jumps to the first
+  case-insensitive substring match as you type (`browser::BrowserState::find_match`), and `Esc`
+  restores the original selection (`select_index`). `:` opens a command prompt supporting
+  `:q`/`:quit` (exit) and `:cd <path>` (jump to an arbitrary directory via the new
+  `BrowserState::goto`, resolving a relative path against the current directory).
+  `handle_prompt_key` now returns `ControlFlow<()>` so a quit command can signal the app to exit
+  without `main.rs`'s event loop needing to know about `:`-commands directly. Verified against
+  the real compiled binary via a scripted PTY session: typing `/bravo` jumped the selection and
+  showed the live search buffer, `:cd alpha` navigated into that subdirectory (confirmed via the
+  pane's title showing the real resolved path), and `:q` quit the app on its own. Getting that PTY
+  verification right surfaced two harness bugs worth remembering for next time (written up in
+  `DIARY.md`): a pty needs an explicit `ioctl(TIOCSWINSZ)` or ratatui lays out every pane as a
+  zero-area rect, and a raw keystroke-by-keystroke capture never contains typed text as one
+  contiguous string since ratatui only rewrites changed cells — a forced full redraw (resize +
+  `SIGWINCH`) is needed before asserting on rendered text.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-*(none — all High Priority items are done; see Medium Priority below for what's next.)*
+- **Richer status line** – expand the bottom status bar beyond the current prompt/progress text
+  to surface per-selection info at a glance: file count, cumulative size, permissions, and (where
+  applicable) git status.
+- **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
+  frequently visited paths don't require re-navigating the miller columns each time.
 
 ---
 
@@ -162,9 +183,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui -- <dir-with-images>` and select a `.png`/`.jpg`/etc. file — it should render
-   inline (Kitty/Sixel/iTerm2 if your terminal supports one, halfblocks otherwise).
-2. `cargo test --workspace` (36 tests) to verify everything still passes.
+1. `cargo run -p tui` — press `/` and type a filename to jump to it, `Esc` to cancel; press `:`
+   and type `cd <path>` or `q` to try the command bar.
+2. `cargo test --workspace` (40 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Pick the next roadmap item from 🟡 Medium Priority: built-in trash + undo history or VFS
-   abstraction hardening are the remaining candidates.
+4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks are
+   the remaining candidates.

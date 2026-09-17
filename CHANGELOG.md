@@ -77,6 +77,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ratatui-image`'s `ThreadProtocol`, so a large or slow-to-encode image never blocks the render
   loop. The preview pane shows "loading preview…" while decoding and "preview failed" if the
   file doesn't actually decode as an image despite its extension.
+- `browser`: `BrowserState::select_index` (clamped jump to an arbitrary entry), `find_match`
+  (case-insensitive substring search over the current directory's entries, always from the top),
+  and `goto` (jump directly to an arbitrary directory, resolving a relative path against the
+  current one) — backing the new search/command bar.
+- `theming`: two new keybindable actions — `Search` (default `/`) and `Command` (default `:`).
+- `tui`: `Prompt` gained `SearchInput`/`CommandInput` variants — `/` opens an incremental
+  filename search that jumps the selection to the first case-insensitive match as you type and
+  restores the original selection on `Esc`; `:` opens a command prompt supporting `:q`/`:quit`
+  (exit the app) and `:cd <path>` (jump to a directory). `handle_prompt_key` now returns
+  `ControlFlow<()>` so a `:q`/`:quit` command can signal the app to exit.
 
 ## [0.1.0] - 2026-09-16
 

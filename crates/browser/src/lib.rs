@@ -16,7 +16,7 @@
 
 //! Miller-column navigation state and logic — no rendering, no I/O beyond the `Vfs` trait.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use shared::{DirEntryInfo, Vfs, VfsError};
 
@@ -66,6 +66,44 @@ impl BrowserState {
             Some(entry) if entry.is_dir => vfs.list_dir(&entry.path).unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    /// Selects `index` directly, clamped to the current entry count. No-op on an empty listing.
+    /// Backs both the `/` search jump and `Esc`-cancel-restores-original-position.
+    pub fn select_index(&mut self, index: usize) {
+        if !self.current_entries.is_empty() {
+            self.selected = index.min(self.current_entries.len() - 1);
+        }
+    }
+
+    /// Index of the first entry (top to bottom) whose name contains `query`, case-insensitively.
+    /// Always searches from the top rather than from the current position, so backspacing a `/`
+    /// search back to a shorter query re-finds the same match deterministically.
+    pub fn find_match(&self, query: &str) -> Option<usize> {
+        if query.is_empty() {
+            return None;
+        }
+        let needle = query.to_lowercase();
+        self.current_entries
+            .iter()
+            .position(|e| e.name.to_lowercase().contains(&needle))
+    }
+
+    /// Jumps directly to `path` (resolved relative to the current directory if not absolute),
+    /// as if the user had navigated there via repeated `enter`/`leave`. Backs the `:cd` command.
+    pub fn goto(&mut self, vfs: &dyn Vfs, path: &Path) -> Result<(), VfsError> {
+        let target = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.current_dir.join(path)
+        };
+        if !vfs.is_dir(&target) {
+            return Err(VfsError::NotADirectory(target));
+        }
+
+        self.current_dir = target;
+        self.selected = 0;
+        self.refresh(vfs)
     }
 
     pub fn move_down(&mut self) {
@@ -181,6 +219,57 @@ mod tests {
             state.move_down();
         }
         assert_eq!(state.selected_index(), state.current_entries().len() - 1);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn select_index_clamps_to_last_entry() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+
+        state.select_index(50);
+        assert_eq!(state.selected_index(), state.current_entries().len() - 1);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn find_match_is_case_insensitive_and_searches_from_top() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let state = BrowserState::new(&vfs, root.clone()).unwrap();
+
+        assert_eq!(state.find_match("SUB"), Some(0));
+        assert_eq!(state.find_match("nope"), None);
+        assert_eq!(state.find_match(""), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn goto_jumps_to_an_arbitrary_directory() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+
+        state.goto(&vfs, &root.join("sub")).unwrap();
+        assert_eq!(state.current_dir(), root.join("sub"));
+        assert_eq!(state.selected_entry().unwrap().name, "file.txt");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn goto_rejects_a_non_directory() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+
+        let result = state.goto(&vfs, &root.join("sub").join("file.txt"));
+        assert!(matches!(result, Err(VfsError::NotADirectory(_))));
+        assert_eq!(state.current_dir(), root);
 
         std::fs::remove_dir_all(&root).unwrap();
     }

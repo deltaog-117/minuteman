@@ -139,7 +139,9 @@ fn run(
             }
 
             if app.prompt.is_some() {
-                app.handle_prompt_key(key.code, vfs, browser)?;
+                if app.handle_prompt_key(key.code, vfs, browser)?.is_break() {
+                    return Ok(());
+                }
                 continue;
             }
 
@@ -162,6 +164,8 @@ fn run(
                 Some(Action::Delete) => app.begin_delete(browser),
                 Some(Action::Rename) => app.begin_rename(browser),
                 Some(Action::Create) => app.begin_create(),
+                Some(Action::Search) => app.begin_search(browser),
+                Some(Action::Command) => app.begin_command(),
                 Some(Action::Shell) => {
                     guard.suspend()?;
                     let result = shell_overlay::spawn_shell(browser.current_dir());
