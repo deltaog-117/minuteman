@@ -142,6 +142,16 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   resizing the pty mid-session (`TIOCSWINSZ` + `SIGWINCH`) kept the shell fully responsive
   afterward, and `exit` closed the popup and restored the exact underlying UI with a "shell
   exited" status message.
+- ✅ **`Esc` closes the popup shell** – requested right after the popup shell shipped: `Esc` is
+  now intercepted before it ever reaches the pty, killing the child (`PopupShell::close`, which
+  calls `kill()` then `wait()` so it's reaped immediately rather than left a zombie) and closing
+  the popup with a "shell closed" status, instead of forwarding it as input. This is a deliberate
+  trade-off against the "vim/less/ssh all still work inside it" full-interactivity goal from the
+  original popup design: a program like `vim` running inside the popup that uses `Esc` for its own
+  purposes (leaving insert mode) will now have the popup close out from under it instead — see
+  `DIARY.md`. Verified against the real compiled binary via a scripted PTY session: `Esc` closed a
+  popup with a real shell prompt still active inside it, the underlying UI was restored exactly as
+  before opening it, and the status line read "shell closed".
 
 ---
 

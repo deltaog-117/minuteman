@@ -175,7 +175,11 @@ fn run(
                 }
 
                 if let Some(active) = popup.as_mut() {
-                    if let Some(bytes) = popup_shell::encode_key(key) {
+                    if key.code == KeyCode::Esc {
+                        active.close()?;
+                        popup = None;
+                        app.status = Some("shell closed".into());
+                    } else if let Some(bytes) = popup_shell::encode_key(key) {
                         active.write_input(&bytes)?;
                     }
                     continue;

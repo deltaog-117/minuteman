@@ -24,6 +24,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-17 | Command/Search Bar Mechanism | Extend the existing `Prompt` enum, not a new `Mode` state machine | ✅ Confirmed |
 | 2026-09-17 | Text Preview Concurrency    | `spawn_blocking` read, mirroring `ImagePreview`'s decode pipeline | ✅ Confirmed |
 | 2026-09-17 | Popup Shell Mechanism       | Full pty (`portable-pty`) + `vt100` parser rendered as a ratatui widget (COA A) | ✅ Confirmed |
+| 2026-09-17 | Popup Shell `Esc`-to-Close  | Intercept `Esc` unconditionally rather than forward it, trading away in-popup `vim` `Esc` usage | ✅ Confirmed |
 
 ---
 
@@ -655,6 +656,46 @@ Command/Search Bar entry above found necessary to force a real redraw) reflowed 
 the panes behind it, and the shell inside kept accepting commands afterward. Typing `exit` closed
 the popup and restored the exact underlying UI with a "shell exited" status message, and `q`
 quit the app cleanly (exit code 0) afterward.
+
+---
+
+### Popup Shell `Esc`-to-Close: Intercept Unconditionally, Trading Away In-Popup `vim` `Esc` Usage
+
+**Date:** 2026-09-17
+**Status:** Confirmed
+
+#### Context / Background
+
+Requested immediately after the popup shell shipped: give `Esc` a way to close the popup, rather
+than requiring `exit` (or waiting for the child to exit on its own) every time. The popup shell's
+own design goal, recorded in the entry above, was full interactivity — "vim/less/ssh all still
+work inside it" — and `vim` treats `Esc` as meaningful input (leaving insert mode). Any
+unconditional interception of `Esc` at the popup layer necessarily conflicts with that: there's no
+way for `vim` running inside the popup to ever see an `Esc` keystroke once the popup itself claims
+it first.
+
+#### Decision & Rationale
+
+Chose the simple, unconditional version anyway, as explicitly requested, rather than a
+foreground-process-aware heuristic (e.g. checking the pty's foreground process group via
+`tcgetpgrp` and only closing when the shell itself — not a subprogram like `vim` — is in the
+foreground). That heuristic would preserve `vim`'s `Esc` while still giving a quick-close
+shortcut at the shell prompt, but adds real complexity (a new syscall dependency, more edge cases
+around job control accuracy) for a distinction that wasn't asked for. `exit` still works
+regardless, so nothing is lost for the `vim` case beyond `Esc` specifically no longer reaching
+it — a real, deliberate narrowing of the original "full interactivity" claim, recorded here so a
+future reader doesn't mistake it for an oversight.
+
+Implementation: `main.rs`'s key-handling branch for an open popup checks `key.code == KeyCode::Esc`
+before calling `popup_shell::encode_key` at all, so `Esc` never reaches the pty. New
+`PopupShell::close` calls the child's `kill()` then `wait()` (not just `kill()`) so the process is
+reaped immediately rather than left as a zombie until the next `try_wait` poll or the whole app
+exiting.
+
+**Verification:** confirmed against the real compiled binary via the same `pyte`-reconstructed PTY
+harness used for the popup shell's own verification above: `Esc` pressed while a real shell prompt
+was active inside the popup closed it immediately, restored the underlying UI exactly as it was
+before opening the popup, and set the status line to "shell closed".
 
 ---
 

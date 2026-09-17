@@ -115,6 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits. The old full-screen `spawn_shell` path is unchanged in `shell_overlay`, just no longer
   bound to any keybinding.
 
+- `shell_overlay`: `PopupShell::close` — kills and reaps the child shell immediately, for a
+  caller-initiated close rather than waiting for it to exit on its own.
+- `tui`: `Esc` now closes the popup shell (kills the child, restores the underlying UI, sets a
+  "shell closed" status) instead of being forwarded to it as input.
+
 ### Removed
 - `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their
   only caller.

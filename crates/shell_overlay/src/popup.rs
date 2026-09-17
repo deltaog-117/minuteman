@@ -126,6 +126,14 @@ impl PopupShell {
             code: status.exit_code(),
         }))
     }
+
+    /// Forcibly terminates the shell and reaps it immediately, for a caller-initiated close
+    /// (e.g. an `Esc` keybinding) rather than waiting for the shell to exit on its own.
+    pub fn close(&mut self) -> std::io::Result<()> {
+        self.child.kill()?;
+        self.child.wait()?;
+        Ok(())
+    }
 }
 
 /// Locks `parser`, recovering the guard even if the background reader thread panicked while
@@ -226,6 +234,22 @@ mod tests {
         let outcome = wait_for(Duration::from_secs(3), || popup.try_wait().unwrap());
         assert!(!outcome.success);
         assert_eq!(outcome.code, 5);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn close_kills_and_reaps_the_child_promptly() {
+        let dir = unique_temp_dir("close");
+        let mut popup = with_fake_shell(&dir, "#!/bin/sh\nsleep 30\n", || {
+            PopupShell::spawn(&dir, 24, 80).unwrap()
+        });
+
+        let start = Instant::now();
+        popup.close().unwrap();
+        // Proves the shell was actually killed rather than `close` just blocking until the
+        // `sleep 30` finished on its own.
+        assert!(start.elapsed() < Duration::from_secs(5));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
