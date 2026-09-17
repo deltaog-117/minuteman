@@ -121,6 +121,27 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   this project's synthetic (non-responding) PTY test harness silently swallowed every keystroke
   sent after startup until the harness was fixed to answer the probe itself — not a bug in
   minuteman.
+- ✅ **Shell overlay as an embedded popup terminal emulator** – picked up the parked COA A from
+  the previous cycle: `s` now opens a bordered, centered popup (80%×70% of the frame) instead of
+  suspending to a full-screen shell. New `shell_overlay::PopupShell` spawns `$SHELL` on its own
+  `portable-pty` pty and parses its output into a `vt100::Parser` screen buffer on a background
+  reader thread; a new `tui::popup_shell` module owns everything crossterm/ratatui-specific —
+  sizing the popup, encoding `KeyEvent`s into the raw escape sequences a real terminal would send
+  (arrows, function keys, `Ctrl`/`Alt` combos), and rendering each `vt100::Cell` (color/bold/
+  italic/underline/inverse) as a styled `Span`. `main.rs`'s loop forwards every keystroke straight
+  to the pty while the popup is open, resizes it on `Event::Resize`, and polls `try_wait`
+  non-blockingly each tick to notice the child exiting — the old full-screen `spawn_shell` path
+  (raw-mode suspend/resume around inherited stdio) stays in `shell_overlay` unchanged and
+  untouched, just no longer wired to any keybinding. Verified against the real compiled binary via
+  a scripted PTY session reconstructed through `pyte` (this project's established fix for
+  `ratatui-image`'s terminal-probe thread otherwise swallowing keystrokes, documented in the Image
+  Preview Concurrency `DIARY.md` entry): pressing `s` showed a genuinely bordered "shell" popup
+  with the rest of the browser's panes still visible around it (not a full-screen takeover), a
+  real `echo` command's output appeared inside the popup, `Ctrl-C` interrupted a foregrounded
+  `sleep 20` almost immediately (proving control-code encoding works, not just plain characters),
+  resizing the pty mid-session (`TIOCSWINSZ` + `SIGWINCH`) kept the shell fully responsive
+  afterward, and `exit` closed the popup and restored the exact underlying UI with a "shell
+  exited" status message.
 
 ---
 
@@ -154,30 +175,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   simple commands, layered alongside the WASM plugin system.
 - **Fuzzy find / search within the browser.**
 - **Multi-tab / multi-pane workspaces.**
-- **Shell overlay as an embedded popup terminal emulator** – requested after the shell overlay
-  shipped: keep minuteman visible around a smaller, still fully-interactive shell window, instead
-  of today's full-screen takeover. This is a meaningfully bigger feature than the current
-  overlay — it means minuteman becoming a terminal emulator itself — so it's parked here rather
-  than built now. Three approaches considered, no decision made yet:
-  - **COA A — Full pty + VT100-parser popup** (e.g. `portable-pty` + `vt100` crates): spawn the
-    shell on a new pty sized to the popup, parse its output into a virtual screen buffer, render
-    that as a bordered ratatui widget layered over the main UI, forward keystrokes to the pty
-    while it's focused. Fully delivers "small window over minuteman" and keeps full
-    interactivity (vim/less/ssh all still work inside it). Adds two new dependencies, a
-    background I/O thread, and real edge cases (resize propagation, cursor visibility,
-    child-crash cleanup, ANSI-parsing correctness). Difficulty: high.
-  - **COA B — Constrained-pty takeover without rendering minuteman behind it**: spawn the shell
-    on a smaller pty and let it draw directly into a sub-region of the real terminal (offsetting
-    its own cursor-position escape codes), without simultaneously rendering minuteman's panes
-    behind it. Still needs to intercept/offset the child's escape codes (doesn't avoid ANSI
-    parsing), and the "background" isn't actually minuteman, just blank space — a weaker result
-    for barely less work than COA A. Difficulty: high, weaker payoff.
-  - **COA C — Cosmetic transition only, no true windowing**: keep today's full-screen
-    suspend/resume shell exactly as-is, just show a bordered "entering shell…" message before
-    suspending. Zero new dependencies, but doesn't deliver an actual popup — the shell still uses
-    the whole terminal once it starts.
-  - Recommendation when this is picked up: **COA A** — B is strictly worse for similar effort,
-    and C doesn't solve the actual ask (a small window, not a cosmetic transition).
 - **Multi-select (mark several entries for one bulk op)** – `BrowserState` only tracks a single
   selection today; yank/cut/paste/delete all operate on one entry. `file_ops::ConflictPolicy`
   already has `Skip` (vs. `Abort`) specifically for when a batch needs to continue past one

@@ -24,6 +24,15 @@
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
+mod popup;
+pub use popup::{ExitOutcome, PopupShell};
+
+/// Serializes tests (here and in `popup`) that temporarily override the process-wide `$SHELL`
+/// env var — `std::env::set_var` isn't scoped to a thread, so two such tests running
+/// concurrently would stomp on each other's shell.
+#[cfg(test)]
+static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Spawns `$SHELL` (falling back to `/bin/sh` if unset) with `cwd` as its working directory,
 /// and blocks until the user exits it.
 pub fn spawn_shell(cwd: &Path) -> std::io::Result<ExitStatus> {
@@ -55,7 +64,8 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&script, perms).unwrap();
 
-        // SAFETY: no other test in this crate reads or writes `SHELL`.
+        let _guard = SHELL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialized by `SHELL_ENV_LOCK` above.
         unsafe {
             std::env::set_var("SHELL", &script);
         }

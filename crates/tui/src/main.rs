@@ -16,6 +16,7 @@
 
 mod app;
 mod image_preview;
+mod popup_shell;
 mod text_preview;
 
 use std::io::{self, Stdout};
@@ -33,7 +34,7 @@ use crossterm::terminal::{
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -51,22 +52,6 @@ impl TerminalGuard {
         enable_raw_mode()?;
         execute!(io::stdout(), EnterAlternateScreen)?;
         Ok(Self)
-    }
-
-    /// Hands the real terminal back to normal (cooked) mode, e.g. so a child process like an
-    /// interactive shell can use it directly. Pair with `resume`.
-    fn suspend(&self) -> Result<()> {
-        disable_raw_mode()?;
-        execute!(io::stdout(), LeaveAlternateScreen)?;
-        Ok(())
-    }
-
-    /// Reverses `suspend`. The caller must also force a full redraw (`Terminal::clear`)
-    /// afterward — ratatui's diffing buffer doesn't know the screen was replaced meanwhile.
-    fn resume(&self) -> Result<()> {
-        execute!(io::stdout(), EnterAlternateScreen)?;
-        enable_raw_mode()?;
-        Ok(())
     }
 }
 
@@ -124,7 +109,6 @@ fn main() -> Result<()> {
 
     let result = run(
         &mut terminal,
-        &guard,
         &vfs,
         &mut browser,
         &mut app,
@@ -138,77 +122,106 @@ fn main() -> Result<()> {
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    guard: &TerminalGuard,
     vfs: &LocalVfs,
     browser: &mut BrowserState,
     app: &mut App,
     previews: &mut Previews,
     config: &Config,
 ) -> Result<()> {
+    // The popup shell (see `popup_shell`) — `Some` for the whole time a shell window is open.
+    // Unlike `Action::Shell`'s old full-screen behavior, this never suspends raw mode/the
+    // alternate screen: it's just another widget layered on top of the normal draw.
+    let mut popup: Option<shell_overlay::PopupShell> = None;
+
     loop {
         app.poll_bulk(browser, vfs)?;
         previews.update(browser.selected_entry().map(|e| e.path.as_path()));
-        terminal.draw(|frame| draw(frame, browser, app, previews, vfs, config))?;
 
-        // A timed poll (rather than a blocking read) so the loop keeps ticking — and picking up
-        // background-operation progress — even while the user isn't pressing anything.
-        if !event::poll(Duration::from_millis(100))? {
+        if let Some(active) = popup.as_mut()
+            && let Some(outcome) = active.try_wait()?
+        {
+            popup = None;
+            app.status = Some(if outcome.success {
+                "shell exited".into()
+            } else {
+                format!("shell exited: code {}", outcome.code)
+            });
+        }
+
+        terminal.draw(|frame| draw(frame, browser, app, previews, vfs, config, popup.as_ref()))?;
+
+        // While the popup shell is running, poll faster so its output (e.g. a redrawing `vim`
+        // or `top`) feels responsive rather than updating in 100ms steps.
+        let poll_timeout = if popup.is_some() {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(100)
+        };
+        if !event::poll(poll_timeout)? {
             continue;
         }
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-
-            if app.prompt.is_some() {
-                if app.handle_prompt_key(key.code, vfs, browser)?.is_break() {
-                    return Ok(());
+        match event::read()? {
+            Event::Resize(cols, rows) => {
+                if let Some(active) = popup.as_ref() {
+                    let area = popup_shell::popup_area(Rect::new(0, 0, cols, rows));
+                    let (pty_rows, pty_cols) = popup_shell::pty_size(area);
+                    active.resize(pty_rows, pty_cols)?;
                 }
-                continue;
             }
-
-            if app.is_busy() {
-                if key.code == KeyCode::Esc {
-                    app.cancel_bulk();
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
                 }
-                continue;
-            }
 
-            match config.keys.resolve(key.code) {
-                Some(Action::Quit) => return Ok(()),
-                Some(Action::MoveDown) => browser.move_down(),
-                Some(Action::MoveUp) => browser.move_up(),
-                Some(Action::Enter) => browser.enter(vfs)?,
-                Some(Action::Leave) => browser.leave(vfs)?,
-                Some(Action::Yank) => app.yank(browser),
-                Some(Action::Cut) => app.cut(browser),
-                Some(Action::Paste) => app.begin_paste(browser),
-                Some(Action::Delete) => app.begin_delete(browser),
-                Some(Action::Rename) => app.begin_rename(browser),
-                Some(Action::Create) => app.begin_create(),
-                Some(Action::Search) => app.begin_search(browser),
-                Some(Action::Command) => app.begin_command(),
-                Some(Action::Shell) => {
-                    guard.suspend()?;
-                    let result = shell_overlay::spawn_shell(browser.current_dir());
-                    guard.resume()?;
-                    // Force a full redraw of every cell, since the shell left arbitrary content
-                    // on screen. `resize` to the current size does this (and resets ratatui's
-                    // diffing buffer) without `clear`'s cursor-position query, which needs the
-                    // terminal to answer an escape-code probe and can time out on some
-                    // terminals/multiplexers — not worth risking a crash right after the user
-                    // returns from their shell.
-                    let area = terminal.size()?.into();
-                    terminal.resize(area)?;
-                    app.status = Some(match result {
-                        Ok(status) if status.success() => "shell exited".into(),
-                        Ok(status) => format!("shell exited: {status}"),
-                        Err(e) => format!("failed to start shell: {e}"),
-                    });
+                if let Some(active) = popup.as_mut() {
+                    if let Some(bytes) = popup_shell::encode_key(key) {
+                        active.write_input(&bytes)?;
+                    }
+                    continue;
                 }
-                None => {}
+
+                if app.prompt.is_some() {
+                    if app.handle_prompt_key(key.code, vfs, browser)?.is_break() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+
+                if app.is_busy() {
+                    if key.code == KeyCode::Esc {
+                        app.cancel_bulk();
+                    }
+                    continue;
+                }
+
+                match config.keys.resolve(key.code) {
+                    Some(Action::Quit) => return Ok(()),
+                    Some(Action::MoveDown) => browser.move_down(),
+                    Some(Action::MoveUp) => browser.move_up(),
+                    Some(Action::Enter) => browser.enter(vfs)?,
+                    Some(Action::Leave) => browser.leave(vfs)?,
+                    Some(Action::Yank) => app.yank(browser),
+                    Some(Action::Cut) => app.cut(browser),
+                    Some(Action::Paste) => app.begin_paste(browser),
+                    Some(Action::Delete) => app.begin_delete(browser),
+                    Some(Action::Rename) => app.begin_rename(browser),
+                    Some(Action::Create) => app.begin_create(),
+                    Some(Action::Search) => app.begin_search(browser),
+                    Some(Action::Command) => app.begin_command(),
+                    Some(Action::Shell) => {
+                        let frame_area: Rect = terminal.size()?.into();
+                        let area = popup_shell::popup_area(frame_area);
+                        let (rows, cols) = popup_shell::pty_size(area);
+                        match shell_overlay::PopupShell::spawn(browser.current_dir(), rows, cols) {
+                            Ok(active) => popup = Some(active),
+                            Err(e) => app.status = Some(format!("failed to start shell: {e}")),
+                        }
+                    }
+                    None => {}
+                }
             }
+            _ => {}
         }
     }
 }
@@ -220,6 +233,7 @@ fn draw(
     previews: &mut Previews,
     vfs: &LocalVfs,
     config: &Config,
+    popup: Option<&shell_overlay::PopupShell>,
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -348,6 +362,12 @@ fn draw(
         Paragraph::new(app.status_line()).style(status_style),
         rows[1],
     );
+
+    // Drawn last, over everything above — the popup shell window.
+    if let Some(popup) = popup {
+        let area = popup_shell::popup_area(frame.area());
+        popup_shell::render(frame, area, popup, config);
+    }
 }
 
 /// A pane `Block` styled with the theme's border/title colors — every pane uses the same frame.

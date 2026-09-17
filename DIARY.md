@@ -23,6 +23,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-16 | Image Preview Concurrency   | `ThreadProtocol` + `spawn_blocking`, not the naive `StatefulProtocol` | ✅ Confirmed |
 | 2026-09-17 | Command/Search Bar Mechanism | Extend the existing `Prompt` enum, not a new `Mode` state machine | ✅ Confirmed |
 | 2026-09-17 | Text Preview Concurrency    | `spawn_blocking` read, mirroring `ImagePreview`'s decode pipeline | ✅ Confirmed |
+| 2026-09-17 | Popup Shell Mechanism       | Full pty (`portable-pty`) + `vt100` parser rendered as a ratatui widget (COA A) | ✅ Confirmed |
 
 ---
 
@@ -586,6 +587,74 @@ between (ratatui skips re-writing a cell whose content is unchanged from the pre
 mid-word), so a naive substring search over the raw byte stream can miss text that is genuinely on
 screen. Switching the harness to feed the raw stream through a `pyte` terminal emulator and
 searching its reconstructed screen buffer instead fixed this reliably.
+
+---
+
+### Popup Shell Mechanism: Full Pty (`portable-pty`) + `vt100` Parser Rendered as a Ratatui Widget
+
+**Date:** 2026-09-17
+**Status:** Confirmed
+
+#### Context / Background
+
+The previous cycle's roadmap entry for "shell overlay as an embedded popup terminal emulator"
+parked three options without a decision: (A) a full pty + `vt100`-parser popup, rendering the
+child's screen buffer as a bordered ratatui widget layered over the main UI; (B) a constrained-pty
+takeover that draws directly into a sub-region of the real terminal without rendering minuteman
+behind it; (C) a purely cosmetic transition, keeping today's full-screen suspend/resume shell and
+just showing a message before suspending. The roadmap entry's own recommendation was A — B needs
+the same ANSI-escape-code interception work as A for a strictly weaker result (blank space instead
+of minuteman behind the popup), and C doesn't deliver a small window at all, just a nicer
+transition into the existing full-screen behavior.
+
+#### Decision & Rationale
+
+Chose **A**, confirming the parked recommendation. `shell_overlay` gained a new `PopupShell` type:
+`PopupShell::spawn` opens a `portable-pty` pty sized to the popup and spawns `$SHELL` on it (same
+`$SHELL`-or-`/bin/sh` fallback as the existing `spawn_shell`), then hands the master's reader to a
+background thread that feeds every byte into a `vt100::Parser` behind an `Arc<Mutex<_>>` — the
+same "never block the render loop" rule this project has applied to every I/O source since the
+async-bulk-ops cycle, just applied to pty reads instead of file reads. `write_input`, `resize`,
+`with_screen`, and `try_wait` round out the API; `try_wait`'s return type (`ExitOutcome`) is a
+small local struct rather than `portable_pty::ExitStatus` directly, so the pty backend stays fully
+contained to `shell_overlay` — nothing above it needs to depend on `portable-pty` to read an exit
+code. `vt100::Screen`/`Cell`/`Color` are unavoidably part of `PopupShell`'s public surface (`tui`
+needs real access to cell styling to render it), so `vt100` — but not `portable-pty` — is also a
+direct dependency of `tui`; that's the deliberate line between "the pty mechanism" (contained) and
+"the screen-buffer data model" (necessarily shared).
+
+The crossterm/ratatui half lives in a new `tui::popup_shell` module: `popup_area` centers a
+popup at 80%×70% of the frame (clamped so it never exceeds a tiny terminal), `pty_size` derives
+the pty's rows/cols from the popup's inner area (minus the one-cell border), `encode_key`
+translates a `KeyEvent` into the raw bytes a real terminal would send (arrows, function keys,
+`Tab`/`BackTab`/`Home`/`End`/paging, `Ctrl`+letter → its control code, `Alt` → a leading `ESC`),
+and `render` walks the `vt100::Screen` cell-by-cell into styled `Span`s (color, bold, italic,
+underline, inverse) and positions the real cursor over the child's cursor cell when it isn't
+hidden. `main.rs`'s event loop forwards every key event straight to the popup (bypassing the
+normal `Action` dispatch entirely) while one is open, handles `Event::Resize` by resizing the pty
+to match, and polls `try_wait` non-blockingly once per tick — closing the popup and setting a
+"shell exited"/"shell exited: code N" status the moment the child exits, with no dedicated
+close-hotkey needed. The old `spawn_shell` (full-screen, direct-stdio-inheritance) function and its
+test are left exactly as they were in `shell_overlay` — just no longer wired to the `s` keybind —
+since deleting tested, working code the roadmap never asked to remove would be scope creep beyond
+what "add the popup" requires; `TerminalGuard::suspend`/`resume` in `main.rs`, which existed only
+to support that old call site, were removed as now-genuinely-dead code.
+
+**Verification:** confirmed against the real compiled binary via a scripted PTY session,
+reconstructed through `pyte` and with the harness answering the startup Device Status Report query
+itself — this project's own established fix (see the Image Preview Concurrency and Text Preview
+Concurrency entries above) for `ratatui-image`'s terminal-probe background thread otherwise
+swallowing every keystroke sent after startup on a synthetic, non-responding pty. Pressing `s`
+showed a genuinely bordered "shell" popup with the rest of the browser's three panes still visible
+around it — not a full-screen takeover. A real `echo` command typed inside the popup produced its
+actual output inside the popup's own screen buffer. `Ctrl-C` sent while a foregrounded `sleep 20`
+was running interrupted it almost immediately (the shell's prompt returned well before 20 seconds
+had passed), confirming the control-code encoding path works and not just plain characters.
+Resizing the pty mid-session (`ioctl(TIOCSWINSZ)` + `SIGWINCH`, the same combination the
+Command/Search Bar entry above found necessary to force a real redraw) reflowed both the popup and
+the panes behind it, and the shell inside kept accepting commands afterward. Typing `exit` closed
+the popup and restored the exact underlying UI with a "shell exited" status message, and `q`
+quit the app cleanly (exit code 0) afterward.
 
 ---
 

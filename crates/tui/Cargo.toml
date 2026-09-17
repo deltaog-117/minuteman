@@ -21,3 +21,4 @@ crossterm = "0.29.0"
 anyhow = "1.0.104"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 ratatui-image = { version = "11.0.8", default-features = false, features = ["crossterm", "tokio"] }
+vt100 = "0.16.2"

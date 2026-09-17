@@ -100,6 +100,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tui`: `ImagePreview` and `TextPreview` are now constructed and driven together via a new
   `Previews` struct, keeping `run`/`draw`'s argument counts down now that there are two preview
   pipelines instead of one.
+- `shell_overlay`: new `PopupShell` type — spawns `$SHELL` on its own `portable-pty` pty and
+  parses its output into a `vt100::Parser` screen buffer on a background thread. New
+  `write_input`/`resize`/`with_screen`/`try_wait` methods; `try_wait` returns a local
+  `ExitOutcome` rather than a `portable_pty` type, keeping that dependency contained to this
+  crate.
+- `tui`: new `popup_shell` module — sizes a centered popup (80%×70% of the frame), encodes
+  `KeyEvent`s into the raw escape sequences a real terminal sends (arrows, function keys,
+  `Ctrl`/`Alt` combos), and renders the `vt100` screen buffer cell-by-cell as styled `Span`s
+  (color/bold/italic/underline/inverse), including cursor positioning.
+- `tui`: `s` now opens the popup shell instead of suspending to a full-screen shell — every
+  keystroke forwards straight to the popup's pty while it's open, `Event::Resize` resizes the
+  pty to match, and the popup closes itself (with a "shell exited" status) the moment the child
+  exits. The old full-screen `spawn_shell` path is unchanged in `shell_overlay`, just no longer
+  bound to any keybinding.
+
+### Removed
+- `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their
+  only caller.
 
 ## [0.1.0] - 2026-09-16
 
