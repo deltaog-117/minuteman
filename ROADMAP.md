@@ -223,6 +223,30 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   grabbing the title bar and dragging moved the box by exactly the dragged delta, an extreme
   off-screen drag clamped the box to the frame's edge instead of vanishing or panicking, and the
   browser underneath stayed visible and `Esc`/`q` still closed/quit cleanly afterward.
+- ✅ **Batch file operations — multi-select for yank/cut/paste** – `Clipboard.path: PathBuf`
+  became `Clipboard.paths: Vec<PathBuf>`; `yank`/`cut` now snapshot every currently marked path
+  (falling back to the single cursor entry when nothing's marked), the same
+  marks-win-over-cursor convention `begin_delete` already established, via a new shared
+  `App::marked_or_selected` helper. `spawn_paste` became `spawn_paste_item(clip, dst_dir, index,
+  policy)`, pasting one item of the batch at a time; `poll_bulk`'s completion handling grew a
+  continuation step — on `Outcome::Completed` or `Outcome::Skipped`, if items remain it
+  re-spawns the next one directly instead of ending the operation, so an N-item batch stays one
+  continuous "busy" operation from the UI's perspective rather than N separate ones. A conflict
+  still pauses the whole batch on the existing overwrite/skip/abort prompt — `o`/`s` resume the
+  batch afterward (retrying the conflicting item or moving past it), closing out the exact gap
+  called out in the previous cycle's roadmap note: `file_ops::ConflictPolicy::Skip` "continue
+  past one conflicting item instead of stopping" was implemented but unobservable in the TUI
+  since there was never more than one item in flight. The status line grew a `[i/N]` hint for
+  batches of more than one item. Verified against the real compiled binary via a scripted PTY
+  session driving actual marks/yank/cut/paste keystrokes (answering `ratatui-image`'s startup
+  terminal-capability probe first — the same synthetic-PTY gap documented in the Image Preview
+  Concurrency `DIARY.md` entry, which otherwise silently swallows every keystroke sent
+  afterward): marking a directory plus two files and yanking, then pasting into an empty
+  directory, landed all three with correct contents including the recursed subdirectory; cutting
+  two files into a directory where one name already existed moved the first one, correctly
+  paused on the real conflict prompt for the second, and — after pressing `s` — left the
+  conflicting source file physically untouched (not moved, destination not overwritten) while
+  still finishing the batch and clearing marks/clipboard state correctly at the end.
 
 ---
 
@@ -255,13 +279,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Optional Lua scripting tier** – lightweight `mlua`-based scripting for config/keybindings/
   simple commands, layered alongside the WASM plugin system.
 - **Fuzzy find / search within the browser.**
-- **Multi-select for yank/cut/paste** – `v` marks now drive `Delete` (see ✅ above), but
-  `Clipboard` still only ever holds one `PathBuf`, so yank/cut/paste still operate on the single
-  cursor entry even when marks are active. Extending `Clipboard` to multiple paths and looping
-  `spawn_paste` per marked entry is the remaining piece. `file_ops::ConflictPolicy` already has
-  `Skip` (vs. `Abort`) specifically for when a batch needs to continue past one conflicting item
-  instead of stopping — that distinction is currently unobservable in the TUI since there's never
-  more than one item in flight.
 - **Byte-level/percentage progress for large single files** – current progress is one tick per
   *file*, so a single huge file shows no movement until it's done. Needs `Vfs::copy_file` to
   support a streaming copy with periodic callbacks instead of one atomic `std::fs::copy` call.
@@ -282,13 +299,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui` — press `s` to open a shell pane, `%`/`"` to split it side by side/stacked,
-   `o` to cycle keyboard focus between panes (or click one directly), drag the border between two
-   panes to resize them, drag the box's top border (the "shell" title) to move the whole box
-   around the screen, and `Esc` to close the focused pane (or the last one, exiting shell mode).
+1. `cargo run -p tui` — mark two or three entries with `v` (include a directory), `y` to yank the
+   whole batch (or `m` to cut it), navigate elsewhere, `p` to paste — watch the status line's
+   `[i/N]` hint step through the batch; try it again into a directory with a conflicting name to
+   see the batch pause on the overwrite/skip/abort prompt and resume afterward.
 2. `cargo test --workspace` (74 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
    (directory bookmarks — distinct from the file marks added earlier) are the remaining
-   candidates. Extending marks to yank/cut/paste (🟡 Medium Priority) is also a well-scoped
-   follow-up.
+   candidates.

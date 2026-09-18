@@ -43,13 +43,20 @@ pub enum ClipboardMode {
 
 #[derive(Debug, Clone)]
 pub struct Clipboard {
-    pub path: PathBuf,
+    pub paths: Vec<PathBuf>,
     pub mode: ClipboardMode,
 }
 
 #[derive(Debug)]
 pub enum ConflictSource {
-    Paste { clip: Clipboard, dst: PathBuf },
+    /// `index` is the position in `clip.paths` that hit the conflict; the caller resumes the
+    /// batch at `index` (retry) or `index + 1` (skip) once the user answers.
+    Paste {
+        clip: Clipboard,
+        dst_dir: PathBuf,
+        index: usize,
+        dst: PathBuf,
+    },
     Rename { target: PathBuf, new_name: String },
 }
 
@@ -107,9 +114,19 @@ impl Prompt {
 
 /// What a running background operation is doing, and what it needs to retry with if it turns
 /// out to hit a conflict (only `Paste` can — `Delete` never has an `AlreadyExists` case).
+///
+/// `Paste` processes `clip.paths` one item at a time — `index` is the item currently in flight,
+/// `dst` its destination under `dst_dir`. `poll_bulk` advances `index` and re-spawns the next
+/// item itself once the current one finishes, so a multi-item batch stays a single continuous
+/// "busy" operation from the UI's perspective rather than N separate ones.
 #[derive(Debug)]
 enum BulkKind {
-    Paste { clip: Clipboard, dst: PathBuf },
+    Paste {
+        clip: Clipboard,
+        dst_dir: PathBuf,
+        index: usize,
+        dst: PathBuf,
+    },
     Delete { targets: Vec<PathBuf> },
 }
 
@@ -173,20 +190,21 @@ impl App {
         if let Some(bulk) = &self.bulk {
             return match &bulk.kind {
                 BulkKind::Delete { targets } => {
-                    let label = match targets.as_slice() {
-                        [single] => display_name(single),
-                        many => format!("{} items", many.len()),
-                    };
-                    format!("{}… {label}", bulk.kind.progressing_label())
+                    format!("{}… {}", bulk.kind.progressing_label(), batch_label(targets))
                 }
-                BulkKind::Paste { .. } => {
+                BulkKind::Paste { clip, index, .. } => {
                     let cancel_hint = if bulk.cancel.is_some() {
                         " — Esc to cancel"
                     } else {
                         ""
                     };
+                    let batch_hint = if clip.paths.len() > 1 {
+                        format!(" [{}/{}]", index + 1, clip.paths.len())
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "{}… {} done ({}){cancel_hint}",
+                        "{}… {} done ({}){batch_hint}{cancel_hint}",
                         bulk.kind.progressing_label(),
                         bulk.items_done,
                         bulk.current
@@ -233,21 +251,35 @@ impl App {
         match result {
             Ok(Outcome::Completed) => {
                 browser.reload(vfs)?;
-                if let BulkKind::Paste { clip, .. } = &bulk.kind
-                    && clip.mode == ClipboardMode::Move
-                {
-                    self.clipboard = None;
-                }
-                if is_delete {
+                if let BulkKind::Paste { clip, dst_dir, index, .. } = bulk.kind {
+                    let Some(clip) = self.try_continue_paste(clip, dst_dir, index) else {
+                        return Ok(());
+                    };
+                    if clip.mode == ClipboardMode::Move {
+                        self.clipboard = None;
+                    }
+                } else if is_delete {
                     browser.prune_marks(vfs);
                 }
                 self.status = Some(format!("{past_label} complete"));
             }
-            Ok(Outcome::Skipped) => self.status = Some(format!("{past_label} skipped")),
+            Ok(Outcome::Skipped) => {
+                if let BulkKind::Paste { clip, dst_dir, index, .. } = bulk.kind
+                    && self.try_continue_paste(clip, dst_dir, index).is_none()
+                {
+                    return Ok(());
+                }
+                self.status = Some(format!("{past_label} skipped"));
+            }
             Err(FileOpsError::Cancelled) => self.status = Some(format!("{past_label} cancelled")),
             Err(FileOpsError::Vfs(VfsError::AlreadyExists(_))) => match bulk.kind {
-                BulkKind::Paste { clip, dst } => {
-                    self.prompt = Some(Prompt::Conflict(ConflictSource::Paste { clip, dst }));
+                BulkKind::Paste { clip, dst_dir, index, dst } => {
+                    self.prompt = Some(Prompt::Conflict(ConflictSource::Paste {
+                        clip,
+                        dst_dir,
+                        index,
+                        dst,
+                    }));
                 }
                 BulkKind::Delete { .. } => {
                     self.status = Some("delete failed: unexpected conflict".into());
@@ -278,44 +310,50 @@ impl App {
         }
     }
 
-    pub fn yank(&mut self, browser: &BrowserState) {
-        match browser.selected_entry() {
-            Some(entry) => {
-                self.clipboard = Some(Clipboard {
-                    path: entry.path.clone(),
-                    mode: ClipboardMode::Copy,
-                });
-                self.status = Some(format!("yanked {}", entry.name));
-            }
-            None => self.status = Some("nothing selected".into()),
+    /// Snapshots the current batch: every marked path if any are marked, otherwise just the
+    /// entry under the cursor. Ranger-style "act on marks if any, else the current file"
+    /// convention, shared by yank/cut/delete so all three batch the same way.
+    fn marked_or_selected(browser: &BrowserState) -> Vec<PathBuf> {
+        match browser.marked_paths() {
+            marked if !marked.is_empty() => marked,
+            _ => browser
+                .selected_entry()
+                .map(|entry| vec![entry.path.clone()])
+                .unwrap_or_default(),
         }
     }
 
-    pub fn cut(&mut self, browser: &BrowserState) {
-        match browser.selected_entry() {
-            Some(entry) => {
-                self.clipboard = Some(Clipboard {
-                    path: entry.path.clone(),
-                    mode: ClipboardMode::Move,
-                });
-                self.status = Some(format!("marked {} to move", entry.name));
-            }
-            None => self.status = Some("nothing selected".into()),
+    pub fn yank(&mut self, browser: &BrowserState) {
+        let paths = Self::marked_or_selected(browser);
+        if paths.is_empty() {
+            self.status = Some("nothing selected".into());
+            return;
         }
+        self.status = Some(format!("yanked {}", batch_label(&paths)));
+        self.clipboard = Some(Clipboard {
+            paths,
+            mode: ClipboardMode::Copy,
+        });
+    }
+
+    pub fn cut(&mut self, browser: &BrowserState) {
+        let paths = Self::marked_or_selected(browser);
+        if paths.is_empty() {
+            self.status = Some("nothing selected".into());
+            return;
+        }
+        self.status = Some(format!("marked {} to move", batch_label(&paths)));
+        self.clipboard = Some(Clipboard {
+            paths,
+            mode: ClipboardMode::Move,
+        });
     }
 
     /// Marks (via `Select`) win over the cursor: if any entries are marked, delete confirms
     /// against the whole marked set; otherwise it falls back to the single entry under the
     /// cursor, matching Ranger's "act on marks if any, else the current file" convention.
     pub fn begin_delete(&mut self, browser: &BrowserState) {
-        let targets = match browser.marked_paths() {
-            marked if !marked.is_empty() => marked,
-            _ => browser
-                .selected_entry()
-                .map(|entry| vec![entry.path.clone()])
-                .unwrap_or_default(),
-        };
-
+        let targets = Self::marked_or_selected(browser);
         if targets.is_empty() {
             self.status = Some("nothing selected".into());
             return;
@@ -363,12 +401,8 @@ impl App {
             self.status = Some("clipboard is empty".into());
             return;
         };
-        let Some(name) = clip.path.file_name() else {
-            self.status = Some("clipboard entry has no file name".into());
-            return;
-        };
-        let dst = browser.current_dir().join(name);
-        self.spawn_paste(clip, dst, ConflictPolicy::Abort);
+        let dst_dir = browser.current_dir().to_path_buf();
+        self.spawn_paste_item(clip, dst_dir, 0, ConflictPolicy::Abort);
     }
 
     /// Routes a raw key to the active prompt. No-op if there is no active prompt. Returns
@@ -507,8 +541,13 @@ impl App {
         policy: ConflictPolicy,
     ) -> Result<()> {
         match source {
-            ConflictSource::Paste { clip, dst } => {
-                self.spawn_paste(clip, dst, policy);
+            ConflictSource::Paste {
+                clip,
+                dst_dir,
+                index,
+                ..
+            } => {
+                self.spawn_paste_item(clip, dst_dir, index, policy);
                 Ok(())
             }
             ConflictSource::Rename { target, new_name } => {
@@ -517,13 +556,49 @@ impl App {
         }
     }
 
-    /// Spawns a copy or move on tokio's blocking thread pool. Progress and the final result
-    /// arrive later via `poll_bulk` — this call itself never blocks.
-    fn spawn_paste(&mut self, clip: Clipboard, dst: PathBuf, policy: ConflictPolicy) {
+    /// If `index` is not the last item in `clip.paths`, spawns the next item (via
+    /// `spawn_paste_item`, with a fresh `ConflictPolicy::Abort`) and returns `None` — the caller
+    /// should stop, since the batch is still in flight. Otherwise returns `clip` back so the
+    /// caller can finish up (e.g. clearing the clipboard on a completed move).
+    fn try_continue_paste(
+        &mut self,
+        clip: Clipboard,
+        dst_dir: PathBuf,
+        index: usize,
+    ) -> Option<Clipboard> {
+        let next_index = index + 1;
+        if next_index < clip.paths.len() {
+            self.spawn_paste_item(clip, dst_dir, next_index, ConflictPolicy::Abort);
+            None
+        } else {
+            Some(clip)
+        }
+    }
+
+    /// Spawns a copy or move of `clip.paths[index]` into `dst_dir` on tokio's blocking thread
+    /// pool. Progress and the final result arrive later via `poll_bulk` — this call itself never
+    /// blocks. `poll_bulk` re-invokes this for the next item once one finishes, so a multi-item
+    /// batch (from marks) stays one continuous background operation from the UI's perspective.
+    fn spawn_paste_item(
+        &mut self,
+        clip: Clipboard,
+        dst_dir: PathBuf,
+        index: usize,
+        policy: ConflictPolicy,
+    ) {
+        let Some(src) = clip.paths.get(index).cloned() else {
+            self.status = Some("paste failed: batch index out of range".into());
+            return;
+        };
+        let Some(name) = src.file_name() else {
+            self.status = Some("clipboard entry has no file name".into());
+            return;
+        };
+        let dst = dst_dir.join(name);
+
         let (tx, rx): (UnboundedSender<BulkMsg>, _) = unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_bg = Arc::clone(&cancel);
-        let src = clip.path.clone();
         let mode = clip.mode;
         let dst_bg = dst.clone();
 
@@ -552,7 +627,12 @@ impl App {
         });
 
         self.bulk = Some(BulkOp {
-            kind: BulkKind::Paste { clip, dst },
+            kind: BulkKind::Paste {
+                clip,
+                dst_dir,
+                index,
+                dst,
+            },
             items_done: 0,
             current: String::new(),
             cancel: Some(cancel),
@@ -661,4 +741,12 @@ fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Renders a batch of paths for a status message: the single name, or an item count.
+fn batch_label(paths: &[PathBuf]) -> String {
+    match paths {
+        [single] => display_name(single),
+        many => format!("{} items", many.len()),
+    }
 }

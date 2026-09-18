@@ -174,6 +174,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, which stay tiled exactly as before (see `ROADMAP.md`/`DIARY.md` for why per-pane dragging is
   still out of scope). New `ShellView` struct bundles the pane tree with its offset for `draw`,
   keeping its argument count from growing.
+- `tui`: batch file operations — `y`/`m` now yank/cut every currently marked path (falling back
+  to the cursor entry if nothing's marked), and `p` pastes the whole batch one item at a time,
+  re-spawning the next item itself as each one finishes so a multi-item paste stays one
+  continuous background operation. A conflict on any item still pauses the batch on the existing
+  overwrite/skip/abort prompt and resumes afterward — including `Skip`, which now actually
+  continues a batch past a conflicting item instead of ending the whole paste. The status line
+  shows an `[i/N]` progress hint for batches of more than one item.
+
+### Changed
+- `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.
 
 ### Removed
 - `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their

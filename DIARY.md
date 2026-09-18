@@ -32,6 +32,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-18 | Pane Mouse Interaction | Divider-drag-to-resize + click-to-focus; no drag-to-reposition or reorder (COA A) | ✅ Confirmed |
 | 2026-09-18 | Shell Pane Container Sizing | Centered 80%/70% box, not the full browser area | ✅ Confirmed |
 | 2026-09-18 | Shell Box Drag Mechanism | Drag the box's title bar by mouse, offset re-added to `shell_area` (COA A) | ✅ Confirmed |
+| 2026-09-18 | Batch Yank/Cut/Paste Continuation | `Clipboard` holds `Vec<PathBuf>`, `poll_bulk` re-spawns the next item itself (COA A) | ✅ Confirmed |
 
 ---
 
@@ -1065,6 +1066,115 @@ its title row followed by a drag and mouse-up moved the box by precisely the dra
 edge left the box clamped flush against it instead of vanishing or panicking; the browser's title
 (showing the real cwd) stayed visible and correct throughout, and `Esc` then `q` still closed the
 shell and quit the app cleanly afterward.
+
+---
+
+### Batch Yank/Cut/Paste Continuation: `Clipboard` Holds `Vec<PathBuf>`, `poll_bulk` Re-Spawns the Next Item Itself
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+`v` marks already drove `Delete` (a prior cycle), which snapshots `browser.marked_paths()` into a
+`Vec<PathBuf>` at confirm-time and loops `file_ops::delete` over it inside one `spawn_blocking`
+call — straightforward, since delete has no conflict/retry path to interrupt the loop. `Yank`/
+`Cut`/`Paste` were the one piece of that prior cycle's scope explicitly deferred (see the Marks /
+Multi-Select Scope entry): `Clipboard` only ever held a single `PathBuf`, so pasting a multi-marked
+batch still only ever moved/copied the single entry under the cursor. Unlike delete, paste's
+`file_ops::copy_with_progress`/`mv_with_progress` can hit `VfsError::AlreadyExists` mid-item and
+need the user to pick overwrite/skip/abort before continuing — a naive single `spawn_blocking` loop
+like delete's has no way to surface that prompt and then resume where it left off.
+
+#### Options Considered
+
+**Option A: Batch `Clipboard`, chained via the existing bulk-completion path** *(chosen)*
+- `Clipboard.path: PathBuf` becomes `Clipboard.paths: Vec<PathBuf>`; `yank`/`cut` snapshot marks-
+  if-any-else-cursor, the same convention `begin_delete` already established (now shared via a new
+  `App::marked_or_selected` helper). One item is spawned at a time via `spawn_paste_item(clip,
+  dst_dir, index, policy)`; `poll_bulk`'s completion handling (`Outcome::Completed` /
+  `Outcome::Skipped`) re-spawns the next index itself before returning, instead of ending the
+  operation, so an N-item batch stays one continuous "busy" state from the UI's perspective. A
+  conflict still surfaces the existing single-item `Prompt::Conflict` and pauses the whole batch;
+  `resolve_conflict` resumes at the same index (retry, on overwrite) or lets the next `poll_bulk`
+  tick advance past it (on skip).
+- Reuses `Prompt::Conflict`/`ConflictPolicy`/the per-item `spawn_blocking` shape almost unchanged;
+  conflict UX for a batch is pixel-identical to today's single-item flow — nothing new to learn.
+- Progress is per-item, not one continuous byte/file stream; an accurate `[i/N]` batch-position hint
+  needed a small addition to `BulkKind::Paste` (`index`) rather than falling out for free.
+
+**Option B: One background task drives the whole batch, conflict policy decided up front**
+- A new `file_ops::paste_batch_with_progress` loops every `(src, dst)` pair inside a single
+  `spawn_blocking`, mirroring `spawn_delete`'s existing internal loop. Since nothing can pop out to
+  ask mid-flight, the overwrite/skip/abort choice would have to be made once before the batch starts
+  instead of per conflicting file.
+- Trivial accurate progress counter and the fewest background spawns, but a real UX regression:
+  losing the ability to make a different call on each conflicting file within one batch — and it
+  needs a new `file_ops` API plus a new "decide up front" prompt type that doesn't exist anywhere
+  else in the app.
+
+**Option C: UI-only queue, zero `file_ops`/`Clipboard` signature changes**
+- Keep `Clipboard.path` singular; `App` reads live marks into a queue at `begin_paste` time (not at
+  yank/cut), popping and calling the unmodified single-item `spawn_paste` as each finishes.
+- Smallest textual diff, but semantically wrong: yank/cut wouldn't actually capture the batch when
+  pressed — marks re-read at paste time mean marks changed in between silently change what gets
+  pasted, breaking the snapshot-at-mark-time convention `begin_delete` (and now yank/cut) already
+  rely on.
+
+#### Decision & Rationale
+
+Chose **A** — it was the direction this project's own prior-cycle roadmap note already pointed at
+("Extending `Clipboard` to multiple paths and looping `spawn_paste` per marked entry is the
+remaining piece"), it's the only option that doesn't change conflict-resolution UX for existing
+single-item pastes, and it extends the exact snapshot-marks-into-a-`Vec<PathBuf>` convention
+`begin_delete` already set rather than inventing a parallel one. The real cost — `poll_bulk` gaining
+a "continue the batch" branch instead of staying purely a drain-and-finish function — was judged
+worth it against Option B's outright UX regression and Option C's stale-snapshot correctness gap.
+This also closes the exact gap called out when marks first landed: `file_ops::ConflictPolicy::Skip`
+existed specifically "for when a batch needs to continue past one conflicting item instead of
+stopping," but was unobservable in the TUI since there was never more than one item in flight —
+it's now the thing that makes Scenario B below actually exercise that code path for the first time.
+
+#### Implementation Notes
+
+- `ConflictSource::Paste` and `BulkKind::Paste` both gained `dst_dir: PathBuf` and `index: usize`
+  alongside the existing `clip`/`dst`, so a paused-on-conflict batch knows exactly where to resume.
+- New `try_continue_paste(clip, dst_dir, index) -> Option<Clipboard>` centralizes the "spawn the
+  next item, or hand `clip` back for final cleanup" branch shared by the `Completed` and `Skipped`
+  arms of `poll_bulk`, instead of duplicating the continuation check in both.
+- The clipboard only clears (on a completed `Move`) once the *last* item finishes — an earlier
+  item in a move batch that succeeded while a later one is later skipped leaves the clipboard
+  holding paths that partially no longer exist at their original location. This is the same
+  imprecision the single-item implementation already had for a skip (clipboard is never touched on
+  `Outcome::Skipped` today either) — deliberately not solved here per this project's iteration
+  rules against unrelated scope creep.
+- Status line gained a `[i/N]` hint for `BulkKind::Paste` when `clip.paths.len() > 1`, and a new
+  `batch_label` helper (single name, or `"N items"`) deduplicates what `Delete`'s status line and
+  `Prompt::ConfirmDelete::display` were each already computing inline.
+
+#### Verification
+
+Confirmed against the real compiled binary via a scripted PTY session driving actual marks/yank/
+cut/paste keystrokes — not just the unchanged `file_ops` unit tests, which never exercised the new
+batch-continuation loop at all. Had to answer `ratatui-image`'s startup terminal-capability probe
+first (`CSI c` / `CSI 16 t` / `CSI 5 n`), deliberately leaving its Kitty graphics query unanswered
+so it falls back to "no Kitty support" the way any ordinary terminal would — the same synthetic-PTY
+gap the Image Preview Concurrency entry documents, which otherwise leaves the probe's stdin-reading
+thread blocked forever and silently swallows every keystroke sent afterward (this cost real debug
+time this cycle before the cause was traced back to that exact prior entry).
+
+**Scenario A (batch copy):** marked a directory plus two files, `y` to yank, navigated to an empty
+destination, `p` to paste. All three landed with correct contents, including the recursed
+subdirectory — confirming the multi-item queue correctly processes a `copy_with_progress` call that
+is itself a full recursive directory copy, not just flat files.
+
+**Scenario B (batch move with a real mid-batch conflict):** marked two files, `m` to cut, pasted
+into a directory where the second file's name already existed. The first item moved immediately;
+the batch correctly paused on the real overwrite/skip/abort prompt for the second. Pressing `s`
+left that file physically untouched at its original location (not moved) and the pre-existing
+destination file untouched (not overwritten), while the batch still finished cleanly afterward —
+the first end-to-end exercise of `ConflictPolicy::Skip` actually continuing a batch past a
+conflict, rather than ending the whole operation the way a single-item skip always has.
 
 ---
 
