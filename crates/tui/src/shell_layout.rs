@@ -641,11 +641,11 @@ impl ShellPanes {
     /// arranged changes. Returns whether there was a split to flip at all; `false` for a lone
     /// pane with no parent split.
     pub fn toggle_focused_orientation(&mut self, area: Rect) -> anyhow::Result<bool> {
-        if let Some(split_id) = parent_split_id(&self.root, self.focused) {
-            if flip_direction_in(&mut self.root, split_id) {
-                self.resize(area)?;
-                return Ok(true);
-            }
+        if let Some(split_id) = parent_split_id(&self.root, self.focused)
+            && flip_direction_in(&mut self.root, split_id)
+        {
+            self.resize(area)?;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -816,6 +816,28 @@ mod tests {
                 second: Box::new(second),
             },
         }
+    }
+
+    /// A leaf's rendered rect, computed the same way `render_tree`/`resize_tree` do — for
+    /// asserting on layout shape (e.g. after `toggle_focused_orientation`) without needing a
+    /// real `Divider`.
+    fn rect_of<T>(tree: &Tree<T>, area: Rect, target: usize) -> Option<Rect> {
+        match &tree.node {
+            Node::Leaf(_) => (tree.id == target).then_some(area),
+            Node::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                let (first_area, second_area) = split_rect(area, *direction, *ratio);
+                rect_of(first, first_area, target).or_else(|| rect_of(second, second_area, target))
+            }
+        }
+    }
+
+    fn shell_rect_of(panes: &ShellPanes, area: Rect, id: usize) -> Rect {
+        rect_of(&panes.root, area, id).expect("id must name a leaf in the tree")
     }
 
     #[test]
@@ -1130,22 +1152,27 @@ mod tests {
             split(2, SplitDirection::Vertical, 0.5, leaf(3, "b"), leaf(4, "c")),
         );
         assert!(flip_direction_in(&mut tree, 2));
-        let Node::Split { direction, .. } = tree.node else {
-            unreachable!()
-        };
-        assert_eq!(direction, SplitDirection::Horizontal);
+
         let Node::Split {
-            first: _,
+            direction: root_direction,
             second,
+            ..
+        } = &tree.node
+        else {
+            panic!("expected the root to still be a Split");
+        };
+        // The root split (id 0) was never named — it must be untouched.
+        assert_eq!(*root_direction, SplitDirection::Horizontal);
+
+        let Node::Split {
             direction: inner_direction,
             ..
-        } = (match &tree.node {
-            _ => unreachable!(),
-        })
+        } = &second.node
         else {
-            unreachable!()
+            panic!("expected the inner split (id 2) to still be a Split");
         };
-        let _ = (second, inner_direction);
+        // Only the named split (id 2) flips: it started `Vertical`, so it's now `Horizontal`.
+        assert_eq!(*inner_direction, SplitDirection::Horizontal);
     }
 
     #[test]

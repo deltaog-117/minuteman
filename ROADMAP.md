@@ -277,6 +277,30 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   mode and quit the app, and — separately — a lone unsplit pane and a vertically-split (`"`) pane
   each grew the box's own width by exactly 6 columns (3×2) on `space r` plus three `l` presses,
   confirming the fallback triggers exactly when there's no horizontal divider to adjust instead.
+- ✅ **Mouse box-width resize + keyboard split-orientation toggle** – two follow-ups to the
+  resize/move chord above, both requested directly from using it. First, the box's own right
+  border (distinct from any internal pane divider) is now mouse-draggable, resizing its width the
+  same way the resize chord's fallback already does — `shell_area`'s `size_adjust.0` tracks the
+  drag, with a mouse-column delta of `d` mapping to a `size_adjust` delta of `2d` since the box
+  grows symmetrically from its centered position (the dragged edge only tracks the mouse 1:1 if
+  the *opposite* edge also moves by the same amount to stay centered). The right-border hit-test
+  is checked before the existing title-bar hit-test, so the top-right corner (where both would
+  otherwise match) prefers resize over move. Second, `space t` — a third, one-shot (not
+  repeatable, unlike `r`/`m`) branch of the existing leader chord — flips the orientation
+  (side-by-side <-> stacked) of the split the focused pane is immediately part of, via new
+  `shell_layout::ShellPanes::toggle_focused_orientation`, which mutates a `Split` node's
+  `direction` in place without touching which panes are on which side or their ratio — still not
+  the pane-reordering this project has already deliberately ruled out (see the Multi-Shell
+  Layout Model entry), just how the same two panes are arranged. Deliberately **not** a bare `t`
+  keybinding intercepted while the shell is focused: that would silently steal an extremely
+  common shell-command letter (`touch`, `top`, `tar`, `test`, `git`, …) from real typing, the
+  exact category of problem the leader chord was already built to avoid for resize/move — see
+  `DIARY.md` for a design decision this cycle caught and reverted before it shipped. Verified
+  against the real compiled binary via scripted PTY sessions: dragging the box's right border by
+  5 columns grew its actual width by 10 (2× the drag delta, matching the symmetric-growth model);
+  `space t` on a side-by-side split removed the internal vertical divider entirely (confirming a
+  stacked layout) and a second `space t` restored it; and `toggle_focused_orientation` on a lone
+  pane correctly reports nothing to toggle rather than panicking.
 
 ---
 
@@ -329,11 +353,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui` — press `s` to open a shell, `%` to split it, `tab` to unfocus (so the
-   chord's keys can't collide with the real shell's own input), then `space r` and `hjkl` to
-   resize the focused pane's divider (or the box itself, if there's no divider along that axis),
-   or `space m` and `hjkl` to move the whole box; `Esc` leaves either mode.
-2. `cargo test --workspace` (82 tests) to verify everything still passes.
+1. `cargo run -p tui` — press `s` to open a shell, `%` to split it. Drag its own right border
+   with the mouse to resize the box's width directly. `tab` to unfocus, then `space t` to flip
+   the split to stacked and back, or `space r`/`space m` plus `hjkl` for the keyboard resize/move
+   chord (`Esc` leaves either mode).
+2. `cargo test --workspace` (86 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
    (directory bookmarks — distinct from the file marks added earlier) are the remaining

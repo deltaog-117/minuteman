@@ -282,9 +282,12 @@ fn run(
     // The mouse position `(col, row)` last seen while dragging the box's title bar, to compute
     // the next frame's delta. `None` means no such drag is in progress.
     let mut dragging_shell: Option<(u16, u16)> = None;
+    // The mouse column last seen while dragging the box's own right border, to resize its width
+    // (see `shell_size`). `None` means no such drag is in progress.
+    let mut dragging_shell_width: Option<u16> = None;
     // Set for exactly one keystroke after `Leader` (space) is pressed while panes are open,
-    // waiting to see whether it's followed by `r` (resize chord) or `m` (move chord); any other
-    // key just drops it. See `ShellChordMode`.
+    // waiting to see whether it's followed by `r` (resize chord), `m` (move chord), or `t` (an
+    // immediate orientation toggle, no chord); any other key just drops it. See `ShellChordMode`.
     let mut pending_leader = false;
     // The active resize/move chord, if any — `hjkl`/arrows are interpreted specially while this
     // is `Some`, instead of driving the browser or forwarding to a shell.
@@ -354,6 +357,7 @@ fn run(
                     continue;
                 };
                 let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
+                let right_edge = area.x + area.width.saturating_sub(1);
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(divider) = panes
@@ -362,6 +366,15 @@ fn run(
                             .find(|d| d.hit(mouse.column, mouse.row))
                         {
                             dragging_divider = Some(divider.id());
+                        } else if mouse.column == right_edge
+                            && mouse.row >= area.y
+                            && mouse.row < area.y + area.height
+                        {
+                            // The box's own right border, distinct from any internal divider —
+                            // grabbing it resizes the box's width, like a floating window's edge.
+                            // Checked before the title-bar hit-test below so the top-right corner
+                            // (where both would otherwise match) prefers resize over move.
+                            dragging_shell_width = Some(mouse.column);
                         } else if mouse.row == area.y
                             && mouse.column >= area.x
                             && mouse.column < area.x + area.width
@@ -390,11 +403,21 @@ fn run(
                             shell_offset.0 += mouse.column as i32 - last_col as i32;
                             shell_offset.1 += mouse.row as i32 - last_row as i32;
                             dragging_shell = Some((mouse.column, mouse.row));
+                        } else if let Some(last_col) = dragging_shell_width {
+                            // The box grows symmetrically from its centered position (see
+                            // `shell_area`'s `size_adjust`), so the dragged edge only tracks the
+                            // mouse 1:1 if the size delta is double the column delta — the
+                            // opposite edge moves the other way by the same amount to keep it
+                            // centered.
+                            shell_size.0 += 2 * (mouse.column as i32 - last_col as i32);
+                            dragging_shell_width = Some(mouse.column);
+                            panes.resize(shell_area(terminal.size()?.into(), shell_offset, shell_size))?;
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         dragging_divider = None;
                         dragging_shell = None;
+                        dragging_shell_width = None;
                     }
                     _ => {}
                 }
@@ -406,7 +429,7 @@ fn run(
 
                 if pending_leader {
                     pending_leader = false;
-                    if shells.is_some() {
+                    if let Some(panes) = shells.as_mut() {
                         match key.code {
                             KeyCode::Char('r') => {
                                 shell_chord = Some(ShellChordMode::Resize);
@@ -415,6 +438,18 @@ fn run(
                             KeyCode::Char('m') => {
                                 shell_chord = Some(ShellChordMode::Move);
                                 app.status = Some("move mode — hjkl to move, Esc to exit".into());
+                            }
+                            // A single immediate action, unlike resize/move — there's nothing
+                            // repeatable about it, so it never enters `shell_chord` at all.
+                            KeyCode::Char('t') => {
+                                let area =
+                                    shell_area(terminal.size()?.into(), shell_offset, shell_size);
+                                let toggled = panes.toggle_focused_orientation(area)?;
+                                app.status = Some(if toggled {
+                                    "pane orientation toggled".into()
+                                } else {
+                                    "only one pane — nothing to toggle".into()
+                                });
                             }
                             _ => {}
                         }

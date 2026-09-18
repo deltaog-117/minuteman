@@ -190,6 +190,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   but is still dispatched normally afterward. New `shell_layout::ShellPanes::resize_focused`
   (now returning whether it actually adjusted a divider) and `shell_layout::NudgeDir`; `shell_area`
   gained a `size_adjust: (i32, i32)` parameter alongside its existing `offset`.
+- `tui`: the shell box's own right border is now mouse-draggable, resizing its width directly
+  (checked before the title-bar drag hit-test, so the shared top-right corner prefers resize).
+  `space t` — a third, one-shot branch of the leader chord — flips the focused pane's split
+  between side-by-side and stacked, keeping the same two panes and their ratio. New
+  `shell_layout::ShellPanes::toggle_focused_orientation`.
 
 ### Changed
 - `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.

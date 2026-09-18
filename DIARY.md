@@ -1313,6 +1313,99 @@ divider resize was untouched by this change.
 
 ---
 
+### Mouse Box-Width Resize + Split-Orientation Toggle: A Caught-and-Reverted `t` Keybinding Mistake
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+Two follow-up requests on the resize/move chord above, from actually using it: "make it possible
+to make the mini-shells be resized horizontally using the mouse, too" (the box's own width, which
+the previous cycle's keyboard fallback could already grow/shrink, had no mouse equivalent), and
+"make it possible to change how they organized: one below the other, or side-by-side, using
+keyboard" — flipping an existing split's orientation, which nothing could do before this cycle
+short of closing a pane and re-splitting the other way.
+
+#### Decision & Rationale: Mouse Box-Width Resize
+
+The box's own right border (distinct from any internal pane divider, which is checked first and
+never conflicts) is now a mouse-drag target, mirroring the title-bar-drag precedent: a mouse-down
+on that exact column starts the drag, `Drag` events update `shell_size.0`, `Up` ends it. The one
+subtlety is the mapping itself — since the box grows symmetrically from its centered position
+(same model the keyboard fallback already established), moving the dragged edge by the mouse's
+column delta `d` requires a `size_adjust` delta of `2d`, not `d`: growing `size_adjust.0` by `2d`
+grows the width by `2d`, which centers by moving *each* edge outward by `d` — exactly matching the
+mouse's own movement on the dragged side, with the *other* edge moving oppositely by the same `d`
+to stay centered. Only width, not height, got a mouse target — height was never mentioned in the
+request, and mirroring it symmetrically for the bottom border can wait until it's actually asked
+for. Hit-test priority: the right-border check now runs *before* the title-bar check, since the
+top-right corner cell would otherwise match both (the title bar's row check spans the box's full
+width, including that column) — resize wins there, matching the general precedent that a precise
+edge grab should take priority over a broader "anywhere on this bar" grab.
+
+#### Options Considered: Orientation Toggle Keybinding
+
+**Option A: A new configurable top-level `Action`, bound to a bare key (`t`) intercepted while
+the shell is focused** *(implemented, then reverted before verification)*
+- This was the first thing built, following the exact precedent `ShellSplitHorizontal`/
+  `ShellPaneNext`/etc. already set: a dedicated `Action`, checked in the same `shell_focused`
+  branch, intercepted before falling through to pty-forwarding. It compiled, passed
+  `cargo clippy`/`cargo test`, and only fell apart once the PTY verification script actually tried
+  to type a shell command containing the letter `t` — `touch`, `top`, `tar`, `test`, `git`, and
+  countless others would have silently lost every `t` while a real shell had focus, the exact
+  category of regression the `space`-prefixed leader chord was built specifically to avoid for
+  resize/move (see the entry above). `%`/`"`/`o` already pay a smaller version of this cost
+  (rarely-typed characters), and the existing `o`-eats-`ShellPaneNext` case is already a known,
+  accepted, if narrow, limitation — but `t` is common enough that this would have been a real,
+  frequently-hit regression, not a narrow edge case.
+- Caught during this cycle's own verification pass, before ever reporting the feature done —
+  writing the PTY test's cleanup step (which needed to type `exit` into a real shell) is what
+  surfaced it, since `exit` doesn't contain a `t` but a broader manual check of ordinary command
+  typing would have. Reverted in full: the `Action::ShellToggleOrientation` variant,
+  `RawKeyMap::shell_toggle_orientation` field/default, its `bind_all` call, the keymap test
+  assertion, the `config.example.toml` line, and the `main.rs` dispatch branch were all removed
+  again in the same cycle, before commit.
+
+**Option B: A third branch of the existing leader chord (`space t`)** *(chosen)*
+- Reuses the exact mechanism that already solves this class of problem: `Action::Leader` only
+  ever resolves outside the pty-forwarding path (a focused pane's own keystrokes never reach that
+  dispatch at all), so nothing typed into a real shell can ever be intercepted by it, regardless
+  of which letter follows `space`. Unlike `r`/`m`, the toggle is a single immediate action with
+  nothing to repeat, so it never sets `shell_chord` at all — it fires once and the chord ends
+  immediately, no `Esc` needed.
+
+#### Implementation Notes
+
+- New `shell_layout::parent_split_id` (the *immediate* parent split of a leaf, unlike
+  `nearest_ancestor_split`, which has no axis to match here) and `flip_direction_in` (mirrors
+  `set_ratio_in`'s search-and-mutate shape exactly) back `ShellPanes::toggle_focused_orientation`,
+  which flips a `Split` node's `direction` field in place — the two children and their ratio are
+  completely untouched, so this only ever changes *how* the same two panes are arranged, never
+  *which* panes they are. Still not the pane-reordering this project ruled out in the Multi-Shell
+  Layout Model entry; toggling a two-pane split's axis doesn't reorder anything.
+- `dragging_shell_width: Option<u16>` joins `dragging_divider`/`dragging_shell` as the third
+  mouse-drag state variable in `run`, following the same "store the last position, apply the
+  delta, clear on `Up`" shape as `dragging_shell` already does for the title bar.
+
+#### Verification
+
+Confirmed against the real compiled binary via scripted PTY sessions (`pyte`-reconstructed, same
+fixes as prior entries). **Mouse resize:** real SGR mouse escape sequences (press, five drag
+steps, release) on the box's right border grew its actual width by exactly 10 columns — 2× the
+5-column drag delta, matching the symmetric-growth mapping. **Orientation toggle:** opened a
+shell, split it side by side (`%`, sent while still focused — `ShellSplitHorizontal` needs that,
+same as before), unfocused (`tab`), then `space t`: the internal vertical divider present at a
+row through the panes beforehand was completely gone afterward (confirming a stacked, not
+side-by-side, layout — a stacked split has a horizontal divider, not a vertical one, so its
+absence is the actual signal, not some specific replacement character), and a second `space t`
+restored it. A lone (unsplit) pane's `toggle_focused_orientation` returned `false` rather than
+panicking, surfaced in the status line as "only one pane — nothing to toggle." The reverted-Option-A
+mistake above was never itself PTY-verified as a mistake in the shipped sense — it was caught
+during this same verification pass, before any binary built with it was reported working.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate
