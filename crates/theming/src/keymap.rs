@@ -45,7 +45,9 @@ pub enum Action {
     /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
     /// later bulk action (e.g. `Delete`) instead of acting on it immediately.
     Select,
-    /// Inert placeholder for future chorded commands. Does not consume or block any other key.
+    /// Starts a chord. Inert with no shell pane open; while one is, the next key (`r`/`m`)
+    /// enters a resize/move mode where `hjkl`/arrows repeatedly nudge the focused pane's divider
+    /// or the whole box's position until `Esc` or any other key ends it.
     Leader,
     /// While any shell pane is open, toggles whether keystrokes go to the focused pane or drive
     /// the browser — lets the pane(s) stay open and visible while browsing.

@@ -181,6 +181,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overwrite/skip/abort prompt and resumes afterward — including `Skip`, which now actually
   continues a batch past a conflicting item instead of ending the whole paste. The status line
   shows an `[i/N]` progress hint for batches of more than one item.
+- `tui`: keyboard resize/move for shell panes. `space` (`Action::Leader`) now starts a chord
+  while any shell pane is open — `r` enters a resize mode where `hjkl`/arrows nudge the focused
+  pane's nearest divider by 5% per press, falling back to growing/shrinking the box's own
+  width/height by 2 cells per press when there's no divider along that axis (a lone pane, or a
+  tree only ever split the other way); `m` enters a move mode where the same keys nudge the
+  whole box's offset by 2 cells per press. `Esc` leaves either mode; any other key leaves it too
+  but is still dispatched normally afterward. New `shell_layout::ShellPanes::resize_focused`
+  (now returning whether it actually adjusted a divider) and `shell_layout::NudgeDir`; `shell_area`
+  gained a `size_adjust: (i32, i32)` parameter alongside its existing `offset`.
 
 ### Changed
 - `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.

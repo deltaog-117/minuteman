@@ -247,6 +247,36 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   paused on the real conflict prompt for the second, and — after pressing `s` — left the
   conflicting source file physically untouched (not moved, destination not overwritten) while
   still finishing the batch and clearing marks/clipboard state correctly at the end.
+- ✅ **Keyboard resize/move for shell panes, i3-style** – `space` (`Action::Leader`, previously
+  inert) now starts a chord whenever a shell pane is open: `r` enters a resize mode where
+  `hjkl`/arrows nudge the focused pane's nearest ancestor divider by 5% per press
+  (`shell_layout::ShellPanes::resize_focused`, walking up the tree for the first `Split` whose
+  axis matches the pressed direction and growing/shrinking the focused pane's share regardless of
+  which side of that split it's actually on), and `m` enters a move mode where the same keys nudge
+  the whole box's offset by 2 cells per press — the keyboard equivalent of the existing
+  mouse-drag-the-divider and drag-the-title-bar interactions, not a new capability. When there's
+  no divider along the pressed axis to adjust — a lone pane, or a tree only ever split the other
+  way, e.g. only stacked (`"`) panes when `h`/`l` is pressed — resize mode falls back to growing or
+  shrinking the box's own width/height instead (`resize_focused` now returns whether it actually
+  found a divider, so `apply_shell_chord` knows when to fall back), via a new `size_adjust: (i32,
+  i32)` parameter on `shell_area` alongside its existing `offset`. `Esc` leaves either mode; any
+  other key leaves it too but still gets dispatched normally afterward (e.g. `q` still quits from
+  inside the chord) rather than being silently swallowed. Deliberately **not** a modifier chord
+  (e.g. `Alt+hjkl`): `KeyMap::resolve` has no modifier awareness at all today, and Alt-prefixed
+  hjkl is real, commonly-configured `tmux`/`vim-tmux-navigator` pane-navigation input that a shell
+  running *inside* one of these panes could legitimately be using — this needed to cost nothing
+  from the pty's own keyspace, which a `space`-prefixed chord dispatched entirely at the app layer
+  accomplishes for free. The chord's own `r`/`m`/`hjkl` keys are hardcoded rather than
+  user-configurable, the same precedent already set by the shell-pane `Esc` handling. Verified
+  against the real compiled binary via scripted PTY sessions (reconstructed through `pyte`):
+  confirmed a space typed while a real shell had focus still landed in it unchanged (proving the
+  chord can't steal input from a focused pty), `space r` plus three `l` presses moved the shared
+  divider between two horizontally split panes measurably left without moving the box itself,
+  `space m` plus `lll`/`jj` moved the whole box by exactly 6 columns and 4 rows (3×2 and 2×2, the
+  configured step), pressing `q` while still inside an active chord (no `Esc` first) both left the
+  mode and quit the app, and — separately — a lone unsplit pane and a vertically-split (`"`) pane
+  each grew the box's own width by exactly 6 columns (3×2) on `space r` plus three `l` presses,
+  confirming the fallback triggers exactly when there's no horizontal divider to adjust instead.
 
 ---
 
@@ -299,11 +329,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui` — mark two or three entries with `v` (include a directory), `y` to yank the
-   whole batch (or `m` to cut it), navigate elsewhere, `p` to paste — watch the status line's
-   `[i/N]` hint step through the batch; try it again into a directory with a conflicting name to
-   see the batch pause on the overwrite/skip/abort prompt and resume afterward.
-2. `cargo test --workspace` (74 tests) to verify everything still passes.
+1. `cargo run -p tui` — press `s` to open a shell, `%` to split it, `tab` to unfocus (so the
+   chord's keys can't collide with the real shell's own input), then `space r` and `hjkl` to
+   resize the focused pane's divider (or the box itself, if there's no divider along that axis),
+   or `space m` and `hjkl` to move the whole box; `Esc` leaves either mode.
+2. `cargo test --workspace` (82 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
    (directory bookmarks — distinct from the file marks added earlier) are the remaining

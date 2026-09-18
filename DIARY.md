@@ -1178,6 +1178,141 @@ conflict, rather than ending the whole operation the way a single-item skip alwa
 
 ---
 
+### Shell Pane Resize/Move Keybinding: `space`-Prefixed Chord on the Leader Key, Not a Modifier
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+Requested: let shell panes be resized and moved from the keyboard as well as the mouse, i3-style,
+in a way quick enough to reach for "on a moment's notice." Until this cycle, `ShellPanes::set_ratio`
+(divider resize) and the box's `(dx, dy)` offset (whole-box move) were only reachable by dragging
+with the mouse.
+
+#### Options Considered
+
+**Option A: Always-live `Alt+hjkl`, no mode** *(rejected)*
+- The most literally "instant" option — every keypress acts immediately, no mode to enter or
+  leave. Rejected for two concrete reasons surfaced while scoping it: `KeyMap::resolve` takes a
+  bare `KeyCode` with no modifier awareness at all today, so this needed new plumbing regardless
+  of which modifier was picked; and `Alt`-prefixed `hjkl` specifically is real, commonly-configured
+  `tmux`/`vim-tmux-navigator` pane-navigation input — exactly the kind of thing a real shell
+  running *inside* one of these panes could legitimately have bound, and intercepting it at the
+  app layer would silently steal it. This is the same shape of problem the Movable/Detachable
+  Popup Shell entry's rejected Option B already ran into with `Alt+hjkl` for moving a single popup,
+  now recurring for tiled panes.
+- Note: that same entry's Option C — building on the `Leader` key for a chord — was *also*
+  rejected at the time, but for a different, now-superseded reason: "more new surface than this
+  feature strictly needs," when there was nothing yet a chord needed to invoke.
+
+**Option B: A dedicated i3-style modal resize/move with real pane reordering** *(rejected)*
+- Adds explicit resize/move modes plus actual tree-surgery to swap a focused leaf with a neighbor,
+  matching i3's own semantics most closely. Rejected as reopening scope this project already
+  closed deliberately: the Multi-Shell Layout Model entry's own note that "drag-to-reorder/swap
+  panes" is "real tree-surgery complexity for a rarely-used interaction even in mature tiling
+  multiplexers." Nothing about this request asked for pane reordering specifically — only resize
+  and move — so taking on that complexity here would be solving a problem nobody raised.
+
+**Option C: `space`-prefixed chord (`space r`/`space m`, then `hjkl`), reusing `Action::Leader`**
+*(chosen)*
+- Gives the previously-inert `Leader` key (see that entry above) its first real use. Since the
+  chord is dispatched entirely at the app layer — the same tier `Esc`/`Tab`/`%`/`"`/`o` already
+  preempt pty-forwarding at — it costs nothing from the shell's own keyspace: no modifier is ever
+  claimed, so nothing a real shell might bind is ever shadowed. The one thing to get right is
+  *where* it's reachable: `Action::Leader` (space) already only resolves in the same top-level
+  dispatch match a literal typed space in a focused shell never reaches (a focused pane's `space`
+  keypress forwards as a raw byte before that match ever runs), so entering the chord can never
+  compete with typing an ordinary command with arguments into a live shell.
+
+#### Decision & Rationale
+
+Chose C. `Action::Leader` now sets a one-shot `pending_leader` flag when a shell pane is open
+(still fully inert with none open, preserving the original entry's guarantee for that case); the
+very next keypress — `r` or `m`, hardcoded rather than routed through `KeyMap::resolve` like the
+existing `Esc`-to-close precedent — opens a `ShellChordMode::Resize` or `::Move`. While a chord is
+active, `hjkl`/arrows are intercepted specially: `Resize` calls the new
+`ShellPanes::resize_focused`, which walks up the pane tree from the focused leaf to the nearest
+ancestor `Split` whose axis matches the pressed direction, then nudges that split's ratio by 5% in
+whichever sign grows or shrinks the focused pane — regardless of which side of that split it's
+actually on, so the key's direction always matches what visibly happens to the pane being looked
+at, not an implementation detail of the tree's shape. `Move` just nudges the existing `(dx, dy)`
+box offset by 2 cells per press, the exact same state the mouse-drag-the-title-bar interaction
+already mutates — no new geometry logic needed there at all. `Esc` leaves either mode outright;
+any other key also leaves it, but — unlike `Esc` — is *not* swallowed: it still gets dispatched
+normally afterward, so e.g. pressing `q` while still inside a chord both exits the mode and quits
+the app, rather than being silently eaten by it. This deliberately still does not add pane
+reordering (Option B, still out of scope) — only resize and move, matching what was actually
+requested.
+
+#### Implementation Notes
+
+- New `shell_layout::NudgeDir` (`Left`/`Down`/`Up`/`Right`) and a private `nearest_ancestor_split`
+  search mirror the existing `dividers`/`focus_at`/`close_id` shape: generic over the leaf payload,
+  unit-tested without spawning a real shell. Its one subtlety is that "found the leaf, but no
+  ancestor of the requested axis exists yet" (`AncestorSearch::Located`) has to keep bubbling
+  upward past non-matching splits rather than terminating — a plain `Option` can't distinguish
+  that from "the leaf isn't in this subtree at all," which is why it's its own three-variant enum.
+- `ShellChordMode`, `pending_leader`, and `apply_shell_chord` all live as local state in
+  `main.rs::run`, next to `dragging_divider`/`dragging_shell`/`shell_offset` — the same
+  precedent the Movable/Detachable Popup Shell entry set for keeping shell-overlay UI state out of
+  `App`/`shell_overlay` and local to the event loop that actually owns the keystrokes.
+- A pane can exit on its own (typing `exit` into it) between keystrokes; `run` now clears
+  `pending_leader`/`shell_chord` whenever `shells` becomes `None` so a chord can never dangle with
+  nothing left for it to act on.
+
+#### Verification
+
+Confirmed against the real compiled binary via a scripted PTY session reconstructed through
+`pyte`, answering the startup Device Status Report probe per this project's established fix (see
+the Image Preview Concurrency and Movable/Detachable Popup Shell entries): a command containing
+spaces (`printf 'a b c\n'`) typed while a real shell had focus landed unchanged, proving the chord
+can never steal input from a focused pty; opening a shell, splitting it, and unfocusing it, then
+`space r` plus three `l` presses moved the shared divider between the two panes measurably left
+(from column 49 to 37 at a fixed 100×40 terminal size) without moving the box's own top-left
+corner; `space m` plus `lll`/`jj` moved the box's top-left corner by exactly 6 columns and 4 rows
+(3×2 and 2×2 — the configured per-press step); and pressing `q` while still inside an active move
+chord, with no `Esc` first, both left the mode and actually quit the process, confirming the
+fallthrough dispatch rather than a swallowed keystroke. Also re-confirmed the pre-existing,
+unrelated `o`-is-`ShellPaneNext`-before-pty-forwarding behavior while writing the harness (typing
+`echo` into a focused shell drops every `o`) — a real but out-of-scope limitation for this cycle,
+noted here rather than fixed, per this project's iteration rules against unrelated scope creep.
+
+#### Follow-up: Resize Falls Back to the Box's Own Size When There's No Divider to Adjust
+
+Reported from real usage, same cycle, before the commit above had even been made: with panes only
+ever split one way (e.g. stacked via `"`, a height divider only), `h`/`l` in resize mode did
+nothing at all — correctly, by the original design (there's no horizontal-axis ancestor split to
+adjust), but indistinguishable from broken to someone who hadn't split in that direction and just
+wanted "resize" to always do *something* sensible. Explicitly requested as a follow-up: "make it
+possible to resize horizontally, also."
+
+`ShellPanes::resize_focused` changed its return type from `anyhow::Result<()>` to
+`anyhow::Result<bool>` — `true` when it actually found and adjusted a matching-axis divider,
+`false` when there wasn't one. `shell_area` gained a second adjustment parameter, `size_adjust:
+(i32, i32)` (a `(dw, dh)` nudge in cells from the default 80%/70%, alongside the existing `offset`
+`(dx, dy)`), clamped the same "never itself clamped at the accumulator, only where it's consumed"
+way `offset` already is — extreme values just saturate against `MIN_SHELL_BOX_WIDTH`/`HEIGHT` on
+the small end and the full browser area on the large end, via `.clamp` on an intermediate `i32`
+(explicitly not the original two-step `.max().min()` u16 chain, which would panic on a browser
+area narrower than the stated minimum — a real, if narrow, difference worth keeping in mind next
+time a `.clamp` gets introduced near a cast to a smaller unsigned type). `apply_shell_chord` now
+tries `resize_focused` first when in resize mode; only when that reports `false` does it fall back
+to nudging `shell_size` (a new piece of `run`-local state, reset to `(0, 0)` on every fresh `s`
+spawn alongside `shell_offset`) by `SHELL_BOX_RESIZE_STEP` and re-`resize`-ing the pty tree against
+the now-different box rect — unlike the move chord, this path *does* need that resize call, since
+the box's own dimensions (not just its position) just changed.
+
+**Verification:** confirmed against the real compiled binary via a scripted PTY session
+(reconstructed through `pyte`, same fixes as above): a single unsplit pane and a vertically-split
+(`"`) pane each grew the box's actual width (right border column minus left border column, not
+just the raw right-border column, since growing re-centers and moves *both* edges) by exactly 6
+columns on `space r` plus three `l` presses — confirming the fallback fires exactly when expected
+and re-confirming (via the unchanged `verify_chord.py` re-run) that a horizontally-split pane's
+divider resize was untouched by this change.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

@@ -26,6 +26,18 @@
 //! `focus_at`, `leaf_ids`) is generic over the leaf payload so it can be unit-tested without
 //! spawning real shells; `ShellPanes` specializes it to `PopupShell` and owns everything that
 //! actually touches a pty (spawning, resizing, rendering, reaping exited shells).
+//!
+//! `resize_focused` adds a keyboard-driven equivalent of dragging a divider: it walks up from the
+//! focused leaf to the nearest ancestor `Split` whose axis matches the requested `NudgeDir`, then
+//! nudges that split's ratio in the direction that grows or shrinks the focused pane — i3's
+//! resize-mode semantics, without adding a way to reorder panes in the tree (still out of scope,
+//! per the note above). It reports whether it actually found a divider to adjust, so `tui::main`
+//! can fall back to resizing the box itself (see `shell_area`'s `size_adjust`) when there isn't
+//! one — a lone pane, or a tree only ever split along the other axis.
+//!
+//! `toggle_focused_orientation` flips a split's direction in place (side-by-side <-> stacked)
+//! without touching which panes are on which side or their ratio — still not pane reordering,
+//! just how the same two panes are arranged.
 
 use std::io;
 use std::path::Path;
@@ -220,6 +232,126 @@ fn set_ratio_in<T>(tree: &mut Tree<T>, id: usize, ratio: f32) -> bool {
         }
     }
 }
+
+/// The id of the `Split` whose *immediate* child (either side) is `target` — not any ancestor
+/// further up, unlike `nearest_ancestor_split`, since there's no axis to match here.
+fn parent_split_id<T>(tree: &Tree<T>, target: usize) -> Option<usize> {
+    match &tree.node {
+        Node::Leaf(_) => None,
+        Node::Split { first, second, .. } => {
+            if first.id == target || second.id == target {
+                Some(tree.id)
+            } else {
+                parent_split_id(first, target).or_else(|| parent_split_id(second, target))
+            }
+        }
+    }
+}
+
+/// Flips the `Split` node `id`'s direction (`Horizontal` <-> `Vertical`) in place — the two
+/// children and their ratio are untouched, so this only ever changes *how* they're arranged
+/// (side by side vs. stacked), never *which* panes they are or their relative share. Mirrors
+/// `set_ratio_in`'s search-and-mutate shape.
+fn flip_direction_in<T>(tree: &mut Tree<T>, id: usize) -> bool {
+    if tree.id == id {
+        if let Node::Split { direction, .. } = &mut tree.node {
+            *direction = match *direction {
+                SplitDirection::Horizontal => SplitDirection::Vertical,
+                SplitDirection::Vertical => SplitDirection::Horizontal,
+            };
+            return true;
+        }
+        return false;
+    }
+    match &mut tree.node {
+        Node::Leaf(_) => false,
+        Node::Split { first, second, .. } => {
+            flip_direction_in(first, id) || flip_direction_in(second, id)
+        }
+    }
+}
+
+fn ratio_of<T>(tree: &Tree<T>, id: usize) -> Option<f32> {
+    match &tree.node {
+        Node::Leaf(_) => None,
+        Node::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            if tree.id == id {
+                Some(*ratio)
+            } else {
+                ratio_of(first, id).or_else(|| ratio_of(second, id))
+            }
+        }
+    }
+}
+
+/// A cardinal keyboard direction for a resize/move chord — see `ShellPanes::resize_focused`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgeDir {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
+/// Outcome of walking up from a leaf looking for the nearest ancestor `Split` along a given
+/// axis — see `nearest_ancestor_split`.
+enum AncestorSearch {
+    /// The target leaf isn't in this subtree at all.
+    NotFound,
+    /// The target leaf was found, but nothing between it and here matches the requested axis —
+    /// still bubbling up looking for one.
+    Located,
+    /// The nearest matching-axis ancestor: its split id, and whether the target sits under its
+    /// `first` child (as opposed to `second`).
+    Found(usize, bool),
+}
+
+/// Walks up from `target` to the nearest ancestor `Split` whose direction is `axis`, tracking
+/// which side of it `target` is on. Mirrors `dividers`' recursion shape but needs the extra
+/// "still looking" state (`Located`) since a matching split isn't necessarily the target's
+/// immediate parent — it's the first one found while unwinding.
+fn nearest_ancestor_split<T>(tree: &Tree<T>, target: usize, axis: SplitDirection) -> AncestorSearch {
+    match &tree.node {
+        Node::Leaf(_) => {
+            if tree.id == target {
+                AncestorSearch::Located
+            } else {
+                AncestorSearch::NotFound
+            }
+        }
+        Node::Split {
+            direction,
+            first,
+            second,
+            ..
+        } => {
+            let side = match nearest_ancestor_split(first, target, axis) {
+                found @ AncestorSearch::Found(..) => return found,
+                AncestorSearch::Located => true,
+                AncestorSearch::NotFound => match nearest_ancestor_split(second, target, axis) {
+                    found @ AncestorSearch::Found(..) => return found,
+                    AncestorSearch::Located => false,
+                    AncestorSearch::NotFound => return AncestorSearch::NotFound,
+                },
+            };
+            if *direction == axis {
+                AncestorSearch::Found(tree.id, side)
+            } else {
+                AncestorSearch::Located
+            }
+        }
+    }
+}
+
+/// The ratio step a single resize-chord keypress moves — 5%, the same minimum slice
+/// `Divider::ratio_at` already clamps a mouse drag to, so a few presses can still reach either
+/// edge.
+const RESIZE_STEP: f32 = 0.05;
 
 enum CloseResult<T> {
     /// `target` isn't in this subtree — hands the (unmodified) subtree back so the caller can
@@ -502,6 +634,49 @@ impl ShellPanes {
             self.resize(area)?;
         }
         Ok(())
+    }
+
+    /// Flips the orientation (side-by-side <-> stacked) of the split the focused pane is
+    /// immediately part of, keeping the same two panes and their ratio — only how they're
+    /// arranged changes. Returns whether there was a split to flip at all; `false` for a lone
+    /// pane with no parent split.
+    pub fn toggle_focused_orientation(&mut self, area: Rect) -> anyhow::Result<bool> {
+        if let Some(split_id) = parent_split_id(&self.root, self.focused) {
+            if flip_direction_in(&mut self.root, split_id) {
+                self.resize(area)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The keyboard equivalent of dragging a divider: nudges the nearest ancestor split along
+    /// `dir`'s axis by `RESIZE_STEP`, growing the focused pane for `Right`/`Down` and shrinking
+    /// it for `Left`/`Up` — regardless of which side of that split the focused pane is actually
+    /// on, so the key's direction always matches what visibly happens to the pane you're looking
+    /// at. Returns whether a divider was actually found and adjusted; `false` (e.g. `Left`/`Right`
+    /// on a lone pane, or one only ever split vertically) tells the caller there was nothing to
+    /// resize along that axis, so it can fall back to resizing the box itself instead.
+    pub fn resize_focused(&mut self, dir: NudgeDir, area: Rect) -> anyhow::Result<bool> {
+        let (axis, grow) = match dir {
+            NudgeDir::Left => (SplitDirection::Horizontal, false),
+            NudgeDir::Right => (SplitDirection::Horizontal, true),
+            NudgeDir::Up => (SplitDirection::Vertical, false),
+            NudgeDir::Down => (SplitDirection::Vertical, true),
+        };
+        if let AncestorSearch::Found(split_id, is_first) =
+            nearest_ancestor_split(&self.root, self.focused, axis)
+        {
+            // The focused pane's share is `ratio` when it's `first`, `1.0 - ratio` otherwise —
+            // growing it means moving `ratio` in the matching direction for each case.
+            let sign = if is_first == grow { 1.0 } else { -1.0 };
+            if let Some(current) = ratio_of(&self.root, split_id) {
+                let new_ratio = (current + sign * RESIZE_STEP).clamp(0.05, 0.95);
+                self.set_ratio(split_id, new_ratio, area)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Focuses whichever pane's rect (against `area`) contains `(col, row)`. Returns whether a
@@ -820,6 +995,200 @@ mod tests {
 
         let id = panes.focused_id();
         assert!(panes.close(id, area).unwrap().is_none());
+    }
+
+    #[test]
+    fn nearest_ancestor_split_finds_the_immediate_parent() {
+        let tree = split(
+            0,
+            SplitDirection::Horizontal,
+            0.5,
+            leaf(1, "a"),
+            leaf(2, "b"),
+        );
+        match nearest_ancestor_split(&tree, 1, SplitDirection::Horizontal) {
+            AncestorSearch::Found(id, is_first) => {
+                assert_eq!(id, 0);
+                assert!(is_first);
+            }
+            _ => panic!("expected Found"),
+        }
+        match nearest_ancestor_split(&tree, 2, SplitDirection::Horizontal) {
+            AncestorSearch::Found(id, is_first) => {
+                assert_eq!(id, 0);
+                assert!(!is_first);
+            }
+            _ => panic!("expected Found"),
+        }
+    }
+
+    #[test]
+    fn nearest_ancestor_split_skips_a_non_matching_axis_to_find_the_grandparent() {
+        // `1` sits directly under a Vertical split, but the nearest Horizontal one is the root.
+        let tree = split(
+            0,
+            SplitDirection::Horizontal,
+            0.5,
+            split(2, SplitDirection::Vertical, 0.5, leaf(1, "a"), leaf(3, "b")),
+            leaf(4, "c"),
+        );
+        match nearest_ancestor_split(&tree, 1, SplitDirection::Horizontal) {
+            AncestorSearch::Found(id, is_first) => {
+                assert_eq!(id, 0);
+                assert!(is_first);
+            }
+            _ => panic!("expected Found"),
+        }
+        match nearest_ancestor_split(&tree, 1, SplitDirection::Vertical) {
+            AncestorSearch::Found(id, is_first) => {
+                assert_eq!(id, 2);
+                assert!(is_first);
+            }
+            _ => panic!("expected Found"),
+        }
+    }
+
+    #[test]
+    fn nearest_ancestor_split_returns_located_when_no_axis_matches() {
+        // The tree only ever splits horizontally, so a vertical ancestor doesn't exist — the
+        // leaf itself is still found, just with nothing matching to report.
+        let tree = split(
+            0,
+            SplitDirection::Horizontal,
+            0.5,
+            leaf(1, "a"),
+            leaf(2, "b"),
+        );
+        assert!(matches!(
+            nearest_ancestor_split(&tree, 1, SplitDirection::Vertical),
+            AncestorSearch::Located
+        ));
+    }
+
+    #[test]
+    fn nearest_ancestor_split_returns_not_found_for_an_unknown_leaf() {
+        let tree = leaf(0, "only");
+        assert!(matches!(
+            nearest_ancestor_split(&tree, 99, SplitDirection::Horizontal),
+            AncestorSearch::NotFound
+        ));
+    }
+
+    #[test]
+    fn resize_focused_grows_the_focused_pane_regardless_of_which_side_it_is_on() {
+        let area = Rect::new(0, 0, 100, 40);
+        // The new (right-hand, `second`) pane is focused after a split.
+        let mut panes = ShellPanes::open(&std::env::temp_dir(), area)
+            .unwrap()
+            .split(SplitDirection::Horizontal, &std::env::temp_dir(), area)
+            .unwrap();
+        let before = ratio_of(&panes.root, 2).unwrap();
+        assert!(panes.resize_focused(NudgeDir::Right, area).unwrap());
+        let after = ratio_of(&panes.root, 2).unwrap();
+        // Growing the focused (second) pane shrinks `ratio`, which is `first`'s share.
+        assert!(after < before);
+
+        assert!(panes.resize_focused(NudgeDir::Left, area).unwrap());
+        let restored = ratio_of(&panes.root, 2).unwrap();
+        assert!((restored - before).abs() < 0.001);
+    }
+
+    #[test]
+    fn resize_focused_on_a_lone_pane_reports_no_divider_to_adjust() {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut panes = ShellPanes::open(&std::env::temp_dir(), area).unwrap();
+        // No ancestor split exists at all — must not panic, and the caller needs to know nothing
+        // happened so it can fall back to resizing the box itself.
+        assert!(!panes.resize_focused(NudgeDir::Right, area).unwrap());
+        assert!(!panes.resize_focused(NudgeDir::Down, area).unwrap());
+    }
+
+    #[test]
+    fn parent_split_id_finds_the_immediate_parent_only() {
+        let tree = split(
+            0,
+            SplitDirection::Horizontal,
+            0.5,
+            leaf(1, "a"),
+            split(2, SplitDirection::Vertical, 0.5, leaf(3, "b"), leaf(4, "c")),
+        );
+        assert_eq!(parent_split_id(&tree, 1), Some(0));
+        assert_eq!(parent_split_id(&tree, 3), Some(2));
+        assert_eq!(parent_split_id(&tree, 4), Some(2));
+        // `0` is the root split itself, not a leaf — it has no parent.
+        assert_eq!(parent_split_id(&tree, 0), None);
+        assert_eq!(parent_split_id(&tree, 99), None);
+    }
+
+    #[test]
+    fn flip_direction_in_toggles_only_the_named_split() {
+        let mut tree = split(
+            0,
+            SplitDirection::Horizontal,
+            0.5,
+            leaf(1, "a"),
+            split(2, SplitDirection::Vertical, 0.5, leaf(3, "b"), leaf(4, "c")),
+        );
+        assert!(flip_direction_in(&mut tree, 2));
+        let Node::Split { direction, .. } = tree.node else {
+            unreachable!()
+        };
+        assert_eq!(direction, SplitDirection::Horizontal);
+        let Node::Split {
+            first: _,
+            second,
+            direction: inner_direction,
+            ..
+        } = (match &tree.node {
+            _ => unreachable!(),
+        })
+        else {
+            unreachable!()
+        };
+        let _ = (second, inner_direction);
+    }
+
+    #[test]
+    fn toggle_focused_orientation_flips_the_parent_split_and_keeps_the_same_panes() {
+        let area = Rect::new(0, 0, 100, 40);
+        // Focused (`second`) pane is side by side with the first after a horizontal split.
+        let mut panes = ShellPanes::open(&std::env::temp_dir(), area)
+            .unwrap()
+            .split(SplitDirection::Horizontal, &std::env::temp_dir(), area)
+            .unwrap();
+        let focused_before = panes.focused_id();
+        let mut ids_before = Vec::new();
+        leaf_ids(&panes.root, &mut ids_before);
+
+        assert!(panes.toggle_focused_orientation(area).unwrap());
+
+        let mut ids_after = Vec::new();
+        leaf_ids(&panes.root, &mut ids_after);
+        assert_eq!(ids_before, ids_after, "toggling must not reorder or replace panes");
+        assert_eq!(panes.focused_id(), focused_before, "focus must not change");
+
+        // The two panes now stack vertically instead of sitting side by side: their rects should
+        // share the same x/width and differ in y, the opposite of the pre-toggle layout.
+        let a = shell_rect_of(&panes, area, ids_after[0]);
+        let b = shell_rect_of(&panes, area, ids_after[1]);
+        assert_eq!(a.x, b.x);
+        assert_eq!(a.width, b.width);
+        assert_ne!(a.y, b.y);
+
+        // Toggling again restores the original side-by-side layout.
+        assert!(panes.toggle_focused_orientation(area).unwrap());
+        let a = shell_rect_of(&panes, area, ids_after[0]);
+        let b = shell_rect_of(&panes, area, ids_after[1]);
+        assert_eq!(a.y, b.y);
+        assert_eq!(a.height, b.height);
+        assert_ne!(a.x, b.x);
+    }
+
+    #[test]
+    fn toggle_focused_orientation_on_a_lone_pane_is_a_no_op() {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut panes = ShellPanes::open(&std::env::temp_dir(), area).unwrap();
+        assert!(!panes.toggle_focused_orientation(area).unwrap());
     }
 
     #[test]
