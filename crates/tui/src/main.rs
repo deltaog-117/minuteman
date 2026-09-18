@@ -67,13 +67,14 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// The region shell panes render into and size their ptys against: a centered box — 80% of the
-/// frame's width, 70% of its height (clamped so it never exceeds the space available above the
-/// status bar) — rather than the full browser area, so the browser stays visible around it just
-/// like the old single popup did. Panes still split/tile normally, just within this smaller box
-/// instead of across the whole screen. `draw` calls this same function for rendering, so a pane's
-/// pty size can never drift from its actual rendered rect.
-fn shell_area(frame_area: Rect) -> Rect {
+/// The region shell panes render into and size their ptys against: an 80%-width/70%-height box
+/// (clamped so it never exceeds the space available above the status bar), centered plus `offset`
+/// — a `(dx, dy)` nudge in cells, applied and then clamped so the box can never be dragged off
+/// screen — rather than the full browser area, so the browser stays visible around it just like
+/// the old single popup did. Panes still split/tile normally, just within this smaller box instead
+/// of across the whole screen. `draw` calls this same function for rendering, so a pane's pty size
+/// can never drift from its actual rendered rect.
+fn shell_area(frame_area: Rect, offset: (i32, i32)) -> Rect {
     let browser_area = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -85,9 +86,26 @@ fn shell_area(frame_area: Rect) -> Rect {
     let height = (browser_area.height.saturating_mul(7) / 10)
         .max(6)
         .min(browser_area.height);
-    let x = browser_area.x + (browser_area.width.saturating_sub(width)) / 2;
-    let y = browser_area.y + (browser_area.height.saturating_sub(height)) / 2;
-    Rect::new(x, y, width, height)
+
+    let min_x = browser_area.x as i32;
+    let max_x = (browser_area.x + browser_area.width).saturating_sub(width) as i32;
+    let centered_x = browser_area.x as i32 + (browser_area.width as i32 - width as i32) / 2;
+    let x = (centered_x + offset.0).clamp(min_x, max_x.max(min_x));
+
+    let min_y = browser_area.y as i32;
+    let max_y = (browser_area.y + browser_area.height).saturating_sub(height) as i32;
+    let centered_y = browser_area.y as i32 + (browser_area.height as i32 - height as i32) / 2;
+    let y = (centered_y + offset.1).clamp(min_y, max_y.max(min_y));
+
+    Rect::new(x as u16, y as u16, width, height)
+}
+
+/// The tiled shell panes plus the box's current offset from centered (see `shell_area`),
+/// bundled together since `draw` only ever needs both or neither — keeps its own argument list
+/// from growing every time the shell overlay gains one more piece of state.
+struct ShellView<'a> {
+    panes: &'a ShellPanes,
+    offset: (i32, i32),
 }
 
 /// The image and text preview pipelines, bundled together since every call site drives both in
@@ -166,13 +184,21 @@ fn run(
     // The divider (by id) currently being dragged, from a mouse-down that hit one. `None` means
     // no drag is in progress.
     let mut dragging_divider: Option<usize> = None;
+    // The box's `(dx, dy)` offset from centered, in cells — dragging its top border (where the
+    // "shell" title renders) moves the whole tiled box like a floating window's title bar,
+    // distinct from dragging a divider between two panes inside it. Resets to `(0, 0)` on every
+    // new `s` spawn.
+    let mut shell_offset: (i32, i32) = (0, 0);
+    // The mouse position `(col, row)` last seen while dragging the box's title bar, to compute
+    // the next frame's delta. `None` means no such drag is in progress.
+    let mut dragging_shell: Option<(u16, u16)> = None;
 
     loop {
         app.poll_bulk(browser, vfs)?;
         previews.update(browser.selected_entry().map(|e| e.path.as_path()));
 
         if let Some(mut panes) = shells.take() {
-            let area = shell_area(terminal.size()?.into());
+            let area = shell_area(terminal.size()?.into(), shell_offset);
             let exited = panes.poll_exits()?;
             let mut current = Some(panes);
             for (id, outcome) in exited {
@@ -187,7 +213,20 @@ fn run(
             shells = current;
         }
 
-        terminal.draw(|frame| draw(frame, browser, app, previews, vfs, config, shells.as_ref()))?;
+        terminal.draw(|frame| {
+            draw(
+                frame,
+                browser,
+                app,
+                previews,
+                vfs,
+                config,
+                shells.as_ref().map(|panes| ShellView {
+                    panes,
+                    offset: shell_offset,
+                }),
+            )
+        })?;
 
         // While a shell pane is open, poll faster so its output (e.g. a redrawing `vim` or `top`)
         // feels responsive rather than updating in 100ms steps.
@@ -203,14 +242,14 @@ fn run(
         match event::read()? {
             Event::Resize(cols, rows) => {
                 if let Some(panes) = shells.as_ref() {
-                    panes.resize(shell_area(Rect::new(0, 0, cols, rows)))?;
+                    panes.resize(shell_area(Rect::new(0, 0, cols, rows), shell_offset))?;
                 }
             }
             Event::Mouse(mouse) => {
                 let Some(panes) = shells.as_mut() else {
                     continue;
                 };
-                let area = shell_area(terminal.size()?.into());
+                let area = shell_area(terminal.size()?.into(), shell_offset);
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(divider) = panes
@@ -219,6 +258,16 @@ fn run(
                             .find(|d| d.hit(mouse.column, mouse.row))
                         {
                             dragging_divider = Some(divider.id());
+                        } else if mouse.row == area.y
+                            && mouse.column >= area.x
+                            && mouse.column < area.x + area.width
+                        {
+                            // The box's top border (where the "shell" title renders) — grabbing
+                            // it moves the whole box, like a floating window's title bar.
+                            dragging_shell = Some((mouse.column, mouse.row));
+                            if panes.focus_at(area, mouse.column, mouse.row) {
+                                shell_focused = true;
+                            }
                         } else if panes.focus_at(area, mouse.column, mouse.row) {
                             shell_focused = true;
                         }
@@ -233,10 +282,15 @@ fn run(
                             if let Some(ratio) = ratio {
                                 panes.set_ratio(id, ratio, area)?;
                             }
+                        } else if let Some((last_col, last_row)) = dragging_shell {
+                            shell_offset.0 += mouse.column as i32 - last_col as i32;
+                            shell_offset.1 += mouse.row as i32 - last_row as i32;
+                            dragging_shell = Some((mouse.column, mouse.row));
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         dragging_divider = None;
+                        dragging_shell = None;
                     }
                     _ => {}
                 }
@@ -247,7 +301,7 @@ fn run(
                 }
 
                 if shells.is_some() {
-                    let area = shell_area(terminal.size()?.into());
+                    let area = shell_area(terminal.size()?.into(), shell_offset);
                     if shell_focused {
                         if key.code == KeyCode::Esc {
                             let panes = shells.take().expect("`shells.is_some()` checked above");
@@ -345,7 +399,10 @@ fn run(
                     // tree here would silently drop the running one without closing it. Use a
                     // split instead once a shell is already open.
                     Some(Action::Shell) if shells.is_none() => {
-                        let area = shell_area(terminal.size()?.into());
+                        // Every fresh spawn starts centered, same as before the box was made
+                        // draggable.
+                        shell_offset = (0, 0);
+                        let area = shell_area(terminal.size()?.into(), shell_offset);
                         match ShellPanes::open(browser.current_dir(), area) {
                             Ok(panes) => {
                                 shells = Some(panes);
@@ -369,7 +426,7 @@ fn draw(
     previews: &mut Previews,
     vfs: &LocalVfs,
     config: &Config,
-    shells: Option<&ShellPanes>,
+    shell: Option<ShellView<'_>>,
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -500,10 +557,10 @@ fn draw(
         rows[1],
     );
 
-    // Drawn last, over the browser columns above — the tiled shell panes, centered in a box that
-    // never covers the status bar (see `shell_area`).
-    if let Some(panes) = shells {
-        panes.render(frame, shell_area(frame.area()), config);
+    // Drawn last, over the browser columns above — the tiled shell panes, in a box that never
+    // covers the status bar and can be dragged off-center by its title bar (see `shell_area`).
+    if let Some(ShellView { panes, offset }) = shell {
+        panes.render(frame, shell_area(frame.area(), offset), config);
     }
 }
 
@@ -553,5 +610,40 @@ fn color_from_name(name: &str) -> Color {
         "white" => Color::White,
         "gray" | "grey" => Color::Gray,
         _ => Color::Reset,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_area_centers_with_zero_offset() {
+        let area = shell_area(Rect::new(0, 0, 100, 40), (0, 0));
+        // 80% width, 70% height of the 39-row browser area (40 minus the 1-row status bar).
+        assert_eq!(area, Rect::new(10, 6, 80, 27));
+    }
+
+    #[test]
+    fn shell_area_applies_a_positive_offset() {
+        let centered = shell_area(Rect::new(0, 0, 100, 40), (0, 0));
+        let moved = shell_area(Rect::new(0, 0, 100, 40), (5, 3));
+        assert_eq!(moved.x, centered.x + 5);
+        assert_eq!(moved.y, centered.y + 3);
+        assert_eq!((moved.width, moved.height), (centered.width, centered.height));
+    }
+
+    #[test]
+    fn shell_area_clamps_offset_so_the_box_never_leaves_the_screen() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let browser_bottom = 39; // rows[0]'s bottom row, one above the status bar.
+
+        let far_right_down = shell_area(frame, (10_000, 10_000));
+        assert_eq!(far_right_down.x + far_right_down.width, 100);
+        assert_eq!(far_right_down.y + far_right_down.height, browser_bottom);
+
+        let far_left_up = shell_area(frame, (-10_000, -10_000));
+        assert_eq!(far_left_up.x, 0);
+        assert_eq!(far_left_up.y, 0);
     }
 }

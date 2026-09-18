@@ -31,6 +31,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-18 | Multi-Shell Layout Model | Tmux-style split-pane tree, not multiple floating popups or tabs (COA B) | ✅ Confirmed |
 | 2026-09-18 | Pane Mouse Interaction | Divider-drag-to-resize + click-to-focus; no drag-to-reposition or reorder (COA A) | ✅ Confirmed |
 | 2026-09-18 | Shell Pane Container Sizing | Centered 80%/70% box, not the full browser area | ✅ Confirmed |
+| 2026-09-18 | Shell Box Drag Mechanism | Drag the box's title bar by mouse, offset re-added to `shell_area` (COA A) | ✅ Confirmed |
 
 ---
 
@@ -997,6 +998,73 @@ risk entirely.
 (same divider-drag/focus-cycling/close assertions, all still passing) and confirmed the shell
 box's top-left corner is now several rows/columns in from `(0, 0)` — the browser is visible around
 it — rather than starting flush with the frame's corner.
+
+---
+
+### Shell Box Drag Mechanism: Drag the Title Bar by Mouse, Offset Re-Added to `shell_area`
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+Requested right after the box was confined to a mini floating area: make that box itself movable,
+"like a window-tab" — i.e. grab it and drag it around the screen, the way a floating window's
+title bar works. This is a different thing from the pane-mouse-interaction decision earlier this
+cycle, which explicitly ruled out dragging *individual panes* (a pane's rect is derived from the
+split tree, not an independent position) — the box is the tree's container, not a member of it, so
+repositioning the whole box doesn't reintroduce that rejected idea.
+
+#### Options Considered
+
+**Option A: Drag the box's top border with the mouse** *(chosen)*
+- Grabbing the row where the "shell" title already renders and dragging moves the whole box.
+  Reuses the exact mouse-drag plumbing (`Down`/`Drag`/`Up` on `MouseButton::Left`, an accumulating
+  `(i32, i32)` state variable) that already shipped for divider-dragging one entry ago, and is the
+  literal match for "like a window-tab" — that's how a real window manager's floating windows move.
+- Only works with a mouse; a session with no mouse-reporting terminal has no path to move the box
+  this cycle.
+
+**Option B: Keyboard move-mode, resurrecting the pre-tiling `g` + `hjkl` design**
+- Would work with no mouse and matches the rest of the app's keyboard-first bindings, but a nudge-
+  by-key modal doesn't really read as "dragging a tab" — it's the mechanism the *pane*-mouse
+  decision already superseded once tiling landed, now being brought back only for the outer box.
+
+**Option C: Both A and B on one shared offset**
+- Most complete "real floating window" feel, but doubles the surface (two input paths, more tests)
+  for a single cycle. This project's own history ships one input modality per feature and adds the
+  other later if it's actually missed — keyboard splits/focus shipped a full cycle before mouse
+  divider-drag did.
+
+#### Decision & Rationale
+
+Chose **A**, keeping this cycle surgical the same way divider-drag and split-bindings were kept
+separate features rather than one combined "shell mouse+keyboard" cycle. `shell_area` gained an
+`offset: (i32, i32)` parameter — centered position plus offset, then clamped to the browser area
+(`min_x`/`max_x`/`min_y`/`max_y` derived from the same box-size math, `.max(min)` guarding against
+a degenerate case where the box is as large as the browser area itself) — so the box can never be
+dragged fully or partially off screen. `main.rs::run` gained `shell_offset` (the accumulated
+offset) and `dragging_shell` (the last mouse position seen mid-drag, `None` when no drag is in
+progress) alongside the existing `dragging_divider`. A mouse-down is checked against the divider
+hit-test first (unchanged priority from the previous cycle), then against the box's exact top row
+— `mouse.row == area.y` — before falling through to pane click-to-focus, so a divider that happens
+to touch the top edge still wins the ambiguity the same way it always has. `shell_offset` resets to
+`(0, 0)` on every fresh `s` spawn, matching the pre-tiling popup's own "starts centered" behavior.
+`draw`'s growing argument list (already at the clippy-flagged edge) got a new `ShellView<'a>`
+struct (`panes: &'a ShellPanes`, `offset: (i32, i32)`) bundling the pane tree with its offset,
+mirroring how `Previews` already bundles the image/text preview pipelines — `draw` takes one
+`Option<ShellView<'_>>` instead of two separate parameters that always travel together.
+
+**Verification:** confirmed against the real compiled binary via a scripted PTY session using
+this project's established fixes (answering the DSR probe, stripping the Kitty-graphics APC query
+before feeding `pyte` — see the Image Preview Concurrency and Multi-Shell Layout Model entries)
+plus real SGR mouse escape sequences for the drag itself, not just the new `shell_area` unit
+tests: pressing `s` opened the box centered exactly where the unit test predicts; a mouse-down on
+its title row followed by a drag and mouse-up moved the box by precisely the dragged delta (row
++4, column +10, matching the mouse movement exactly); a second run dragging far past the frame's
+edge left the box clamped flush against it instead of vanishing or panicking; the browser's title
+(showing the real cwd) stayed visible and correct throughout, and `Esc` then `q` still closed the
+shell and quit the app cleanly afterward.
 
 ---
 

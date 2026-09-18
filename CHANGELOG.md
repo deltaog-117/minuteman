@@ -166,6 +166,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of the whole thing, so shell panes stay contained to a mini floating area (matching the
   original single popup's sizing) instead of tiling across the entire screen. `draw` now calls
   `shell_area` directly rather than duplicating its layout math.
+- `tui`: the shell box itself can now be dragged around the screen by its title bar, like a
+  floating window — `shell_area` takes a `(dx, dy)` offset from centered, clamped so the box can
+  never be dragged off screen. A mouse-down on the box's top border (where the "shell" title
+  renders) starts the drag; `Drag` events accumulate into the offset, `Up` ends it. The offset
+  resets to `(0, 0)` on every new `s` spawn. This moves the whole box, not individual panes inside
+  it, which stay tiled exactly as before (see `ROADMAP.md`/`DIARY.md` for why per-pane dragging is
+  still out of scope). New `ShellView` struct bundles the pane tree with its offset for `draw`,
+  keeping its argument count from growing.
 
 ### Removed
 - `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their

@@ -212,6 +212,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   duplicating the layout math, so rendering and pty sizing can never drift apart. Verified against
   the real compiled binary: the same split/focus/divider-drag/close PTY session as above, with the
   shell box now visibly starting a few rows/columns in from the frame's edge instead of at (0, 0).
+- ✅ **Mini-shell box movable by mouse, like a floating window's title bar** – the whole shell box
+  (not individual panes, which stay tiled) can now be dragged around the screen. `shell_area`
+  gained a `(dx, dy)` offset from centered, applied then clamped so the box can never be dragged
+  off screen; a mouse-down on the box's top border (where the "shell" title renders) starts the
+  drag, `Drag` accumulates the delta, `Up` ends it, and every fresh `s` spawn resets the offset to
+  centered. New `ShellView` struct bundles the pane tree with its offset so `draw`'s argument list
+  doesn't grow with every new piece of shell-overlay state. Verified against the real compiled
+  binary via a scripted PTY session (real SGR mouse escape sequences, not just unit tests):
+  grabbing the title bar and dragging moved the box by exactly the dragged delta, an extreme
+  off-screen drag clamped the box to the frame's edge instead of vanishing or panicking, and the
+  browser underneath stayed visible and `Esc`/`q` still closed/quit cleanly afterward.
 
 ---
 
@@ -273,8 +284,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 1. `cargo run -p tui` — press `s` to open a shell pane, `%`/`"` to split it side by side/stacked,
    `o` to cycle keyboard focus between panes (or click one directly), drag the border between two
-   panes to resize them, and `Esc` to close the focused pane (or the last one, exiting shell mode).
-2. `cargo test --workspace` (81 tests) to verify everything still passes.
+   panes to resize them, drag the box's top border (the "shell" title) to move the whole box
+   around the screen, and `Esc` to close the focused pane (or the last one, exiting shell mode).
+2. `cargo test --workspace` (74 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
    (directory bookmarks — distinct from the file marks added earlier) are the remaining
