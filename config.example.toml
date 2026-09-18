@@ -19,7 +19,9 @@ delete = ["d"]
 rename = ["r"]
 # A trailing "/" on the typed name creates a directory instead of a file.
 create = ["n"]
-# Drops into a real, interactive $SHELL in the current directory; "exit" returns to the TUI.
+# Opens the first shell pane in the current directory ("s" again does nothing once one is
+# already open — split instead). "esc" closes the focused pane, or exits shell mode entirely
+# once it's the last one open.
 shell = ["s"]
 # Jumps to the first entry whose name matches as you type.
 search = ["/"]
@@ -30,12 +32,18 @@ command = [":"]
 select = ["v"]
 # Reserved for future chorded commands. Currently does nothing and never blocks any other key.
 leader = ["space"]
-# While the popup shell (see `shell` above) is open, toggles whether keystrokes go to the shell
-# or drive the browser, so the shell can stay open and visible while you keep browsing.
+# While any shell pane (see `shell` above) is open, toggles whether keystrokes go to the focused
+# pane or drive the browser, so the pane(s) can stay open and visible while you keep browsing.
 shell_focus = ["tab"]
-# While the popup shell is open and unfocused, enters move mode: "hjkl"/arrows reposition it,
-# "enter"/"esc" confirms.
-shell_move = ["g"]
+# Splits the focused pane side by side (left/right); the new pane's shell starts in the current
+# directory and takes focus. Tmux's own default binding, for muscle memory.
+shell_split_horizontal = ["%"]
+# Splits the focused pane stacked (top/bottom); same directory, new pane takes focus. Also
+# tmux's own default binding.
+shell_split_vertical = ["\""]
+# Cycles keyboard focus to the next pane — useful when a mouse isn't available; click a pane
+# directly to focus it instead.
+shell_pane_next = ["o"]
 
 [theme]
 # Selects a built-in base palette ("default" or "dracula"); an unrecognised name falls back to

@@ -141,9 +141,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or arrow keys reposition the popup, `enter`/`esc` confirms. `popup_shell::popup_area` now takes
   an `(i32, i32)` offset, clamped so the popup can never be nudged off-screen.
 
+- `tui`: new `shell_layout` module — a binary split-pane tree (`ShellPanes`) replacing the single
+  floating popup shell with tmux-style tiled panes. The tree/geometry logic (`split_rect`,
+  `Divider`, tree search/mutation) is generic over the leaf payload so it's unit-testable without
+  spawning real shells; `ShellPanes` specializes it to `shell_overlay::PopupShell` and owns
+  spawning, resizing, rendering, and reaping exited panes.
+- `theming`: `Action::ShellMove` replaced with three new actions — `ShellSplitHorizontal`
+  (default `%`), `ShellSplitVertical` (default `"`), and `ShellPaneNext` (default `o`), matching
+  tmux's own default split bindings for muscle memory.
+- `tui`: `s` opens the first shell pane tiled into the frame (docked below the status bar, not
+  floating); `%`/`"` split the focused pane side by side or stacked, spawning a new shell in the
+  current directory and focusing it; `o` cycles keyboard focus to the next pane. `Esc` now closes
+  just the focused pane, promoting its sibling to fill the freed space, and only exits shell mode
+  entirely once it's the last pane open.
+- `tui`: mouse support — `EnableMouseCapture` is now on for the whole session. Dragging a
+  divider (the shared border between two sibling panes) live-resizes their split ratio; clicking
+  inside a pane focuses it (and refocuses keyboard input to the shell if it was browsing).
+  Dragging a pane to reposition it and reordering panes are explicitly out of scope (see
+  `ROADMAP.md` and `DIARY.md`) — panes are tiled, not floating, so there's no independent
+  position to drag.
+- `tui`: the focused pane's border is now highlighted with the theme's `selection_bg` color, so
+  which pane keystrokes route to is visible at a glance once more than one is open.
+
 ### Removed
 - `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their
   only caller.
+- `tui`: `popup_shell::popup_area` and `theming::Action::ShellMove`/`RawKeyMap::shell_move` —
+  floating-popup positioning is gone now that shell panes are tiled by `shell_layout::ShellPanes`
+  instead.
 
 ## [0.1.0] - 2026-09-16
 

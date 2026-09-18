@@ -14,42 +14,22 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The crossterm/ratatui side of `shell_overlay::PopupShell`: sizing the popup, translating key
+//! The crossterm/ratatui side of `shell_overlay::PopupShell`: sizing a pane, translating key
 //! events into the raw bytes a real terminal would send, and rendering the `vt100` screen buffer
-//! as a bordered widget layered over the main UI. `shell_overlay` stays free of any UI-toolkit
-//! dependency (beyond `vt100`, which is the screen-buffer data model both sides need) — it only
-//! knows pty mechanics.
+//! as a bordered widget. `shell_overlay` stays free of any UI-toolkit dependency (beyond `vt100`,
+//! which is the screen-buffer data model both sides need) — it only knows pty mechanics. Each
+//! pane's actual on-screen rect is computed by `shell_layout` (the tmux-style split tree), not
+//! here — this module only knows how to turn a given rect into a pty size and a rendered widget.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use shell_overlay::PopupShell;
 use theming::Config;
 
-/// The popup's on-screen rectangle: 80% of the frame's width and 70% of its height, clamped so
-/// it never exceeds the frame itself (a tiny terminal just gets a full-bleed popup). `offset`
-/// shifts it from its default centered position (as accumulated by move mode — see
-/// `main.rs::run`); the result is clamped back into the frame so the popup can never be nudged
-/// fully or partially off-screen.
-pub(crate) fn popup_area(frame_area: Rect, offset: (i32, i32)) -> Rect {
-    let width = (frame_area.width.saturating_mul(4) / 5)
-        .max(20)
-        .min(frame_area.width);
-    let height = (frame_area.height.saturating_mul(7) / 10)
-        .max(6)
-        .min(frame_area.height);
-    let centered_x = (frame_area.width.saturating_sub(width)) / 2;
-    let centered_y = (frame_area.height.saturating_sub(height)) / 2;
-    let max_x = frame_area.width.saturating_sub(width) as i32;
-    let max_y = frame_area.height.saturating_sub(height) as i32;
-    let x = (centered_x as i32 + offset.0).clamp(0, max_x) as u16;
-    let y = (centered_y as i32 + offset.1).clamp(0, max_y) as u16;
-    Rect::new(x, y, width, height)
-}
-
-/// The pty size (rows, cols) for a popup whose bordered outer rect is `area` — one cell of
+/// The pty size (rows, cols) for a pane whose bordered outer rect is `area` — one cell of
 /// border on every side, so the pty only ever sees the space actually available for output.
 pub(crate) fn pty_size(area: Rect) -> (u16, u16) {
     (
@@ -116,16 +96,28 @@ fn function_key_sequence(n: u8) -> Option<Vec<u8>> {
     })
 }
 
-/// Renders the popup's current screen buffer as a bordered widget over `area`, and positions
-/// the real terminal cursor over the child's cursor cell (when it isn't hidden).
+/// Renders the pane's current screen buffer as a bordered widget over `area`, and positions the
+/// real terminal cursor over the child's cursor cell (when it isn't hidden). `is_focused`
+/// highlights the border using the theme's selection color, so with several panes tiled at once
+/// it's visible at a glance which one keystrokes route to.
 pub(crate) fn render(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     popup: &PopupShell,
     config: &Config,
+    is_focused: bool,
 ) {
     frame.render_widget(Clear, area);
-    let block = crate::themed_block(config, "shell");
+    let border_color = if is_focused {
+        crate::color_from_name(&config.theme.selection_bg)
+    } else {
+        crate::color_from_name(&config.theme.border_fg)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title("shell")
+        .title_style(Style::default().fg(crate::color_from_name(&config.theme.title_fg)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -244,46 +236,6 @@ mod tests {
             }),
             None
         );
-    }
-
-    #[test]
-    fn popup_area_never_exceeds_the_frame_and_stays_centered() {
-        let frame = Rect::new(0, 0, 100, 40);
-        let popup = popup_area(frame, (0, 0));
-        assert!(popup.width <= frame.width && popup.height <= frame.height);
-        assert_eq!(popup.x, (frame.width - popup.width) / 2);
-        assert_eq!(popup.y, (frame.height - popup.height) / 2);
-    }
-
-    #[test]
-    fn popup_area_clamps_to_a_tiny_frame() {
-        let frame = Rect::new(0, 0, 10, 4);
-        let popup = popup_area(frame, (0, 0));
-        assert_eq!(popup.width, frame.width);
-        assert_eq!(popup.height, frame.height);
-    }
-
-    #[test]
-    fn popup_area_offset_shifts_the_popup_from_center() {
-        let frame = Rect::new(0, 0, 100, 40);
-        let centered = popup_area(frame, (0, 0));
-        let moved = popup_area(frame, (5, -3));
-        assert_eq!(moved.x, centered.x + 5);
-        assert_eq!(moved.y, centered.y - 3);
-    }
-
-    #[test]
-    fn popup_area_offset_clamps_within_the_frame() {
-        let frame = Rect::new(0, 0, 100, 40);
-        let clamped_high = popup_area(frame, (10_000, 10_000));
-        let max_x = frame.width - clamped_high.width;
-        let max_y = frame.height - clamped_high.height;
-        assert_eq!(clamped_high.x, max_x);
-        assert_eq!(clamped_high.y, max_y);
-
-        let clamped_low = popup_area(frame, (-10_000, -10_000));
-        assert_eq!(clamped_low.x, 0);
-        assert_eq!(clamped_low.y, 0);
     }
 
     #[test]

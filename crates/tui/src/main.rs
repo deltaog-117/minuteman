@@ -17,6 +17,7 @@
 mod app;
 mod image_preview;
 mod popup_shell;
+mod shell_layout;
 mod text_preview;
 
 use std::io::{self, Stdout};
@@ -26,7 +27,10 @@ use std::time::Duration;
 use anyhow::Result;
 use app::App;
 use browser::BrowserState;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+    MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -40,6 +44,7 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::StatefulImage;
 use shared::{DirEntryInfo, LocalVfs};
+use shell_layout::{ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
 use theming::{Action, Config};
 
@@ -50,7 +55,7 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn new() -> Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
         Ok(Self)
     }
 }
@@ -58,8 +63,18 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     }
+}
+
+/// The region shell panes render into and size their ptys against: the frame minus the bottom
+/// status-bar row. Mirrors `draw`'s own top-level `Layout` split exactly (same constraints), so a
+/// pane's pty size can never drift from its actual rendered rect.
+fn shell_area(frame_area: Rect) -> Rect {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(frame_area)[0]
 }
 
 /// The image and text preview pipelines, bundled together since every call site drives both in
@@ -128,50 +143,42 @@ fn run(
     previews: &mut Previews,
     config: &Config,
 ) -> Result<()> {
-    // The popup shell (see `popup_shell`) — `Some` for the whole time a shell window is open.
-    // Unlike `Action::Shell`'s old full-screen behavior, this never suspends raw mode/the
-    // alternate screen: it's just another widget layered on top of the normal draw.
-    let mut popup: Option<shell_overlay::PopupShell> = None;
-    // Whether keystrokes go to the popup shell (true) or drive the browser underneath it while
-    // the popup stays open and visible (false). Meaningless while `popup` is `None`.
-    let mut popup_focused = true;
-    // Offset from the popup's default centered position, in cells, accumulated by move mode.
-    // Reset whenever a shell is (re)spawned so every new popup starts centered.
-    let mut popup_offset: (i32, i32) = (0, 0);
-    // Entered via `Action::ShellMove` while the popup is open and unfocused: the next
-    // `h`/`j`/`k`/`l`/arrow key adjusts `popup_offset`, and `Enter`/`Esc` exits back to browsing.
-    let mut moving_popup = false;
+    // The tmux-style split-pane shell tree (see `shell_layout`) — `Some` for the whole time any
+    // shell pane is open. Never suspends raw mode/the alternate screen: it's just tiled into the
+    // frame's own area (below the status bar) as part of the normal draw.
+    let mut shells: Option<ShellPanes> = None;
+    // Whether keystrokes go to the focused pane (true) or drive the browser underneath while the
+    // pane(s) stay open and visible (false). Meaningless while `shells` is `None`.
+    let mut shell_focused = true;
+    // The divider (by id) currently being dragged, from a mouse-down that hit one. `None` means
+    // no drag is in progress.
+    let mut dragging_divider: Option<usize> = None;
 
     loop {
         app.poll_bulk(browser, vfs)?;
         previews.update(browser.selected_entry().map(|e| e.path.as_path()));
 
-        if let Some(active) = popup.as_mut()
-            && let Some(outcome) = active.try_wait()?
-        {
-            popup = None;
-            app.status = Some(if outcome.success {
-                "shell exited".into()
-            } else {
-                format!("shell exited: code {}", outcome.code)
-            });
+        if let Some(mut panes) = shells.take() {
+            let area = shell_area(terminal.size()?.into());
+            let exited = panes.poll_exits()?;
+            let mut current = Some(panes);
+            for (id, outcome) in exited {
+                let Some(p) = current.take() else { break };
+                app.status = Some(if outcome.success {
+                    "shell exited".into()
+                } else {
+                    format!("shell exited: code {}", outcome.code)
+                });
+                current = p.close(id, area)?;
+            }
+            shells = current;
         }
 
-        terminal.draw(|frame| {
-            draw(
-                frame,
-                browser,
-                app,
-                previews,
-                vfs,
-                config,
-                popup.as_ref().map(|p| (p, popup_offset)),
-            )
-        })?;
+        terminal.draw(|frame| draw(frame, browser, app, previews, vfs, config, shells.as_ref()))?;
 
-        // While the popup shell is running, poll faster so its output (e.g. a redrawing `vim`
-        // or `top`) feels responsive rather than updating in 100ms steps.
-        let poll_timeout = if popup.is_some() {
+        // While a shell pane is open, poll faster so its output (e.g. a redrawing `vim` or `top`)
+        // feels responsive rather than updating in 100ms steps.
+        let poll_timeout = if shells.is_some() {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
@@ -182,10 +189,43 @@ fn run(
 
         match event::read()? {
             Event::Resize(cols, rows) => {
-                if let Some(active) = popup.as_ref() {
-                    let area = popup_shell::popup_area(Rect::new(0, 0, cols, rows), popup_offset);
-                    let (pty_rows, pty_cols) = popup_shell::pty_size(area);
-                    active.resize(pty_rows, pty_cols)?;
+                if let Some(panes) = shells.as_ref() {
+                    panes.resize(shell_area(Rect::new(0, 0, cols, rows)))?;
+                }
+            }
+            Event::Mouse(mouse) => {
+                let Some(panes) = shells.as_mut() else {
+                    continue;
+                };
+                let area = shell_area(terminal.size()?.into());
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(divider) = panes
+                            .dividers(area)
+                            .into_iter()
+                            .find(|d| d.hit(mouse.column, mouse.row))
+                        {
+                            dragging_divider = Some(divider.id());
+                        } else if panes.focus_at(area, mouse.column, mouse.row) {
+                            shell_focused = true;
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(id) = dragging_divider {
+                            let ratio = panes
+                                .dividers(area)
+                                .into_iter()
+                                .find(|d| d.id() == id)
+                                .map(|d| d.ratio_at(mouse.column, mouse.row));
+                            if let Some(ratio) = ratio {
+                                panes.set_ratio(id, ratio, area)?;
+                            }
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        dragging_divider = None;
+                    }
+                    _ => {}
                 }
             }
             Event::Key(key) => {
@@ -193,44 +233,59 @@ fn run(
                     continue;
                 }
 
-                if let Some(active) = popup.as_mut() {
-                    if popup_focused {
+                if shells.is_some() {
+                    let area = shell_area(terminal.size()?.into());
+                    if shell_focused {
                         if key.code == KeyCode::Esc {
-                            active.close()?;
-                            popup = None;
-                            app.status = Some("shell closed".into());
+                            let panes = shells.take().expect("`shells.is_some()` checked above");
+                            let id = panes.focused_id();
+                            let remaining = panes.close(id, area)?;
+                            app.status = Some(if remaining.is_some() {
+                                "pane closed".into()
+                            } else {
+                                "shell closed".into()
+                            });
+                            shells = remaining;
                         } else if config.keys.resolve(key.code) == Some(Action::ShellFocus) {
-                            popup_focused = false;
+                            shell_focused = false;
                             app.status = Some("browsing — tab to refocus the shell".into());
+                        } else if config.keys.resolve(key.code)
+                            == Some(Action::ShellSplitHorizontal)
+                        {
+                            let panes = shells.take().expect("`shells.is_some()` checked above");
+                            shells = Some(panes.split(
+                                SplitDirection::Horizontal,
+                                browser.current_dir(),
+                                area,
+                            )?);
+                        } else if config.keys.resolve(key.code) == Some(Action::ShellSplitVertical)
+                        {
+                            let panes = shells.take().expect("`shells.is_some()` checked above");
+                            shells = Some(panes.split(
+                                SplitDirection::Vertical,
+                                browser.current_dir(),
+                                area,
+                            )?);
+                        } else if config.keys.resolve(key.code) == Some(Action::ShellPaneNext) {
+                            shells
+                                .as_mut()
+                                .expect("`shells.is_some()` checked above")
+                                .focus_next();
                         } else if let Some(bytes) = popup_shell::encode_key(key) {
-                            active.write_input(&bytes)?;
-                        }
-                        continue;
-                    } else if moving_popup {
-                        match key.code {
-                            KeyCode::Enter | KeyCode::Esc => {
-                                moving_popup = false;
-                                app.status = Some("shell moved".into());
-                            }
-                            KeyCode::Char('h') | KeyCode::Left => popup_offset.0 -= 1,
-                            KeyCode::Char('l') | KeyCode::Right => popup_offset.0 += 1,
-                            KeyCode::Char('k') | KeyCode::Up => popup_offset.1 -= 1,
-                            KeyCode::Char('j') | KeyCode::Down => popup_offset.1 += 1,
-                            _ => {}
+                            shells
+                                .as_mut()
+                                .expect("`shells.is_some()` checked above")
+                                .focused_shell()
+                                .write_input(&bytes)?;
                         }
                         continue;
                     } else if config.keys.resolve(key.code) == Some(Action::ShellFocus) {
-                        popup_focused = true;
+                        shell_focused = true;
                         app.status = Some("shell focused".into());
                         continue;
-                    } else if config.keys.resolve(key.code) == Some(Action::ShellMove) {
-                        moving_popup = true;
-                        app.status =
-                            Some("moving shell — hjkl/arrows, enter/esc to confirm".into());
-                        continue;
                     }
-                    // Popup open, unfocused, not moving, and not a shell-control key — fall
-                    // through so the browser dispatch below still handles it.
+                    // Panes open, unfocused, and not a shell-control key — fall through so the
+                    // browser dispatch below still handles it.
                 }
 
                 if app.prompt.is_some() {
@@ -266,22 +321,22 @@ fn run(
                     // not enter any modal/capturing state, so every other key keeps working
                     // exactly as if leader didn't exist.
                     Some(Action::Leader) => {}
-                    // Both are meaningless without an open popup — handled above (before this
-                    // match) whenever `popup` is `Some`.
-                    Some(Action::ShellFocus) | Some(Action::ShellMove) => {}
-                    // Guarded explicitly rather than relying on it being unreachable while a
-                    // popup is already open (the branch above handles that case) — spawning a
-                    // second shell here would silently drop the running one without closing it.
-                    Some(Action::Shell) if popup.is_none() => {
-                        let frame_area: Rect = terminal.size()?.into();
-                        popup_offset = (0, 0);
-                        let area = popup_shell::popup_area(frame_area, popup_offset);
-                        let (rows, cols) = popup_shell::pty_size(area);
-                        match shell_overlay::PopupShell::spawn(browser.current_dir(), rows, cols) {
-                            Ok(active) => {
-                                popup = Some(active);
-                                popup_focused = true;
-                                moving_popup = false;
+                    // All meaningless without an open pane — handled above (before this match)
+                    // whenever `shells` is `Some`.
+                    Some(Action::ShellFocus)
+                    | Some(Action::ShellSplitHorizontal)
+                    | Some(Action::ShellSplitVertical)
+                    | Some(Action::ShellPaneNext) => {}
+                    // Guarded explicitly rather than relying on it being unreachable while panes
+                    // are already open (the branch above handles that case) — opening a second
+                    // tree here would silently drop the running one without closing it. Use a
+                    // split instead once a shell is already open.
+                    Some(Action::Shell) if shells.is_none() => {
+                        let area = shell_area(terminal.size()?.into());
+                        match ShellPanes::open(browser.current_dir(), area) {
+                            Ok(panes) => {
+                                shells = Some(panes);
+                                shell_focused = true;
                             }
                             Err(e) => app.status = Some(format!("failed to start shell: {e}")),
                         }
@@ -301,7 +356,7 @@ fn draw(
     previews: &mut Previews,
     vfs: &LocalVfs,
     config: &Config,
-    popup: Option<(&shell_overlay::PopupShell, (i32, i32))>,
+    shells: Option<&ShellPanes>,
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -432,10 +487,10 @@ fn draw(
         rows[1],
     );
 
-    // Drawn last, over everything above — the popup shell window.
-    if let Some((popup, popup_offset)) = popup {
-        let area = popup_shell::popup_area(frame.area(), popup_offset);
-        popup_shell::render(frame, area, popup, config);
+    // Drawn last, over the browser columns above — the tiled shell panes, docked into the same
+    // area `rows[0]` occupies so they never cover the status bar.
+    if let Some(panes) = shells {
+        panes.render(frame, rows[0], config);
     }
 }
 

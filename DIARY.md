@@ -28,6 +28,8 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-18 | Marks / Multi-Select Scope  | Wire marks into `Delete` only this cycle, not `Yank`/`Cut`/`Paste` | ✅ Confirmed |
 | 2026-09-18 | Leader Key Design           | Inert placeholder `Action`, non-modal — never captures or blocks other keys | ✅ Confirmed |
 | 2026-09-18 | Movable/Detachable Popup Shell | Two literal keys (focus-toggle + move-mode), state local to `main.rs::run` (COA A) | ✅ Confirmed |
+| 2026-09-18 | Multi-Shell Layout Model | Tmux-style split-pane tree, not multiple floating popups or tabs (COA B) | ✅ Confirmed |
+| 2026-09-18 | Pane Mouse Interaction | Divider-drag-to-resize + click-to-focus; no drag-to-reposition or reorder (COA A) | ✅ Confirmed |
 
 ---
 
@@ -862,6 +864,103 @@ rendered, with no stray `j` reaching the shell's own output; `g` entered move mo
 shell…" status), `llllllll` plus `Enter` moved the popup measurably to the right on screen and set
 a "shell moved" status; `tab` refocused it ("shell focused"), and `Esc` closed it ("shell closed"),
 with the popup's border genuinely gone from every row above the status line afterward.
+
+---
+
+### Multi-Shell Layout Model + Pane Mouse Interaction: Tmux-Style Split Tree, Divider-Resize, Click-Focus
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+Requested: a tmux-like feature for opening multiple mini-shells at once, plus moving them around
+with the mouse. Until this cycle, `main.rs` held exactly one `Option<PopupShell>`, positioned by
+a free `(i32, i32)` offset from center and moved only by the keyboard move-mode from the previous
+cycle (see the Movable/Detachable Popup Shell entry above) — there was no way to have more than
+one shell open, and no mouse handling anywhere (`EnableMouseCapture` was never on).
+
+#### Options Considered — Multi-Shell Layout
+
+**Option A: A `Vec` of independent floating popups, each still using the existing offset model**
+- Smallest diff — reuses the existing popup rendering/move-mode almost unchanged, just per-window
+  instead of global.
+- Rejected: no auto-layout means overlapping windows bury each other, and floating positioning
+  doesn't compose with the mouse feature actually wanted (dragging a *tiled* pane means resizing a
+  neighbor, not repositioning a free-floating rect).
+
+**Option B: A binary split-pane tree, tmux-style** *(chosen)*
+- Each `Split` node carries a direction and a ratio, recursively partitioning its parent's rect
+  between two children, so panes fill the frame and never overlap.
+- No manual positioning is needed at all — panes resize via their split ratio instead of moving.
+
+**Option C: Tabs — one visible pane at a time, others kept running in the background**
+- Rejected: loses the "see several shells side by side at once" tmux feel the feature exists to
+  deliver, and a mouse can't meaningfully reposition something you can't see.
+
+#### Options Considered — Mouse Interaction
+
+Once B was chosen, the original three mouse COAs (all assumed a free-floating popup with an
+independent `(x, y)` — drag-by-titlebar, drag-while-unfocused, click-to-focus-only) stopped
+applying: a tiled pane's rect is *derived* from the tree, not an independent position, so
+"moving" it necessarily means resizing a sibling, not repositioning a window.
+
+**Option A: Drag the shared divider between two sibling panes to resize; click a pane to focus**
+*(chosen)*
+- The literal, correct interpretation of "move" once panes are tiled — exactly how tmux/i3/most
+  tiling window managers handle the mouse. No z-order to reason about since panes never overlap.
+
+**Option B: Drag-to-reorder — grabbing a pane and dropping it onto another swaps their tree
+positions**
+- Rejected for this cycle: real tree-surgery complexity for an interaction that's uncommon even
+  in mature tiling multiplexers. Left for a future cycle if it's actually missed.
+
+#### Decision & Rationale
+
+Chose split-pane-tree (B) + divider-resize/click-focus (A), explicitly deferring reordering.
+`crates/tui/src/shell_layout.rs` is new: a private `Tree<T>`/`Node<T>` (`Leaf(T)` or
+`Split{direction, ratio, first, second}`) generic over the leaf payload, plus free functions
+(`split_rect`, `Divider`, `close_id`, `split_id`, `focus_at`, `leaf_ids`) that never touch `T`'s
+contents — only its identity (`id: usize`) and the tree's shape. This genericity isn't
+speculative future-proofing; it's what makes the tree-surgery logic (which is the actual risky,
+novel part of this feature) unit-testable with plain `String`/`u32` payloads instead of needing to
+spawn a real `$SHELL` process per test case, matching this project's existing preference for pure
+unit tests wherever the logic allows it. `close_id`/`split_id` are ownership-based (`fn(tree:
+Tree<T>, ...) -> Result<Tree<T>>`-shaped), which surfaced a real bug during implementation: the
+first draft of `split_id` moved `new_payload` into the recursive call on `first` unconditionally,
+so if the target leaf was actually in `second`, the newly-spawned shell was already gone by the
+time `second`'s recursion needed it. Fixed by having the `NotFound` variant hand the still-unused
+payload back to the caller so it can be retried against the sibling — caught by a dedicated
+regression test (`split_id_finds_the_target_inside_the_second_child`) before it ever reached the
+real binary. `ShellPanes` (public) specializes the tree to `PopupShell` and owns everything that
+actually touches a pty: `open`/`split`/`close` spawn/kill real shells and resize every remaining
+leaf's pty to its new rect immediately (before the next render), `poll_exits` reaps a shell that
+exited on its own (e.g. typing `exit`), and `render` highlights the focused pane's border with the
+theme's `selection_bg` so it's visible at a glance which one keystrokes route to. Panes render
+docked into the frame's existing `rows[0]` (the same area the three browser columns use, computed
+via a shared `shell_area` helper), not the old floating popup's full-frame-relative rect — this
+keeps the bottom status bar always visible instead of risking a tiled pane growing over it.
+`Action::ShellMove` is removed entirely (there's nothing left to "move" — a pane's rect is a pure
+function of the tree); `theming::Action` gained `ShellSplitHorizontal`/`ShellSplitVertical`
+(defaults `%`/`"`, tmux's own bindings) and `ShellPaneNext` (default `o`) for keyboard-only pane
+cycling, kept alongside click-to-focus rather than replacing it, since not every session has a
+usable mouse.
+
+**Verification:** confirmed against the real compiled binary via a scripted PTY session
+reconstructed through `pyte`, using this project's established fixes (answering the startup
+Device Status Report probe, stripping the Kitty-graphics APC query before feeding `pyte` — see
+the Image Preview Concurrency and Movable/Detachable Popup Shell entries above). `s` opened one
+bordered pane; `%` split it into two side-by-side panes sharing the same top-border row, with the
+new (right) one focused — confirmed by typing distinct marker commands into each and finding each
+marker's output landed only on its own side, never leaking across. `o` (keyboard pane-cycling)
+moved focus to the left pane, confirmed the same way; a real SGR mouse click back on the right
+pane refocused it, confirmed by a third marker landing there. A real SGR mouse-down on the exact
+column where the two panes' borders meet, followed by a drag and mouse-up, moved that column
+measurably to the right — confirming `Divider::hit`/`ratio_at`/`ShellPanes::set_ratio` all wire up
+correctly through actual mouse escape sequences, not just their unit tests. `Esc` closed the
+focused pane and the remaining one was resized to fill the whole freed width (not left stopping at
+the old divider); a second `Esc` closed the last pane entirely, and the browser stayed responsive
+to `j`/`q` afterward.
 
 ---
 

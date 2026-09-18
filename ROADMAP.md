@@ -181,6 +181,29 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   the shell and the browser's file list stayed visible and responsive to navigation while the
   popup itself stayed open and rendered; `g` plus `hjkl` moved the popup measurably to the right on
   screen; `tab` refocused it and `Esc` closed it, restoring the exact underlying UI.
+- ✅ **Tmux-style split-pane shells, with mouse support** – replaced the single floating
+  `Option<PopupShell>` with `shell_layout::ShellPanes`, a binary split tree (`Leaf(PopupShell) |
+  Split{direction, ratio, first, second}`) tiling the frame's browser area, so multiple shells can
+  be open and visible side by side (or stacked) instead of one popup at a time. `%`/`"` split the
+  focused pane horizontally/vertically (tmux's own default bindings) and focus the new pane; `o`
+  cycles keyboard focus between panes; `Esc` closes just the focused pane, promoting its sibling
+  to fill the freed space, and only exits shell mode entirely once it's the last pane. Mouse
+  support is new (`EnableMouseCapture` is now on for the session): dragging the shared border
+  between two sibling panes live-resizes their `ratio`, and clicking inside a pane focuses it.
+  Deliberately **not** in scope: drag-to-reposition (meaningless once panes are tiled — a pane's
+  rect is derived from the tree, not an independent offset) and drag-to-reorder/swap panes (real
+  tree-surgery complexity for a rarely-used interaction even in mature tiling multiplexers). The
+  tree/geometry logic is generic over the leaf payload specifically so it could be unit-tested
+  (tree shape, divider hit-testing, focus routing) without spawning real shells — see `DIARY.md`
+  for the design decision, the two rejected layout alternatives, and a real ownership bug the
+  generic tests caught before it reached the compiled binary. Supersedes the older, vaguer
+  "Multi-tab / multi-pane workspaces" idea previously listed under Low Priority. Verified against
+  the real compiled binary via a scripted PTY session: `s` then `%` produced two independently
+  interactive side-by-side panes (marker commands typed into each landed only on their own side);
+  `o` and a real mouse click each correctly moved keyboard focus between panes; a real mouse
+  divider-drag measurably moved the pane boundary; `Esc` closed the focused pane and resized the
+  remaining one to fill the freed width, and a second `Esc` closed the last pane entirely with the
+  browser still responsive afterward.
 
 ---
 
@@ -213,7 +236,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Optional Lua scripting tier** – lightweight `mlua`-based scripting for config/keybindings/
   simple commands, layered alongside the WASM plugin system.
 - **Fuzzy find / search within the browser.**
-- **Multi-tab / multi-pane workspaces.**
 - **Multi-select for yank/cut/paste** – `v` marks now drive `Delete` (see ✅ above), but
   `Clipboard` still only ever holds one `PathBuf`, so yank/cut/paste still operate on the single
   cursor entry even when marks are active. Extending `Clipboard` to multiple paths and looping
@@ -241,12 +263,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui` — press `s` to open the popup shell, `tab` to unfocus it and confirm the
-   browser is navigable while it stays open, `g` then `hjkl`/`Enter` to move it, `tab` to
-   refocus, and `Esc` to close it.
-2. `cargo test --workspace` (61 tests) to verify everything still passes.
+1. `cargo run -p tui` — press `s` to open a shell pane, `%`/`"` to split it side by side/stacked,
+   `o` to cycle keyboard focus between panes (or click one directly), drag the border between two
+   panes to resize them, and `Esc` to close the focused pane (or the last one, exiting shell mode).
+2. `cargo test --workspace` (81 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
-   (directory bookmarks — distinct from the file marks added last cycle) are the remaining
+   (directory bookmarks — distinct from the file marks added earlier) are the remaining
    candidates. Extending marks to yank/cut/paste (🟡 Medium Priority) is also a well-scoped
    follow-up.
