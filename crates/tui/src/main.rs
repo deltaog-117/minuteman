@@ -67,14 +67,27 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// The region shell panes render into and size their ptys against: the frame minus the bottom
-/// status-bar row. Mirrors `draw`'s own top-level `Layout` split exactly (same constraints), so a
-/// pane's pty size can never drift from its actual rendered rect.
+/// The region shell panes render into and size their ptys against: a centered box — 80% of the
+/// frame's width, 70% of its height (clamped so it never exceeds the space available above the
+/// status bar) — rather than the full browser area, so the browser stays visible around it just
+/// like the old single popup did. Panes still split/tile normally, just within this smaller box
+/// instead of across the whole screen. `draw` calls this same function for rendering, so a pane's
+/// pty size can never drift from its actual rendered rect.
 fn shell_area(frame_area: Rect) -> Rect {
-    Layout::default()
+    let browser_area = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(frame_area)[0]
+        .split(frame_area)[0];
+
+    let width = (browser_area.width.saturating_mul(4) / 5)
+        .max(20)
+        .min(browser_area.width);
+    let height = (browser_area.height.saturating_mul(7) / 10)
+        .max(6)
+        .min(browser_area.height);
+    let x = browser_area.x + (browser_area.width.saturating_sub(width)) / 2;
+    let y = browser_area.y + (browser_area.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, width, height)
 }
 
 /// The image and text preview pipelines, bundled together since every call site drives both in
@@ -487,10 +500,10 @@ fn draw(
         rows[1],
     );
 
-    // Drawn last, over the browser columns above — the tiled shell panes, docked into the same
-    // area `rows[0]` occupies so they never cover the status bar.
+    // Drawn last, over the browser columns above — the tiled shell panes, centered in a box that
+    // never covers the status bar (see `shell_area`).
     if let Some(panes) = shells {
-        panes.render(frame, rows[0], config);
+        panes.render(frame, shell_area(frame.area()), config);
     }
 }
 

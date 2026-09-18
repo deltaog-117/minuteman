@@ -162,6 +162,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position to drag.
 - `tui`: the focused pane's border is now highlighted with the theme's `selection_bg` color, so
   which pane keystrokes route to is visible at a glance once more than one is open.
+- `tui`: `shell_area` now returns a centered 80%-width/70%-height box within the browser region
+  instead of the whole thing, so shell panes stay contained to a mini floating area (matching the
+  original single popup's sizing) instead of tiling across the entire screen. `draw` now calls
+  `shell_area` directly rather than duplicating its layout math.
 
 ### Removed
 - `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their

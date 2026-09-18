@@ -204,6 +204,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   divider-drag measurably moved the pane boundary; `Esc` closed the focused pane and resized the
   remaining one to fill the freed width, and a second `Esc` closed the last pane entirely with the
   browser still responsive afterward.
+- ✅ **Shell panes contained to a mini floating box, not the full screen** – `shell_area` no
+  longer returns the entire browser region; it now returns an 80%-width/70%-height box centered
+  within it (the same sizing the original single popup used), so the browser stays visible around
+  the shell panes instead of them tiling across the whole screen. Splits/tiling still work exactly
+  as before, just confined to that smaller box. `draw` now calls `shell_area` directly instead of
+  duplicating the layout math, so rendering and pty sizing can never drift apart. Verified against
+  the real compiled binary: the same split/focus/divider-drag/close PTY session as above, with the
+  shell box now visibly starting a few rows/columns in from the frame's edge instead of at (0, 0).
 
 ---
 

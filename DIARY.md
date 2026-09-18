@@ -30,6 +30,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-18 | Movable/Detachable Popup Shell | Two literal keys (focus-toggle + move-mode), state local to `main.rs::run` (COA A) | ✅ Confirmed |
 | 2026-09-18 | Multi-Shell Layout Model | Tmux-style split-pane tree, not multiple floating popups or tabs (COA B) | ✅ Confirmed |
 | 2026-09-18 | Pane Mouse Interaction | Divider-drag-to-resize + click-to-focus; no drag-to-reposition or reorder (COA A) | ✅ Confirmed |
+| 2026-09-18 | Shell Pane Container Sizing | Centered 80%/70% box, not the full browser area | ✅ Confirmed |
 
 ---
 
@@ -961,6 +962,41 @@ correctly through actual mouse escape sequences, not just their unit tests. `Esc
 focused pane and the remaining one was resized to fill the whole freed width (not left stopping at
 the old divider); a second `Esc` closed the last pane entirely, and the browser stayed responsive
 to `j`/`q` afterward.
+
+---
+
+### Shell Pane Container Sizing: Centered 80%/70% Box, Not the Full Browser Area
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+Right after shipping the split-pane tree (see the entries above), tried it against the real
+binary and found `shell_area` sized panes to the *entire* browser region (the full frame minus
+the status bar) — so a single shell pane filled the whole screen, and the browser columns
+disappeared behind it entirely. Feedback: it should behave like a mini floating window again (as
+the original single popup did), not take over the full screen — panes should still split/tile
+normally, just within a smaller contained area.
+
+#### Decision & Rationale
+
+`shell_area` now computes its old full-browser-region rect first, then centers an 80%-width/
+70%-height box inside it (the exact sizing the original single-popup `popup_area` used, clamped
+the same way — `.max(...).min(...)` so a tiny terminal still gets a sane, non-overflowing box).
+No offset/move-mode was reintroduced — that mechanism was deliberately dropped when the tree
+replaced the floating popup (see the Multi-Shell Layout Model entry) and nothing here changes
+that; the box's position is fixed and centered, only its *contents* (the split tree) are dynamic.
+`draw` was also changed to call `shell_area` directly for rendering instead of separately
+inlining the same layout math it already had for the browser columns — the previous version
+worked by coincidence (both computations happened to agree) but had no structural guarantee they
+always would as the code evolved further; calling the one function from both places removes that
+risk entirely.
+
+**Verification:** re-ran the same scripted PTY session used for the split-pane feature itself
+(same divider-drag/focus-cycling/close assertions, all still passing) and confirmed the shell
+box's top-left corner is now several rows/columns in from `(0, 0)` — the browser is visible around
+it — rather than starting flush with the frame's corner.
 
 ---
 
