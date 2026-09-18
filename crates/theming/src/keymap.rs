@@ -47,6 +47,12 @@ pub enum Action {
     Select,
     /// Inert placeholder for future chorded commands. Does not consume or block any other key.
     Leader,
+    /// While the popup shell is open, toggles whether keystrokes go to the shell or drive the
+    /// browser — lets the shell stay open and visible while browsing.
+    ShellFocus,
+    /// While the popup shell is open and unfocused, enters move mode: the next `h`/`j`/`k`/`l`
+    /// or arrow key repositions the popup, and `Enter`/`Esc` confirms.
+    ShellMove,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +74,8 @@ pub struct RawKeyMap {
     pub command: Vec<String>,
     pub select: Vec<String>,
     pub leader: Vec<String>,
+    pub shell_focus: Vec<String>,
+    pub shell_move: Vec<String>,
 }
 
 impl Default for RawKeyMap {
@@ -89,6 +97,8 @@ impl Default for RawKeyMap {
             command: vec![":".into()],
             select: vec!["v".into()],
             leader: vec!["space".into()],
+            shell_focus: vec!["tab".into()],
+            shell_move: vec!["g".into()],
         }
     }
 }
@@ -131,6 +141,8 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.command, Action::Command);
         bind_all(&raw.select, Action::Select);
         bind_all(&raw.leader, Action::Leader);
+        bind_all(&raw.shell_focus, Action::ShellFocus);
+        bind_all(&raw.shell_move, Action::ShellMove);
 
         Self { bindings }
     }
@@ -182,6 +194,8 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
         assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));
         assert_eq!(keymap.resolve(KeyCode::Char(' ')), Some(Action::Leader));
+        assert_eq!(keymap.resolve(KeyCode::Tab), Some(Action::ShellFocus));
+        assert_eq!(keymap.resolve(KeyCode::Char('g')), Some(Action::ShellMove));
         assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
     }
 

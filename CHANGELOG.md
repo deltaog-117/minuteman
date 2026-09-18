@@ -133,6 +133,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `theming` test parses it and asserts it resolves to exactly `RawConfig::default()`, so it can't
   silently drift out of sync with a future default change.
 
+- `theming`: two new keybindable actions — `ShellFocus` (default `tab`) and `ShellMove` (default
+  `g`).
+- `tui`: while the popup shell is open, `tab` toggles whether keystrokes go to the shell or drive
+  the browser underneath it, so the shell can stay open and visible while you keep browsing.
+  `g` (only reachable while the popup is open and unfocused) enters move mode — `h`/`j`/`k`/`l`
+  or arrow keys reposition the popup, `enter`/`esc` confirms. `popup_shell::popup_area` now takes
+  an `(i32, i32)` offset, clamped so the popup can never be nudged off-screen.
+
 ### Removed
 - `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their
   only caller.

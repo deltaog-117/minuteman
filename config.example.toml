@@ -30,6 +30,12 @@ command = [":"]
 select = ["v"]
 # Reserved for future chorded commands. Currently does nothing and never blocks any other key.
 leader = ["space"]
+# While the popup shell (see `shell` above) is open, toggles whether keystrokes go to the shell
+# or drive the browser, so the shell can stay open and visible while you keep browsing.
+shell_focus = ["tab"]
+# While the popup shell is open and unfocused, enters move mode: "hjkl"/arrows reposition it,
+# "enter"/"esc" confirms.
+shell_move = ["g"]
 
 [theme]
 # Selects a built-in base palette ("default" or "dracula"); an unrecognised name falls back to

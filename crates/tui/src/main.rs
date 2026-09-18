@@ -132,6 +132,15 @@ fn run(
     // Unlike `Action::Shell`'s old full-screen behavior, this never suspends raw mode/the
     // alternate screen: it's just another widget layered on top of the normal draw.
     let mut popup: Option<shell_overlay::PopupShell> = None;
+    // Whether keystrokes go to the popup shell (true) or drive the browser underneath it while
+    // the popup stays open and visible (false). Meaningless while `popup` is `None`.
+    let mut popup_focused = true;
+    // Offset from the popup's default centered position, in cells, accumulated by move mode.
+    // Reset whenever a shell is (re)spawned so every new popup starts centered.
+    let mut popup_offset: (i32, i32) = (0, 0);
+    // Entered via `Action::ShellMove` while the popup is open and unfocused: the next
+    // `h`/`j`/`k`/`l`/arrow key adjusts `popup_offset`, and `Enter`/`Esc` exits back to browsing.
+    let mut moving_popup = false;
 
     loop {
         app.poll_bulk(browser, vfs)?;
@@ -148,7 +157,17 @@ fn run(
             });
         }
 
-        terminal.draw(|frame| draw(frame, browser, app, previews, vfs, config, popup.as_ref()))?;
+        terminal.draw(|frame| {
+            draw(
+                frame,
+                browser,
+                app,
+                previews,
+                vfs,
+                config,
+                popup.as_ref().map(|p| (p, popup_offset)),
+            )
+        })?;
 
         // While the popup shell is running, poll faster so its output (e.g. a redrawing `vim`
         // or `top`) feels responsive rather than updating in 100ms steps.
@@ -164,7 +183,7 @@ fn run(
         match event::read()? {
             Event::Resize(cols, rows) => {
                 if let Some(active) = popup.as_ref() {
-                    let area = popup_shell::popup_area(Rect::new(0, 0, cols, rows));
+                    let area = popup_shell::popup_area(Rect::new(0, 0, cols, rows), popup_offset);
                     let (pty_rows, pty_cols) = popup_shell::pty_size(area);
                     active.resize(pty_rows, pty_cols)?;
                 }
@@ -175,14 +194,43 @@ fn run(
                 }
 
                 if let Some(active) = popup.as_mut() {
-                    if key.code == KeyCode::Esc {
-                        active.close()?;
-                        popup = None;
-                        app.status = Some("shell closed".into());
-                    } else if let Some(bytes) = popup_shell::encode_key(key) {
-                        active.write_input(&bytes)?;
+                    if popup_focused {
+                        if key.code == KeyCode::Esc {
+                            active.close()?;
+                            popup = None;
+                            app.status = Some("shell closed".into());
+                        } else if config.keys.resolve(key.code) == Some(Action::ShellFocus) {
+                            popup_focused = false;
+                            app.status = Some("browsing — tab to refocus the shell".into());
+                        } else if let Some(bytes) = popup_shell::encode_key(key) {
+                            active.write_input(&bytes)?;
+                        }
+                        continue;
+                    } else if moving_popup {
+                        match key.code {
+                            KeyCode::Enter | KeyCode::Esc => {
+                                moving_popup = false;
+                                app.status = Some("shell moved".into());
+                            }
+                            KeyCode::Char('h') | KeyCode::Left => popup_offset.0 -= 1,
+                            KeyCode::Char('l') | KeyCode::Right => popup_offset.0 += 1,
+                            KeyCode::Char('k') | KeyCode::Up => popup_offset.1 -= 1,
+                            KeyCode::Char('j') | KeyCode::Down => popup_offset.1 += 1,
+                            _ => {}
+                        }
+                        continue;
+                    } else if config.keys.resolve(key.code) == Some(Action::ShellFocus) {
+                        popup_focused = true;
+                        app.status = Some("shell focused".into());
+                        continue;
+                    } else if config.keys.resolve(key.code) == Some(Action::ShellMove) {
+                        moving_popup = true;
+                        app.status =
+                            Some("moving shell — hjkl/arrows, enter/esc to confirm".into());
+                        continue;
                     }
-                    continue;
+                    // Popup open, unfocused, not moving, and not a shell-control key — fall
+                    // through so the browser dispatch below still handles it.
                 }
 
                 if app.prompt.is_some() {
@@ -218,16 +266,27 @@ fn run(
                     // not enter any modal/capturing state, so every other key keeps working
                     // exactly as if leader didn't exist.
                     Some(Action::Leader) => {}
-                    Some(Action::Shell) => {
+                    // Both are meaningless without an open popup — handled above (before this
+                    // match) whenever `popup` is `Some`.
+                    Some(Action::ShellFocus) | Some(Action::ShellMove) => {}
+                    // Guarded explicitly rather than relying on it being unreachable while a
+                    // popup is already open (the branch above handles that case) — spawning a
+                    // second shell here would silently drop the running one without closing it.
+                    Some(Action::Shell) if popup.is_none() => {
                         let frame_area: Rect = terminal.size()?.into();
-                        let area = popup_shell::popup_area(frame_area);
+                        popup_offset = (0, 0);
+                        let area = popup_shell::popup_area(frame_area, popup_offset);
                         let (rows, cols) = popup_shell::pty_size(area);
                         match shell_overlay::PopupShell::spawn(browser.current_dir(), rows, cols) {
-                            Ok(active) => popup = Some(active),
+                            Ok(active) => {
+                                popup = Some(active);
+                                popup_focused = true;
+                                moving_popup = false;
+                            }
                             Err(e) => app.status = Some(format!("failed to start shell: {e}")),
                         }
                     }
-                    None => {}
+                    Some(Action::Shell) | None => {}
                 }
             }
             _ => {}
@@ -242,7 +301,7 @@ fn draw(
     previews: &mut Previews,
     vfs: &LocalVfs,
     config: &Config,
-    popup: Option<&shell_overlay::PopupShell>,
+    popup: Option<(&shell_overlay::PopupShell, (i32, i32))>,
 ) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -374,8 +433,8 @@ fn draw(
     );
 
     // Drawn last, over everything above — the popup shell window.
-    if let Some(popup) = popup {
-        let area = popup_shell::popup_area(frame.area());
+    if let Some((popup, popup_offset)) = popup {
+        let area = popup_shell::popup_area(frame.area(), popup_offset);
         popup_shell::render(frame, area, popup, config);
     }
 }

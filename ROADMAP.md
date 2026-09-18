@@ -168,6 +168,19 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   those two files while an unmarked file and a directory in the same listing were untouched, a
   `space` keypress had no visible effect and didn't block the movement/mark/delete keys sent right
   after it, and `q` still quit the app cleanly afterward.
+- ✅ **Movable, detachable popup shell** – the popup shell can now be repositioned and no longer
+  monopolizes every keystroke while it's open. New `Action::ShellFocus` (default `tab`) toggles
+  whether keys go to the shell or drive the browser underneath it — the popup stays open and
+  visible either way — and `Action::ShellMove` (default `g`, only reachable while the popup is
+  open and unfocused) enters a move mode where `hjkl`/arrows nudge its position and `Enter`/`Esc`
+  confirms. `popup_shell::popup_area` now takes an `(i32, i32)` offset from center, clamped so the
+  popup can never be nudged off-screen; the offset resets to centered on every new `s` spawn.
+  Verified against the real compiled binary via a scripted PTY session reconstructed through
+  `pyte` (this cycle also needed stripping the `ratatui-image` Kitty-graphics startup query from
+  the raw stream before feeding `pyte`, which has no APC handler — see `DIARY.md`): `tab` unfocused
+  the shell and the browser's file list stayed visible and responsive to navigation while the
+  popup itself stayed open and rendered; `g` plus `hjkl` moved the popup measurably to the right on
+  screen; `tab` refocused it and `Esc` closed it, restoring the exact underlying UI.
 
 ---
 
@@ -228,10 +241,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui` — press `v` on a couple of entries (each should show a `* ` prefix), then
-   `d` and confirm the prompt reads "delete N marked items" and only those entries are removed.
-2. `cargo test --workspace` (56 tests) to verify everything still passes.
+1. `cargo run -p tui` — press `s` to open the popup shell, `tab` to unfocus it and confirm the
+   browser is navigable while it stays open, `g` then `hjkl`/`Enter` to move it, `tab` to
+   refocus, and `Esc` to close it.
+2. `cargo test --workspace` (61 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
-   (directory bookmarks — distinct from the file marks just added) are the remaining candidates.
-   Extending marks to yank/cut/paste (🟡 Medium Priority) is also now a well-scoped follow-up.
+   (directory bookmarks — distinct from the file marks added last cycle) are the remaining
+   candidates. Extending marks to yank/cut/paste (🟡 Medium Priority) is also a well-scoped
+   follow-up.

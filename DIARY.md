@@ -27,6 +27,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-17 | Popup Shell `Esc`-to-Close  | Intercept `Esc` unconditionally rather than forward it, trading away in-popup `vim` `Esc` usage | ✅ Confirmed |
 | 2026-09-18 | Marks / Multi-Select Scope  | Wire marks into `Delete` only this cycle, not `Yank`/`Cut`/`Paste` | ✅ Confirmed |
 | 2026-09-18 | Leader Key Design           | Inert placeholder `Action`, non-modal — never captures or blocks other keys | ✅ Confirmed |
+| 2026-09-18 | Movable/Detachable Popup Shell | Two literal keys (focus-toggle + move-mode), state local to `main.rs::run` (COA A) | ✅ Confirmed |
 
 ---
 
@@ -785,6 +786,82 @@ by special-casing.
 **Verification:** confirmed against the real compiled binary via the same PTY session as the
 marks entry above: pressing `space`, then continuing to navigate and mark files and run a
 multi-target delete, produced identical behavior to a run with the `space` keypress omitted.
+
+---
+
+### Movable/Detachable Popup Shell: Two Literal Keys, State Local to `main.rs::run`
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+Requested: make the popup shell (see the Popup Shell Mechanism entry above) movable on screen,
+and let the browser stay usable while the popup is open, through a specific key — i.e. the shell
+should be detachable from keyboard focus instead of monopolizing every keystroke until it closes.
+Until this cycle, `main.rs`'s event loop forwarded every key except `Esc` straight into the
+popup's pty whenever it was open, so the browser was entirely unreachable while a shell window
+was up.
+
+#### Options Considered
+
+**Option A: Two separate literal keys — a focus-toggle plus a dedicated move-mode** *(chosen)*
+- A new key toggles whether keystrokes go to the shell or the browser; a second key enters a
+  transient move-mode where `hjkl`/arrows nudge the popup's offset until `Enter`/`Esc` confirms.
+- Keeps `shell_overlay` exactly as UI-agnostic as it already was (position lives only in the
+  `tui` crate), and needs no new cross-cutting mechanism — each mode is the same shape as the
+  existing prompt/command-bar states.
+
+**Option B: One focus-toggle key plus always-live `Alt+hjkl` for moving** *(rejected)*
+- Fewer explicit modes, but `Alt+letter` would have to be intercepted before pty forwarding,
+  permanently shadowing that combo from ever reaching the shell — a real (if narrow) regression
+  for shell programs/readline that use `Alt+letter` for word navigation.
+
+**Option C: Build on the already-shipped, currently-inert `Leader` key for chorded moves**
+*(rejected)*
+- Would give `Leader` (`space`) its first real use via a `space`+`hjkl` chord instead of a third
+  literal keybinding, but requires building generic chord-sequencing machinery that doesn't exist
+  anywhere in the codebase yet — more new surface than this feature strictly needs.
+
+#### Decision & Rationale
+
+Chose A. New `Action::ShellFocus` (default `tab`) and `Action::ShellMove` (default `g`), resolved
+through the same `KeyMap::resolve` every other key already goes through. Both are meaningless
+without an open popup and are deliberate no-ops in the main dispatch match in that case — the
+same "inert when not applicable" precedent the `Leader` key set. All of the actual state
+(`popup_focused: bool`, `popup_offset: (i32, i32)`, `moving_popup: bool`) lives as local variables
+in `main.rs::run`, right next to the existing `popup: Option<PopupShell>` — not on `App` or in
+`shell_overlay` — since the popup's on-screen position is purely a `tui`-crate/UI concern that
+`shell_overlay` has no reason to know about. `popup_shell::popup_area` gained an `(i32, i32)`
+offset parameter, clamping the final rect so the popup can never be nudged fully or partially
+off-screen (nudging further in a direction that's already at the clamp boundary is simply a
+no-op, rather than needing separate bounds-checking on the accumulator itself). Re-spawning a
+shell (`s`) always resets `popup_offset` to `(0, 0)` and `popup_focused` to `true`, so every new
+popup starts centered and focused exactly like before this cycle; the `Action::Shell` match arm
+also gained an explicit `popup.is_none()` guard even though that branch is already unreachable
+while a popup is open (handled earlier in the same `if let Some(active) = popup.as_mut()` block)
+— guarding it directly rather than relying on that invariant, since spawning a second shell here
+would have silently dropped the running one without closing it.
+
+**Verification:** confirmed against the real compiled binary via a scripted PTY session
+reconstructed through `pyte`, using this project's own established fix (answering the startup
+Device Status Report/Device Attributes queries so `ratatui-image`'s probe thread never blocks and
+swallows later keystrokes — see the Image Preview Concurrency entry above). This cycle's harness
+also needed one further fix not previously written up: `pyte` has no APC (Application Program
+Command) handler, so `ratatui-image`'s Kitty-graphics capability query (`ESC _ ... ESC \`, sent
+once at startup) corrupted `pyte`'s parser state for the rest of the session unless stripped from
+the raw byte stream before feeding it in — and every read had to be fed into the *same* persistent
+`pyte` screen rather than only the bytes captured by the "final" read, since ratatui's own
+cell-diffing means a `SIGWINCH`-forced redraw can emit little or nothing new once the screen
+already reflects the current state (an early version of the harness discarded the real first
+frame this way and then saw nothing on every subsequent capture). With both fixed: pressing `s`
+opened the bordered popup and typing `echo hello_from_popup` produced that real output inside it;
+`tab` unfocused the shell (status line read "browsing — tab to refocus the shell") and the
+browser's file list stayed visible and responsive to `j` while the popup itself stayed open and
+rendered, with no stray `j` reaching the shell's own output; `g` entered move mode ("moving
+shell…" status), `llllllll` plus `Enter` moved the popup measurably to the right on screen and set
+a "shell moved" status; `tab` refocused it ("shell focused"), and `Esc` closed it ("shell closed"),
+with the popup's border genuinely gone from every row above the status line afterward.
 
 ---
 

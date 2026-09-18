@@ -28,17 +28,24 @@ use ratatui::widgets::{Clear, Paragraph};
 use shell_overlay::PopupShell;
 use theming::Config;
 
-/// The popup's on-screen rectangle: centered, 80% of the frame's width and 70% of its height,
-/// clamped so it never exceeds the frame itself (a tiny terminal just gets a full-bleed popup).
-pub(crate) fn popup_area(frame_area: Rect) -> Rect {
+/// The popup's on-screen rectangle: 80% of the frame's width and 70% of its height, clamped so
+/// it never exceeds the frame itself (a tiny terminal just gets a full-bleed popup). `offset`
+/// shifts it from its default centered position (as accumulated by move mode — see
+/// `main.rs::run`); the result is clamped back into the frame so the popup can never be nudged
+/// fully or partially off-screen.
+pub(crate) fn popup_area(frame_area: Rect, offset: (i32, i32)) -> Rect {
     let width = (frame_area.width.saturating_mul(4) / 5)
         .max(20)
         .min(frame_area.width);
     let height = (frame_area.height.saturating_mul(7) / 10)
         .max(6)
         .min(frame_area.height);
-    let x = (frame_area.width.saturating_sub(width)) / 2;
-    let y = (frame_area.height.saturating_sub(height)) / 2;
+    let centered_x = (frame_area.width.saturating_sub(width)) / 2;
+    let centered_y = (frame_area.height.saturating_sub(height)) / 2;
+    let max_x = frame_area.width.saturating_sub(width) as i32;
+    let max_y = frame_area.height.saturating_sub(height) as i32;
+    let x = (centered_x as i32 + offset.0).clamp(0, max_x) as u16;
+    let y = (centered_y as i32 + offset.1).clamp(0, max_y) as u16;
     Rect::new(x, y, width, height)
 }
 
@@ -242,7 +249,7 @@ mod tests {
     #[test]
     fn popup_area_never_exceeds_the_frame_and_stays_centered() {
         let frame = Rect::new(0, 0, 100, 40);
-        let popup = popup_area(frame);
+        let popup = popup_area(frame, (0, 0));
         assert!(popup.width <= frame.width && popup.height <= frame.height);
         assert_eq!(popup.x, (frame.width - popup.width) / 2);
         assert_eq!(popup.y, (frame.height - popup.height) / 2);
@@ -251,9 +258,32 @@ mod tests {
     #[test]
     fn popup_area_clamps_to_a_tiny_frame() {
         let frame = Rect::new(0, 0, 10, 4);
-        let popup = popup_area(frame);
+        let popup = popup_area(frame, (0, 0));
         assert_eq!(popup.width, frame.width);
         assert_eq!(popup.height, frame.height);
+    }
+
+    #[test]
+    fn popup_area_offset_shifts_the_popup_from_center() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let centered = popup_area(frame, (0, 0));
+        let moved = popup_area(frame, (5, -3));
+        assert_eq!(moved.x, centered.x + 5);
+        assert_eq!(moved.y, centered.y - 3);
+    }
+
+    #[test]
+    fn popup_area_offset_clamps_within_the_frame() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let clamped_high = popup_area(frame, (10_000, 10_000));
+        let max_x = frame.width - clamped_high.width;
+        let max_y = frame.height - clamped_high.height;
+        assert_eq!(clamped_high.x, max_x);
+        assert_eq!(clamped_high.y, max_y);
+
+        let clamped_low = popup_area(frame, (-10_000, -10_000));
+        assert_eq!(clamped_low.x, 0);
+        assert_eq!(clamped_low.y, 0);
     }
 
     #[test]
