@@ -119,6 +119,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller-initiated close rather than waiting for it to exit on its own.
 - `tui`: `Esc` now closes the popup shell (kills the child, restores the underlying UI, sets a
   "shell closed" status) instead of being forwarded to it as input.
+- `theming`: two new keybindable actions — `Select` (default `v`, Ranger-style toggle-mark) and
+  `Leader` (default `space`, an inert placeholder reserved for future chorded commands).
+- `browser`: `BrowserState` gained a mark set (`toggle_mark`/`is_marked`/`marked_paths`/
+  `prune_marks`) — marks persist across directory navigation until toggled off or consumed by a
+  bulk action.
+- `tui`: `v` toggles a mark on the current entry (shown with a `* ` prefix in the current pane);
+  `d` (delete) now acts on every marked entry when any are marked, falling back to the single
+  cursor selection otherwise, with a pluralized confirmation prompt and per-item progress.
+  `space` is bound to the new inert `Leader` action and never blocks or delays any other key.
+- Added `config.example.toml` at the repo root — every `[keys]`/`[theme]` field spelled out with
+  its built-in default, to copy to `~/.config/minuteman/config.toml` as a starting point. A new
+  `theming` test parses it and asserts it resolves to exactly `RawConfig::default()`, so it can't
+  silently drift out of sync with a future default change.
 
 ### Removed
 - `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their

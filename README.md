@@ -39,6 +39,9 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
   Sixel) or Unicode halfblocks as a universal fallback. Decoding and rendering never block the UI.
 - 🔹 **Config-driven keybindings** – read from `~/.config/minuteman/config.toml`, with per-field
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
+- 🔹 **Ranger-style marks** – `v` toggles a mark on the current entry; `d` (delete) acts on every
+  marked entry when any are marked, falling back to the single selection otherwise. `space` is
+  reserved as an inert leader key for future chorded commands.
 
 ---
 
@@ -79,25 +82,30 @@ cargo run -p tui -- /path/to/dir
 | `y`         | yank (copy) selection                         |
 | `m`         | cut (move) selection                          |
 | `p`         | paste                                         |
-| `d`         | delete selection permanently (confirm `y`/N)  |
+| `d`         | delete — marked entries if any are marked, else the selection (confirm `y`/N) |
 | `r`         | rename selection                              |
 | `n`         | create — trailing `/` makes a directory       |
 | `s`         | shell — drop into `$SHELL` in the current dir |
 | `/`         | search — jump to the first matching entry as you type |
 | `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory |
+| `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
+| `space`     | leader — reserved, no bindings yet; never blocks any other key |
 
 While a prompt is active (rename/create/delete-confirm/conflict/search/command), `Enter` submits
 and `Esc` cancels; the keybindings above are not resolved until the prompt closes. `Esc` while
 searching also restores the selection you had before the search started. While a paste or delete
 is running in the background, every key except `Esc` (cancel — copy/move only; delete can't be
-cancelled mid-flight) is ignored until it finishes, including `q`.
+cancelled mid-flight) is ignored until it finishes, including `q`. Marks persist as you navigate
+directories until toggled off or consumed by a delete, and a marked entry is shown with a `*`
+prefix in the current pane.
 
 ---
 
 ## ⚙️ Configuration
 
 Minuteman reads `~/.config/minuteman/config.toml` if present. Any key you don't specify keeps
-its default.
+its default. Copy [`config.example.toml`](config.example.toml) to that path as a starting point —
+it documents every field with its built-in default.
 
 ```toml
 [keys]
@@ -115,6 +123,8 @@ create = ["n"]
 shell = ["s"]
 search = ["/"]
 command = [":"]
+select = ["v"]
+leader = ["space"]
 
 [theme]
 # Selects a built-in base palette ("default" or "dracula"); an unrecognised name falls back

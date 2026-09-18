@@ -76,4 +76,19 @@ mod tests {
         let theme: Theme = raw.theme.into();
         assert_eq!(theme.selection_bg, "blue");
     }
+
+    /// The shipped `config.example.toml` must always parse and, being nothing but the built-in
+    /// defaults spelled out explicitly, resolve to exactly `RawConfig::default()` — catches the
+    /// example silently drifting out of sync with a future default change.
+    #[test]
+    fn shipped_example_config_parses_and_matches_defaults() {
+        let text = include_str!("../../../config.example.toml");
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        let keys: KeyMap = raw.keys.into();
+        let default_keys: KeyMap = RawKeyMap::default().into();
+        assert_eq!(keys, default_keys);
+
+        let theme: Theme = raw.theme.into();
+        assert_eq!(theme, Theme::default());
+    }
 }

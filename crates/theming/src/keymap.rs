@@ -42,6 +42,11 @@ pub enum Action {
     Search,
     /// Opens the `:`-command prompt.
     Command,
+    /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
+    /// later bulk action (e.g. `Delete`) instead of acting on it immediately.
+    Select,
+    /// Inert placeholder for future chorded commands. Does not consume or block any other key.
+    Leader,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +66,8 @@ pub struct RawKeyMap {
     pub shell: Vec<String>,
     pub search: Vec<String>,
     pub command: Vec<String>,
+    pub select: Vec<String>,
+    pub leader: Vec<String>,
 }
 
 impl Default for RawKeyMap {
@@ -80,11 +87,13 @@ impl Default for RawKeyMap {
             shell: vec!["s".into()],
             search: vec!["/".into()],
             command: vec![":".into()],
+            select: vec!["v".into()],
+            leader: vec!["space".into()],
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyMap {
     bindings: HashMap<KeyCode, Action>,
 }
@@ -120,6 +129,8 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.shell, Action::Shell);
         bind_all(&raw.search, Action::Search);
         bind_all(&raw.command, Action::Command);
+        bind_all(&raw.select, Action::Select);
+        bind_all(&raw.leader, Action::Leader);
 
         Self { bindings }
     }
@@ -169,6 +180,8 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('s')), Some(Action::Shell));
         assert_eq!(keymap.resolve(KeyCode::Char('/')), Some(Action::Search));
         assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
+        assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));
+        assert_eq!(keymap.resolve(KeyCode::Char(' ')), Some(Action::Leader));
         assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
     }
 

@@ -25,6 +25,8 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-17 | Text Preview Concurrency    | `spawn_blocking` read, mirroring `ImagePreview`'s decode pipeline | ✅ Confirmed |
 | 2026-09-17 | Popup Shell Mechanism       | Full pty (`portable-pty`) + `vt100` parser rendered as a ratatui widget (COA A) | ✅ Confirmed |
 | 2026-09-17 | Popup Shell `Esc`-to-Close  | Intercept `Esc` unconditionally rather than forward it, trading away in-popup `vim` `Esc` usage | ✅ Confirmed |
+| 2026-09-18 | Marks / Multi-Select Scope  | Wire marks into `Delete` only this cycle, not `Yank`/`Cut`/`Paste` | ✅ Confirmed |
+| 2026-09-18 | Leader Key Design           | Inert placeholder `Action`, non-modal — never captures or blocks other keys | ✅ Confirmed |
 
 ---
 
@@ -696,6 +698,93 @@ exiting.
 harness used for the popup shell's own verification above: `Esc` pressed while a real shell prompt
 was active inside the popup closed it immediately, restored the underlying UI exactly as it was
 before opening the popup, and set the status line to "shell closed".
+
+---
+
+### Marks / Multi-Select Scope: Wire Into `Delete` Only This Cycle
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+Requested: a Ranger-style `v` to toggle a mark on the current entry, "for the action later (e.g.:
+deletion)." `ROADMAP.md` had already flagged full multi-select (marking several entries for one
+bulk op across `Yank`/`Cut`/`Paste`/`Delete`) as separate, unscheduled Low Priority scope, since
+`BrowserState` only ever tracked a single `selected: usize` and `Clipboard` only ever held one
+`PathBuf`.
+
+#### Options Considered
+
+**Option A: Mark set, visual indicator only** — `v` toggles a `HashSet<PathBuf>` on
+`BrowserState`; nothing consumes it yet.
+- Smallest possible diff, but doesn't satisfy the explicit "for the action later (e.g.: deletion)"
+  ask — marking would be visible but functionally inert.
+
+**Option B: Mark set wired into every bulk action** (`Yank`/`Cut`/`Paste`/`Delete`) *(rejected)*
+- Matches Ranger most closely, but `Clipboard` (and the whole `spawn_paste` pipeline: conflict
+  resolution, progress reporting) is built around exactly one path. Extending it to N paths in
+  the same cycle that introduces marking at all is a large, higher-risk diff for scope nobody
+  asked for yet.
+
+**Option C: Mark set wired into `Delete` only** *(chosen)*
+- Matches the literal, concrete example given. `spawn_delete` already ran one `file_ops::delete`
+  call per invocation with no conflict-resolution branch to generalize (delete has no
+  `AlreadyExists` case), so extending it from one target to `Vec<PathBuf>` — looping the same
+  call, sending one `Progress` message per completed target, stopping at the first failure — was
+  a contained, mechanical change. `Yank`/`Cut`/`Paste` are left exactly as they were, still
+  operating on the single cursor selection.
+
+#### Decision & Rationale
+
+Chose C. `begin_delete` now prefers `browser.marked_paths()` when non-empty, falling back to the
+single cursor entry otherwise — Ranger's own "act on marks if any, else the current file"
+convention. `Prompt::ConfirmDelete` gained a `targets: Vec<PathBuf>` (from a single `target:
+PathBuf`) and its confirmation text pluralizes ("delete 3 marked items permanently?" vs. the
+original single-file wording). A successful or partially-failed bulk delete now also calls the
+new `BrowserState::prune_marks(vfs)` (drops any mark whose path no longer exists), so a mark
+pointing at an already-deleted file can't linger and silently get swept into some future bulk
+action. Marks persist across `enter`/`leave` navigation rather than being scoped to one directory
+listing, matching Ranger's session-wide marking rather than clearing them on every `refresh`.
+Extending `Yank`/`Cut`/`Paste` to the marked set is recorded here as the natural next step, not
+implemented — it needs `Clipboard` to hold multiple paths and `spawn_paste`'s conflict handling to
+iterate, which is a bigger, separate design decision.
+
+**Verification:** confirmed against the real compiled binary via a scripted PTY session
+reconstructed through `pyte`, answering the startup Device Status Report query as this project's
+own established fix requires (see the Image/Text Preview Concurrency and Popup Shell entries
+above). Pressing `v` on two different files showed each one prefixed with `* ` in the current
+pane; `d` with two marks active prompted "delete 2 marked items permanently?" (not the single-file
+wording); `y` deleted exactly those two files off disk while a third, unmarked file and a
+directory in the same listing were left untouched, and the status line read "delete complete".
+
+---
+
+### Leader Key Design: Inert, Non-Modal Placeholder
+
+**Date:** 2026-09-18
+**Status:** Confirmed
+
+#### Context / Background
+
+Requested: bind `space` as a leader key "for features i may add later," with an explicit
+constraint that every other key must keep working exactly as before — no modal capture.
+
+#### Decision & Rationale
+
+Added `Action::Leader` (default `space`) resolved through the exact same `KeyMap::resolve`/
+`Action` dispatch every other key already goes through, with a literal no-op arm in `main.rs`'s
+match. No new state (no "awaiting chord" flag, no timeout, no capturing sub-loop) was introduced,
+since there is nothing yet for a chord to invoke — a stateful chord-capture mechanism would be
+speculative infrastructure for bindings that don't exist. Because dispatch stays a flat,
+one-keystroke-in-one-action-out match (unchanged from how `Select`, `Delete`, etc. already work),
+`space` pressed on its own truly does nothing and cannot intercept, delay, or swallow any
+subsequent keystroke — satisfying "the other keys to work without it" by construction rather than
+by special-casing.
+
+**Verification:** confirmed against the real compiled binary via the same PTY session as the
+marks entry above: pressing `space`, then continuing to navigate and mark files and run a
+multi-target delete, produced identical behavior to a run with the `space` keypress omitted.
 
 ---
 

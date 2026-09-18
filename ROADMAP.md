@@ -152,6 +152,22 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `DIARY.md`. Verified against the real compiled binary via a scripted PTY session: `Esc` closed a
   popup with a real shell prompt still active inside it, the underlying UI was restored exactly as
   before opening it, and the status line read "shell closed".
+- ✅ **Ranger-style marks (`v`) + inert leader key (`space`) + shipped config example** – `v` now
+  toggles a mark on the current entry (`BrowserState`'s new `HashSet<PathBuf>`, persisting across
+  navigation, rendered with a `* ` prefix); `d` (delete) acts on every marked entry when any are
+  marked, falling back to the single cursor selection otherwise (`Prompt::ConfirmDelete` and
+  `spawn_delete` now take `Vec<PathBuf>`, deleting each in order and stopping at the first
+  failure), and `BrowserState::prune_marks` drops any mark left pointing at a now-deleted path.
+  `space` is a new inert `Action::Leader` — reserved for future chorded commands, dispatched
+  through the same flat keymap match as every other key so it never captures or blocks input.
+  New `config.example.toml` at the repo root documents every `[keys]`/`[theme]` field with its
+  default, to copy to `~/.config/minuteman/config.toml`; a new test parses it against
+  `RawConfig::default()` so it can't silently go stale. Verified against the real compiled binary
+  via a scripted PTY session: `v` on two files showed both with a `* ` prefix, `d` prompted
+  "delete 2 marked items permanently?" rather than the single-file wording, `y` deleted exactly
+  those two files while an unmarked file and a directory in the same listing were untouched, a
+  `space` keypress had no visible effect and didn't block the movement/mark/delete keys sent right
+  after it, and `q` still quit the app cleanly afterward.
 
 ---
 
@@ -185,11 +201,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   simple commands, layered alongside the WASM plugin system.
 - **Fuzzy find / search within the browser.**
 - **Multi-tab / multi-pane workspaces.**
-- **Multi-select (mark several entries for one bulk op)** – `BrowserState` only tracks a single
-  selection today; yank/cut/paste/delete all operate on one entry. `file_ops::ConflictPolicy`
-  already has `Skip` (vs. `Abort`) specifically for when a batch needs to continue past one
-  conflicting item instead of stopping — that distinction is currently unobservable in the TUI
-  since there's never more than one item in flight.
+- **Multi-select for yank/cut/paste** – `v` marks now drive `Delete` (see ✅ above), but
+  `Clipboard` still only ever holds one `PathBuf`, so yank/cut/paste still operate on the single
+  cursor entry even when marks are active. Extending `Clipboard` to multiple paths and looping
+  `spawn_paste` per marked entry is the remaining piece. `file_ops::ConflictPolicy` already has
+  `Skip` (vs. `Abort`) specifically for when a batch needs to continue past one conflicting item
+  instead of stopping — that distinction is currently unobservable in the TUI since there's never
+  more than one item in flight.
 - **Byte-level/percentage progress for large single files** – current progress is one tick per
   *file*, so a single huge file shows no movement until it's done. Needs `Vfs::copy_file` to
   support a streaming copy with periodic callbacks instead of one atomic `std::fs::copy` call.
@@ -210,9 +228,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-1. `cargo run -p tui` — select a source/text file (e.g. `Cargo.toml` or any `.rs` file) and
-   confirm its contents render in the preview pane.
-2. `cargo test --workspace` (47 tests) to verify everything still passes.
+1. `cargo run -p tui` — press `v` on a couple of entries (each should show a `* ` prefix), then
+   `d` and confirm the prompt reads "delete N marked items" and only those entries are removed.
+2. `cargo test --workspace` (56 tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks are
-   the remaining candidates.
+4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
+   (directory bookmarks — distinct from the file marks just added) are the remaining candidates.
+   Extending marks to yank/cut/paste (🟡 Medium Priority) is also now a well-scoped follow-up.

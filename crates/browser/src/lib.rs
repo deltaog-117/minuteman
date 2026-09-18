@@ -16,6 +16,7 @@
 
 //! Miller-column navigation state and logic — no rendering, no I/O beyond the `Vfs` trait.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use shared::{DirEntryInfo, Vfs, VfsError};
@@ -26,6 +27,9 @@ pub struct BrowserState {
     parent_entries: Vec<DirEntryInfo>,
     current_entries: Vec<DirEntryInfo>,
     selected: usize,
+    /// Ranger-style marks: paths toggled via `Select`, persisting across navigation until
+    /// explicitly toggled off or consumed by a bulk action (e.g. `Delete`).
+    marked: HashSet<PathBuf>,
 }
 
 impl BrowserState {
@@ -35,6 +39,7 @@ impl BrowserState {
             parent_entries: Vec::new(),
             current_entries: Vec::new(),
             selected: 0,
+            marked: HashSet::new(),
         };
         state.refresh(vfs)?;
         Ok(state)
@@ -58,6 +63,34 @@ impl BrowserState {
 
     pub fn selected_entry(&self) -> Option<&DirEntryInfo> {
         self.current_entries.get(self.selected)
+    }
+
+    /// Toggles the current entry's mark on/off. No-op on an empty listing.
+    pub fn toggle_mark(&mut self) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let path = entry.path.clone();
+        if !self.marked.remove(&path) {
+            self.marked.insert(path);
+        }
+    }
+
+    pub fn is_marked(&self, path: &Path) -> bool {
+        self.marked.contains(path)
+    }
+
+    /// All currently marked paths, sorted for deterministic ordering (a `HashSet` has none).
+    pub fn marked_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.marked.iter().cloned().collect();
+        paths.sort();
+        paths
+    }
+
+    /// Drops any mark whose path no longer exists — call after a bulk action that may have
+    /// deleted marked entries, since `BrowserState` has no other way to learn of that.
+    pub fn prune_marks(&mut self, vfs: &dyn Vfs) {
+        self.marked.retain(|path| vfs.exists(path));
     }
 
     /// Entries of the selected item, if it's a directory — used to render the preview pane.
@@ -257,6 +290,44 @@ mod tests {
         state.goto(&vfs, &root.join("sub")).unwrap();
         assert_eq!(state.current_dir(), root.join("sub"));
         assert_eq!(state.selected_entry().unwrap().name, "file.txt");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn toggle_mark_adds_then_removes_the_selected_path() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+        let sub_path = state.selected_entry().unwrap().path.clone();
+
+        assert!(!state.is_marked(&sub_path));
+        state.toggle_mark();
+        assert!(state.is_marked(&sub_path));
+        assert_eq!(state.marked_paths(), vec![sub_path.clone()]);
+
+        state.toggle_mark();
+        assert!(!state.is_marked(&sub_path));
+        assert!(state.marked_paths().is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn marks_persist_across_navigation_and_prune_drops_missing_paths() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+        let sub_path = state.selected_entry().unwrap().path.clone();
+        state.toggle_mark();
+
+        state.enter(&vfs).unwrap();
+        assert!(state.is_marked(&sub_path));
+
+        std::fs::remove_dir_all(&sub_path).unwrap();
+        state.leave(&vfs).unwrap();
+        state.prune_marks(&vfs);
+        assert!(!state.is_marked(&sub_path));
 
         std::fs::remove_dir_all(&root).unwrap();
     }

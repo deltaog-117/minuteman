@@ -35,7 +35,7 @@ use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::StatefulImage;
@@ -213,6 +213,11 @@ fn run(
                     Some(Action::Create) => app.begin_create(),
                     Some(Action::Search) => app.begin_search(browser),
                     Some(Action::Command) => app.begin_command(),
+                    Some(Action::Select) => browser.toggle_mark(),
+                    // Inert for now — reserved for future chorded commands. Deliberately does
+                    // not enter any modal/capturing state, so every other key keeps working
+                    // exactly as if leader didn't exist.
+                    Some(Action::Leader) => {}
                     Some(Action::Shell) => {
                         let frame_area: Rect = terminal.size()?.into();
                         let area = popup_shell::popup_area(frame_area);
@@ -261,18 +266,19 @@ fn draw(
     let parent_items: Vec<ListItem> = browser
         .parent_entries()
         .iter()
-        .map(|e| entry_item(e, config))
+        .map(|e| entry_item(e, config, false))
         .collect();
     frame.render_widget(
         List::new(parent_items).block(themed_block(config, "..")),
         columns[0],
     );
 
-    // Current pane — the active column, with the selection highlighted.
+    // Current pane — the active column, with the selection highlighted and marked entries
+    // prefixed (Ranger-style) so a pending multi-select is visible before acting on it.
     let current_items: Vec<ListItem> = browser
         .current_entries()
         .iter()
-        .map(|e| entry_item(e, config))
+        .map(|e| entry_item(e, config, browser.is_marked(&e.path)))
         .collect();
     let mut current_state = ListState::default();
     if !browser.current_entries().is_empty() {
@@ -342,7 +348,7 @@ fn draw(
         let items: Vec<ListItem> = browser
             .preview_entries(vfs)
             .iter()
-            .map(|e| entry_item(e, config))
+            .map(|e| entry_item(e, config, false))
             .collect();
         frame.render_widget(
             List::new(items).block(themed_block(config, "preview")),
@@ -383,14 +389,21 @@ fn themed_block<'a>(config: &Config, title: &'a str) -> Block<'a> {
         .title_style(Style::default().fg(color_from_name(&config.theme.title_fg)))
 }
 
-fn entry_item(entry: &DirEntryInfo, config: &Config) -> ListItem<'static> {
+fn entry_item(entry: &DirEntryInfo, config: &Config, marked: bool) -> ListItem<'static> {
     let label = entry_label(entry);
     let color = if entry.is_dir {
         color_from_name(&config.theme.dir_fg)
     } else {
         color_from_name(&config.theme.file_fg)
     };
-    ListItem::new(Span::styled(label, Style::default().fg(color)))
+    let mut style = Style::default().fg(color);
+    let label = if marked {
+        style = style.add_modifier(Modifier::BOLD);
+        format!("* {label}")
+    } else {
+        label
+    };
+    ListItem::new(Span::styled(label, style))
 }
 
 fn entry_label(entry: &DirEntryInfo) -> String {

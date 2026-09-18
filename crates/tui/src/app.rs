@@ -62,8 +62,10 @@ pub enum Prompt {
     CreateInput {
         buffer: String,
     },
+    /// Confirms a permanent delete of one or more targets — either the single cursor entry, or
+    /// every currently marked path if any are marked (Ranger-style: marks win over the cursor).
     ConfirmDelete {
-        target: PathBuf,
+        targets: Vec<PathBuf>,
     },
     Conflict(ConflictSource),
     /// Incremental filename search (`/`). `origin` is the selection index to restore on `Esc`.
@@ -84,8 +86,11 @@ impl Prompt {
             Prompt::CreateInput { buffer } => {
                 format!("create (end with / for a directory): {buffer}")
             }
-            Prompt::ConfirmDelete { target } => {
-                format!("delete '{}' permanently? (y/N)", display_name(target))
+            Prompt::ConfirmDelete { targets } if targets.len() == 1 => {
+                format!("delete '{}' permanently? (y/N)", display_name(&targets[0]))
+            }
+            Prompt::ConfirmDelete { targets } => {
+                format!("delete {} marked items permanently? (y/N)", targets.len())
             }
             Prompt::Conflict(ConflictSource::Paste { dst, .. }) => format!(
                 "'{}' already exists — overwrite / skip / abort? (o/s/a)",
@@ -105,7 +110,7 @@ impl Prompt {
 #[derive(Debug)]
 enum BulkKind {
     Paste { clip: Clipboard, dst: PathBuf },
-    Delete { target: PathBuf },
+    Delete { targets: Vec<PathBuf> },
 }
 
 impl BulkKind {
@@ -167,11 +172,13 @@ impl App {
     pub fn status_line(&self) -> String {
         if let Some(bulk) = &self.bulk {
             return match &bulk.kind {
-                BulkKind::Delete { target } => format!(
-                    "{}… {}",
-                    bulk.kind.progressing_label(),
-                    display_name(target)
-                ),
+                BulkKind::Delete { targets } => {
+                    let label = match targets.as_slice() {
+                        [single] => display_name(single),
+                        many => format!("{} items", many.len()),
+                    };
+                    format!("{}… {label}", bulk.kind.progressing_label())
+                }
                 BulkKind::Paste { .. } => {
                     let cancel_hint = if bulk.cancel.is_some() {
                         " — Esc to cancel"
@@ -221,6 +228,8 @@ impl App {
         let bulk = self.bulk.take().expect("checked Some above");
         let past_label = bulk.kind.past_label();
 
+        let is_delete = matches!(bulk.kind, BulkKind::Delete { .. });
+
         match result {
             Ok(Outcome::Completed) => {
                 browser.reload(vfs)?;
@@ -228,6 +237,9 @@ impl App {
                     && clip.mode == ClipboardMode::Move
                 {
                     self.clipboard = None;
+                }
+                if is_delete {
+                    browser.prune_marks(vfs);
                 }
                 self.status = Some(format!("{past_label} complete"));
             }
@@ -241,7 +253,16 @@ impl App {
                     self.status = Some("delete failed: unexpected conflict".into());
                 }
             },
-            Err(e) => self.status = Some(format!("{past_label} failed: {e}")),
+            // A delete can fail partway through a multi-target batch, having already removed
+            // some marked paths from disk — reload/prune so the browser reflects that instead
+            // of showing stale entries and stale marks alongside the failure message.
+            Err(e) => {
+                if is_delete {
+                    browser.reload(vfs)?;
+                    browser.prune_marks(vfs);
+                }
+                self.status = Some(format!("{past_label} failed: {e}"));
+            }
         }
         Ok(())
     }
@@ -283,15 +304,23 @@ impl App {
         }
     }
 
+    /// Marks (via `Select`) win over the cursor: if any entries are marked, delete confirms
+    /// against the whole marked set; otherwise it falls back to the single entry under the
+    /// cursor, matching Ranger's "act on marks if any, else the current file" convention.
     pub fn begin_delete(&mut self, browser: &BrowserState) {
-        match browser.selected_entry() {
-            Some(entry) => {
-                self.prompt = Some(Prompt::ConfirmDelete {
-                    target: entry.path.clone(),
-                });
-            }
-            None => self.status = Some("nothing selected".into()),
+        let targets = match browser.marked_paths() {
+            marked if !marked.is_empty() => marked,
+            _ => browser
+                .selected_entry()
+                .map(|entry| vec![entry.path.clone()])
+                .unwrap_or_default(),
+        };
+
+        if targets.is_empty() {
+            self.status = Some("nothing selected".into());
+            return;
         }
+        self.prompt = Some(Prompt::ConfirmDelete { targets });
     }
 
     pub fn begin_rename(&mut self, browser: &BrowserState) {
@@ -390,8 +419,8 @@ impl App {
                 }
                 _ => self.prompt = Some(Prompt::CreateInput { buffer }),
             },
-            Prompt::ConfirmDelete { target } => match code {
-                KeyCode::Char('y') => self.spawn_delete(target),
+            Prompt::ConfirmDelete { targets } => match code {
+                KeyCode::Char('y') => self.spawn_delete(targets),
                 _ => self.status = Some("delete cancelled".into()),
             },
             Prompt::Conflict(source) => match code {
@@ -531,24 +560,40 @@ impl App {
         });
     }
 
-    /// Spawns a delete on tokio's blocking thread pool. No per-item progress (see `BulkOp`
-    /// doc), but it still keeps a large recursive delete from freezing the render loop.
-    fn spawn_delete(&mut self, target: PathBuf) {
+    /// Spawns a delete of one or more targets on tokio's blocking thread pool, one
+    /// `file_ops::delete` call per target in order. Stops at the first failure — the same
+    /// abort-not-partial semantics `ConflictPolicy::Abort` gives paste — rather than trying to
+    /// press on through the rest of the batch. No per-item cancellation (see `BulkOp` doc), but
+    /// it still keeps a large recursive delete from freezing the render loop.
+    fn spawn_delete(&mut self, targets: Vec<PathBuf>) {
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
             return;
         }
         let (tx, rx) = unbounded_channel();
-        let target_bg = target.clone();
+        let targets_bg = targets.clone();
 
         self.handle.spawn_blocking(move || {
             let vfs = LocalVfs;
-            let result = file_ops::delete(&vfs, &target_bg).map(|()| Outcome::Completed);
+            let mut result = Ok(Outcome::Completed);
+            for target in &targets_bg {
+                match file_ops::delete(&vfs, target) {
+                    Ok(()) => {
+                        let _ = tx.send(BulkMsg::Progress {
+                            path: display_name(target),
+                        });
+                    }
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
+                }
+            }
             let _ = tx.send(BulkMsg::Done(result));
         });
 
         self.bulk = Some(BulkOp {
-            kind: BulkKind::Delete { target },
+            kind: BulkKind::Delete { targets },
             items_done: 0,
             current: String::new(),
             cancel: None,
