@@ -15,7 +15,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Command-line parsing: `minuteman [--cwd-file <path>] [start_dir]`, `minuteman init
-//! <bash|zsh|fish>`, `minuteman init-terminal <kitty|alacritty|wezterm>`, and `minuteman glyphs`.
+//! <bash|zsh|fish>`, `minuteman init-terminal <kitty|alacritty|wezterm>`, `minuteman init-appearance`, and
+//! `minuteman glyphs`.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -32,6 +33,8 @@ pub enum Command {
     Init(Shell),
     /// Print a font + color snippet for `Terminal` and exit.
     InitTerminal(Terminal),
+    /// Print the commented default `appearance.toml` and exit.
+    InitAppearance,
     /// Print a sample of every glyph set, to see which ones the terminal's font can draw.
     Glyphs,
     Run(RunArgs),
@@ -96,6 +99,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliErr
 
     while let Some(arg) = args.next() {
         let is_first = std::mem::take(&mut first);
+        if is_first && arg == "init-appearance" {
+            return match args.next() {
+                None => Ok(Command::InitAppearance),
+                Some(extra) => Err(CliError::ExtraArgument(PathBuf::from(extra))),
+            };
+        }
         if is_first && arg == "glyphs" {
             return match args.next() {
                 None => Ok(Command::Glyphs),
@@ -220,6 +229,18 @@ mod tests {
         assert_eq!(
             parse_strs(&["init-terminal", "xterm"]),
             Err(CliError::UnknownTerminal("xterm".into()))
+        );
+    }
+
+    #[test]
+    fn init_appearance_is_a_bare_subcommand() {
+        assert_eq!(
+            parse_strs(&["init-appearance"]),
+            Ok(Command::InitAppearance)
+        );
+        assert_eq!(
+            parse_strs(&["init-appearance", "x"]),
+            Err(CliError::ExtraArgument("x".into()))
         );
     }
 

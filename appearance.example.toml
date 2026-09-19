@@ -1,0 +1,118 @@
+# Minuteman appearance.
+#
+# Copy this file to ~/.config/minuteman/appearance.toml (or print it with
+# `minuteman init-appearance > ~/.config/minuteman/appearance.toml`) and edit what you want to
+# change. Everything visual lives here: colors, glyphs, text styles (bold, italic, ...) and the
+# font. Anything left out keeps its built-in default (shown below) — a partial file, a missing
+# file, and even a file that fails to parse are all fine: Minuteman falls back per-field rather
+# than refusing to start. Keybindings are in config.toml, not here.
+
+# ---------------------------------------------------------------------------------------------
+# [theme] — colors
+# ---------------------------------------------------------------------------------------------
+[theme]
+# Selects a built-in base palette: "neon" (the default — cyberpunk cyan/magenta, true color),
+# "classic" (the original plain 16-color look), or "dracula". An unrecognised name falls back to
+# "neon". Any field below overrides just that field on top of the chosen palette.
+name = "neon"
+
+# Colors are a basic name — black, red, green, yellow, blue, magenta, cyan, white, gray (grey also
+# works) — or a hex value, "#rrggbb" or "#rgb". Hex is drawn in true color where the terminal
+# advertises it (COLORTERM=truecolor) and is mapped to the nearest of 256 colors otherwise. An
+# unrecognised color resets to the terminal's default.
+
+# The selected row's background, and its text color — or "keep" to leave each entry in its own
+# file-type color and only change the background.
+selection_bg = "#2b1a4f"
+selection_fg = "keep"
+# Frame color of every pane except the active one (the current directory's column, or the
+# focused shell), which gets the brighter border below.
+border_fg = "#3d4270"
+border_focused_fg = "#00f0ff"
+title_fg = "#8a8fd6"
+# Highlights: the active pane's title, the stripe in front of the selected row, and the "*" on
+# marked rows.
+accent_fg = "#ff2bd6"
+# Entry colors, by kind: directories, source code, config/data files (toml, json, dotfiles, ...),
+# documents, archives, images/audio/video, and everything else.
+dir_fg = "#00d9ff"
+source_fg = "#39ff88"
+config_fg = "#ffd60a"
+doc_fg = "#b69cff"
+archive_fg = "#ff7a3d"
+media_fg = "#ff5cf0"
+file_fg = "#c8ccff"
+status_fg = "#7a80b8"
+# Status bar: the segments' background, and the color of destructive prompts (delete, overwrite).
+bar_bg = "#1a1f3d"
+danger_fg = "#ff3860"
+# Frame style: "rounded", "plain", "double", or "thick".
+border_type = "rounded"
+# Edge between status-bar segments: "arrow" draws Powerline arrows (they need a Powerline/Nerd
+# Font — without one they show as missing-glyph boxes), "flat" uses plain dividers, and "auto"
+# picks arrows exactly when [ui] glyphs is "nerd".
+separator = "auto"
+
+# ---------------------------------------------------------------------------------------------
+# [ui] — glyphs
+# ---------------------------------------------------------------------------------------------
+[ui]
+# The symbols the interface draws with. The font itself is your terminal's, so pick what it can
+# show:
+#   "unicode" — box-drawing and geometric symbols; works in nearly any modern font (default).
+#   "nerd"    — adds file-type icons and Powerline arrows. Needs a Nerd Font (use the "Mono"
+#               variant so icons stay one cell wide), or a Symbols Nerd Font as a fallback.
+#   "ascii"   — plain ASCII chrome, for a Linux console or a very limited font.
+# Run `minuteman glyphs` to see what each set looks like in your terminal.
+glyphs = "unicode"
+
+# ---------------------------------------------------------------------------------------------
+# [style] — bold, italic and friends, per element
+# ---------------------------------------------------------------------------------------------
+[style]
+# Each element takes a list of any of: "bold", "italic", "dim", "underline", "reverse",
+# "strikethrough". A list REPLACES that element's default, so `dir = []` turns directory bold off
+# and `dir = ["bold", "italic"]` adds italic. Unknown names are ignored. These change the text's
+# weight/slant only; the typeface itself is set by your terminal (see [font] below).
+
+# Entry names, by kind (colors are set in [theme]). Directories are bold, like Ranger's.
+dir = ["bold"]
+source = []
+config = []
+doc = []
+archive = []
+media = []
+other = []
+# Added on top of a file's kind style when it has an execute bit.
+executable = ["bold"]
+# The selected row's name, and the "*" and name of a marked row.
+selection = ["bold"]
+mark = ["bold"]
+# Pane titles: every pane's, then the active pane's.
+title = []
+title_focused = ["bold"]
+# The size and age columns.
+columns = []
+# The header: breadcrumb segments above the current directory, then the current one; and the
+# status pills (marks, clipboard, running job).
+breadcrumb = []
+breadcrumb_current = ["bold"]
+pill = []
+# The status bar: the mode pill, the selected file's name, the other segments, the key hints
+# (the key, then its label), and transient messages.
+mode = ["bold"]
+status_name = ["bold"]
+status = []
+hint_key = []
+hint_label = []
+message = []
+
+# ---------------------------------------------------------------------------------------------
+# [font] — used by `minuteman init-terminal`
+# ---------------------------------------------------------------------------------------------
+[font]
+# Minuteman can't change your terminal's font — the terminal draws every character. These two
+# values are what `minuteman init-terminal <kitty|alacritty|wezterm>` puts in the config snippet
+# it prints for you to paste. Use the "Mono" variant of a Nerd Font so icons stay one cell wide.
+family = "JetBrainsMono Nerd Font Mono"
+size = 12.0

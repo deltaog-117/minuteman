@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use shared::DirEntryInfo;
@@ -307,10 +307,14 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
     let theme = &config.theme;
     let g = glyphs::of(config);
     let pill_bg = style::color(&theme.bar_bg);
+    let styles = &config.styles;
     let pill = |text: String, fg: &str| {
         Span::styled(
             format!(" {text} "),
-            Style::default().fg(style::color(fg)).bg(pill_bg),
+            style::styled(
+                Style::default().fg(style::color(fg)).bg(pill_bg),
+                styles.pill,
+            ),
         )
     };
 
@@ -354,7 +358,10 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
         view.home.as_deref(),
         left_width.saturating_sub(text_width(prefix)),
     );
-    let dim = Style::default().fg(style::color(&theme.title_fg));
+    let dim = style::styled(
+        Style::default().fg(style::color(&theme.title_fg)),
+        styles.breadcrumb,
+    );
     let sep = Style::default().fg(style::color(&theme.border_fg));
     let mut left = vec![Span::styled(
         prefix,
@@ -368,9 +375,10 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
         left.push(if i == last {
             Span::styled(
                 segment,
-                Style::default()
-                    .fg(style::color(&theme.border_focused_fg))
-                    .add_modifier(Modifier::BOLD),
+                style::styled(
+                    Style::default().fg(style::color(&theme.border_focused_fg)),
+                    styles.breadcrumb_current,
+                ),
             )
         } else {
             Span::styled(segment, dim)
@@ -572,8 +580,14 @@ fn right_segments(segs: &[Segment], arrows: bool, g: &Glyphs) -> Line<'static> {
 /// end until the rest fit `width`.
 fn fit_hints(all: &[(String, &'static str)], width: usize, config: &Config) -> Line<'static> {
     let theme = &config.theme;
-    let key_style = Style::default().fg(style::color(&theme.accent_fg));
-    let label_style = Style::default().fg(style::color(&theme.status_fg));
+    let key_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.hint_key,
+    );
+    let label_style = style::styled(
+        Style::default().fg(style::color(&theme.status_fg)),
+        config.styles.hint_label,
+    );
     let build = |n: usize| {
         let mut spans = Vec::new();
         for (i, (key, what)) in all.iter().take(n).enumerate() {
@@ -613,7 +627,9 @@ pub fn render_status_bar(
     let g = glyphs::of(config);
     let arrows = use_arrows(config, g);
     let bar_bg = style::color(&theme.bar_bg);
-    let seg_style = Style::default().fg(style::color(&theme.file_fg)).bg(bar_bg);
+    let styles = &config.styles;
+    let seg_base = Style::default().fg(style::color(&theme.file_fg)).bg(bar_bg);
+    let seg_style = style::styled(seg_base, styles.status);
     let divider = Style::default()
         .fg(style::color(&theme.border_fg))
         .bg(bar_bg);
@@ -621,10 +637,10 @@ pub fn render_status_bar(
     let (label, mode_color) = mode_pill(view.mode, theme);
     let mut left = vec![Segment {
         text: label,
-        style: Style::default()
-            .fg(Color::Black)
-            .bg(mode_color)
-            .add_modifier(Modifier::BOLD),
+        style: style::styled(
+            Style::default().fg(Color::Black).bg(mode_color),
+            styles.mode,
+        ),
     }];
     let mut right = Vec::new();
 
@@ -644,7 +660,7 @@ pub fn render_status_bar(
                 (true, None) => "dir".to_string(),
                 (false, _) => format_size(entry.size),
             };
-            let name_style = seg_style.add_modifier(Modifier::BOLD);
+            let name_style = style::styled(seg_base, styles.status_name);
             left.push(Segment {
                 text: fit_width(&entry.name, 28),
                 style: name_style,
@@ -699,7 +715,10 @@ pub fn render_status_bar(
         frame.render_widget(
             Paragraph::new(Span::styled(
                 message,
-                Style::default().fg(style::color(message_color)),
+                style::styled(
+                    Style::default().fg(style::color(message_color)),
+                    styles.message,
+                ),
             )),
             at(left_width + 1, message_width),
         );
@@ -761,6 +780,8 @@ mod tests {
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             ui: theming::Ui::default(),
+            styles: theming::Styles::default(),
+            font: theming::Font::default(),
         }
     }
 

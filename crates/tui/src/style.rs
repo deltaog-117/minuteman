@@ -25,7 +25,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
 use shared::DirEntryInfo;
-use theming::{Config, Theme};
+use theming::{Config, Mods, Styles, Theme};
 
 /// Whether the terminal advertises 24-bit color. Read once — `COLORTERM` can't change under a
 /// running process, and this is consulted for every colored cell.
@@ -107,6 +107,26 @@ pub fn quantize_256(r: u8, g: u8, b: u8) -> u8 {
     }
 }
 
+/// The ratatui modifiers for a set of configured text attributes.
+pub fn modifiers(mods: Mods) -> Modifier {
+    [
+        (mods.bold, Modifier::BOLD),
+        (mods.italic, Modifier::ITALIC),
+        (mods.dim, Modifier::DIM),
+        (mods.underline, Modifier::UNDERLINED),
+        (mods.reverse, Modifier::REVERSED),
+        (mods.crossed_out, Modifier::CROSSED_OUT),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .fold(Modifier::empty(), |acc, (_, m)| acc | m)
+}
+
+/// `base` with the configured attributes added on top.
+pub fn styled(base: Style, mods: Mods) -> Style {
+    base.add_modifier(modifiers(mods))
+}
+
 pub fn color(name: &str) -> Color {
     parse_color(name, truecolor())
 }
@@ -121,21 +141,23 @@ pub fn border_type(name: &str) -> BorderType {
 }
 
 /// The frame every pane shares. `focused` marks the pane keystrokes currently act on: it gets
-/// the bright border and an accent-colored bold title, so the active pane reads as lit up
-/// against the dimmer rest.
+/// the bright border and an accent-colored title (bold by default), so the active pane reads as
+/// lit up against the dimmer rest.
 pub fn themed_block(config: &Config, title: &str, focused: bool) -> Block<'static> {
     let theme = &config.theme;
+    let styles = &config.styles;
     let (border, title_style) = if focused {
         (
             color(&theme.border_focused_fg),
-            Style::default()
-                .fg(color(&theme.accent_fg))
-                .add_modifier(Modifier::BOLD),
+            styled(
+                Style::default().fg(color(&theme.accent_fg)),
+                styles.title_focused,
+            ),
         )
     } else {
         (
             color(&theme.border_fg),
-            Style::default().fg(color(&theme.title_fg)),
+            styled(Style::default().fg(color(&theme.title_fg)), styles.title),
         )
     };
     let block = Block::default()
@@ -203,6 +225,19 @@ impl FileKind {
         }
     }
 
+    /// This kind's text attributes in `styles`.
+    pub fn mods(self, styles: &Styles) -> Mods {
+        match self {
+            Self::Dir => styles.dir,
+            Self::Source => styles.source,
+            Self::Config => styles.config,
+            Self::Doc => styles.doc,
+            Self::Archive => styles.archive,
+            Self::Media => styles.media,
+            Self::Other => styles.other,
+        }
+    }
+
     /// This kind's color string in `theme`.
     pub fn theme_color(self, theme: &Theme) -> &str {
         match self {
@@ -215,6 +250,12 @@ impl FileKind {
             Self::Other => &theme.file_fg,
         }
     }
+}
+
+/// Whether `entry` is a file with any execute bit set — styled on top of its kind, like Ranger's
+/// bold executables. Always false where the backend has no permission bits.
+pub fn is_executable(entry: &DirEntryInfo) -> bool {
+    !entry.is_dir && entry.mode.is_some_and(|mode| mode & 0o111 != 0)
 }
 
 /// The color to paint the selected row's text, or `None` when the theme says `"keep"` — the
@@ -321,6 +362,53 @@ mod tests {
         assert_eq!(
             FileKind::classify(&file("Makefile", false)),
             FileKind::Config
+        );
+    }
+
+    #[test]
+    fn modifiers_map_each_configured_attribute() {
+        assert_eq!(modifiers(Mods::default()), Modifier::empty());
+        let all = Mods::parse(&[
+            "bold",
+            "italic",
+            "dim",
+            "underline",
+            "reverse",
+            "strikethrough",
+        ]);
+        assert_eq!(
+            modifiers(all),
+            Modifier::BOLD
+                | Modifier::ITALIC
+                | Modifier::DIM
+                | Modifier::UNDERLINED
+                | Modifier::REVERSED
+                | Modifier::CROSSED_OUT
+        );
+        assert_eq!(modifiers(Mods::parse(&["italic"])), Modifier::ITALIC);
+    }
+
+    #[test]
+    fn each_file_kind_reads_its_own_style() {
+        let styles = Styles::default();
+        assert!(FileKind::Dir.mods(&styles).bold);
+        assert!(!FileKind::Doc.mods(&styles).bold);
+    }
+
+    #[test]
+    fn only_non_directories_with_an_execute_bit_are_executable() {
+        let mut e = file("run.sh", false);
+        e.mode = Some(0o755);
+        assert!(is_executable(&e));
+        e.mode = Some(0o644);
+        assert!(!is_executable(&e));
+        e.mode = None;
+        assert!(!is_executable(&e));
+        let mut dir = file("bin", true);
+        dir.mode = Some(0o755);
+        assert!(
+            !is_executable(&dir),
+            "a directory's x bit means searchable, not executable"
         );
     }
 

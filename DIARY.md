@@ -1732,6 +1732,76 @@ the codepoints and colors on screen, not see the glyph shapes.
 
 ---
 
+### One Appearance File: Text Styles per Element, a Font Table, and Layering Over the Old Config
+
+**Date:** 2026-09-19
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Two requests in a row: why does Ranger's text look bold with "its own font", and then "make the
+entire TUI appearance (neon, font, bold, italic, ...) configurable through a file specific to
+appearance". Checking Ranger's installed `default.py` showed the answer to the first: it has no
+font of its own. It sets the bold attribute on directories, executables, tagged and cut/copied
+entries, and adds `BRIGHT` to the color — so directories are bold bright blue, drawn in the
+user's terminal font. Minuteman's directories were plain, and since terminals only brighten bold
+for the 16 basic colors, Minuteman's hex colors got none of that weight for free.
+
+#### Decision & Rationale
+
+- **One file, four tables.** `appearance.toml` holds `[theme]`, `[ui]`, `[style]` and `[font]`.
+  Keybindings stay in `config.toml`. `minuteman init-appearance` prints the commented default
+  (the same file the tests check against), in the style of the other `init-*` commands: it prints,
+  and never writes into the user's home.
+- **Styles as data, per element.** Every place that hardcoded a bold now reads a `Mods` set for a
+  named element (22 of them). A list *replaces* the element's default rather than merging, so
+  there is a way to turn a default off (`dir = []`). The struct, its deserializable twin, the
+  defaults, the layering and the list of element names come from one `element_styles!` macro
+  invocation, so adding an element is one line and can't drift between those five places. A test
+  requires every element to be documented in the example file.
+- **Directories and executables bold by default**, matching Ranger. Executable is a modifier
+  layered on the kind's style (from the mode bits `list_dir` already reads), not a new color,
+  so a `.sh` script stays green and gains weight.
+- **The font is honest.** The terminal draws every character, so `[font]` cannot change anything
+  inside Minuteman. It exists to feed `init-terminal`, which now prints the user's own family
+  and size in the kitty, alacritty and wezterm snippets. Quotes in a family name are escaped so a
+  font name can't break the printed config.
+- **Layering rather than a break.** `[theme]` and `[ui]` used to live in `config.toml`.
+  Moving them would silently reset anyone's look, so they still work there and
+  `appearance.toml` wins field by field (`RawTheme::overlay`, `RawUi::overlay`). Each file is
+  parsed on its own, so a malformed appearance file keeps the working keybindings and just falls
+  back to the default look, with a warning on stderr.
+
+#### Implementation Notes
+
+- New `theming/src/appearance.rs` (`Mods`, `Styles`/`RawStyles`, `Font`/`RawFont`);
+  `Config::from_sources(config, appearance)` is the pure, testable core of `Config::load`.
+- Unknown modifier names are skipped and a nonsense font size (zero, negative, NaN, absurd)
+  falls back to the default, in keeping with the rule that a typo never blocks startup.
+- Not done: reloading appearance while the app runs (edit the file, restart), and a
+  `[font]` bold/italic face or line height — those vary too much between terminals to print
+  correctly without testing each one.
+
+#### Verification
+
+`cargo test --workspace` passes (178 tests); clippy is clean. Ran the real binary on a PTY through
+`pyte` and read each cell's attributes: with no appearance file, directories (`alpha/`) and an
+executable (`main.rs`, mode 755) were bold and other files plain, with the neon colors; with a
+custom file (`dir = ["italic"]`, `doc = ["italic", "underline"]`, `executable = []`, a new focused
+border color) a directory was italic and *not* bold (bold only returned on the selected row, from
+`selection`), the document was italic and underlined in its new color, `main.rs` lost its bold,
+and the border took the new color; with `config.toml` naming the dracula palette and
+`appearance.toml` overriding one field, the dracula colors applied and the appearance field won;
+with a malformed appearance file the app started with the default look and printed a parse
+warning. `init-terminal kitty|alacritty|wezterm` printed `Iosevka Term` at `13.5` from a `[font]`
+table, and with a malformed file warned and used the default font. `init-appearance` output is
+byte-identical to `appearance.example.toml` and parses as TOML with the four tables. Not
+verified: how the italic and underline look in your terminal font, since that depends on the
+font having those faces.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

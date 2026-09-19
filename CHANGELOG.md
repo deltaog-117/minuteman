@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `theming`: `appearance.toml` (in `~/.config/minuteman/`) holds the whole look in one file:
+  `[theme]` colors, `[ui]` glyphs, and two new tables. `minuteman init-appearance` prints the
+  fully commented default (`appearance.example.toml`).
+- `theming`: `[style]` sets text attributes — `bold`, `italic`, `dim`, `underline`, `reverse`,
+  `strikethrough` — for 22 elements: the seven entry kinds, executables, the selection, marks,
+  pane titles, the size/age columns, the breadcrumb, header pills, the status bar's mode pill,
+  name, segments, hints and messages. A list replaces the element's default.
+- `theming`: `[font]` (`family`, `size`), which `minuteman init-terminal` now puts in the kitty,
+  alacritty and wezterm snippets it prints. Minuteman can't apply a font itself.
+- `tui`: executables (files with an execute bit) are styled on top of their kind.
 - `theming`: `[ui] glyphs = "unicode" | "nerd" | "ascii"` chooses the symbols the interface draws
   with. `nerd` adds file-type icons (Font Awesome codepoints, stable across Nerd Fonts v2/v3) in
   each kind's color and Powerline arrows; `ascii` uses plain ASCII for every frame and symbol.
@@ -240,6 +250,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: directories and executables are now bold by default (like Ranger). Every bold in the
+  interface was hardcoded before and is now a `[style]` default.
+- `theming`: a `[theme]` or `[ui]` table in `config.toml` is still honored, but values in
+  `appearance.toml` override it field by field. `config.example.toml` no longer lists them.
 - `theming`: `[theme] separator` now defaults to `"auto"` (Powerline arrows exactly when the
   glyph set is `nerd`) instead of `"flat"`; `"flat"` and `"arrow"` still force a style. With the
   default `unicode` glyph set nothing looks different.

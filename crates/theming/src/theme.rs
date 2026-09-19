@@ -169,6 +169,34 @@ pub struct RawTheme {
     pub separator: Option<String>,
 }
 
+impl RawTheme {
+    /// `top` wins wherever it sets a field; otherwise `self` shows through. Lets `appearance.toml`
+    /// override a `[theme]` still left in `config.toml`, one field at a time.
+    pub fn overlay(self, top: RawTheme) -> RawTheme {
+        RawTheme {
+            name: top.name.or(self.name),
+            selection_bg: top.selection_bg.or(self.selection_bg),
+            selection_fg: top.selection_fg.or(self.selection_fg),
+            border_fg: top.border_fg.or(self.border_fg),
+            border_focused_fg: top.border_focused_fg.or(self.border_focused_fg),
+            title_fg: top.title_fg.or(self.title_fg),
+            accent_fg: top.accent_fg.or(self.accent_fg),
+            dir_fg: top.dir_fg.or(self.dir_fg),
+            file_fg: top.file_fg.or(self.file_fg),
+            source_fg: top.source_fg.or(self.source_fg),
+            config_fg: top.config_fg.or(self.config_fg),
+            doc_fg: top.doc_fg.or(self.doc_fg),
+            archive_fg: top.archive_fg.or(self.archive_fg),
+            media_fg: top.media_fg.or(self.media_fg),
+            status_fg: top.status_fg.or(self.status_fg),
+            bar_bg: top.bar_bg.or(self.bar_bg),
+            danger_fg: top.danger_fg.or(self.danger_fg),
+            border_type: top.border_type.or(self.border_type),
+            separator: top.separator.or(self.separator),
+        }
+    }
+}
+
 impl From<RawTheme> for Theme {
     fn from(raw: RawTheme) -> Self {
         let base = Theme::named(raw.name.as_deref().unwrap_or("default"));

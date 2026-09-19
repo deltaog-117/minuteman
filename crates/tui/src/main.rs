@@ -45,7 +45,7 @@ use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::StatefulImage;
@@ -234,7 +234,12 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Ok(cli::Command::InitTerminal(terminal)) => {
-            print!("{}", terminal.snippet());
+            // The font comes from `[font]` in the user's appearance.toml.
+            print!("{}", terminal.snippet(&Config::load().font));
+            return Ok(());
+        }
+        Ok(cli::Command::InitAppearance) => {
+            print!("{}", include_str!("../../../appearance.example.toml"));
             return Ok(());
         }
         Ok(cli::Command::Glyphs) => {
@@ -970,17 +975,24 @@ fn entry_item(
     let theme = &config.theme;
     let g = glyphs::of(config);
     let accent = Style::default().fg(color_from_name(&theme.accent_fg));
+    let styles = &config.styles;
     let kind = style::FileKind::classify(entry);
-    let kind_style = Style::default().fg(color_from_name(kind.theme_color(theme)));
+    let mut kind_style = style::styled(
+        Style::default().fg(color_from_name(kind.theme_color(theme))),
+        kind.mods(styles),
+    );
+    if style::is_executable(entry) {
+        kind_style = style::styled(kind_style, styles.executable);
+    }
     let mut name_style = kind_style;
     if row.selected {
         if let Some(fg) = style::selection_fg(theme) {
             name_style = name_style.fg(fg);
         }
-        name_style = name_style.add_modifier(Modifier::BOLD);
+        name_style = style::styled(name_style, styles.selection);
     }
     if row.marked {
-        name_style = name_style.add_modifier(Modifier::BOLD);
+        name_style = style::styled(name_style, styles.mark);
     }
 
     let mut spans = Vec::with_capacity(3);
@@ -991,7 +1003,7 @@ fn entry_item(
             Span::raw(" ")
         });
         spans.push(if row.marked {
-            Span::styled("*", accent.add_modifier(Modifier::BOLD))
+            Span::styled("*", style::styled(accent, styles.mark))
         } else {
             Span::raw(" ")
         });
@@ -1011,7 +1023,10 @@ fn entry_item(
                 name_style,
             ));
             // Dim, so the eye lands on names first.
-            let dim = Style::default().fg(color_from_name(&theme.status_fg));
+            let dim = style::styled(
+                Style::default().fg(color_from_name(&theme.status_fg)),
+                styles.columns,
+            );
             if plan.size {
                 spans.push(Span::styled(
                     format!(" {:>5}", hud::size_cell(entry, g.none)),

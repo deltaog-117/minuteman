@@ -14,14 +14,17 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Config loading, keybinding resolution, and theme colors — read from
-//! `~/.config/minuteman/config.toml`, with built-in defaults when absent or invalid.
+//! Config loading, keybinding resolution, and appearance — keys from
+//! `~/.config/minuteman/config.toml`, the whole look (colors, glyphs, text styles, font) from
+//! `~/.config/minuteman/appearance.toml`, each with built-in defaults when absent or invalid.
 
+pub mod appearance;
 pub mod config;
 pub mod keymap;
 pub mod theme;
 pub mod ui;
 
+pub use appearance::{Font, Mods, Styles};
 pub use config::Config;
 pub use keymap::{Action, KeyMap};
 pub use theme::Theme;

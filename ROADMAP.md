@@ -354,14 +354,22 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   against the real binary through a terminal emulator: the Nerd set showed icons, arrows and pill
   symbols with columns still aligned, and the ASCII set put no non-ASCII character anywhere on
   screen; the alacritty snippet parses as TOML and the wezterm one as Lua.
+- ✅ **Appearance file with text styles and font (UI overhaul, typography)** – all of the look
+  now lives in `~/.config/minuteman/appearance.toml`: `[theme]` colors, `[ui]` glyphs, a new
+  `[style]` table giving each of 22 elements a list of bold/italic/dim/underline/reverse/
+  strikethrough, and a `[font]` table. Prompted by Ranger's bold directories: Minuteman's were
+  plain, and terminals brighten bold only for the basic 16 colors, so hex colors needed the
+  attribute set explicitly — directories and executables are now bold by default, and every other
+  hardcoded bold became a `[style]` default. The font can't be applied by the TUI (the terminal
+  owns it), so `[font]` feeds `minuteman init-terminal`. `minuteman init-appearance` prints the
+  commented default; a `[theme]`/`[ui]` still in `config.toml` keeps working, with the
+  appearance file winning per field. Verified against the real binary: attributes read off the
+  screen for the defaults, a custom file, and legacy layering; a malformed file falls back.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-- **Typography polish** – a consistent casing/weight scheme for chrome labels (pane titles,
-  pills, hints), as a follow-up to the glyph sets: the font is the terminal's, so this is about
-  hierarchy (bold/dim/italic, uppercase labels), not typefaces.
 - **UI overhaul, phase C — cinematic layer** – a boot splash, animated focus transitions,
   gradient borders/titles, a pulsing selection, a typewriter reveal on the preview, and an
   optional system/git HUD. Needs an animation tick on top of the existing 100ms poll.

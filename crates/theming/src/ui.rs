@@ -56,6 +56,14 @@ pub struct RawUi {
     pub glyphs: Option<String>,
 }
 
+impl RawUi {
+    pub fn overlay(self, top: RawUi) -> RawUi {
+        RawUi {
+            glyphs: top.glyphs.or(self.glyphs),
+        }
+    }
+}
+
 impl From<RawUi> for Ui {
     fn from(raw: RawUi) -> Self {
         Self {

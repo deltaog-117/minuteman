@@ -31,6 +31,9 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
 - 🔹 **Interactive shell overlay** – `s` drops you into a real, fully interactive `$SHELL` in the
   browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
   auto-close-after-one-command.
+- 🔹 **The whole look in one file** – `appearance.toml` holds colors, glyphs, per-element text
+  styles (bold, italic, dim, underline, ...) and your font; `minuteman init-appearance` prints a
+  commented starting point. Directories and executables are bold by default, like Ranger's.
 - 🔹 **Glyph sets that match your font** – `[ui] glyphs = "nerd"` adds file-type icons and
   Powerline arrows (with a Nerd Font); `"unicode"` (default) needs nothing special; `"ascii"` is
   for a Linux console. `minuteman glyphs` previews them, and
@@ -151,11 +154,17 @@ prefix in the current pane.
 
 ## ⚙️ Configuration
 
-Minuteman reads `~/.config/minuteman/config.toml` if present. Any key you don't specify keeps
-its default. Copy [`config.example.toml`](config.example.toml) to that path as a starting point —
-it documents every field with its built-in default.
+Two files in `~/.config/minuteman/`, each optional and each falling back per field — a partial
+file, a missing file, even one that fails to parse never stops Minuteman from starting:
+
+- **`config.toml`** — keybindings. Copy [`config.example.toml`](config.example.toml) as a starting
+  point.
+- **`appearance.toml`** — the whole look: colors, glyphs, text styles and the font. Print a fully
+  commented starting point with `minuteman init-appearance > ~/.config/minuteman/appearance.toml`
+  (it's [`appearance.example.toml`](appearance.example.toml)).
 
 ```toml
+# config.toml
 [keys]
 move_down = ["j"]
 move_up = ["k"]
@@ -173,56 +182,67 @@ search = ["/"]
 command = [":"]
 select = ["v"]
 leader = ["space"]
-
-[theme]
-# Built-in palettes: "neon" (default), "classic", "dracula". Any field below overrides one color.
-name = "neon"
-selection_bg = "#2b1a4f"
-selection_fg = "keep"          # "keep" = leave each entry in its own file-type color
-border_fg = "#3d4270"          # every pane but the active one
-border_focused_fg = "#00f0ff"  # the active pane (or focused shell)
-title_fg = "#8a8fd6"
-accent_fg = "#ff2bd6"          # active title, selection stripe, marks
-dir_fg = "#00d9ff"
-source_fg = "#39ff88"
-config_fg = "#ffd60a"
-doc_fg = "#b69cff"
-archive_fg = "#ff7a3d"
-media_fg = "#ff5cf0"
-file_fg = "#c8ccff"
-status_fg = "#7a80b8"
-border_type = "rounded"        # or "plain", "double", "thick"
-bar_bg = "#1a1f3d"             # status-bar segments
-danger_fg = "#ff3860"          # delete / overwrite prompts
-separator = "auto"             # "auto" = arrows when glyphs = "nerd"; or "arrow" / "flat"
-
-[ui]
-glyphs = "unicode"             # "unicode" | "nerd" (icons + arrows) | "ascii"
 ```
 
-Colors are a basic name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`,
-`gray`/`grey`) or a hex value (`#rrggbb` or `#rgb`). Hex is drawn in true color when the terminal
-sets `COLORTERM=truecolor` and mapped to the nearest 256-color otherwise. An unrecognised color
+## 🎨 Appearance
+
+`appearance.toml` has four tables. Everything left out keeps its default.
+
+```toml
+[theme]   # colors: a built-in palette ("neon", "classic", "dracula") plus per-field overrides
+name = "neon"
+border_focused_fg = "#00f0ff"   # the active pane; see appearance.example.toml for every field
+dir_fg = "#00d9ff"
+
+[ui]      # glyphs
+glyphs = "unicode"             # "unicode" | "nerd" (icons + Powerline arrows) | "ascii"
+
+[style]   # bold, italic, dim, underline, reverse, strikethrough — per element
+dir = ["bold"]                 # directories are bold, like Ranger's
+executable = ["bold"]          # files with an execute bit
+doc = ["italic"]               # e.g. make documents italic
+title_focused = ["bold", "underline"]
+
+[font]    # used by `minuteman init-terminal` — see below
+family = "JetBrainsMono Nerd Font Mono"
+size = 12.0
+```
+
+**Colors** are a basic name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
+`white`, `gray`/`grey`) or hex (`#rrggbb`, `#rgb`). Hex is drawn in true color when the terminal
+sets `COLORTERM=truecolor` and mapped to the nearest 256-color otherwise; an unrecognised color
 resets to the terminal's default.
+
+**Text styles.** Each `[style]` element takes a list of `"bold"`, `"italic"`, `"dim"`,
+`"underline"`, `"reverse"` and `"strikethrough"`. A list *replaces* that element's default, so
+`dir = []` turns directory bold off and `dir = ["bold", "italic"]` adds italic. The elements are
+the seven entry kinds (`dir`, `source`, `config`, `doc`, `archive`, `media`, `other`),
+`executable`, `selection`, `mark`, `title`, `title_focused`, `columns`, `breadcrumb`,
+`breadcrumb_current`, `pill`, `mode`, `status_name`, `status`, `hint_key`, `hint_label` and
+`message`; the example file says what each covers.
+
+**A `[theme]` or `[ui]` left in `config.toml`** (where they used to live) still works, but
+anything `appearance.toml` sets wins, field by field.
 
 ### Fonts and glyphs
 
-The typeface is your terminal's; Minuteman can only choose which symbols it draws. To get icons and
-Powerline arrows:
+The typeface itself is your terminal's — Minuteman can't change it, only choose which symbols it
+draws and how heavy or slanted its text is. To set up a font and icons:
 
 1. Install a Nerd Font — the **Mono** variant, so icons stay one cell wide (for example
    *JetBrainsMono Nerd Font Mono* from [nerdfonts.com](https://www.nerdfonts.com), or your
    distribution's `ttf-jetbrains-mono-nerd`-style package).
-2. Run `minuteman init-terminal <kitty|alacritty|wezterm>` and paste the snippet into that
-   terminal's config. It sets the font and a 16-color palette matching the neon theme; nothing is
-   written for you. Prefer to keep your font? kitty's `symbol_map` line (in the snippet) borrows
-   just the icons from *Symbols Nerd Font Mono*.
+2. Put your font in `[font]` in `appearance.toml`, then run
+   `minuteman init-terminal <kitty|alacritty|wezterm>` and paste the snippet into that terminal's
+   config. It sets that font and a 16-color palette matching the neon theme; nothing is written
+   for you. Prefer to keep your font? kitty's `symbol_map` line (in the snippet) borrows just the
+   icons from *Symbols Nerd Font Mono*.
 3. Run `minuteman glyphs` — if the `[nerd]` rows show boxes or `?`, the font isn't set up yet.
-4. Set `glyphs = "nerd"` under `[ui]` in `config.toml`.
+4. Set `glyphs = "nerd"` under `[ui]` in `appearance.toml`.
 
 Without a Nerd Font, leave it on `unicode` (the default), or use `ascii` on a bare console. The
-subcommands `init`, `init-terminal` and `glyphs` are only recognised as the first argument; browse
-a directory with one of those names as `./init`.
+subcommands `init`, `init-terminal`, `init-appearance` and `glyphs` are only recognised as the
+first argument; browse a directory with one of those names as `./init`.
 
 ---
 

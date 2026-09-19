@@ -22,6 +22,8 @@
 //! colors matches the theme's hex colors). Snippets are only printed — never written to the
 //! user's config files.
 
+use theming::Font;
+
 /// A terminal `init-terminal` can print a snippet for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terminal {
@@ -40,19 +42,20 @@ impl Terminal {
         }
     }
 
-    pub fn snippet(self) -> String {
+    /// The snippet for this terminal, with `font` (from `appearance.toml`'s `[font]`).
+    pub fn snippet(self, font: &Font) -> String {
         match self {
-            Self::Kitty => kitty(),
-            Self::Alacritty => alacritty(),
-            Self::Wezterm => wezterm(),
+            Self::Kitty => kitty(font),
+            Self::Alacritty => alacritty(font),
+            Self::Wezterm => wezterm(font),
         }
     }
 }
 
-/// The "Mono" variant keeps every icon one cell wide; the regular Nerd Font variants draw them
-/// double-width, which misaligns the file list.
-const FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
-const FONT_SIZE: &str = "12.0";
+/// A font size the way terminal configs write it: one decimal place (`12.0`, `13.5`).
+fn size(font: &Font) -> String {
+    format!("{:.1}", font.size)
+}
 
 const BACKGROUND: &str = "#0b0e1e";
 const FOREGROUND: &str = "#c8ccff";
@@ -68,11 +71,11 @@ const BRIGHT: [&str; 8] = [
     "#3d4270", "#ff6b86", "#7dffb0", "#ffe55c", "#7fa0ff", "#ff70e6", "#6dffff", "#ffffff",
 ];
 
-fn kitty() -> String {
+fn kitty(font: &Font) -> String {
     let mut lines = vec![
         "# Add to ~/.config/kitty/kitty.conf".to_string(),
-        format!("font_family      {FONT_FAMILY}"),
-        format!("font_size        {FONT_SIZE}"),
+        format!("font_family      {}", font.family),
+        format!("font_size        {}", size(font)),
         String::new(),
         "# Prefer to keep your current font? Leave font_family alone and add only this, which"
             .to_string(),
@@ -95,17 +98,17 @@ fn kitty() -> String {
     lines.join("\n") + "\n"
 }
 
-fn alacritty() -> String {
+fn alacritty(font: &Font) -> String {
     const NAMES: [&str; 8] = [
         "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
     ];
     let mut lines = vec![
         "# Add to ~/.config/alacritty/alacritty.toml".to_string(),
         "[font]".to_string(),
-        format!("size = {FONT_SIZE}"),
+        format!("size = {}", size(font)),
         String::new(),
         "[font.normal]".to_string(),
-        format!("family = \"{FONT_FAMILY}\""),
+        format!("family = \"{}\"", font.family.replace('"', "\\\"")),
         String::new(),
         "[colors.primary]".to_string(),
         format!("background = \"{BACKGROUND}\""),
@@ -132,7 +135,7 @@ fn alacritty() -> String {
     lines.join("\n") + "\n"
 }
 
-fn wezterm() -> String {
+fn wezterm(font: &Font) -> String {
     let list = |colors: &[&str; 8]| {
         colors
             .iter()
@@ -142,8 +145,11 @@ fn wezterm() -> String {
     };
     [
         "-- Add to ~/.config/wezterm/wezterm.lua, before `return config`".to_string(),
-        format!("config.font = wezterm.font('{FONT_FAMILY}')"),
-        format!("config.font_size = {FONT_SIZE}"),
+        format!(
+            "config.font = wezterm.font('{}')",
+            font.family.replace('\'', "\\'")
+        ),
+        format!("config.font_size = {}", size(font)),
         "config.colors = {".to_string(),
         format!("  foreground = '{FOREGROUND}',"),
         format!("  background = '{BACKGROUND}',"),
@@ -161,6 +167,7 @@ fn wezterm() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use theming::appearance::DEFAULT_FONT_FAMILY;
 
     const ALL: [Terminal; 3] = [Terminal::Kitty, Terminal::Alacritty, Terminal::Wezterm];
 
@@ -175,8 +182,11 @@ mod tests {
     #[test]
     fn every_snippet_sets_the_mono_nerd_font_and_all_sixteen_colors() {
         for terminal in ALL {
-            let text = terminal.snippet();
-            assert!(text.contains(FONT_FAMILY), "{terminal:?} lacks the font");
+            let text = terminal.snippet(&Font::default());
+            assert!(
+                text.contains(DEFAULT_FONT_FAMILY),
+                "{terminal:?} lacks the font"
+            );
             for color in NORMAL.iter().chain(BRIGHT.iter()) {
                 assert!(text.contains(color), "{terminal:?} lacks {color}");
             }
@@ -187,7 +197,7 @@ mod tests {
     #[test]
     fn snippets_have_no_stray_indentation_and_end_in_one_newline() {
         for terminal in ALL {
-            let text = terminal.snippet();
+            let text = terminal.snippet(&Font::default());
             assert!(
                 text.ends_with('\n') && !text.ends_with("\n\n"),
                 "{terminal:?}"
@@ -204,8 +214,43 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_font_replaces_the_default_in_every_snippet() {
+        let font = Font {
+            family: "Iosevka Term".into(),
+            size: 13.5,
+        };
+        for terminal in ALL {
+            let text = terminal.snippet(&font);
+            assert!(text.contains("Iosevka Term"), "{terminal:?}: {text}");
+            assert!(text.contains("13.5"), "{terminal:?} lacks the size");
+            assert!(
+                !text.contains(DEFAULT_FONT_FAMILY),
+                "{terminal:?} kept the default"
+            );
+        }
+    }
+
+    #[test]
+    fn font_names_with_quotes_cannot_break_the_snippet() {
+        let font = Font {
+            family: "Odd\"Name".into(),
+            size: 12.0,
+        };
+        assert!(Terminal::Alacritty.snippet(&font).contains("Odd\\\"Name"));
+        let font = Font {
+            family: "Odd'Name".into(),
+            size: 12.0,
+        };
+        assert!(Terminal::Wezterm.snippet(&font).contains("Odd\\'Name"));
+    }
+
+    #[test]
     fn the_kitty_snippet_offers_the_symbol_map_fallback() {
-        assert!(Terminal::Kitty.snippet().contains("symbol_map"));
+        assert!(
+            Terminal::Kitty
+                .snippet(&Font::default())
+                .contains("symbol_map")
+        );
     }
 
     #[test]
