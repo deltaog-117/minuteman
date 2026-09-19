@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: new neon look. Rounded frames; the active pane (the current directory's column, or the
+  focused shell) gets a bright border and an accent-colored bold title while the others dim; the
+  selected row gets an accent stripe (`▌`) over a background highlight and keeps its own color;
+  marked rows show an accent `*`. Entries are colored by kind (directory, source, config, doc,
+  archive, media) from their extension, dotfiles counting as config.
+- `theming`: `#rrggbb` / `#rgb` hex colors in `[theme]`. Hex is drawn in true color when
+  `COLORTERM` is `truecolor`/`24bit` and quantized to the nearest xterm-256 color otherwise.
+- `theming`: new `[theme]` fields `border_focused_fg`, `accent_fg`, `source_fg`, `config_fg`,
+  `doc_fg`, `archive_fg`, `media_fg` and `border_type` (`rounded`/`plain`/`double`/`thick`);
+  `selection_fg = "keep"` leaves the selected entry in its file-type color. New built-in
+  palettes `neon` and `classic`.
 - Cargo workspace scaffold: 10 feature-first crates (`shared`, `vfs_ssh`, `browser`,
   `file_ops`, `preview`, `shell_overlay`, `trash`, `plugins`, `theming`, `tui`).
 - `shared`: `Vfs` trait and a synchronous `LocalVfs` implementation over `std::fs`, with
@@ -207,6 +218,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `theming`: the default theme is now `neon` (true color). The previous 16-color look is
+  `name = "classic"`; `name = "default"` and unknown names resolve to `neon`.
+- `tui`: the mini-shell frame now uses the shared pane frame, so a focused shell is outlined in
+  `border_focused_fg` (previously `selection_bg`).
 - `tui`: `space` is now the single leader key for all mini-shell commands: `space space` goes
   back to typing in the shell, `space h`/`j`/`k`/`l` (or arrows) moves focus between panes,
   `space |` and `space -` split side by side / stacked, `space x` closes the focused pane, next to

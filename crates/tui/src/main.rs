@@ -20,6 +20,7 @@ mod image_preview;
 mod popup_shell;
 mod shell_init;
 mod shell_layout;
+mod style;
 mod text_preview;
 
 use std::io::{self, Stdout};
@@ -42,8 +43,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::StatefulImage;
 use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
@@ -711,27 +712,36 @@ fn draw(
         ])
         .split(rows[0]);
 
-    let selection_style = Style::default()
-        .bg(color_from_name(&config.theme.selection_bg))
-        .fg(color_from_name(&config.theme.selection_fg));
+    // Background only: the selected row's text color is set per span in `entry_item` (so the
+    // accent stripe and file-type colors survive the highlight).
+    let selection_style = Style::default().bg(color_from_name(&config.theme.selection_bg));
 
     // Parent pane — context only, no selection highlight.
     let parent_items: Vec<ListItem> = browser
         .parent_entries()
         .iter()
-        .map(|e| entry_item(e, config, false))
+        .map(|e| entry_item(e, config, Row::PLAIN))
         .collect();
     frame.render_widget(
-        List::new(parent_items).block(themed_block(config, "..")),
+        List::new(parent_items).block(style::themed_block(config, "..", false)),
         columns[0],
     );
 
     // Current pane — the active column, with the selection highlighted and marked entries
     // prefixed (Ranger-style) so a pending multi-select is visible before acting on it.
+    let has_selection = !browser.current_entries().is_empty();
     let current_items: Vec<ListItem> = browser
         .current_entries()
         .iter()
-        .map(|e| entry_item(e, config, browser.is_marked(&e.path)))
+        .enumerate()
+        .map(|(i, e)| {
+            let row = Row {
+                gutter: true,
+                selected: has_selection && i == browser.selected_index(),
+                marked: browser.is_marked(&e.path),
+            };
+            entry_item(e, config, row)
+        })
         .collect();
     let mut current_state = ListState::default();
     if !browser.current_entries().is_empty() {
@@ -740,7 +750,7 @@ fn draw(
     let title = browser.current_dir().to_string_lossy().into_owned();
     frame.render_stateful_widget(
         List::new(current_items)
-            .block(themed_block(config, &title))
+            .block(style::themed_block(config, &title, true))
             .highlight_style(selection_style),
         columns[1],
         &mut current_state,
@@ -756,7 +766,7 @@ fn draw(
         .is_some_and(|e| !e.is_dir && preview::is_text(&e.path));
 
     if is_selected_image {
-        let block = themed_block(config, "preview");
+        let block = style::themed_block(config, "preview", false);
         let inner = block.inner(columns[2]);
         frame.render_widget(block, columns[2]);
         match previews.image.status() {
@@ -776,7 +786,7 @@ fn draw(
             ImagePreviewStatus::Empty => {}
         }
     } else if is_selected_text {
-        let block = themed_block(config, "preview");
+        let block = style::themed_block(config, "preview", false);
         let inner = block.inner(columns[2]);
         frame.render_widget(block, columns[2]);
         let style = Style::default().fg(color_from_name(&config.theme.file_fg));
@@ -801,10 +811,10 @@ fn draw(
         let items: Vec<ListItem> = browser
             .preview_entries(vfs)
             .iter()
-            .map(|e| entry_item(e, config, false))
+            .map(|e| entry_item(e, config, Row::PLAIN))
             .collect();
         frame.render_widget(
-            List::new(items).block(themed_block(config, "preview")),
+            List::new(items).block(style::themed_block(config, "preview", false)),
             columns[2],
         );
     } else {
@@ -815,7 +825,7 @@ fn draw(
         let style = Style::default().fg(color_from_name(&config.theme.file_fg));
         frame.render_widget(
             List::new(vec![ListItem::new(Span::styled(label, style))])
-                .block(themed_block(config, "preview")),
+                .block(style::themed_block(config, "preview", false)),
             columns[2],
         );
     }
@@ -833,30 +843,55 @@ fn draw(
     }
 }
 
-/// A pane `Block` styled with the theme's border/title colors — every pane uses the same frame.
-fn themed_block<'a>(config: &Config, title: &'a str) -> Block<'a> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(color_from_name(&config.theme.border_fg)))
-        .title(title)
-        .title_style(Style::default().fg(color_from_name(&config.theme.title_fg)))
+/// How one row of a file list is drawn.
+#[derive(Clone, Copy)]
+struct Row {
+    /// Reserve the two-cell gutter (selection stripe + mark) in front of the name. Only the
+    /// current pane has one; the parent and preview lists are context, with nothing selected.
+    gutter: bool,
+    selected: bool,
+    marked: bool,
 }
 
-fn entry_item(entry: &DirEntryInfo, config: &Config, marked: bool) -> ListItem<'static> {
-    let label = entry_label(entry);
-    let color = if entry.is_dir {
-        color_from_name(&config.theme.dir_fg)
-    } else {
-        color_from_name(&config.theme.file_fg)
+impl Row {
+    const PLAIN: Row = Row {
+        gutter: false,
+        selected: false,
+        marked: false,
     };
-    let mut style = Style::default().fg(color);
-    let label = if marked {
-        style = style.add_modifier(Modifier::BOLD);
-        format!("* {label}")
-    } else {
-        label
-    };
-    ListItem::new(Span::styled(label, style))
+}
+
+fn entry_item(entry: &DirEntryInfo, config: &Config, row: Row) -> ListItem<'static> {
+    let theme = &config.theme;
+    let accent = Style::default().fg(color_from_name(&theme.accent_fg));
+    let mut name_style = Style::default().fg(color_from_name(
+        style::FileKind::classify(entry).theme_color(theme),
+    ));
+    if row.selected {
+        if let Some(fg) = style::selection_fg(theme) {
+            name_style = name_style.fg(fg);
+        }
+        name_style = name_style.add_modifier(Modifier::BOLD);
+    }
+    if row.marked {
+        name_style = name_style.add_modifier(Modifier::BOLD);
+    }
+
+    let mut spans = Vec::with_capacity(3);
+    if row.gutter {
+        spans.push(if row.selected {
+            Span::styled("▌", accent)
+        } else {
+            Span::raw(" ")
+        });
+        spans.push(if row.marked {
+            Span::styled("*", accent.add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw(" ")
+        });
+    }
+    spans.push(Span::styled(entry_label(entry), name_style));
+    ListItem::new(Line::from(spans))
 }
 
 fn entry_label(entry: &DirEntryInfo) -> String {
@@ -868,18 +903,7 @@ fn entry_label(entry: &DirEntryInfo) -> String {
 }
 
 fn color_from_name(name: &str) -> Color {
-    match name.to_lowercase().as_str() {
-        "black" => Color::Black,
-        "red" => Color::Red,
-        "green" => Color::Green,
-        "yellow" => Color::Yellow,
-        "blue" => Color::Blue,
-        "magenta" => Color::Magenta,
-        "cyan" => Color::Cyan,
-        "white" => Color::White,
-        "gray" | "grey" => Color::Gray,
-        _ => Color::Reset,
-    }
+    style::color(name)
 }
 
 #[cfg(test)]

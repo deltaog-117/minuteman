@@ -318,11 +318,27 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   and `"` couldn't be typed into a focused shell. Verified with a real bash in a PTY read through
   a terminal emulator: those keys and multi-space input reached the shell, and `space |`,
   `space h`, `space space` and `space x` each did what they say.
+- ✅ **Neon theme engine (UI overhaul, phase A)** – the default look is now a cyberpunk
+  true-color palette: rounded frames, an active pane that glows cyan against dim indigo
+  neighbours, a magenta stripe on the selected row, and per-kind entry colors. `[theme]` gained
+  hex colors (drawn as truecolor, or quantized to 256 colors when `COLORTERM` doesn't advertise
+  it), seven new color fields, `border_type`, and `selection_fg = "keep"`; the old look survives as
+  `name = "classic"`. Verified against the real binary with a terminal emulator reading per-cell
+  colors, with and without `COLORTERM=truecolor`. Phases B (HUD layout: header breadcrumb,
+  powerline status bar, size/date columns, scrollbars, optional Nerd Font icons) and C
+  (animation and effects) are queued below.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
+- **UI overhaul, phase B — HUD layout** – a header bar with a breadcrumb path; a powerline-style
+  status bar (mode, selection info, position `12/48`, size); right-aligned size/date/permission
+  columns; scrollbars; a key-hint footer; and Nerd Font file icons behind an opt-in with an ASCII
+  fallback.
+- **UI overhaul, phase C — cinematic layer** – a boot splash, animated focus transitions,
+  gradient borders/titles, a pulsing selection, a typewriter reveal on the preview, and an
+  optional system/git HUD. Needs an animation tick on top of the existing 100ms poll.
 - **Richer status line** – expand the bottom status bar beyond the current prompt/progress text
   to surface per-selection info at a glance: file count, cumulative size, permissions, and (where
   applicable) git status.
@@ -372,7 +388,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 0. Add `eval "$(minuteman init zsh)"` to `~/.zshrc`, reopen the terminal, run `mm`, navigate
    somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — press `s` to open a shell and type in it (`Tab` completes, spaces work).
+1. `cargo run -p tui` — the new neon theme is the default (`COLORTERM=truecolor` for full color;
+   `name = "classic"` for the old look). Press `s` to open a shell and type in it (`Tab` completes, spaces work).
    `Esc` stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
    `space space` goes back to typing, `space x` closes a pane. `space t` flips a split, and
    `space r`/`space m` plus `hjkl` resize/move (`Esc` leaves either mode).

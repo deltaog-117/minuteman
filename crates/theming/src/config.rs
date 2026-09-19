@@ -74,7 +74,7 @@ mod tests {
         assert_eq!(raw.keys.move_up, vec!["k".to_string()]);
 
         let theme: Theme = raw.theme.into();
-        assert_eq!(theme.selection_bg, "blue");
+        assert_eq!(theme.selection_bg, Theme::default().selection_bg);
     }
 
     /// The shipped `config.example.toml` must always parse and, being nothing but the built-in

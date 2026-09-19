@@ -44,16 +44,37 @@ select = ["v"]
 leader = ["space"]
 
 [theme]
-# Selects a built-in base palette ("default" or "dracula"); an unrecognised name falls back to
-# "default". Any color field below overrides just that field on top of the chosen palette.
-name = "default"
-selection_bg = "blue"
-selection_fg = "white"
-border_fg = "gray"
-title_fg = "white"
-dir_fg = "blue"
-file_fg = "white"
-status_fg = "gray"
+# Selects a built-in base palette: "neon" (the default — cyberpunk cyan/magenta, true color),
+# "classic" (the original plain 16-color look), or "dracula". An unrecognised name falls back to
+# "neon". Any field below overrides just that field on top of the chosen palette.
+name = "neon"
 
-# Colors: black, red, green, yellow, blue, magenta, cyan, white, gray (grey also works). An
-# unrecognised color name resets to the terminal's default.
+# Colors are a basic name — black, red, green, yellow, blue, magenta, cyan, white, gray (grey also
+# works) — or a hex value, "#rrggbb" or "#rgb". Hex is drawn in true color where the terminal
+# advertises it (COLORTERM=truecolor) and is mapped to the nearest of 256 colors otherwise. An
+# unrecognised color resets to the terminal's default.
+
+# The selected row's background, and its text color — or "keep" to leave each entry in its own
+# file-type color and only change the background.
+selection_bg = "#2b1a4f"
+selection_fg = "keep"
+# Frame color of every pane except the active one (the current directory's column, or the
+# focused shell), which gets the brighter border below.
+border_fg = "#3d4270"
+border_focused_fg = "#00f0ff"
+title_fg = "#8a8fd6"
+# Highlights: the active pane's title, the stripe in front of the selected row, and the "*" on
+# marked rows.
+accent_fg = "#ff2bd6"
+# Entry colors, by kind: directories, source code, config/data files (toml, json, dotfiles, ...),
+# documents, archives, images/audio/video, and everything else.
+dir_fg = "#00d9ff"
+source_fg = "#39ff88"
+config_fg = "#ffd60a"
+doc_fg = "#b69cff"
+archive_fg = "#ff7a3d"
+media_fg = "#ff5cf0"
+file_fg = "#c8ccff"
+status_fg = "#7a80b8"
+# Frame style: "rounded", "plain", "double", or "thick".
+border_type = "rounded"

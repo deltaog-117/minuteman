@@ -31,9 +31,11 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
 - 🔹 **Interactive shell overlay** – `s` drops you into a real, fully interactive `$SHELL` in the
   browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
   auto-close-after-one-command.
-- 🔹 **Themeable UI** – a real palette (borders, titles, directory/file colors, selection
-  highlight, status bar), not just two colors. `[theme] name = "dracula"` swaps the whole
-  palette; individual color fields still override it.
+- 🔹 **Neon, themeable UI** – a cyberpunk true-color palette by default: rounded frames, the
+  active pane glowing cyan against dim indigo neighbours, a magenta stripe on the selected row,
+  and entries colored by kind (directories, source, config, docs, archives, media). Hex colors
+  drop to the nearest of 256 colors on terminals without truecolor. `[theme] name = "classic"`
+  restores the old plain look, `"dracula"` swaps the palette, and every color still overrides.
 - 🔹 **Inline image preview** – select a `.png`/`.jpg`/`.gif`/etc. file and it renders directly in
   the preview pane, using your terminal's best available graphics protocol (Kitty, iTerm2,
   Sixel) or Unicode halfblocks as a universal fallback. Decoding and rendering never block the UI.
@@ -165,20 +167,29 @@ select = ["v"]
 leader = ["space"]
 
 [theme]
-# Selects a built-in base palette ("default" or "dracula"); an unrecognised name falls back
-# to "default". Any color field below overrides just that field on top of the chosen palette.
-name = "default"
-selection_bg = "blue"
-selection_fg = "white"
-border_fg = "gray"
-title_fg = "white"
-dir_fg = "blue"
-file_fg = "white"
-status_fg = "gray"
+# Built-in palettes: "neon" (default), "classic", "dracula". Any field below overrides one color.
+name = "neon"
+selection_bg = "#2b1a4f"
+selection_fg = "keep"          # "keep" = leave each entry in its own file-type color
+border_fg = "#3d4270"          # every pane but the active one
+border_focused_fg = "#00f0ff"  # the active pane (or focused shell)
+title_fg = "#8a8fd6"
+accent_fg = "#ff2bd6"          # active title, selection stripe, marks
+dir_fg = "#00d9ff"
+source_fg = "#39ff88"
+config_fg = "#ffd60a"
+doc_fg = "#b69cff"
+archive_fg = "#ff7a3d"
+media_fg = "#ff5cf0"
+file_fg = "#c8ccff"
+status_fg = "#7a80b8"
+border_type = "rounded"        # or "plain", "double", "thick"
 ```
 
-Colors are one of: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`
-(`grey` also works). An unrecognised color name resets to the terminal's default.
+Colors are a basic name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`,
+`gray`/`grey`) or a hex value (`#rrggbb` or `#rgb`). Hex is drawn in true color when the terminal
+sets `COLORTERM=truecolor` and mapped to the nearest 256-color otherwise. An unrecognised color
+resets to the terminal's default.
 
 ---
 

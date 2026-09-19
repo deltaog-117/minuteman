@@ -1528,6 +1528,73 @@ were not separately driven through the PTY.
 
 ---
 
+### Neon Theme Engine: Truecolor Hex, a Glowing Active Pane, and File-Type Colors
+
+**Date:** 2026-09-19
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Request: make the UI less "bland", better than Ranger's, with a cyberpunk-neon, hacker feel. What
+was actually plain: only the 16 basic terminal colors, identical square frames on every pane (so
+nothing marked the active one), directories blue and everything else white, and a flat selection
+bar.
+
+#### Options Considered
+
+- **A: theme engine first.** Truecolor, palettes, per-kind colors, border styles, an active-pane
+  glow, a selection stripe. No layout change.
+- **B: HUD layout redesign** (header, powerline status bar, columns, scrollbars, icons).
+- **C: a cinematic layer** (splash, animation, gradients, system HUD).
+
+A was chosen to go first: it's the foundation B and C reuse, and the biggest visual change for the
+least risk. B and C are queued as separate loops.
+
+#### Decision & Rationale
+
+Colors stay strings in `Theme`, so a config can mix basic names and `#rrggbb`/`#rgb`, and the
+example config stays a readable spelling-out of the defaults (a test requires it to resolve to
+exactly `Theme::default()`). The default became the neon palette; the old look is kept as
+`classic` rather than deleted. The active pane is the current directory's column (or the focused
+shell) with a bright border and an accent-bold title; the rest are dim. The selected row draws its
+stripe and text per span and the list highlight sets only a background, so the stripe and the
+file-type color survive the highlight (`selection_fg = "keep"`). Marks stay a `*` — now in the
+accent color — rather than a new glyph, so behavior and docs are unchanged. Terminals without
+truecolor get hex quantized to the nearest xterm-256 entry (the closer of the color cube and the
+grayscale ramp) instead of garbled colors.
+
+#### Implementation Notes
+
+- New `tui/src/style.rs` owns color parsing (`parse_color`, `quantize_256`, `truecolor`), border
+  types, `themed_block` (the frame every pane shares, including the mini-shell), and
+  `FileKind::classify`. `main.rs::color_from_name` is now a one-line delegate, so existing call
+  sites are unchanged. `themed_block` moved out of `main.rs`, and `popup_shell` now uses it, so a
+  focused shell is outlined in `border_focused_fg` (before: `selection_bg`).
+- `Theme` grew from 7 to 15 fields. Old configs keep working: every field is optional and falls
+  back to the chosen palette. A config that set only `selection_bg`/`border_fg` etc. now gets neon
+  for everything it didn't set, since `default` is neon.
+- Every current-pane row now has a two-cell gutter (stripe, mark), so names no longer shift when
+  a row is marked. Parent and preview lists have none.
+- Known limitation: quantizing loses hue in dark, low-saturation colors. The dim indigo frame
+  (`#3d4270`) becomes a neutral grey (`4e4e4e`) without truecolor. Ok for a border; noted so a
+  custom theme for 256-color terminals can pick colors that survive it.
+
+#### Verification
+
+`cargo test --workspace` passes (115 tests, including new ones for hex parsing, quantization,
+border-type fallback, file-kind classification, `keep`, and the palettes); clippy is clean. Ran the
+real binary in a PTY against a directory of varied files, reading per-cell colors through
+`pyte`. With `COLORTERM=truecolor`: rounded corners; the current pane's border `#00f0ff` vs the
+parent's `#3d4270`; `alpha/` `#00d9ff`, `main.rs` `#39ff88`, `Cargo.toml` `#ffd60a`, `README.md`
+`#b69cff`, `a.zip` `#ff7a3d`, `cat.png` `#ff5cf0`, an unclassified file `#c8ccff`; the selection
+stripe `#ff2bd6` on `#2b1a4f`. Without it, the same cells came back as nearby xterm-256 colors
+(e.g. `00ffff`, `5fff87`). The mini-shell box showed a rounded `#00f0ff` border and a bold
+`#ff2bd6` title. Not verified: how it looks to a human eye on your terminal and font, since I can
+only read the cells, not see them, and Nerd Font icons are out of scope until phase B.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate
