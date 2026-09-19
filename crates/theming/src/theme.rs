@@ -49,8 +49,9 @@ pub struct Theme {
     pub danger_fg: String,
     /// `"rounded"`, `"plain"`, `"double"`, or `"thick"`.
     pub border_type: String,
-    /// Edge between status-bar segments: `"flat"` (works in any font) or `"arrow"` (Powerline
-    /// arrows; needs a Powerline/Nerd Font).
+    /// Edge between status-bar segments: `"flat"` (works in any font), `"arrow"` (Powerline
+    /// arrows; needs a Powerline/Nerd Font), or `"auto"` (arrows exactly when the glyph set is
+    /// `nerd`).
     pub separator: String,
 }
 
@@ -85,7 +86,7 @@ impl Theme {
             bar_bg: "reset".into(),
             danger_fg: "red".into(),
             border_type: "plain".into(),
-            separator: "flat".into(),
+            separator: "auto".into(),
         }
     }
 
@@ -108,7 +109,7 @@ impl Theme {
             bar_bg: "reset".into(),
             danger_fg: "red".into(),
             border_type: "rounded".into(),
-            separator: "flat".into(),
+            separator: "auto".into(),
         }
     }
 }
@@ -135,7 +136,7 @@ impl Default for Theme {
             bar_bg: "#1a1f3d".into(),
             danger_fg: "#ff3860".into(),
             border_type: "rounded".into(),
-            separator: "flat".into(),
+            separator: "auto".into(),
         }
     }
 }
@@ -233,8 +234,9 @@ mod tests {
         assert!(theme.border_focused_fg.starts_with('#'));
         assert_eq!(theme.selection_fg, "keep");
         assert_eq!(theme.border_type, "rounded");
-        // Flat by default: the arrows need a patched font, and a missing glyph looks broken.
-        assert_eq!(theme.separator, "flat");
+        // Automatic: arrows only once the user has opted into the Nerd glyph set, since a
+        // missing arrow glyph looks broken.
+        assert_eq!(theme.separator, "auto");
     }
 
     #[test]

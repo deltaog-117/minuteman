@@ -14,8 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Command-line parsing: `minuteman [--cwd-file <path>] [start_dir]` and
-//! `minuteman init <bash|zsh|fish>`.
+//! Command-line parsing: `minuteman [--cwd-file <path>] [start_dir]`, `minuteman init
+//! <bash|zsh|fish>`, `minuteman init-terminal <kitty|alacritty|wezterm>`, and `minuteman glyphs`.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -23,12 +23,17 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use crate::shell_init::Shell;
+use crate::terminal_init::Terminal;
 
 /// What the process was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     /// Print the shell wrapper for `Shell` and exit, without starting the TUI.
     Init(Shell),
+    /// Print a font + color snippet for `Terminal` and exit.
+    InitTerminal(Terminal),
+    /// Print a sample of every glyph set, to see which ones the terminal's font can draw.
+    Glyphs,
     Run(RunArgs),
 }
 
@@ -45,6 +50,8 @@ pub enum CliError {
     UnknownFlag(String),
     UnknownShell(String),
     MissingShell,
+    UnknownTerminal(String),
+    MissingTerminal,
     ExtraArgument(PathBuf),
 }
 
@@ -60,6 +67,16 @@ impl fmt::Display for CliError {
                 )
             }
             Self::MissingShell => write!(f, "init needs a shell: bash, zsh, or fish"),
+            Self::UnknownTerminal(name) => write!(
+                f,
+                "unsupported terminal '{name}' (expected kitty, alacritty, or wezterm)"
+            ),
+            Self::MissingTerminal => {
+                write!(
+                    f,
+                    "init-terminal needs a terminal: kitty, alacritty, or wezterm"
+                )
+            }
             Self::ExtraArgument(path) => {
                 write!(f, "unexpected extra argument: {}", path.display())
             }
@@ -69,15 +86,30 @@ impl fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
-/// Parses everything after the program name. `init` as the *first* argument is the subcommand
-/// (browse a directory literally named `init` as `./init`).
+/// Parses everything after the program name. `init`, `init-terminal` and `glyphs` as the
+/// *first* argument are subcommands (browse a directory literally named one of those as
+/// `./init`).
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliError> {
     let mut args = args.into_iter();
     let mut run = RunArgs::default();
     let mut first = true;
 
     while let Some(arg) = args.next() {
-        if std::mem::take(&mut first) && arg == "init" {
+        let is_first = std::mem::take(&mut first);
+        if is_first && arg == "glyphs" {
+            return match args.next() {
+                None => Ok(Command::Glyphs),
+                Some(extra) => Err(CliError::ExtraArgument(PathBuf::from(extra))),
+            };
+        }
+        if is_first && arg == "init-terminal" {
+            let name = args.next().ok_or(CliError::MissingTerminal)?;
+            let name = name.to_string_lossy();
+            return Terminal::parse(&name)
+                .map(Command::InitTerminal)
+                .ok_or_else(|| CliError::UnknownTerminal(name.into_owned()));
+        }
+        if is_first && arg == "init" {
             let name = args.next().ok_or(CliError::MissingShell)?;
             let name = name.to_string_lossy();
             return Shell::parse(&name)
@@ -172,6 +204,31 @@ mod tests {
         assert_eq!(
             parse_strs(&["init", "tcsh"]),
             Err(CliError::UnknownShell("tcsh".into()))
+        );
+    }
+
+    #[test]
+    fn init_terminal_selects_a_terminal() {
+        assert_eq!(
+            parse_strs(&["init-terminal", "kitty"]),
+            Ok(Command::InitTerminal(Terminal::Kitty))
+        );
+        assert_eq!(
+            parse_strs(&["init-terminal"]),
+            Err(CliError::MissingTerminal)
+        );
+        assert_eq!(
+            parse_strs(&["init-terminal", "xterm"]),
+            Err(CliError::UnknownTerminal("xterm".into()))
+        );
+    }
+
+    #[test]
+    fn glyphs_is_a_bare_subcommand() {
+        assert_eq!(parse_strs(&["glyphs"]), Ok(Command::Glyphs));
+        assert_eq!(
+            parse_strs(&["glyphs", "nerd"]),
+            Err(CliError::ExtraArgument("nerd".into()))
         );
     }
 

@@ -32,6 +32,7 @@ use shared::DirEntryInfo;
 use theming::{Action, Config};
 
 use crate::app::{ClipboardMode, Progress};
+use crate::glyphs::{self, Glyphs};
 use crate::style;
 
 // ---------------------------------------------------------------------------------------------
@@ -187,8 +188,9 @@ pub fn breadcrumb(path: &Path, home: Option<&Path>, max_width: usize) -> Vec<Str
 // File-list columns and scrollbar
 // ---------------------------------------------------------------------------------------------
 
-/// The two-cell gutter in front of every current-pane name (selection stripe, mark).
-pub const GUTTER: usize = 2;
+/// The two-cell gutter in front of every current-pane name (selection stripe, mark). A file-type
+/// icon, when the glyph set has them, adds to it.
+pub const BASE_GUTTER: usize = 2;
 const SIZE_WIDTH: usize = 5;
 const AGE_WIDTH: usize = 3;
 /// A name never gets squeezed below this to make room for a column.
@@ -203,13 +205,14 @@ pub struct Columns {
 }
 
 /// Picks the richest layout that still leaves a name `MIN_NAME_WIDTH` cells — dropping the age
-/// column first, then size — so a narrow terminal loses detail, never the file name.
-pub fn plan_columns(inner_width: usize) -> Columns {
+/// column first, then size — so a narrow terminal loses detail, never the file name. `gutter` is
+/// everything in front of the name (stripe, mark, and any icon).
+pub fn plan_columns(inner_width: usize, gutter: usize) -> Columns {
     let tail = |size: bool, age: bool| {
         (if size { 1 + SIZE_WIDTH } else { 0 }) + (if age { 1 + AGE_WIDTH } else { 0 })
     };
     for (size, age) in [(true, true), (true, false)] {
-        let used = GUTTER + tail(size, age);
+        let used = gutter + tail(size, age);
         if inner_width >= used + MIN_NAME_WIDTH {
             return Columns {
                 name_width: inner_width - used,
@@ -219,17 +222,17 @@ pub fn plan_columns(inner_width: usize) -> Columns {
         }
     }
     Columns {
-        name_width: inner_width.saturating_sub(GUTTER),
+        name_width: inner_width.saturating_sub(gutter),
         size: false,
         age: false,
     }
 }
 
-/// The size column's text: a file's size, or `—` for a directory (whose size is meaningless;
-/// its item count shows in the status bar once selected).
-pub fn size_cell(entry: &DirEntryInfo) -> String {
+/// The size column's text: a file's size, or the glyph set's "none" mark for a directory (whose
+/// size is meaningless; its item count shows in the status bar once selected).
+pub fn size_cell(entry: &DirEntryInfo, none: &str) -> String {
     if entry.is_dir {
-        "—".into()
+        none.into()
     } else {
         format_size(entry.size)
     }
@@ -248,14 +251,15 @@ pub fn render_scrollbar(
         return;
     }
     let theme = &config.theme;
+    let g = glyphs::of(config);
     let mut state = ScrollbarState::new(total)
         .position(selected)
         .viewport_content_length(visible);
     let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
         .end_symbol(None)
-        .track_symbol(Some("│"))
-        .thumb_symbol("█")
+        .track_symbol(Some(g.track))
+        .thumb_symbol(g.thumb)
         .track_style(Style::default().fg(style::color(&theme.border_focused_fg)))
         .thumb_style(Style::default().fg(style::color(&theme.accent_fg)));
     frame.render_stateful_widget(
@@ -280,10 +284,14 @@ pub struct HeaderView<'a> {
     pub progress: Option<Progress>,
 }
 
-/// A `cells`-wide gauge with `filled` cells lit: `▰▰▱▱▱`.
-pub fn gauge(filled: usize, cells: usize) -> String {
+/// A `cells`-wide gauge with `filled` cells lit (`▰▰▱▱▱` in the unicode set).
+pub fn gauge(filled: usize, cells: usize, g: &Glyphs) -> String {
     let filled = filled.min(cells);
-    format!("{}{}", "▰".repeat(filled), "▱".repeat(cells - filled))
+    format!(
+        "{}{}",
+        g.gauge_on.repeat(filled),
+        g.gauge_off.repeat(cells - filled)
+    )
 }
 
 /// How many of `cells` to light. A multi-item paste fills in step with its items; a single
@@ -297,6 +305,7 @@ pub fn progress_fill(progress: &Progress, cells: usize) -> usize {
 
 pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, config: &Config) {
     let theme = &config.theme;
+    let g = glyphs::of(config);
     let pill_bg = style::color(&theme.bar_bg);
     let pill = |text: String, fg: &str| {
         Span::styled(
@@ -309,7 +318,7 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
     if let Some(progress) = &view.progress {
         let text = format!(
             "{} {} {}",
-            gauge(progress_fill(progress, 5), 5),
+            gauge(progress_fill(progress, 5), 5, g),
             progress.label,
             progress.done
         );
@@ -317,13 +326,16 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
     }
     if let Some((mode, count)) = view.clipboard {
         let text = match mode {
-            ClipboardMode::Copy => format!("⧉ {count} yanked"),
-            ClipboardMode::Move => format!("✂ {count} cut"),
+            ClipboardMode::Copy => g.pill(g.yanked, &format!("{count} yanked")),
+            ClipboardMode::Move => g.pill(g.cut, &format!("{count} cut")),
         };
         pills.push(pill(text, &theme.config_fg));
     }
     if view.marks > 0 {
-        pills.push(pill(format!("◆ {} marked", view.marks), &theme.accent_fg));
+        pills.push(pill(
+            g.pill(g.marked, &format!("{} marked", view.marks)),
+            &theme.accent_fg,
+        ));
     }
     let mut right = Vec::with_capacity(pills.len() * 2);
     for (i, p) in pills.into_iter().enumerate() {
@@ -336,7 +348,7 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
     let right_width = right_line.width().min(area.width as usize);
 
     let left_width = (area.width as usize).saturating_sub(right_width + 1);
-    let prefix = " ▌ ";
+    let prefix = g.header_prefix;
     let segments = breadcrumb(
         view.path,
         view.home.as_deref(),
@@ -351,7 +363,7 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
     let last = segments.len().saturating_sub(1);
     for (i, segment) in segments.into_iter().enumerate() {
         if i > 0 {
-            left.push(Span::styled(" › ", sep));
+            left.push(Span::styled(g.crumb_sep, sep));
         }
         left.push(if i == last {
             Span::styled(
@@ -509,31 +521,25 @@ fn segment_bg(seg: &Segment) -> Color {
     seg.style.bg.unwrap_or(Color::Reset)
 }
 
-const ARROW_RIGHT: &str = "\u{e0b0}";
-const ARROW_LEFT: &str = "\u{e0b2}";
-/// Powerline's hollow arrow, for two neighbours that share a background — the solid one would be
-/// the same color as both and vanish.
-const ARROW_RIGHT_THIN: &str = "\u{e0b1}";
-
 /// Segments laid out left to right. Between them: a Powerline arrow if `arrows`, else a thin
 /// divider where two neighbours share a background (so they don't blur into one block).
-fn left_segments(segs: &[Segment], arrows: bool, divider: Style) -> Line<'static> {
+fn left_segments(segs: &[Segment], arrows: bool, divider: Style, g: &Glyphs) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, seg) in segs.iter().enumerate() {
         spans.push(Span::styled(format!(" {} ", seg.text), seg.style));
         match segs.get(i + 1) {
             Some(next) if arrows && segment_bg(seg) == segment_bg(next) => {
-                spans.push(Span::styled(ARROW_RIGHT_THIN, divider));
+                spans.push(Span::styled(g.arrow_right_thin, divider));
             }
             Some(next) if arrows => spans.push(Span::styled(
-                ARROW_RIGHT,
+                g.arrow_right,
                 Style::default().fg(segment_bg(seg)).bg(segment_bg(next)),
             )),
             Some(next) if segment_bg(seg) == segment_bg(next) => {
-                spans.push(Span::styled("│", divider));
+                spans.push(Span::styled(g.divider, divider));
             }
             None if arrows => spans.push(Span::styled(
-                ARROW_RIGHT,
+                g.arrow_right,
                 Style::default().fg(segment_bg(seg)).bg(Color::Reset),
             )),
             _ => {}
@@ -543,7 +549,7 @@ fn left_segments(segs: &[Segment], arrows: bool, divider: Style) -> Line<'static
 }
 
 /// Segments for the right edge: arrows point left, drawn before each segment.
-fn right_segments(segs: &[Segment], arrows: bool) -> Line<'static> {
+fn right_segments(segs: &[Segment], arrows: bool, g: &Glyphs) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, seg) in segs.iter().enumerate() {
         if arrows {
@@ -553,7 +559,7 @@ fn right_segments(segs: &[Segment], arrows: bool) -> Line<'static> {
                 segment_bg(&segs[i - 1])
             };
             spans.push(Span::styled(
-                ARROW_LEFT,
+                g.arrow_left,
                 Style::default().fg(segment_bg(seg)).bg(prev_bg),
             ));
         }
@@ -586,6 +592,16 @@ fn fit_hints(all: &[(String, &'static str)], width: usize, config: &Config) -> L
         .unwrap_or_default()
 }
 
+/// Whether segment edges are Powerline arrows: as the theme's `separator` says, or, for `auto`,
+/// whenever the glyph set is one with a Nerd Font behind it.
+fn use_arrows(config: &Config, g: &Glyphs) -> bool {
+    match config.theme.separator.to_lowercase().as_str() {
+        "arrow" => true,
+        "flat" => false,
+        _ => g.powerline,
+    }
+}
+
 pub fn render_status_bar(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -594,7 +610,8 @@ pub fn render_status_bar(
 ) {
     let theme = &config.theme;
     let width = area.width as usize;
-    let arrows = theme.separator.eq_ignore_ascii_case("arrow");
+    let g = glyphs::of(config);
+    let arrows = use_arrows(config, g);
     let bar_bg = style::color(&theme.bar_bg);
     let seg_style = Style::default().fg(style::color(&theme.file_fg)).bg(bar_bg);
     let divider = Style::default()
@@ -633,7 +650,7 @@ pub fn render_status_bar(
                 style: name_style,
             });
             left.push(Segment {
-                text: entry.mode.map_or_else(|| "—".to_string(), format_perms),
+                text: entry.mode.map_or_else(|| g.none.to_string(), format_perms),
                 style: seg_style,
             });
             left.push(Segment {
@@ -651,8 +668,8 @@ pub fn render_status_bar(
         });
     }
 
-    let left_line = left_segments(&left, arrows, divider);
-    let right_line = right_segments(&right, arrows);
+    let left_line = left_segments(&left, arrows, divider, g);
+    let right_line = right_segments(&right, arrows, g);
     let left_width = left_line.width().min(width);
     let right_width = right_line.width().min(width.saturating_sub(left_width));
 
@@ -743,6 +760,7 @@ mod tests {
         Config {
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
+            ui: theming::Ui::default(),
         }
     }
 
@@ -837,23 +855,38 @@ mod tests {
 
     #[test]
     fn columns_drop_age_then_size_but_keep_the_name() {
-        let wide = plan_columns(40);
+        let wide = plan_columns(40, BASE_GUTTER);
         assert!(wide.size && wide.age);
-        assert_eq!(wide.name_width, 40 - GUTTER - 6 - 4);
+        assert_eq!(wide.name_width, 40 - BASE_GUTTER - 6 - 4);
 
-        let medium = plan_columns(22);
+        let medium = plan_columns(22, BASE_GUTTER);
         assert!(medium.size && !medium.age);
 
-        let narrow = plan_columns(15);
+        let narrow = plan_columns(15, BASE_GUTTER);
         assert!(!narrow.size && !narrow.age);
-        assert_eq!(narrow.name_width, 15 - GUTTER);
-        assert_eq!(plan_columns(0).name_width, 0);
+        assert_eq!(narrow.name_width, 15 - BASE_GUTTER);
+        assert_eq!(plan_columns(0, BASE_GUTTER).name_width, 0);
+    }
+
+    #[test]
+    fn an_icon_widens_the_gutter_and_so_narrows_the_name() {
+        let plain = plan_columns(40, BASE_GUTTER);
+        let with_icon = plan_columns(40, BASE_GUTTER + 2);
+        assert_eq!(with_icon.name_width, plain.name_width - 2);
+        // The icon can tip a borderline pane into dropping a column.
+        assert!(plan_columns(24, BASE_GUTTER).age);
+        assert!(!plan_columns(24, BASE_GUTTER + 2).age);
     }
 
     #[test]
     fn gauge_and_fill_track_the_batch_or_cycle_without_one() {
-        assert_eq!(gauge(2, 5), "▰▰▱▱▱");
-        assert_eq!(gauge(9, 5), "▰▰▰▰▰");
+        let unicode = Glyphs::for_set(theming::GlyphSet::Unicode);
+        assert_eq!(gauge(2, 5, unicode), "▰▰▱▱▱");
+        assert_eq!(gauge(9, 5, unicode), "▰▰▰▰▰");
+        assert_eq!(
+            gauge(2, 5, Glyphs::for_set(theming::GlyphSet::Ascii)),
+            "##---"
+        );
         let batch = |index, total| Progress {
             label: "copying",
             done: 0,
@@ -1003,15 +1036,100 @@ mod tests {
         let flat = render_to_text(80, |f, a| {
             render_status_bar(f, a, &view(Mode::Normal, Some(&file), ""), &config)
         });
-        assert!(!flat.contains(ARROW_RIGHT) && !flat.contains(ARROW_LEFT));
+        let g = Glyphs::for_set(theming::GlyphSet::Unicode);
+        assert!(!flat.contains(g.arrow_right) && !flat.contains(g.arrow_left));
 
         config.theme.separator = "arrow".into();
         let arrows = render_to_text(80, |f, a| {
             render_status_bar(f, a, &view(Mode::Normal, Some(&file), ""), &config)
         });
-        assert!(arrows.contains(ARROW_RIGHT) && arrows.contains(ARROW_LEFT));
+        assert!(arrows.contains(g.arrow_right) && arrows.contains(g.arrow_left));
         // Name, permissions, size and type share a background, so they get the hollow arrow.
-        assert!(arrows.contains(ARROW_RIGHT_THIN));
+        assert!(arrows.contains(g.arrow_right_thin));
+    }
+
+    fn config_with(glyphs: theming::GlyphSet) -> Config {
+        Config {
+            ui: theming::Ui { glyphs },
+            ..test_config()
+        }
+    }
+
+    #[test]
+    fn auto_separator_draws_arrows_only_for_the_nerd_glyph_set() {
+        let file = entry("a", false);
+        let bar = |set| {
+            let config = config_with(set);
+            render_to_text(80, |f, a| {
+                render_status_bar(f, a, &view(Mode::Normal, Some(&file), ""), &config)
+            })
+        };
+        let g = Glyphs::for_set(theming::GlyphSet::Nerd);
+        assert!(bar(theming::GlyphSet::Nerd).contains(g.arrow_right));
+        assert!(!bar(theming::GlyphSet::Unicode).contains(g.arrow_right));
+        assert!(!bar(theming::GlyphSet::Ascii).contains(g.arrow_right));
+    }
+
+    #[test]
+    fn an_explicit_separator_overrides_the_glyph_set() {
+        let file = entry("a", false);
+        let mut config = config_with(theming::GlyphSet::Nerd);
+        config.theme.separator = "flat".into();
+        let text = render_to_text(80, |f, a| {
+            render_status_bar(f, a, &view(Mode::Normal, Some(&file), ""), &config)
+        });
+        assert!(!text.contains(Glyphs::for_set(theming::GlyphSet::Nerd).arrow_right));
+    }
+
+    #[test]
+    fn the_ascii_set_draws_the_header_and_status_bar_in_ascii_only() {
+        let config = config_with(theming::GlyphSet::Ascii);
+        let file = entry("main.rs", false);
+        let status = render_to_text(120, |f, a| {
+            render_status_bar(f, a, &view(Mode::Normal, Some(&file), "msg"), &config)
+        });
+        let header = render_to_text(120, |f, a| {
+            render_header(
+                f,
+                a,
+                &HeaderView {
+                    path: Path::new("/home/me/dev"),
+                    home: Some("/home/me".into()),
+                    marks: 2,
+                    clipboard: Some((ClipboardMode::Copy, 1)),
+                    progress: Some(Progress {
+                        label: "copying",
+                        done: 1,
+                        batch: None,
+                    }),
+                },
+                &config,
+            )
+        });
+        for text in [status, header] {
+            assert!(text.is_ascii(), "non-ASCII in {text:?}");
+        }
+    }
+
+    #[test]
+    fn nerd_pills_carry_their_symbols() {
+        let config = config_with(theming::GlyphSet::Nerd);
+        let text = render_to_text(100, |f, a| {
+            render_header(
+                f,
+                a,
+                &HeaderView {
+                    path: Path::new("/x"),
+                    home: None,
+                    marks: 1,
+                    clipboard: Some((ClipboardMode::Move, 2)),
+                    progress: None,
+                },
+                &config,
+            )
+        });
+        let g = Glyphs::for_set(theming::GlyphSet::Nerd);
+        assert!(text.contains(g.cut) && text.contains(g.marked), "{text:?}");
     }
 
     #[test]

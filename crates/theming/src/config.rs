@@ -20,18 +20,21 @@ use serde::Deserialize;
 
 use crate::keymap::{KeyMap, RawKeyMap};
 use crate::theme::{RawTheme, Theme};
+use crate::ui::{RawUi, Ui};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 struct RawConfig {
     keys: RawKeyMap,
     theme: RawTheme,
+    ui: RawUi,
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub keys: KeyMap,
     pub theme: Theme,
+    pub ui: Ui,
 }
 
 impl Config {
@@ -53,6 +56,7 @@ impl Config {
         Self {
             keys: raw.keys.into(),
             theme: raw.theme.into(),
+            ui: raw.ui.into(),
         }
     }
 
@@ -90,5 +94,15 @@ mod tests {
 
         let theme: Theme = raw.theme.into();
         assert_eq!(theme, Theme::default());
+
+        let ui: Ui = raw.ui.into();
+        assert_eq!(ui, Ui::default());
+    }
+
+    #[test]
+    fn ui_table_selects_the_glyph_set() {
+        let raw: RawConfig = toml::from_str("[ui]\nglyphs = \"nerd\"\n").unwrap();
+        let ui: Ui = raw.ui.into();
+        assert_eq!(ui.glyphs, crate::ui::GlyphSet::Nerd);
     }
 }

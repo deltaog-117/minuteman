@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `theming`: `[ui] glyphs = "unicode" | "nerd" | "ascii"` chooses the symbols the interface draws
+  with. `nerd` adds file-type icons (Font Awesome codepoints, stable across Nerd Fonts v2/v3) in
+  each kind's color and Powerline arrows; `ascii` uses plain ASCII for every frame and symbol.
+- `tui`: `minuteman glyphs` prints a sample of each glyph set, to see what the terminal's font
+  can draw.
+- `tui`: `minuteman init-terminal <kitty|alacritty|wezterm>` prints a font (JetBrainsMono Nerd
+  Font Mono) and neon 16-color palette snippet matching the theme; the kitty one also offers a
+  `symbol_map` fallback to Symbols Nerd Font. Nothing is written to config files.
 - `tui`: header row with a breadcrumb path (`~` for home, `…` for elided middle segments) and
   pills for marked entries, the clipboard (`⧉ N yanked` / `✂ N cut`), and a gauge for a running
   copy/move/delete.
@@ -232,6 +240,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `theming`: `[theme] separator` now defaults to `"auto"` (Powerline arrows exactly when the
+  glyph set is `nerd`) instead of `"flat"`; `"flat"` and `"arrow"` still force a style. With the
+  default `unicode` glyph set nothing looks different.
+- `tui`: the header prefix, breadcrumb separator, selection stripe, scrollbar, gauge, status-bar
+  dividers, prompt cursor and pane frames are drawn from the active glyph set instead of being
+  hardcoded.
 - `tui`: the current pane's frame is titled with the directory's own name; the full path lives
   in the new header. Rows in that pane now start with a two-cell gutter (selection stripe, mark).
 - `tui`: `Esc`/`space`/resize/typing states are shown by the status bar's mode pill and hints

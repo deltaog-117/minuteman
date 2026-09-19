@@ -1665,6 +1665,73 @@ color as their foreground. Not verified: how it looks to a human eye on your ter
 
 ---
 
+### Glyph Sets, File Icons, and Terminal Snippets: Matching the UI to the Font
+
+**Date:** 2026-09-19
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Feedback: the letters and symbols "seem out of place" against the neon look. A terminal app
+cannot choose its font — the terminal draws every cell in its own — so the fix could only be to
+control which symbols the UI uses, and to help the user set the terminal up to match.
+
+#### Options Considered
+
+- **A: a typographic system inside the app** (casing, weight, spacing). Works anywhere, but is
+  limited by whatever font is present. Queued as follow-up polish.
+- **B: a glyph set plus a recommended font and terminal config.** Chosen.
+- **C: draw headings as images in a bundled typeface.** Only on graphics terminals, hard to align
+  to the grid, and not selectable; a possible showpiece later.
+
+#### Decision & Rationale
+
+`[ui] glyphs = unicode | nerd | ascii`, defaulting to `unicode` because the app can't detect
+whether a Nerd Font is installed, and a missing icon glyph shows as a broken box. Everything the
+header, list, scrollbar and status bar used to hardcode moved into one `Glyphs` table
+(`tui/src/glyphs.rs`), so a set is data, not scattered conditionals. `nerd` adds file-type
+icons and Powerline arrows; `ascii` replaces every frame and symbol, including the pane borders
+(via a custom `border::Set`), for a Linux console. The theme's `separator` became `auto`: arrows
+exactly when the set is `nerd`, so opting into the font doesn't need two settings, while
+`"flat"`/`"arrow"` still force a style. The user gets terminal help rather than being told to
+"install a font": `minuteman glyphs` shows what each set looks like in *their* terminal, and
+`minuteman init-terminal <kitty|alacritty|wezterm>` prints a font-and-palette snippet. The snippet
+palette equals the theme's own neon colors (a test asserts this), so anything drawn in the
+terminal's 16 ANSI colors matches the hex theme. Snippets are only printed, never written to the
+user's config files.
+
+#### Implementation Notes
+
+- Icons use Font Awesome codepoints (`U+F07B` folder, `U+F121` code, `U+F013` cog, ...), which
+  Nerd Fonts v2 and v3 both keep in place, unlike the Material Design range that v3 moved. The
+  snippets ask for the *Mono* variant so icons stay one cell wide; the non-Mono variants draw
+  them double-width and would misalign the list. An icon adds two cells to the gutter, so
+  `plan_columns` now takes the gutter width, and a borderline pane drops a column sooner.
+- Icons show on every list, including the parent and preview panes, in the kind's color.
+- Kept deliberately small: one icon per file *kind* (7), not per language or extension.
+- A first version of the kitty and wezterm snippets came out indented, because an unquoted shell
+  heredoc consumed the Rust `\`-newline continuations when writing the file. Caught by running
+  the built binary, then rewritten to build lines explicitly, with a test that no line is
+  unexpectedly indented.
+- The ASCII set still shows `…` when a name or path is truncated, and any non-ASCII file name
+  as it is: only the chrome is guaranteed ASCII.
+
+#### Verification
+
+`cargo test --workspace` passes (157 tests); clippy is clean. `minuteman glyphs` printed all
+three sets. The alacritty snippet parsed with Python's `tomllib` and the wezterm one loaded as
+Lua under LuaJIT; the kitty one has no stray indentation and all 16 colors. On a PTY read through
+`pyte`: with `glyphs = "nerd"` the list showed file-type icons in each kind's color (folder
+`U+F07B` in the directory color, code, cog, document, archive and file icons), Powerline arrows
+between status-bar segments, symbols on the yanked and marked pills, and columns still aligned;
+with `glyphs = "ascii"` the entire screen contained no non-ASCII character (`>` stripe, `+--+`
+frames, `#` scrollbar thumb, `|` dividers); the default `unicode` set was unchanged at 60 columns.
+Not verified: how the icons actually look in any specific Nerd Font on your machine — I can read
+the codepoints and colors on screen, not see the glyph shapes.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

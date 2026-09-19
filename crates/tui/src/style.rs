@@ -138,11 +138,15 @@ pub fn themed_block(config: &Config, title: &str, focused: bool) -> Block<'stati
             Style::default().fg(color(&theme.title_fg)),
         )
     };
-    Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(border_type(&theme.border_type))
         .border_style(Style::default().fg(border))
-        .title(Line::from(Span::styled(format!(" {title} "), title_style)))
+        .title(Line::from(Span::styled(format!(" {title} "), title_style)));
+    if crate::glyphs::of(config).ascii_borders {
+        block.border_set(crate::glyphs::ASCII_BORDER)
+    } else {
+        block.border_type(border_type(&theme.border_type))
+    }
 }
 
 /// Broad file categories, each with its own theme color so a directory listing can be read by

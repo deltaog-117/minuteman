@@ -16,12 +16,14 @@
 
 mod app;
 mod cli;
+mod glyphs;
 mod hud;
 mod image_preview;
 mod popup_shell;
 mod shell_init;
 mod shell_layout;
 mod style;
+mod terminal_init;
 mod text_preview;
 
 use std::io::{self, Stdout};
@@ -50,7 +52,7 @@ use ratatui_image::StatefulImage;
 use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
-use theming::{Action, Config};
+use theming::{Action, Config, GlyphSet};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -229,6 +231,16 @@ fn main() -> Result<()> {
     let args = match cli::parse(std::env::args_os().skip(1)) {
         Ok(cli::Command::Init(shell)) => {
             print!("{}", shell.wrapper());
+            return Ok(());
+        }
+        Ok(cli::Command::InitTerminal(terminal)) => {
+            print!("{}", terminal.snippet());
+            return Ok(());
+        }
+        Ok(cli::Command::Glyphs) => {
+            for set in [GlyphSet::Unicode, GlyphSet::Nerd, GlyphSet::Ascii] {
+                println!("{}", glyphs::sample(set));
+            }
             return Ok(());
         }
         Ok(cli::Command::Run(args)) => args,
@@ -768,7 +780,11 @@ fn draw(
     // prefixed (Ranger-style) so a pending multi-select is visible before acting on it.
     let has_selection = !browser.current_entries().is_empty();
     let now = SystemTime::now();
-    let plan = hud::plan_columns(columns[1].width.saturating_sub(2) as usize);
+    let glyphs = glyphs::of(config);
+    let plan = hud::plan_columns(
+        columns[1].width.saturating_sub(2) as usize,
+        hud::BASE_GUTTER + glyphs.icon_width(),
+    );
     let current_items: Vec<ListItem> = browser
         .current_entries()
         .iter()
@@ -895,7 +911,7 @@ fn draw(
     let mut message = app.status_line();
     if app.prompt.as_ref().is_some_and(|p| p.is_text_input()) {
         // A visible cursor: prompts only ever append to their buffer.
-        message.push('▏');
+        message.push_str(glyphs::of(config).cursor);
     }
     hud::render_status_bar(
         frame,
@@ -952,10 +968,11 @@ fn entry_item(
     columns: Option<(hud::Columns, SystemTime)>,
 ) -> ListItem<'static> {
     let theme = &config.theme;
+    let g = glyphs::of(config);
     let accent = Style::default().fg(color_from_name(&theme.accent_fg));
-    let mut name_style = Style::default().fg(color_from_name(
-        style::FileKind::classify(entry).theme_color(theme),
-    ));
+    let kind = style::FileKind::classify(entry);
+    let kind_style = Style::default().fg(color_from_name(kind.theme_color(theme)));
+    let mut name_style = kind_style;
     if row.selected {
         if let Some(fg) = style::selection_fg(theme) {
             name_style = name_style.fg(fg);
@@ -969,7 +986,7 @@ fn entry_item(
     let mut spans = Vec::with_capacity(3);
     if row.gutter {
         spans.push(if row.selected {
-            Span::styled("▌", accent)
+            Span::styled(g.stripe, accent)
         } else {
             Span::raw(" ")
         });
@@ -978,6 +995,13 @@ fn entry_item(
         } else {
             Span::raw(" ")
         });
+    }
+    // A file-type icon in the kind's color (Nerd glyph set only), before the name.
+    if let Some(icons) = &g.icons {
+        spans.push(Span::styled(
+            format!("{} ", icons.for_kind(kind)),
+            kind_style,
+        ));
     }
     let label = entry_label(entry);
     match columns {
@@ -989,10 +1013,16 @@ fn entry_item(
             // Dim, so the eye lands on names first.
             let dim = Style::default().fg(color_from_name(&theme.status_fg));
             if plan.size {
-                spans.push(Span::styled(format!(" {:>5}", hud::size_cell(entry)), dim));
+                spans.push(Span::styled(
+                    format!(" {:>5}", hud::size_cell(entry, g.none)),
+                    dim,
+                ));
             }
             if plan.age {
-                let age = hud::format_age(now, entry.modified);
+                let age = match entry.modified {
+                    Some(_) => hud::format_age(now, entry.modified),
+                    None => g.none.to_string(),
+                };
                 spans.push(Span::styled(format!(" {age:>3}"), dim));
             }
         }

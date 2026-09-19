@@ -342,14 +342,26 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   binary through a terminal emulator at 120 and 60 columns, in every mode. Directories show `—`
   in the size column and their item count in the status bar once selected, rather than counting
   every directory's entries on every listing.
+- ✅ **Glyph sets, Nerd Font icons, and terminal snippets (UI overhaul, typography)** – the
+  font is the terminal's, so the UI now matches what the font can draw. `[ui] glyphs` selects
+  `unicode` (default), `nerd` or `ascii`: `nerd` adds file-type icons in each kind's color and
+  real Powerline arrows (`[theme] separator` defaults to `auto`, meaning arrows exactly when
+  the set is `nerd`); `ascii` draws every frame, stripe, scrollbar, gauge and separator with
+  plain ASCII. Every hardcoded symbol in the header, list, scrollbar and status bar moved into
+  one `Glyphs` table. `minuteman glyphs` prints all three sets to see what your font shows, and
+  `minuteman init-terminal <kitty|alacritty|wezterm>` prints a matching font (JetBrainsMono Nerd
+  Font Mono) and neon 16-color palette, with a Symbols Nerd Font fallback for kitty. Verified
+  against the real binary through a terminal emulator: the Nerd set showed icons, arrows and pill
+  symbols with columns still aligned, and the ASCII set put no non-ASCII character anywhere on
+  screen; the alacritty snippet parses as TOML and the wezterm one as Lua.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-- **Nerd Font file icons** – per-kind icons in front of entry names, behind an opt-in with an
-  ASCII fallback (left out of the HUD phase: it needs a patched font, unlike everything else
-  there).
+- **Typography polish** – a consistent casing/weight scheme for chrome labels (pane titles,
+  pills, hints), as a follow-up to the glyph sets: the font is the terminal's, so this is about
+  hierarchy (bold/dim/italic, uppercase labels), not typefaces.
 - **UI overhaul, phase C — cinematic layer** – a boot splash, animated focus transitions,
   gradient borders/titles, a pulsing selection, a typewriter reveal on the preview, and an
   optional system/git HUD. Needs an animation tick on top of the existing 100ms poll.

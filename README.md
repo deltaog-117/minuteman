@@ -31,6 +31,10 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
 - 🔹 **Interactive shell overlay** – `s` drops you into a real, fully interactive `$SHELL` in the
   browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
   auto-close-after-one-command.
+- 🔹 **Glyph sets that match your font** – `[ui] glyphs = "nerd"` adds file-type icons and
+  Powerline arrows (with a Nerd Font); `"unicode"` (default) needs nothing special; `"ascii"` is
+  for a Linux console. `minuteman glyphs` previews them, and
+  `minuteman init-terminal kitty|alacritty|wezterm` prints a matching font + neon color config.
 - 🔹 **HUD layout** – a header with a breadcrumb path and pills for marks, the clipboard and
   running jobs; size and age columns; a scrollbar; and a powerline-style status bar with a colored
   mode pill, the selection's permissions/size/type, your position in the list, and key hints that
@@ -190,13 +194,35 @@ status_fg = "#7a80b8"
 border_type = "rounded"        # or "plain", "double", "thick"
 bar_bg = "#1a1f3d"             # status-bar segments
 danger_fg = "#ff3860"          # delete / overwrite prompts
-separator = "flat"             # "arrow" = Powerline arrows (needs a Powerline/Nerd Font)
+separator = "auto"             # "auto" = arrows when glyphs = "nerd"; or "arrow" / "flat"
+
+[ui]
+glyphs = "unicode"             # "unicode" | "nerd" (icons + arrows) | "ascii"
 ```
 
 Colors are a basic name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`,
 `gray`/`grey`) or a hex value (`#rrggbb` or `#rgb`). Hex is drawn in true color when the terminal
 sets `COLORTERM=truecolor` and mapped to the nearest 256-color otherwise. An unrecognised color
 resets to the terminal's default.
+
+### Fonts and glyphs
+
+The typeface is your terminal's; Minuteman can only choose which symbols it draws. To get icons and
+Powerline arrows:
+
+1. Install a Nerd Font — the **Mono** variant, so icons stay one cell wide (for example
+   *JetBrainsMono Nerd Font Mono* from [nerdfonts.com](https://www.nerdfonts.com), or your
+   distribution's `ttf-jetbrains-mono-nerd`-style package).
+2. Run `minuteman init-terminal <kitty|alacritty|wezterm>` and paste the snippet into that
+   terminal's config. It sets the font and a 16-color palette matching the neon theme; nothing is
+   written for you. Prefer to keep your font? kitty's `symbol_map` line (in the snippet) borrows
+   just the icons from *Symbols Nerd Font Mono*.
+3. Run `minuteman glyphs` — if the `[nerd]` rows show boxes or `?`, the font isn't set up yet.
+4. Set `glyphs = "nerd"` under `[ui]` in `config.toml`.
+
+Without a Nerd Font, leave it on `unicode` (the default), or use `ascii` on a bare console. The
+subcommands `init`, `init-terminal` and `glyphs` are only recognised as the first argument; browse
+a directory with one of those names as `./init`.
 
 ---
 

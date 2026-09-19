@@ -20,7 +20,9 @@
 pub mod config;
 pub mod keymap;
 pub mod theme;
+pub mod ui;
 
 pub use config::Config;
 pub use keymap::{Action, KeyMap};
 pub use theme::Theme;
+pub use ui::{GlyphSet, Ui};

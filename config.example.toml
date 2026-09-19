@@ -81,6 +81,18 @@ bar_bg = "#1a1f3d"
 danger_fg = "#ff3860"
 # Frame style: "rounded", "plain", "double", or "thick".
 border_type = "rounded"
-# Edge between status-bar segments: "flat" works in any font; "arrow" draws Powerline arrows and
-# needs a Powerline/Nerd Font in your terminal (without one they show as missing-glyph boxes).
-separator = "flat"
+# Edge between status-bar segments: "arrow" draws Powerline arrows (they need a Powerline/Nerd
+# Font — without one they show as missing-glyph boxes), "flat" uses plain dividers, and "auto"
+# picks arrows exactly when [ui] glyphs is "nerd".
+separator = "auto"
+
+[ui]
+# The symbols the interface draws with. The font itself is your terminal's, so pick what it can
+# show:
+#   "unicode" — box-drawing and geometric symbols; works in nearly any modern font (default).
+#   "nerd"    — adds file-type icons and Powerline arrows. Needs a Nerd Font (use the "Mono"
+#               variant so icons stay one cell wide), or a Symbols Nerd Font as a fallback.
+#   "ascii"   — plain ASCII chrome, for a Linux console or a very limited font.
+# Run `minuteman glyphs` to see what each set looks like in your terminal, and
+# `minuteman init-terminal <kitty|alacritty|wezterm>` for a matching font + color config.
+glyphs = "unicode"
