@@ -11,6 +11,11 @@ move_up = ["k"]
 enter = ["l", "enter"]
 leave = ["h"]
 quit = ["q"]
+# Quits like `quit`, but also records the directory you were browsing so the `mm` shell wrapper
+# (see `minuteman init` in the README) can `cd` your shell there. Single-character keys are
+# case-sensitive: "Q" is Shift+q, distinct from "q". Without `--cwd-file` (a bare `minuteman`
+# run, not via `mm`) it just quits.
+quit_to_cwd = ["Q"]
 yank = ["y"]
 cut = ["m"]
 paste = ["p"]

@@ -70,6 +70,21 @@ cargo run -p tui
 cargo run -p tui -- /path/to/dir
 ```
 
+### Quitting into the current directory (`Q`)
+
+A program can't change its parent shell's working directory, so `Q` needs a one-line shell
+hook, the same mechanism as ranger's `--choosedir` wrapper. Add this to your rc file
+(`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish`):
+
+```bash
+eval "$(minuteman init zsh)"   # or: bash; fish: minuteman init fish | source
+```
+
+That defines `mm`. Run `mm` instead of `minuteman`: `Q` quits and leaves your shell in the
+directory you were browsing, while `q` (and `:q`) quit and leave it where you started. Under the
+hood `mm` runs `minuteman --cwd-file <tmpfile>`; `Q` writes the directory there and the wrapper
+`cd`s to it. A directory literally named `init` must be passed as `./init`.
+
 ### Default keybindings
 
 | Key         | Action                                       |
@@ -79,6 +94,7 @@ cargo run -p tui -- /path/to/dir
 | `l` / Enter | enter directory                               |
 | `h`         | leave directory                               |
 | `q`         | quit                                          |
+| `Q`         | quit and `cd` your shell to the directory you were in (needs the `mm` wrapper above) |
 | `y`         | yank (copy) selection                         |
 | `m`         | cut (move) selection                          |
 | `p`         | paste                                         |

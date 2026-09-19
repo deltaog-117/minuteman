@@ -301,6 +301,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `space t` on a side-by-side split removed the internal vertical divider entirely (confirming a
   stacked layout) and a second `space t` restored it; and `toggle_focused_orientation` on a lone
   pane correctly reports nothing to toggle rather than panicking.
+- ✅ **Quit into the current directory (`Q`), ranger-style** – capital `Q` quits and leaves
+  the parent shell in the directory being browsed; lowercase `q` still quits in place. A process
+  can't change its parent's working directory, so the feature is two halves: `Q`
+  (`Action::QuitToCwd`) writes the directory to the file given by the new `--cwd-file` option,
+  and `minuteman init <bash|zsh|fish>` prints an `mm` wrapper function that passes the flag and
+  `cd`s afterward (one `eval` line in the rc file). Single-character config keys became
+  case-sensitive so `"Q"` doesn't collapse into `"q"`. Verified with a real zsh in a PTY: after
+  three keypresses down into `root/alpha/beta`, `Q` left the shell in `root/alpha/beta` and `q`
+  left it in `root`.
 
 ---
 
@@ -353,11 +362,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
+0. Add `eval "$(minuteman init zsh)"` to `~/.zshrc`, reopen the terminal, run `mm`, navigate
+   somewhere, and press `Q` — your shell should follow; `q` should not.
 1. `cargo run -p tui` — press `s` to open a shell, `%` to split it. Drag its own right border
    with the mouse to resize the box's width directly. `tab` to unfocus, then `space t` to flip
    the split to stacked and back, or `space r`/`space m` plus `hjkl` for the keyboard resize/move
    chord (`Esc` leaves either mode).
-2. `cargo test --workspace` (86 tests) to verify everything still passes.
+2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
    (directory bookmarks — distinct from the file marks added earlier) are the remaining

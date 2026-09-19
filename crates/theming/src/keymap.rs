@@ -26,6 +26,10 @@ pub enum Action {
     Enter,
     Leave,
     Quit,
+    /// Quits like `Quit`, but first records the directory being browsed into the file named by
+    /// `--cwd-file`, so the `minuteman init` shell wrapper can `cd` the parent shell there. Behaves
+    /// exactly like `Quit` when no `--cwd-file` was given.
+    QuitToCwd,
     /// Mark the selection to be duplicated on the next `Paste`.
     Yank,
     /// Mark the selection to be relocated on the next `Paste`.
@@ -73,6 +77,7 @@ pub struct RawKeyMap {
     pub enter: Vec<String>,
     pub leave: Vec<String>,
     pub quit: Vec<String>,
+    pub quit_to_cwd: Vec<String>,
     pub yank: Vec<String>,
     pub cut: Vec<String>,
     pub paste: Vec<String>,
@@ -98,6 +103,7 @@ impl Default for RawKeyMap {
             enter: vec!["l".into(), "enter".into()],
             leave: vec!["h".into()],
             quit: vec!["q".into()],
+            quit_to_cwd: vec!["Q".into()],
             yank: vec!["y".into()],
             cut: vec!["m".into()],
             paste: vec!["p".into()],
@@ -144,6 +150,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.enter, Action::Enter);
         bind_all(&raw.leave, Action::Leave);
         bind_all(&raw.quit, Action::Quit);
+        bind_all(&raw.quit_to_cwd, Action::QuitToCwd);
         bind_all(&raw.yank, Action::Yank);
         bind_all(&raw.cut, Action::Cut);
         bind_all(&raw.paste, Action::Paste);
@@ -164,9 +171,13 @@ impl From<RawKeyMap> for KeyMap {
     }
 }
 
-/// Parses a single config key string (e.g. `"j"`, `"enter"`, `"space"`) into a crossterm
+/// Parses a single config key string (e.g. `"j"`, `"Q"`, `"enter"`, `"space"`) into a crossterm
 /// `KeyCode`. Unrecognised or multi-character (non-named) strings are skipped rather than
 /// causing a hard error — a typo in one binding shouldn't crash startup.
+///
+/// Named keys (`"enter"`, `"Space"`, ...) match case-insensitively, but a single character keeps
+/// its case: the terminal reports Shift+q as `Char('Q')`, so `"q"` and `"Q"` must stay distinct
+/// bindings (`quit` vs. `quit_to_cwd`).
 fn parse_key(s: &str) -> Option<KeyCode> {
     match s.to_lowercase().as_str() {
         "enter" | "return" => Some(KeyCode::Enter),
@@ -174,8 +185,8 @@ fn parse_key(s: &str) -> Option<KeyCode> {
         "space" => Some(KeyCode::Char(' ')),
         "tab" => Some(KeyCode::Tab),
         "backspace" => Some(KeyCode::Backspace),
-        other => {
-            let mut chars = other.chars();
+        _ => {
+            let mut chars = s.chars();
             let first = chars.next()?;
             if chars.next().is_none() {
                 Some(KeyCode::Char(first))
@@ -199,6 +210,7 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Enter), Some(Action::Enter));
         assert_eq!(keymap.resolve(KeyCode::Char('h')), Some(Action::Leave));
         assert_eq!(keymap.resolve(KeyCode::Char('q')), Some(Action::Quit));
+        assert_eq!(keymap.resolve(KeyCode::Char('Q')), Some(Action::QuitToCwd));
         assert_eq!(keymap.resolve(KeyCode::Char('y')), Some(Action::Yank));
         assert_eq!(keymap.resolve(KeyCode::Char('m')), Some(Action::Cut));
         assert_eq!(keymap.resolve(KeyCode::Char('p')), Some(Action::Paste));
@@ -224,6 +236,23 @@ mod tests {
             Some(Action::ShellPaneNext)
         );
         assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
+    }
+
+    #[test]
+    fn single_character_keys_keep_their_case_but_named_keys_do_not() {
+        assert_eq!(parse_key("Q"), Some(KeyCode::Char('Q')));
+        assert_eq!(parse_key("q"), Some(KeyCode::Char('q')));
+        assert_eq!(parse_key("Enter"), Some(KeyCode::Enter));
+        assert_eq!(parse_key("SPACE"), Some(KeyCode::Char(' ')));
+    }
+
+    #[test]
+    fn quit_and_quit_to_cwd_do_not_shadow_each_other() {
+        let keymap: KeyMap = RawKeyMap::default().into();
+        assert_ne!(
+            keymap.resolve(KeyCode::Char('q')),
+            keymap.resolve(KeyCode::Char('Q'))
+        );
     }
 
     #[test]

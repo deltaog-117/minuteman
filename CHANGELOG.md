@@ -195,6 +195,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `space t` — a third, one-shot branch of the leader chord — flips the focused pane's split
   between side-by-side and stacked, keeping the same two panes and their ratio. New
   `shell_layout::ShellPanes::toggle_focused_orientation`.
+- `theming`: new `QuitToCwd` keybindable action (`quit_to_cwd`), default `Q`. Single-character
+  key names in `[keys]` are now case-sensitive (`"Q"` is Shift+q, distinct from `"q"`); named keys
+  such as `"Enter"`/`"space"` still match case-insensitively.
+- `tui`: `Q` quits and records the directory being browsed into the file named by the new
+  `--cwd-file <path>` option; `q` and `:q` never write it. Without `--cwd-file`, `Q` is a plain
+  quit.
+- `tui`: new `minuteman init <bash|zsh|fish>` subcommand prints an `mm` shell wrapper that runs
+  minuteman with `--cwd-file` and `cd`s the parent shell afterward, since a child process cannot
+  change its parent's directory. Unknown flags and extra positional arguments are now rejected
+  with exit code 2 instead of being taken as the start directory.
 
 ### Changed
 - `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.

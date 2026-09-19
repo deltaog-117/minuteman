@@ -1406,6 +1406,64 @@ during this same verification pass, before any binary built with it was reported
 
 ---
 
+### Quit Into the Current Directory: `--cwd-file` Plus a Generated Shell Wrapper (Ranger's `--choosedir` Model)
+
+**Date:** 2026-09-19
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Request: capital `Q` should close minuteman and leave the shell that launched it in the directory
+minuteman was browsing, while lowercase `q` closes normally in the directory it started in. A
+child process cannot change its parent shell's working directory, so the real question was how
+the shell finds out where to go.
+
+#### Options Considered
+
+- **A: `--cwd-file` flag plus a wrapper the user writes by hand.** Ranger's `--choosedir`, yazi's
+  `--cwd-file`, lf's `-last-dir-path`. Robust, works in any shell, but the user pastes a function.
+- **B: A plus `minuteman init <shell>` printing that wrapper.** Chosen. Same mechanism, but the
+  wrapper is versioned and tested with the binary, and setup is one `eval` line.
+- **C: `exec $SHELL` in the browsed directory on `Q`.** Rejected: it starts a nested shell with
+  the original still waiting underneath, so it doesn't do what was asked. Injecting `cd` through
+  `TIOCSTI` was ruled out as well: modern kernels disable it, and it is a security hazard.
+
+#### Decision & Rationale
+
+`Action::QuitToCwd` (default `Q`) writes `browser.current_dir()` as raw bytes to the `--cwd-file`
+path and quits; `q`/`:q` never write, so the wrapper's `[ -s file ]` test makes them a no-op.
+Without `--cwd-file`, `Q` is a plain quit. Arg parsing moved into `tui/src/cli.rs` as a typed
+`Command`/`CliError` instead of `args().nth(1)`, and the wrapper text lives in
+`tui/src/shell_init.rs`. The wrapper is named `mm` so the bare `minuteman` binary stays runnable.
+
+#### Implementation Notes
+
+- `theming::keymap::parse_key` lowercased every key string, which would have silently turned a
+  `"Q"` binding into `q`. Single-character keys now keep their case; named keys (`"Enter"`,
+  `"space"`) still match case-insensitively. Anyone who had written an uppercase letter in their
+  config expecting it to mean the lowercase one will see it change meaning.
+- Unknown `--flags` and a second positional argument are now errors (exit code 2). Before, any
+  first argument was taken as the start directory.
+- No property tests or benchmark stub: nothing here is a hot path, and the repo has no `proptest`
+  dependency yet, so example-based unit tests cover parsing, key resolution, and the file round
+  trip.
+
+#### Verification
+
+Scripted PTY session with a real `zsh -f -i`, the real binary on `PATH`, and the wrapper loaded
+via `eval "$(minuteman init zsh)"`. After running `mm` and descending, `Q` left the shell's `$PWD`
+at the directory the TUI was in (`root/alpha/beta` after three presses) and `q` left it at the
+starting `root`. `minuteman init bash` and `init zsh` output passed `bash -n`/`zsh -n`; the fish
+wrapper was not run, because `fish` isn't installed here. `:q` through the wrapper was not
+confirmed (the PTY run was inconclusive), but that path is unchanged and never writes the file.
+Also observed, not investigated: in this harness the first keystroke after launch never
+registered (n presses reached depth n-1, and an extra throwaway key first restored the count). It
+is consistent with the startup terminal probe, but I did not confirm whether the previous build
+behaves the same.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

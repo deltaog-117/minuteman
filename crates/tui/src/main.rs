@@ -15,13 +15,15 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 mod app;
+mod cli;
 mod image_preview;
 mod popup_shell;
+mod shell_init;
 mod shell_layout;
 mod text_preview;
 
 use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -215,10 +217,22 @@ impl Previews {
 }
 
 fn main() -> Result<()> {
-    let start_dir = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?);
+    let args = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(cli::Command::Init(shell)) => {
+            print!("{}", shell.wrapper());
+            return Ok(());
+        }
+        Ok(cli::Command::Run(args)) => args,
+        Err(e) => {
+            eprintln!("minuteman: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let start_dir = match args.start_dir {
+        Some(dir) => dir,
+        None => std::env::current_dir()?,
+    };
     let start_dir = start_dir.canonicalize().unwrap_or(start_dir);
 
     let config = Config::load();
@@ -245,6 +259,7 @@ fn main() -> Result<()> {
         &mut app,
         &mut previews,
         &config,
+        args.cwd_file.as_deref(),
     );
 
     drop(guard);
@@ -258,6 +273,7 @@ fn run(
     app: &mut App,
     previews: &mut Previews,
     config: &Config,
+    cwd_file: Option<&Path>,
 ) -> Result<()> {
     // The tmux-style split-pane shell tree (see `shell_layout`) — `Some` for the whole time any
     // shell pane is open. Never suspends raw mode/the alternate screen: it's just tiled into the
@@ -592,6 +608,14 @@ fn run(
 
                 match config.keys.resolve(key.code) {
                     Some(Action::Quit) => return Ok(()),
+                    // Without `--cwd-file` (a bare `minuteman` run) there's nobody to hand the
+                    // directory to, so this degrades to a plain quit rather than doing nothing.
+                    Some(Action::QuitToCwd) => {
+                        if let Some(file) = cwd_file {
+                            cli::write_cwd_file(file, browser.current_dir())?;
+                        }
+                        return Ok(());
+                    }
                     Some(Action::MoveDown) => browser.move_down(),
                     Some(Action::MoveUp) => browser.move_up(),
                     Some(Action::Enter) => browser.enter(vfs)?,
