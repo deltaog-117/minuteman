@@ -207,9 +207,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: `space` is now the single leader key for all mini-shell commands: `space space` goes
+  back to typing in the shell, `space h`/`j`/`k`/`l` (or arrows) moves focus between panes,
+  `space |` and `space -` split side by side / stacked, `space x` closes the focused pane, next to
+  the existing `space r`/`m`/`t`. Pressing `space` lists them in the status bar.
+- `tui`: while typing in a shell, `Esc` now leaves typing mode instead of closing the pane (close
+  with `space x`), and every other key — `Space`, `Tab`, `o`, `%`, `"` included — is sent to the
+  shell.
 - `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.
 
 ### Removed
+- `theming`: `Action::ShellFocus`/`ShellSplitHorizontal`/`ShellSplitVertical`/`ShellPaneNext` and
+  their `shell_focus`/`shell_split_horizontal`/`shell_split_vertical`/`shell_pane_next` config keys
+  (`Tab`, `%`, `"`, `o`), replaced by the `space` leader commands above. Old config files that
+  still set them keep loading; the keys are ignored.
 - `tui`: `TerminalGuard::suspend`/`resume`, now dead code after the popup shell replaced their
   only caller.
 - `tui`: `popup_shell::popup_area` and `theming::Action::ShellMove`/`RawKeyMap::shell_move` —

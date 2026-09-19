@@ -310,6 +310,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   case-sensitive so `"Q"` doesn't collapse into `"q"`. Verified with a real zsh in a PTY: after
   three keypresses down into `root/alpha/beta`, `Q` left the shell in `root/alpha/beta` and `q`
   left it in `root`.
+- ✅ **Single-leader mini-shell keys** – replaced the `Tab` focus toggle and the `%`/`"`/`o`
+  pane keys with one leader, `space`, for everything: `space space` (back to typing),
+  `space h`/`j`/`k`/`l` (directional pane focus, via new `shell_layout::neighbor`), `space |`/`-`
+  (split), `space x` (close), plus the existing `r`/`m`/`t`. Typing mode now forwards every key to
+  the shell except `Esc`, which leaves it. This also fixes a bug where `Tab` (completion), `o`, `%`
+  and `"` couldn't be typed into a focused shell. Verified with a real bash in a PTY read through
+  a terminal emulator: those keys and multi-space input reached the shell, and `space |`,
+  `space h`, `space space` and `space x` each did what they say.
 
 ---
 
@@ -364,10 +372,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 0. Add `eval "$(minuteman init zsh)"` to `~/.zshrc`, reopen the terminal, run `mm`, navigate
    somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — press `s` to open a shell, `%` to split it. Drag its own right border
-   with the mouse to resize the box's width directly. `tab` to unfocus, then `space t` to flip
-   the split to stacked and back, or `space r`/`space m` plus `hjkl` for the keyboard resize/move
-   chord (`Esc` leaves either mode).
+1. `cargo run -p tui` — press `s` to open a shell and type in it (`Tab` completes, spaces work).
+   `Esc` stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
+   `space space` goes back to typing, `space x` closes a pane. `space t` flips a split, and
+   `space r`/`space m` plus `hjkl` resize/move (`Esc` leaves either mode).
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks

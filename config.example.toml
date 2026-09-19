@@ -35,20 +35,13 @@ command = [":"]
 # Toggles a mark on the current entry, Ranger-style — press once per file to queue it for a
 # later bulk action instead of acting on it immediately.
 select = ["v"]
-# Reserved for future chorded commands. Currently does nothing and never blocks any other key.
+# The one leader key for every mini-shell command. With a shell open and not being typed into
+# (press "esc" in the shell to stop typing), leader followed by: leader again = type in the shell;
+# h/j/k/l or the arrows = focus the pane in that direction; "|" = split side by side; "-" = split
+# stacked; x = close the focused pane; r/m = resize/move mode (hjkl to nudge, esc to leave);
+# t = flip the split's orientation. Does nothing when no shell is open. While typing in a shell,
+# every key — this one included — goes to the shell, except "esc".
 leader = ["space"]
-# While any shell pane (see `shell` above) is open, toggles whether keystrokes go to the focused
-# pane or drive the browser, so the pane(s) can stay open and visible while you keep browsing.
-shell_focus = ["tab"]
-# Splits the focused pane side by side (left/right); the new pane's shell starts in the current
-# directory and takes focus. Tmux's own default binding, for muscle memory.
-shell_split_horizontal = ["%"]
-# Splits the focused pane stacked (top/bottom); same directory, new pane takes focus. Also
-# tmux's own default binding.
-shell_split_vertical = ["\""]
-# Cycles keyboard focus to the next pane — useful when a mouse isn't available; click a pane
-# directly to focus it instead.
-shell_pane_next = ["o"]
 
 [theme]
 # Selects a built-in base palette ("default" or "dracula"); an unrecognised name falls back to

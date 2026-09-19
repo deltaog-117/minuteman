@@ -445,29 +445,79 @@ fn run(
 
                 if pending_leader {
                     pending_leader = false;
-                    if let Some(panes) = shells.as_mut() {
-                        match key.code {
-                            KeyCode::Char('r') => {
-                                shell_chord = Some(ShellChordMode::Resize);
-                                app.status = Some("resize mode — hjkl to size, Esc to exit".into());
+                    if shells.is_some() {
+                        let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
+                        // The leader pressed twice means "go type in the shell", checked through
+                        // the keymap rather than a literal `' '` so a rebound leader still works.
+                        if config.keys.resolve(key.code) == Some(Action::Leader) {
+                            shell_focused = true;
+                            app.status = Some("shell focused — Esc to browse".into());
+                        } else if let Some(dir) = leader_focus_dir(key.code) {
+                            let moved = shells
+                                .as_mut()
+                                .expect("`shells.is_some()` checked above")
+                                .focus_direction(dir, area);
+                            if !moved {
+                                app.status = Some("no pane that way".into());
                             }
-                            KeyCode::Char('m') => {
-                                shell_chord = Some(ShellChordMode::Move);
-                                app.status = Some("move mode — hjkl to move, Esc to exit".into());
+                        } else {
+                            match key.code {
+                                // `|` reads as the vertical divider a side-by-side split draws,
+                                // `-` as the horizontal one a stacked split draws.
+                                KeyCode::Char('|') | KeyCode::Char('-') => {
+                                    let direction = if key.code == KeyCode::Char('|') {
+                                        SplitDirection::Horizontal
+                                    } else {
+                                        SplitDirection::Vertical
+                                    };
+                                    let panes =
+                                        shells.take().expect("`shells.is_some()` checked above");
+                                    shells = Some(panes.split(
+                                        direction,
+                                        browser.current_dir(),
+                                        area,
+                                    )?);
+                                    // The new pane is where you'd want to type, so hand it the
+                                    // keyboard straight away.
+                                    shell_focused = true;
+                                }
+                                KeyCode::Char('x') => {
+                                    let panes =
+                                        shells.take().expect("`shells.is_some()` checked above");
+                                    let id = panes.focused_id();
+                                    let remaining = panes.close(id, area)?;
+                                    app.status = Some(if remaining.is_some() {
+                                        "pane closed".into()
+                                    } else {
+                                        "shell closed".into()
+                                    });
+                                    shells = remaining;
+                                }
+                                KeyCode::Char('r') => {
+                                    shell_chord = Some(ShellChordMode::Resize);
+                                    app.status =
+                                        Some("resize mode — hjkl to size, Esc to exit".into());
+                                }
+                                KeyCode::Char('m') => {
+                                    shell_chord = Some(ShellChordMode::Move);
+                                    app.status =
+                                        Some("move mode — hjkl to move, Esc to exit".into());
+                                }
+                                // A single immediate action, unlike resize/move — there's nothing
+                                // repeatable about it, so it never enters `shell_chord` at all.
+                                KeyCode::Char('t') => {
+                                    let toggled = shells
+                                        .as_mut()
+                                        .expect("`shells.is_some()` checked above")
+                                        .toggle_focused_orientation(area)?;
+                                    app.status = Some(if toggled {
+                                        "pane orientation toggled".into()
+                                    } else {
+                                        "only one pane — nothing to toggle".into()
+                                    });
+                                }
+                                _ => {}
                             }
-                            // A single immediate action, unlike resize/move — there's nothing
-                            // repeatable about it, so it never enters `shell_chord` at all.
-                            KeyCode::Char('t') => {
-                                let area =
-                                    shell_area(terminal.size()?.into(), shell_offset, shell_size);
-                                let toggled = panes.toggle_focused_orientation(area)?;
-                                app.status = Some(if toggled {
-                                    "pane orientation toggled".into()
-                                } else {
-                                    "only one pane — nothing to toggle".into()
-                                });
-                            }
-                            _ => {}
                         }
                     }
                     continue;
@@ -537,59 +587,17 @@ fn run(
                     }
                 }
 
-                if shells.is_some() {
-                    let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
-                    if shell_focused {
-                        if key.code == KeyCode::Esc {
-                            let panes = shells.take().expect("`shells.is_some()` checked above");
-                            let id = panes.focused_id();
-                            let remaining = panes.close(id, area)?;
-                            app.status = Some(if remaining.is_some() {
-                                "pane closed".into()
-                            } else {
-                                "shell closed".into()
-                            });
-                            shells = remaining;
-                        } else if config.keys.resolve(key.code) == Some(Action::ShellFocus) {
-                            shell_focused = false;
-                            app.status = Some("browsing — tab to refocus the shell".into());
-                        } else if config.keys.resolve(key.code)
-                            == Some(Action::ShellSplitHorizontal)
-                        {
-                            let panes = shells.take().expect("`shells.is_some()` checked above");
-                            shells = Some(panes.split(
-                                SplitDirection::Horizontal,
-                                browser.current_dir(),
-                                area,
-                            )?);
-                        } else if config.keys.resolve(key.code) == Some(Action::ShellSplitVertical)
-                        {
-                            let panes = shells.take().expect("`shells.is_some()` checked above");
-                            shells = Some(panes.split(
-                                SplitDirection::Vertical,
-                                browser.current_dir(),
-                                area,
-                            )?);
-                        } else if config.keys.resolve(key.code) == Some(Action::ShellPaneNext) {
-                            shells
-                                .as_mut()
-                                .expect("`shells.is_some()` checked above")
-                                .focus_next();
-                        } else if let Some(bytes) = popup_shell::encode_key(key) {
-                            shells
-                                .as_mut()
-                                .expect("`shells.is_some()` checked above")
-                                .focused_shell()
-                                .write_input(&bytes)?;
-                        }
-                        continue;
-                    } else if config.keys.resolve(key.code) == Some(Action::ShellFocus) {
-                        shell_focused = true;
-                        app.status = Some("shell focused".into());
-                        continue;
+                // Typing mode: every key belongs to the focused shell — `Tab`, `Space`, `o`, `%`
+                // and all the rest — except `Esc`, the one way out. Everything else about the
+                // panes is a `Leader` command from browse mode (see `pending_leader` above).
+                if shell_focused && let Some(panes) = shells.as_mut() {
+                    if key.code == KeyCode::Esc {
+                        shell_focused = false;
+                        app.status = Some("browsing — space space to type in the shell".into());
+                    } else if let Some(bytes) = popup_shell::encode_key(key) {
+                        panes.focused_shell().write_input(&bytes)?;
                     }
-                    // Panes open, unfocused, and not a shell-control key — fall through so the
-                    // browser dispatch below still handles it.
+                    continue;
                 }
 
                 if app.prompt.is_some() {
@@ -635,14 +643,14 @@ fn run(
                     Some(Action::Leader) => {
                         if shells.is_some() {
                             pending_leader = true;
+                            // One leader hides every binding behind it, so list them.
+                            app.status = Some(
+                                "space + hjkl focus · | - split · x close · r resize · m move · \
+                                 t flip · space type"
+                                    .into(),
+                            );
                         }
                     }
-                    // All meaningless without an open pane — handled above (before this match)
-                    // whenever `shells` is `Some`.
-                    Some(Action::ShellFocus)
-                    | Some(Action::ShellSplitHorizontal)
-                    | Some(Action::ShellSplitVertical)
-                    | Some(Action::ShellPaneNext) => {}
                     // Guarded explicitly rather than relying on it being unreachable while panes
                     // are already open (the branch above handles that case) — opening a second
                     // tree here would silently drop the running one without closing it. Use a
@@ -666,6 +674,17 @@ fn run(
             }
             _ => {}
         }
+    }
+}
+
+/// The pane-focus direction a key means after the leader: `hjkl` or the arrows.
+fn leader_focus_dir(code: KeyCode) -> Option<NudgeDir> {
+    match code {
+        KeyCode::Char('h') | KeyCode::Left => Some(NudgeDir::Left),
+        KeyCode::Char('j') | KeyCode::Down => Some(NudgeDir::Down),
+        KeyCode::Char('k') | KeyCode::Up => Some(NudgeDir::Up),
+        KeyCode::Char('l') | KeyCode::Right => Some(NudgeDir::Right),
+        _ => None,
     }
 }
 

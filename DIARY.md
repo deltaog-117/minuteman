@@ -1464,6 +1464,70 @@ behaves the same.
 
 ---
 
+### Single-Leader Mini-Shell Keys: `Space` for Everything, `Esc` the Only Way Out of Typing
+
+**Date:** 2026-09-19
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Feedback from using the shell panes: the `Tab` focus toggle and the `Space` leader together were
+"uncomfortable and unintuitive", and the request was to keep `Space` as the leader, drop `Tab`,
+and have only one leader key. Reading the code also turned up a bug behind part of that
+discomfort: while a pane was focused, `Tab`, `o`, `%` and `"` were intercepted for pane control,
+so none of them could be typed into the shell (`Tab` completion included).
+
+#### Options Considered
+
+- **A: a tmux-style prefix, usable while typing** (e.g. `Ctrl+\`). One key taken from the shell.
+- **B: direct Alt chords.** Fastest, but fights readline and vim/tmux-navigator inside the pane,
+  which an earlier cycle already rejected.
+- **C: a sticky vim-style command mode.**
+
+The user narrowed it: keep `Space`, no `Tab`, one leader. That can't be done while typing, since
+a shell needs spaces, so exactly one key has to leave typing mode. `Esc` was chosen for that.
+
+#### Decision & Rationale
+
+Two modes. In typing mode every key goes to the shell except `Esc`, which leaves it. In browsing
+mode `space` is the leader: `space space` returns to typing, `hjkl`/arrows move pane focus, `|`
+and `-` split (side by side, stacked), `x` closes, and `r`/`m`/`t` are unchanged. Pressing `space`
+puts the whole list in the status bar, since one leader hides every binding behind it. Splitting
+also returns to typing, because the new pane is where you'd type. `Esc` no longer closes a pane;
+that moved to `space x`. Needing no modifier keys avoids the modifier-aware keymap that A
+would have required.
+
+#### Implementation Notes
+
+- `theming`: removed `Action::ShellFocus`/`ShellSplitHorizontal`/`ShellSplitVertical`/
+  `ShellPaneNext` and their config keys. The chord's second keys are hardcoded in `main.rs`, like
+  `r`/`m`/`t` already were. Old configs that still set the removed keys keep loading (unknown
+  fields are ignored). The "leader twice" check goes through the keymap, so a rebound leader
+  still works.
+- `shell_layout`: new `leaf_rects` and a pure `neighbor(rects, from, dir)`: among panes lying
+  entirely past the focused pane's edge and sharing part of its perpendicular span, the nearest,
+  with ties broken by the closest start edge. It returns `None` at the box's edge rather than
+  wrapping. `ShellPanes::focus_direction` wraps it. `focus_next`/`cycle_focus` were removed as
+  dead code.
+- The literal `Esc` can no longer reach a program inside the pane (vim, for one). It couldn't
+  before either, since `Esc` used to close the pane. Left as is; a pass-through can come later if
+  it turns out to matter.
+
+#### Verification
+
+`cargo test --workspace` passes (103 tests, 5 new for `neighbor`); clippy is clean. Scripted PTY
+session against the real binary with `bash` as `$SHELL`, screen read through `pyte`: `echo o"x"%
+a   b` printed `ox% a b` (the freed keys and multi-space input reach the shell); `ech<Tab>` then
+` TABOK` ran `echo` (Tab completion works); `Esc` showed the browsing status; `space` showed the
+hint line; `space |` produced a second pane that took typing focus; `Esc`, `space h`,
+`space space` then typing landed in the left pane, which rendered left of the right one;
+`space x` closed it and the right pane remained. Directional focus for `Up`/`Down` and the
+`space -` split are covered by the `neighbor` unit tests and by sharing the `|` code path, but
+were not separately driven through the PTY.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

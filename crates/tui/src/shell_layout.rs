@@ -23,7 +23,7 @@
 //! supported (see `ROADMAP.md`).
 //!
 //! The tree shape/geometry logic (`Node`/`Tree`, `split_rect`, `Divider`, `close_id`, `split_id`,
-//! `focus_at`, `leaf_ids`) is generic over the leaf payload so it can be unit-tested without
+//! `focus_at`, `leaf_ids`, `leaf_rects`, `neighbor`) is generic over the leaf payload so it can be unit-tested without
 //! spawning real shells; `ShellPanes` specializes it to `PopupShell` and owns everything that
 //! actually touches a pty (spawning, resizing, rendering, reaping exited shells).
 //!
@@ -172,8 +172,7 @@ fn dividers<T>(tree: &Tree<T>, area: Rect, out: &mut Vec<Divider>) {
     }
 }
 
-/// Leaf ids in left-to-right, top-to-bottom tree order — the order `focus_next`/`focus_prev`
-/// cycle through.
+/// Leaf ids in left-to-right, top-to-bottom tree order.
 fn leaf_ids<T>(tree: &Tree<T>, out: &mut Vec<usize>) {
     match &tree.node {
         Node::Leaf(_) => out.push(tree.id),
@@ -182,6 +181,53 @@ fn leaf_ids<T>(tree: &Tree<T>, out: &mut Vec<usize>) {
             leaf_ids(second, out);
         }
     }
+}
+
+/// Every leaf's id and on-screen rect (computed against `area`), in tree order.
+fn leaf_rects<T>(tree: &Tree<T>, area: Rect, out: &mut Vec<(usize, Rect)>) {
+    match &tree.node {
+        Node::Leaf(_) => out.push((tree.id, area)),
+        Node::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let (first_area, second_area) = split_rect(area, *direction, *ratio);
+            leaf_rects(first, first_area, out);
+            leaf_rects(second, second_area, out);
+        }
+    }
+}
+
+/// The pane visually adjacent to `from` in direction `dir`: of the rects that lie entirely past
+/// `from`'s edge on that side *and* share part of its perpendicular span, the nearest one — ties
+/// (several panes stacked along the far side) go to whichever starts closest to `from`'s own
+/// start, so `hjkl` feels like it stays on the row/column you're in. `None` when nothing is
+/// there, so the caller can leave focus alone at an edge instead of wrapping around.
+fn neighbor(rects: &[(usize, Rect)], from: usize, dir: NudgeDir) -> Option<usize> {
+    let (_, f) = *rects.iter().find(|(id, _)| *id == from)?;
+    let (fx, fy, fw, fh) = (f.x as i32, f.y as i32, f.width as i32, f.height as i32);
+    let overlaps = |a: i32, alen: i32, b: i32, blen: i32| a < b + blen && b < a + alen;
+
+    rects
+        .iter()
+        .filter(|(id, _)| *id != from)
+        .filter_map(|&(id, r)| {
+            let (x, y, w, h) = (r.x as i32, r.y as i32, r.width as i32, r.height as i32);
+            let (gap, offset) = match dir {
+                NudgeDir::Left if x + w <= fx && overlaps(fy, fh, y, h) => (fx - (x + w), y - fy),
+                NudgeDir::Right if x >= fx + fw && overlaps(fy, fh, y, h) => {
+                    (x - (fx + fw), y - fy)
+                }
+                NudgeDir::Up if y + h <= fy && overlaps(fx, fw, x, w) => (fy - (y + h), x - fx),
+                NudgeDir::Down if y >= fy + fh && overlaps(fx, fw, x, w) => (y - (fy + fh), x - fx),
+                _ => return None,
+            };
+            Some((gap, offset.abs(), id))
+        })
+        .min()
+        .map(|(_, _, id)| id)
 }
 
 /// The id of the leaf whose rect (computed against `area`) contains `(col, row)`, if any.
@@ -691,19 +737,18 @@ impl ShellPanes {
         }
     }
 
-    pub fn focus_next(&mut self) {
-        self.cycle_focus(1);
-    }
-
-    fn cycle_focus(&mut self, delta: i32) {
-        let mut ids = Vec::new();
-        leaf_ids(&self.root, &mut ids);
-        let Some(pos) = ids.iter().position(|&id| id == self.focused) else {
-            return;
-        };
-        let len = ids.len() as i32;
-        let next = (pos as i32 + delta).rem_euclid(len) as usize;
-        self.focused = ids[next];
+    /// Moves focus to the pane adjacent to the focused one in direction `dir` (against `area`).
+    /// Returns whether there was one — `false` at the box's edge, where focus stays put.
+    pub fn focus_direction(&mut self, dir: NudgeDir, area: Rect) -> bool {
+        let mut rects = Vec::new();
+        leaf_rects(&self.root, area, &mut rects);
+        match neighbor(&rects, self.focused, dir) {
+            Some(id) => {
+                self.focused = id;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn focused_id(&self) -> usize {
@@ -896,6 +941,71 @@ mod tests {
         let mut ids = Vec::new();
         leaf_ids(&tree, &mut ids);
         assert_eq!(ids, vec![1, 3, 4]);
+    }
+
+    /// Three panes: `1` on the left half, `2` top-right, `3` bottom-right.
+    fn left_and_two_stacked_right() -> Tree<String> {
+        split(
+            0,
+            SplitDirection::Horizontal,
+            0.5,
+            leaf(1, "a"),
+            split(
+                10,
+                SplitDirection::Vertical,
+                0.5,
+                leaf(2, "b"),
+                leaf(3, "c"),
+            ),
+        )
+    }
+
+    fn neighbor_of(tree: &Tree<String>, from: usize, dir: NudgeDir) -> Option<usize> {
+        let mut rects = Vec::new();
+        leaf_rects(tree, Rect::new(0, 0, 100, 40), &mut rects);
+        neighbor(&rects, from, dir)
+    }
+
+    #[test]
+    fn neighbor_moves_between_adjacent_panes() {
+        let tree = left_and_two_stacked_right();
+        assert_eq!(neighbor_of(&tree, 1, NudgeDir::Right), Some(2));
+        assert_eq!(neighbor_of(&tree, 2, NudgeDir::Down), Some(3));
+        assert_eq!(neighbor_of(&tree, 3, NudgeDir::Up), Some(2));
+        assert_eq!(neighbor_of(&tree, 3, NudgeDir::Left), Some(1));
+    }
+
+    #[test]
+    fn neighbor_is_none_at_the_edge_instead_of_wrapping() {
+        let tree = left_and_two_stacked_right();
+        assert_eq!(neighbor_of(&tree, 1, NudgeDir::Left), None);
+        assert_eq!(neighbor_of(&tree, 1, NudgeDir::Up), None);
+        assert_eq!(neighbor_of(&tree, 2, NudgeDir::Up), None);
+        assert_eq!(neighbor_of(&tree, 3, NudgeDir::Down), None);
+        assert_eq!(neighbor_of(&tree, 3, NudgeDir::Right), None);
+    }
+
+    #[test]
+    fn neighbor_ignores_panes_that_do_not_share_the_axis() {
+        // `2` is top-right and `3` bottom-right: neither is beside the other horizontally.
+        let tree = left_and_two_stacked_right();
+        assert_eq!(neighbor_of(&tree, 2, NudgeDir::Left), Some(1));
+        assert_eq!(neighbor_of(&tree, 2, NudgeDir::Right), None);
+    }
+
+    #[test]
+    fn neighbor_prefers_the_pane_level_with_the_focused_one() {
+        // Left pane `1` is tall; on its right sit `2` (top) and `3` (bottom). Coming from `3`,
+        // going left lands on `1`; from `1`, going right prefers the one starting nearest its
+        // own top edge, which is `2`.
+        let tree = left_and_two_stacked_right();
+        assert_eq!(neighbor_of(&tree, 1, NudgeDir::Right), Some(2));
+    }
+
+    #[test]
+    fn neighbor_of_an_unknown_pane_is_none() {
+        let tree = left_and_two_stacked_right();
+        assert_eq!(neighbor_of(&tree, 99, NudgeDir::Left), None);
     }
 
     #[test]

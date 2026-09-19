@@ -40,8 +40,10 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
 - 🔹 **Config-driven keybindings** – read from `~/.config/minuteman/config.toml`, with per-field
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
 - 🔹 **Ranger-style marks** – `v` toggles a mark on the current entry; `d` (delete) acts on every
-  marked entry when any are marked, falling back to the single selection otherwise. `space` is
-  reserved as an inert leader key for future chorded commands.
+  marked entry when any are marked, falling back to the single selection otherwise.
+- 🔹 **Tiling mini-shells with a single leader key** – `s` opens a real `$SHELL` in a movable,
+  resizable box; `space` is the one leader for everything else (see below). While you type, every
+  key goes to the shell — `Tab` completion included — except `Esc`.
 
 ---
 
@@ -105,7 +107,27 @@ hood `mm` runs `minuteman --cwd-file <tmpfile>`; `Q` writes the directory there 
 | `/`         | search — jump to the first matching entry as you type |
 | `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
-| `space`     | leader — reserved, no bindings yet; never blocks any other key |
+| `space`     | leader — commands for the mini-shell panes (below); inert with no shell open |
+
+### Mini-shell keys
+
+`s` opens a shell in the current directory. There are two modes:
+
+- **Typing:** every key, `Space` and `Tab` included, goes to the shell. `Esc` leaves typing.
+- **Browsing:** the shell stays visible and the file browser works normally. `space` is the leader:
+
+| After `space` | Action                                              |
+|---------------|-----------------------------------------------------|
+| `space`       | go back to typing in the shell                      |
+| `h` `j` `k` `l` / arrows | focus the pane in that direction         |
+| `\|`          | split side by side                                  |
+| `-`           | split stacked                                       |
+| `x`           | close the focused pane                              |
+| `r` / `m`     | resize / move mode (`hjkl` to nudge, `Esc` to leave) |
+| `t`           | flip the focused split between side by side and stacked |
+
+Pressing `space` lists these in the status bar. Clicking a pane focuses it and starts typing;
+dragging a divider, the box's title bar, or its right border resizes and moves things.
 
 While a prompt is active (rename/create/delete-confirm/conflict/search/command), `Enter` submits
 and `Esc` cancels; the keybindings above are not resolved until the prompt closes. `Esc` while

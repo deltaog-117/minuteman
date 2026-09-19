@@ -49,24 +49,15 @@ pub enum Action {
     /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
     /// later bulk action (e.g. `Delete`) instead of acting on it immediately.
     Select,
-    /// Starts a chord. Inert with no shell pane open; while one is, the next key is `r` (enters
-    /// a resize mode where `hjkl`/arrows repeatedly nudge the focused pane's divider, or the box
-    /// itself if there's none along that axis, until `Esc` or any other key ends it), `m` (same,
-    /// but for the box's position), or `t` (an immediate one-shot toggle of the focused pane's
-    /// split orientation, side-by-side <-> stacked).
+    /// The single leader key for every shell-pane command. Inert with no shell pane open; while
+    /// one is, and keystrokes aren't going to the shell (`Esc` leaves that typing mode), the next
+    /// key is the command: `Space` again to go back to typing in the focused pane, `hjkl`/arrows
+    /// to move focus to the neighbouring pane, `|` / `-` to split side by side / stacked, `x` to
+    /// close the focused pane, `r` (enters a resize mode where `hjkl`/arrows repeatedly nudge the
+    /// focused pane's divider, or the box itself if there's none along that axis, until `Esc` or
+    /// any other key ends it), `m` (same, but for the box's position), or `t` (an immediate
+    /// one-shot toggle of the focused pane's split orientation, side-by-side <-> stacked).
     Leader,
-    /// While any shell pane is open, toggles whether keystrokes go to the focused pane or drive
-    /// the browser — lets the pane(s) stay open and visible while browsing.
-    ShellFocus,
-    /// Splits the focused pane side by side (left/right); the new pane's shell starts in the
-    /// current directory and takes focus.
-    ShellSplitHorizontal,
-    /// Splits the focused pane stacked (top/bottom); the new pane's shell starts in the current
-    /// directory and takes focus.
-    ShellSplitVertical,
-    /// Cycles keyboard focus to the next pane — for when a mouse isn't available; clicking a
-    /// pane directly focuses it too.
-    ShellPaneNext,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,10 +80,6 @@ pub struct RawKeyMap {
     pub command: Vec<String>,
     pub select: Vec<String>,
     pub leader: Vec<String>,
-    pub shell_focus: Vec<String>,
-    pub shell_split_horizontal: Vec<String>,
-    pub shell_split_vertical: Vec<String>,
-    pub shell_pane_next: Vec<String>,
 }
 
 impl Default for RawKeyMap {
@@ -115,10 +102,6 @@ impl Default for RawKeyMap {
             command: vec![":".into()],
             select: vec!["v".into()],
             leader: vec!["space".into()],
-            shell_focus: vec!["tab".into()],
-            shell_split_horizontal: vec!["%".into()],
-            shell_split_vertical: vec!["\"".into()],
-            shell_pane_next: vec!["o".into()],
         }
     }
 }
@@ -162,10 +145,6 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.command, Action::Command);
         bind_all(&raw.select, Action::Select);
         bind_all(&raw.leader, Action::Leader);
-        bind_all(&raw.shell_focus, Action::ShellFocus);
-        bind_all(&raw.shell_split_horizontal, Action::ShellSplitHorizontal);
-        bind_all(&raw.shell_split_vertical, Action::ShellSplitVertical);
-        bind_all(&raw.shell_pane_next, Action::ShellPaneNext);
 
         Self { bindings }
     }
@@ -222,19 +201,15 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
         assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));
         assert_eq!(keymap.resolve(KeyCode::Char(' ')), Some(Action::Leader));
-        assert_eq!(keymap.resolve(KeyCode::Tab), Some(Action::ShellFocus));
-        assert_eq!(
-            keymap.resolve(KeyCode::Char('%')),
-            Some(Action::ShellSplitHorizontal)
-        );
-        assert_eq!(
-            keymap.resolve(KeyCode::Char('"')),
-            Some(Action::ShellSplitVertical)
-        );
-        assert_eq!(
-            keymap.resolve(KeyCode::Char('o')),
-            Some(Action::ShellPaneNext)
-        );
+        // `Tab`, `o`, `%` and `"` used to be shell-pane keys; they belong to the shell now.
+        for freed in [
+            KeyCode::Tab,
+            KeyCode::Char('o'),
+            KeyCode::Char('%'),
+            KeyCode::Char('"'),
+        ] {
+            assert_eq!(keymap.resolve(freed), None);
+        }
         assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
     }
 
