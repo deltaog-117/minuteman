@@ -43,8 +43,15 @@ pub struct Theme {
     pub archive_fg: String,
     pub media_fg: String,
     pub status_fg: String,
+    /// Background of the status bar's segments (the mode pill has its own color).
+    pub bar_bg: String,
+    /// Destructive-action prompts (delete, overwrite) in the status bar.
+    pub danger_fg: String,
     /// `"rounded"`, `"plain"`, `"double"`, or `"thick"`.
     pub border_type: String,
+    /// Edge between status-bar segments: `"flat"` (works in any font) or `"arrow"` (Powerline
+    /// arrows; needs a Powerline/Nerd Font).
+    pub separator: String,
 }
 
 impl Theme {
@@ -75,7 +82,10 @@ impl Theme {
             archive_fg: "white".into(),
             media_fg: "white".into(),
             status_fg: "gray".into(),
+            bar_bg: "reset".into(),
+            danger_fg: "red".into(),
             border_type: "plain".into(),
+            separator: "flat".into(),
         }
     }
 
@@ -95,7 +105,10 @@ impl Theme {
             archive_fg: "red".into(),
             media_fg: "magenta".into(),
             status_fg: "yellow".into(),
+            bar_bg: "reset".into(),
+            danger_fg: "red".into(),
             border_type: "rounded".into(),
+            separator: "flat".into(),
         }
     }
 }
@@ -119,7 +132,10 @@ impl Default for Theme {
             archive_fg: "#ff7a3d".into(),
             media_fg: "#ff5cf0".into(),
             status_fg: "#7a80b8".into(),
+            bar_bg: "#1a1f3d".into(),
+            danger_fg: "#ff3860".into(),
             border_type: "rounded".into(),
+            separator: "flat".into(),
         }
     }
 }
@@ -146,7 +162,10 @@ pub struct RawTheme {
     pub archive_fg: Option<String>,
     pub media_fg: Option<String>,
     pub status_fg: Option<String>,
+    pub bar_bg: Option<String>,
+    pub danger_fg: Option<String>,
     pub border_type: Option<String>,
+    pub separator: Option<String>,
 }
 
 impl From<RawTheme> for Theme {
@@ -167,7 +186,10 @@ impl From<RawTheme> for Theme {
             archive_fg: raw.archive_fg.unwrap_or(base.archive_fg),
             media_fg: raw.media_fg.unwrap_or(base.media_fg),
             status_fg: raw.status_fg.unwrap_or(base.status_fg),
+            bar_bg: raw.bar_bg.unwrap_or(base.bar_bg),
+            danger_fg: raw.danger_fg.unwrap_or(base.danger_fg),
             border_type: raw.border_type.unwrap_or(base.border_type),
+            separator: raw.separator.unwrap_or(base.separator),
         }
     }
 }
@@ -211,6 +233,8 @@ mod tests {
         assert!(theme.border_focused_fg.starts_with('#'));
         assert_eq!(theme.selection_fg, "keep");
         assert_eq!(theme.border_type, "rounded");
+        // Flat by default: the arrows need a patched font, and a missing glyph looks broken.
+        assert_eq!(theme.separator, "flat");
     }
 
     #[test]

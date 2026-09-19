@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: header row with a breadcrumb path (`~` for home, `…` for elided middle segments) and
+  pills for marked entries, the clipboard (`⧉ N yanked` / `✂ N cut`), and a gauge for a running
+  copy/move/delete.
+- `tui`: right-aligned size and relative-age columns in the current pane (`14K`, `2h`), dropping
+  age and then size when the pane is too narrow to keep names readable.
+- `tui`: scrollbar over the current pane's right border when the list overflows.
+- `tui`: powerline-style status bar: a colored mode pill (`NORMAL`, `SHELL`, `LEADER`, `RESIZE`,
+  `MOVE`, `BUSY`, or the prompt's label), the selection's name, permissions, size or item count,
+  and type, the position (`3/49`), and key hints drawn from the user's own bindings that change
+  with the mode. Text prompts show a cursor.
+- `theming`: `[theme]` fields `bar_bg`, `danger_fg` and `separator` (`"flat"` or `"arrow"`, the
+  latter needing a Powerline/Nerd Font), and `KeyMap::keys_for`.
+- `shared`: `DirEntryInfo` gained `size`, `modified` and `mode`, filled from the `stat` the local
+  listing already made per entry.
 - `tui`: new neon look. Rounded frames; the active pane (the current directory's column, or the
   focused shell) gets a bright border and an accent-colored bold title while the others dim; the
   selected row gets an accent stripe (`▌`) over a background highlight and keeps its own color;
@@ -218,6 +232,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: the current pane's frame is titled with the directory's own name; the full path lives
+  in the new header. Rows in that pane now start with a two-cell gutter (selection stripe, mark).
+- `tui`: `Esc`/`space`/resize/typing states are shown by the status bar's mode pill and hints
+  instead of one-off messages ("resize mode — ...", "shell focused — ..."). Status messages now
+  clear after five seconds instead of staying until replaced.
 - `theming`: the default theme is now `neon` (true color). The previous 16-color look is
   `name = "classic"`; `name = "default"` and unknown names resolve to `neon`.
 - `tui`: the mini-shell frame now uses the shared pane frame, so a focused shell is outlined in

@@ -31,6 +31,10 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
 - 🔹 **Interactive shell overlay** – `s` drops you into a real, fully interactive `$SHELL` in the
   browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
   auto-close-after-one-command.
+- 🔹 **HUD layout** – a header with a breadcrumb path and pills for marks, the clipboard and
+  running jobs; size and age columns; a scrollbar; and a powerline-style status bar with a colored
+  mode pill, the selection's permissions/size/type, your position in the list, and key hints that
+  follow your own bindings and change with the mode.
 - 🔹 **Neon, themeable UI** – a cyberpunk true-color palette by default: rounded frames, the
   active pane glowing cyan against dim indigo neighbours, a magenta stripe on the selected row,
   and entries colored by kind (directories, source, config, docs, archives, media). Hex colors
@@ -184,6 +188,9 @@ media_fg = "#ff5cf0"
 file_fg = "#c8ccff"
 status_fg = "#7a80b8"
 border_type = "rounded"        # or "plain", "double", "thick"
+bar_bg = "#1a1f3d"             # status-bar segments
+danger_fg = "#ff3860"          # delete / overwrite prompts
+separator = "flat"             # "arrow" = Powerline arrows (needs a Powerline/Nerd Font)
 ```
 
 Colors are a basic name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`,

@@ -115,6 +115,18 @@ impl KeyMap {
     pub fn resolve(&self, code: KeyCode) -> Option<Action> {
         self.bindings.get(&code).copied()
     }
+
+    /// Every key bound to `action`, in a stable order — for showing the user their own bindings
+    /// (e.g. key hints) rather than hardcoded defaults.
+    pub fn keys_for(&self, action: Action) -> Vec<KeyCode> {
+        let mut keys: Vec<KeyCode> = self
+            .bindings
+            .iter()
+            .filter_map(|(code, bound)| (*bound == action).then_some(*code))
+            .collect();
+        keys.sort_by_key(|code| format!("{code:?}"));
+        keys
+    }
 }
 
 impl From<RawKeyMap> for KeyMap {
@@ -211,6 +223,25 @@ mod tests {
             assert_eq!(keymap.resolve(freed), None);
         }
         assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
+    }
+
+    #[test]
+    fn keys_for_lists_every_binding_of_an_action() {
+        let keymap: KeyMap = RawKeyMap::default().into();
+        let mut enter = keymap.keys_for(Action::Enter);
+        enter.sort_by_key(|c| format!("{c:?}"));
+        assert_eq!(enter, vec![KeyCode::Char('l'), KeyCode::Enter]);
+        assert_eq!(keymap.keys_for(Action::Quit), vec![KeyCode::Char('q')]);
+    }
+
+    #[test]
+    fn keys_for_an_unbound_action_is_empty() {
+        let raw = RawKeyMap {
+            quit: vec![],
+            ..RawKeyMap::default()
+        };
+        let keymap: KeyMap = raw.into();
+        assert!(keymap.keys_for(Action::Quit).is_empty());
     }
 
     #[test]

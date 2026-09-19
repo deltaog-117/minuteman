@@ -16,6 +16,7 @@
 
 mod app;
 mod cli;
+mod hud;
 mod image_preview;
 mod popup_shell;
 mod shell_init;
@@ -24,8 +25,8 @@ mod style;
 mod text_preview;
 
 use std::io::{self, Stdout};
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use app::App;
@@ -120,6 +121,13 @@ fn shell_area(frame_area: Rect, offset: (i32, i32), size_adjust: (i32, i32)) -> 
 /// The tiled shell panes plus the box's current offset/size adjustment from its centered default
 /// (see `shell_area`), bundled together since `draw` only ever needs all three or none — keeps
 /// its own argument list from growing every time the shell overlay gains one more piece of state.
+/// Everything `draw` needs about the interactive state layered over the browser: what the app is
+/// doing (for the status bar) and the shell panes, if any are open.
+struct Overlay<'a> {
+    mode: hud::Mode,
+    shell: Option<ShellView<'a>>,
+}
+
 struct ShellView<'a> {
     panes: &'a ShellPanes,
     offset: (i32, i32),
@@ -309,6 +317,8 @@ fn run(
     // The active resize/move chord, if any — `hjkl`/arrows are interpreted specially while this
     // is `Some`, instead of driving the browser or forwarding to a shell.
     let mut shell_chord: Option<ShellChordMode> = None;
+    // Lets `app.status` messages clear themselves after a few seconds instead of lingering.
+    let mut status_clock = hud::StatusClock::new(Instant::now());
 
     loop {
         app.poll_bulk(browser, vfs)?;
@@ -336,6 +346,31 @@ fn run(
             shell_chord = None;
         }
 
+        status_clock.tick(&mut app.status, Instant::now());
+
+        // Mirrors the order the key handling below checks these in, so the pill always names
+        // what the next keystroke will actually do.
+        let mode = if shells.is_some() && pending_leader {
+            hud::Mode::Leader
+        } else if let (Some(chord), true) = (shell_chord, shells.is_some()) {
+            match chord {
+                ShellChordMode::Resize => hud::Mode::Resize,
+                ShellChordMode::Move => hud::Mode::Move,
+            }
+        } else if shells.is_some() && shell_focused {
+            hud::Mode::Shell
+        } else if let Some(prompt) = &app.prompt {
+            hud::Mode::Prompt {
+                label: prompt.label(),
+                destructive: prompt.is_destructive(),
+                text_input: prompt.is_text_input(),
+            }
+        } else if app.is_busy() {
+            hud::Mode::Busy
+        } else {
+            hud::Mode::Normal
+        };
+
         terminal.draw(|frame| {
             draw(
                 frame,
@@ -344,11 +379,14 @@ fn run(
                 previews,
                 vfs,
                 config,
-                shells.as_ref().map(|panes| ShellView {
-                    panes,
-                    offset: shell_offset,
-                    size: shell_size,
-                }),
+                Overlay {
+                    mode,
+                    shell: shells.as_ref().map(|panes| ShellView {
+                        panes,
+                        offset: shell_offset,
+                        size: shell_size,
+                    }),
+                },
             )
         })?;
 
@@ -452,7 +490,6 @@ fn run(
                         // the keymap rather than a literal `' '` so a rebound leader still works.
                         if config.keys.resolve(key.code) == Some(Action::Leader) {
                             shell_focused = true;
-                            app.status = Some("shell focused — Esc to browse".into());
                         } else if let Some(dir) = leader_focus_dir(key.code) {
                             let moved = shells
                                 .as_mut()
@@ -494,16 +531,8 @@ fn run(
                                     });
                                     shells = remaining;
                                 }
-                                KeyCode::Char('r') => {
-                                    shell_chord = Some(ShellChordMode::Resize);
-                                    app.status =
-                                        Some("resize mode — hjkl to size, Esc to exit".into());
-                                }
-                                KeyCode::Char('m') => {
-                                    shell_chord = Some(ShellChordMode::Move);
-                                    app.status =
-                                        Some("move mode — hjkl to move, Esc to exit".into());
-                                }
+                                KeyCode::Char('r') => shell_chord = Some(ShellChordMode::Resize),
+                                KeyCode::Char('m') => shell_chord = Some(ShellChordMode::Move),
                                 // A single immediate action, unlike resize/move — there's nothing
                                 // repeatable about it, so it never enters `shell_chord` at all.
                                 KeyCode::Char('t') => {
@@ -594,7 +623,6 @@ fn run(
                 if shell_focused && let Some(panes) = shells.as_mut() {
                     if key.code == KeyCode::Esc {
                         shell_focused = false;
-                        app.status = Some("browsing — space space to type in the shell".into());
                     } else if let Some(bytes) = popup_shell::encode_key(key) {
                         panes.focused_shell().write_input(&bytes)?;
                     }
@@ -643,13 +671,8 @@ fn run(
                     // against — whenever no shell is open.
                     Some(Action::Leader) => {
                         if shells.is_some() {
+                            // The status bar lists what can follow (see `hud::hints`).
                             pending_leader = true;
-                            // One leader hides every binding behind it, so list them.
-                            app.status = Some(
-                                "space + hjkl focus · | - split · x close · r resize · m move · \
-                                 t flip · space type"
-                                    .into(),
-                            );
                         }
                     }
                     // Guarded explicitly rather than relying on it being unreachable while panes
@@ -696,12 +719,19 @@ fn draw(
     previews: &mut Previews,
     vfs: &LocalVfs,
     config: &Config,
-    shell: Option<ShellView<'_>>,
+    overlay: Overlay<'_>,
 ) {
+    let Overlay { mode, shell } = overlay;
+    // Header, the three file columns, then the status bar.
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
+    let (header_row, body_row, status_row) = (rows[0], rows[1], rows[2]);
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -710,7 +740,14 @@ fn draw(
             Constraint::Percentage(40),
             Constraint::Percentage(40),
         ])
-        .split(rows[0]);
+        .split(body_row);
+
+    // Read once: the status bar wants the selected directory's item count, and the preview pane
+    // wants its listing — one `list_dir`, not two, per frame.
+    let dir_preview: Option<Vec<DirEntryInfo>> = browser
+        .selected_entry()
+        .filter(|e| e.is_dir)
+        .map(|_| browser.preview_entries(vfs));
 
     // Background only: the selected row's text color is set per span in `entry_item` (so the
     // accent stripe and file-type colors survive the highlight).
@@ -720,7 +757,7 @@ fn draw(
     let parent_items: Vec<ListItem> = browser
         .parent_entries()
         .iter()
-        .map(|e| entry_item(e, config, Row::PLAIN))
+        .map(|e| entry_item(e, config, Row::PLAIN, None))
         .collect();
     frame.render_widget(
         List::new(parent_items).block(style::themed_block(config, "..", false)),
@@ -730,6 +767,8 @@ fn draw(
     // Current pane — the active column, with the selection highlighted and marked entries
     // prefixed (Ranger-style) so a pending multi-select is visible before acting on it.
     let has_selection = !browser.current_entries().is_empty();
+    let now = SystemTime::now();
+    let plan = hud::plan_columns(columns[1].width.saturating_sub(2) as usize);
     let current_items: Vec<ListItem> = browser
         .current_entries()
         .iter()
@@ -740,20 +779,31 @@ fn draw(
                 selected: has_selection && i == browser.selected_index(),
                 marked: browser.is_marked(&e.path),
             };
-            entry_item(e, config, row)
+            entry_item(e, config, row, Some((plan, now)))
         })
         .collect();
     let mut current_state = ListState::default();
     if !browser.current_entries().is_empty() {
         current_state.select(Some(browser.selected_index()));
     }
-    let title = browser.current_dir().to_string_lossy().into_owned();
+    // The header carries the full path; the frame just names this directory.
+    let title = browser
+        .current_dir()
+        .file_name()
+        .map_or_else(|| "/".to_string(), |n| n.to_string_lossy().into_owned());
     frame.render_stateful_widget(
         List::new(current_items)
             .block(style::themed_block(config, &title, true))
             .highlight_style(selection_style),
         columns[1],
         &mut current_state,
+    );
+    hud::render_scrollbar(
+        frame,
+        columns[1],
+        browser.current_entries().len(),
+        browser.selected_index(),
+        config,
     );
 
     // Preview pane — an inline image for image files, rendered text for code/text files,
@@ -807,11 +857,10 @@ fn draw(
             }
             TextPreviewStatus::Empty => {}
         }
-    } else if browser.selected_entry().map(|e| e.is_dir).unwrap_or(false) {
-        let items: Vec<ListItem> = browser
-            .preview_entries(vfs)
+    } else if let Some(children) = &dir_preview {
+        let items: Vec<ListItem> = children
             .iter()
-            .map(|e| entry_item(e, config, Row::PLAIN))
+            .map(|e| entry_item(e, config, Row::PLAIN, None))
             .collect();
         frame.render_widget(
             List::new(items).block(style::themed_block(config, "preview", false)),
@@ -830,10 +879,43 @@ fn draw(
         );
     }
 
-    let status_style = Style::default().fg(color_from_name(&config.theme.status_fg));
-    frame.render_widget(
-        Paragraph::new(app.status_line()).style(status_style),
-        rows[1],
+    hud::render_header(
+        frame,
+        header_row,
+        &hud::HeaderView {
+            path: browser.current_dir(),
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            marks: browser.marked_paths().len(),
+            clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
+            progress: app.progress(),
+        },
+        config,
+    );
+
+    let mut message = app.status_line();
+    if app.prompt.as_ref().is_some_and(|p| p.is_text_input()) {
+        // A visible cursor: prompts only ever append to their buffer.
+        message.push('▏');
+    }
+    hud::render_status_bar(
+        frame,
+        status_row,
+        &hud::StatusView {
+            mode,
+            shell_open: shell.is_some(),
+            entry: browser.selected_entry(),
+            dir_items: dir_preview.as_ref().map(Vec::len),
+            position: (
+                if has_selection {
+                    browser.selected_index() + 1
+                } else {
+                    0
+                },
+                browser.current_entries().len(),
+            ),
+            message: &message,
+        },
+        config,
     );
 
     // Drawn last, over the browser columns above — the tiled shell panes, in a box that never
@@ -861,7 +943,14 @@ impl Row {
     };
 }
 
-fn entry_item(entry: &DirEntryInfo, config: &Config, row: Row) -> ListItem<'static> {
+/// `columns` is the current pane's column plan and the time to measure ages against; `None` for
+/// the context panes, which show names only.
+fn entry_item(
+    entry: &DirEntryInfo,
+    config: &Config,
+    row: Row,
+    columns: Option<(hud::Columns, SystemTime)>,
+) -> ListItem<'static> {
     let theme = &config.theme;
     let accent = Style::default().fg(color_from_name(&theme.accent_fg));
     let mut name_style = Style::default().fg(color_from_name(
@@ -890,7 +979,25 @@ fn entry_item(entry: &DirEntryInfo, config: &Config, row: Row) -> ListItem<'stat
             Span::raw(" ")
         });
     }
-    spans.push(Span::styled(entry_label(entry), name_style));
+    let label = entry_label(entry);
+    match columns {
+        Some((plan, now)) => {
+            spans.push(Span::styled(
+                hud::pad_to(&label, plan.name_width),
+                name_style,
+            ));
+            // Dim, so the eye lands on names first.
+            let dim = Style::default().fg(color_from_name(&theme.status_fg));
+            if plan.size {
+                spans.push(Span::styled(format!(" {:>5}", hud::size_cell(entry)), dim));
+            }
+            if plan.age {
+                let age = hud::format_age(now, entry.modified);
+                spans.push(Span::styled(format!(" {age:>3}"), dim));
+            }
+        }
+        None => spans.push(Span::styled(label, name_style)),
+    }
     ListItem::new(Line::from(spans))
 }
 

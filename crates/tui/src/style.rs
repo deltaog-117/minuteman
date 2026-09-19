@@ -228,6 +228,9 @@ mod tests {
             name: name.into(),
             path: name.into(),
             is_dir,
+            size: 0,
+            modified: None,
+            mode: None,
         }
     }
 

@@ -76,5 +76,11 @@ archive_fg = "#ff7a3d"
 media_fg = "#ff5cf0"
 file_fg = "#c8ccff"
 status_fg = "#7a80b8"
+# Status bar: the segments' background, and the color of destructive prompts (delete, overwrite).
+bar_bg = "#1a1f3d"
+danger_fg = "#ff3860"
 # Frame style: "rounded", "plain", "double", or "thick".
 border_type = "rounded"
+# Edge between status-bar segments: "flat" works in any font; "arrow" draws Powerline arrows and
+# needs a Powerline/Nerd Font in your terminal (without one they show as missing-glyph boxes).
+separator = "flat"

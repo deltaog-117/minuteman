@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::error::VfsError;
 
@@ -23,6 +24,12 @@ pub struct DirEntryInfo {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
+    /// Size in bytes. Zero when the entry's metadata couldn't be read (e.g. a broken symlink),
+    /// and meaningless for a directory.
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+    /// Unix permission bits (`st_mode`), when the backend has them.
+    pub mode: Option<u32>,
 }
 
 pub trait Vfs {
@@ -52,6 +59,17 @@ pub trait Vfs {
     fn remove_dir_all(&self, path: &Path) -> Result<(), VfsError>;
 }
 
+#[cfg(unix)]
+fn unix_mode(metadata: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    Some(metadata.permissions().mode())
+}
+
+#[cfg(not(unix))]
+fn unix_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LocalVfs;
 
@@ -71,12 +89,17 @@ impl Vfs for LocalVfs {
                 source,
             })?;
             let entry_path = entry.path();
-            let is_dir = entry_path.is_dir();
+            // One `stat` (following symlinks, like `is_dir` did) answers everything at once, so
+            // showing size/age/permissions costs no extra syscalls over the old listing.
+            let metadata = entry_path.metadata().ok();
             let name = entry.file_name().to_string_lossy().into_owned();
             entries.push(DirEntryInfo {
                 name,
                 path: entry_path,
-                is_dir,
+                is_dir: metadata.as_ref().is_some_and(|m| m.is_dir()),
+                size: metadata.as_ref().map_or(0, |m| m.len()),
+                modified: metadata.as_ref().and_then(|m| m.modified().ok()),
+                mode: metadata.as_ref().and_then(unix_mode),
             });
         }
 
@@ -169,6 +192,38 @@ mod tests {
         assert_eq!(entries[1].name, "b_dir");
         assert_eq!(entries[2].name, "a_file.txt");
 
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn listing_reports_size_modified_time_and_permissions() {
+        let tmp = std::env::temp_dir().join(format!("minuteman-test-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("five.txt"), b"12345").unwrap();
+
+        let entries = LocalVfs.list_dir(&tmp).unwrap();
+        let file = &entries[0];
+
+        assert_eq!(file.size, 5);
+        assert!(file.modified.is_some());
+        #[cfg(unix)]
+        assert!(file.mode.is_some_and(|m| m & 0o400 != 0));
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn a_broken_symlink_lists_as_a_zero_sized_non_directory() {
+        let tmp = std::env::temp_dir().join(format!("minuteman-test-link-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(tmp.join("missing"), tmp.join("dangling")).unwrap();
+            let entries = LocalVfs.list_dir(&tmp).unwrap();
+            assert!(!entries[0].is_dir);
+            assert_eq!(entries[0].size, 0);
+            assert_eq!(entries[0].modified, None);
+        }
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

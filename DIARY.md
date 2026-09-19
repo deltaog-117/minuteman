@@ -1595,6 +1595,76 @@ only read the cells, not see them, and Nerd Font icons are out of scope until ph
 
 ---
 
+### HUD Layout: Header, Columns, Scrollbar, and a Mode-Aware Powerline Status Bar
+
+**Date:** 2026-09-19
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Phase B of the UI overhaul (after the neon theme): make the layout itself richer than Ranger's.
+Requested pieces: a header with a breadcrumb path, a powerline-style status bar, size/date
+columns, and scrollbars.
+
+#### Decision & Rationale
+
+- **Data first.** Columns and the status bar need size, modified time and permissions, which the
+  listing didn't carry. `DirEntryInfo` gained them, filled from the `stat` that `list_dir` already
+  made to decide `is_dir`, so this costs no extra syscalls. A broken symlink lists as a
+  zero-sized non-directory, as before.
+- **A pure core.** Formatting and layout decisions live in `hud.rs` as pure functions
+  (`format_size`, `format_age`, `format_perms`, `breadcrumb`, `plan_columns`, `hints`), so they're
+  unit-tested without a terminal. Rendering is a thin layer on top, tested by drawing into a
+  `TestBackend`.
+- **Mode drives the bar.** The status bar's pill and hints follow a `Mode`, computed each frame
+  in the same order the key handling checks its states (leader, resize/move, shell typing,
+  prompt, busy). That let the ad-hoc status strings for leader/resize/typing go away. Hints are
+  looked up from the user's own keymap (`KeyMap::keys_for`), not hardcoded, so a rebound key
+  is shown correctly, and whole hints are dropped from the end when the bar is narrow.
+- **Columns never cost the name.** `plan_columns` drops age, then size, before letting a name
+  fall under 12 cells.
+- **Flat by default, arrows opt-in.** Powerline arrows need a patched font and render as
+  missing-glyph boxes without one, so `[theme] separator = "arrow"` is opt-in. Same-background
+  neighbours get the thin Powerline arrow, since the solid one would match both sides and vanish.
+- **Messages expire.** Status text used to stay until replaced. Assignments are spread over ~40
+  sites, so `StatusClock` watches the text for change and clears it five seconds after it last
+  changed, rather than timestamping each site.
+
+#### Implementation Notes
+
+- Directories show `—` in the size column, and their item count appears in the status bar once
+  selected. Counting every directory's entries on every listing would cost a `read_dir` per
+  directory, which is slow in big trees. The selected directory's listing is already read for the
+  preview pane, so `draw` reads it once and shares it (before, it was read only in the preview
+  branch).
+- The scrollbar is drawn over the current pane's right border rather than inside it, so it takes
+  no width from the list.
+- The mini-shell box can still be dragged over the header row: `shell_area` only reserves the
+  status bar. Left alone; harmless, and changing it would move the box's tested geometry.
+- Not done, by decision: Nerd Font icons (need a patched font, unlike the rest), and progress for
+  a single large directory copy beyond a file count (its total isn't known up front).
+- The sweep test (every width from 1 to 140, flat and arrow, every mode) caught nothing in the
+  header/status layout; the size test did catch that a value just under 1 PiB printed `1024T`,
+  fixed by adding a `P` unit.
+
+#### Verification
+
+`cargo test --workspace` passes (137 tests); clippy is clean. Ran the real binary in a PTY over a
+directory of 49 entries, read through `pyte` (with the terminal's graphics-probe reply filtered
+out, as a real terminal swallows it). At 120 columns: the header showed `~ › hud`; the list
+showed right-aligned sizes and ages (`20K 1mo`, `8B 2h`); the scrollbar thumb appeared on the
+right border in the accent color; the status bar showed `NORMAL`, name, `rwxr-xr-x`, `1 item`,
+`dir`, hints from the default keys, and `1/49`; marking and yanking added `◆ 1 marked` and
+`⧉ 1 yanked` pills; `/` showed a `SEARCH` pill with a cursor and `enter ok / esc cancel`; `d`
+showed a `DELETE` pill on the danger color (`#ff3860`); opening a shell showed `SHELL`, `Esc`
+returned to `NORMAL` with the leader hint, `space` showed `LEADER` with the pane commands, and
+`space r` showed `RESIZE`. At 60 columns the age column dropped and hints truncated to fit.
+With `separator = "arrow"` in a real config file, the arrow glyphs appeared with the pill's
+color as their foreground. Not verified: how it looks to a human eye on your terminal and font.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

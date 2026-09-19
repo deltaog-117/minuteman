@@ -87,6 +87,35 @@ pub enum Prompt {
 }
 
 impl Prompt {
+    /// The status bar's mode label for this prompt.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Prompt::RenameInput { .. } => "RENAME",
+            Prompt::CreateInput { .. } => "CREATE",
+            Prompt::ConfirmDelete { .. } => "DELETE",
+            Prompt::Conflict(_) => "CONFLICT",
+            Prompt::SearchInput { .. } => "SEARCH",
+            Prompt::CommandInput { .. } => "COMMAND",
+        }
+    }
+
+    /// Whether the user is typing into a buffer (so a cursor belongs at the end of the text),
+    /// as opposed to answering a one-key question.
+    pub fn is_text_input(&self) -> bool {
+        matches!(
+            self,
+            Prompt::RenameInput { .. }
+                | Prompt::CreateInput { .. }
+                | Prompt::SearchInput { .. }
+                | Prompt::CommandInput { .. }
+        )
+    }
+
+    /// Whether confirming this prompt is destructive (permanent delete, overwrite).
+    pub fn is_destructive(&self) -> bool {
+        matches!(self, Prompt::ConfirmDelete { .. } | Prompt::Conflict(_))
+    }
+
     pub fn display(&self) -> String {
         match self {
             Prompt::RenameInput { buffer, .. } => format!("rename: {buffer}"),
@@ -167,6 +196,17 @@ struct BulkOp {
     rx: UnboundedReceiver<BulkMsg>,
 }
 
+/// A snapshot of the running background operation, for the header's progress gauge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Progress {
+    pub label: &'static str,
+    /// Items finished so far (files and directories, as `file_ops` reports them).
+    pub done: u64,
+    /// `(index of the item in flight, total items)` for a multi-item paste; `None` otherwise,
+    /// since a single directory's total size isn't known up front.
+    pub batch: Option<(usize, usize)>,
+}
+
 pub struct App {
     pub clipboard: Option<Clipboard>,
     pub prompt: Option<Prompt>,
@@ -220,6 +260,21 @@ impl App {
 
     pub fn is_busy(&self) -> bool {
         self.bulk.is_some()
+    }
+
+    pub fn progress(&self) -> Option<Progress> {
+        let bulk = self.bulk.as_ref()?;
+        let batch = match &bulk.kind {
+            BulkKind::Paste { clip, index, .. } if clip.paths.len() > 1 => {
+                Some((*index, clip.paths.len()))
+            }
+            _ => None,
+        };
+        Some(Progress {
+            label: bulk.kind.progressing_label(),
+            done: bulk.items_done,
+            batch,
+        })
     }
 
     /// Drains any progress/completion messages from the running background operation, if any.

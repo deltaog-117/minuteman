@@ -327,21 +327,35 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   colors, with and without `COLORTERM=truecolor`. Phases B (HUD layout: header breadcrumb,
   powerline status bar, size/date columns, scrollbars, optional Nerd Font icons) and C
   (animation and effects) are queued below.
+- ✅ **HUD layout (UI overhaul, phase B)** – a header row with a breadcrumb path (`~` for home,
+  the middle elided with `…` when narrow) and pills for marks, the clipboard (`⧉ 1 yanked`,
+  `✂ 3 cut`) and a background-job gauge; right-aligned size and relative-age columns that drop
+  age, then size, on narrow panes and never squeeze a name below 12 cells; a scrollbar drawn over
+  the current pane's right border when the list overflows; and a powerline-style status bar: a
+  colored mode pill (NORMAL, SHELL, LEADER, RESIZE, MOVE, BUSY, or the prompt's own), then the
+  selection's name, permissions, size (or item count for a directory) and type, the position
+  `12/48`, and key hints built from *your* bindings that change with the mode. This replaces the
+  ad-hoc status strings for leader/resize/typing states, and status messages now clear themselves
+  after five seconds. `DirEntryInfo` gained `size`, `modified` and `mode`, read from the same
+  `stat` the listing already did. `[theme] separator = "arrow"` switches the segment edges to
+  Powerline arrows (needs a Powerline/Nerd Font; the default is flat). Verified against the real
+  binary through a terminal emulator at 120 and 60 columns, in every mode. Directories show `—`
+  in the size column and their item count in the status bar once selected, rather than counting
+  every directory's entries on every listing.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-- **UI overhaul, phase B — HUD layout** – a header bar with a breadcrumb path; a powerline-style
-  status bar (mode, selection info, position `12/48`, size); right-aligned size/date/permission
-  columns; scrollbars; a key-hint footer; and Nerd Font file icons behind an opt-in with an ASCII
-  fallback.
+- **Nerd Font file icons** – per-kind icons in front of entry names, behind an opt-in with an
+  ASCII fallback (left out of the HUD phase: it needs a patched font, unlike everything else
+  there).
 - **UI overhaul, phase C — cinematic layer** – a boot splash, animated focus transitions,
   gradient borders/titles, a pulsing selection, a typewriter reveal on the preview, and an
   optional system/git HUD. Needs an animation tick on top of the existing 100ms poll.
-- **Richer status line** – expand the bottom status bar beyond the current prompt/progress text
-  to surface per-selection info at a glance: file count, cumulative size, permissions, and (where
-  applicable) git status.
+- **Richer status line, remainder** – the HUD now shows permissions, size, type, item count and
+  position for the selection; still missing are the cumulative size of the marked entries and
+  (where applicable) git status.
 - **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
   frequently visited paths don't require re-navigating the miller columns each time.
 
@@ -388,7 +402,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 0. Add `eval "$(minuteman init zsh)"` to `~/.zshrc`, reopen the terminal, run `mm`, navigate
    somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the new neon theme is the default (`COLORTERM=truecolor` for full color;
+1. `cargo run -p tui` — the new neon theme and HUD (header, size/age columns, scrollbar, powerline
+   status bar) are the default (`COLORTERM=truecolor` for full color;
    `name = "classic"` for the old look). Press `s` to open a shell and type in it (`Tab` completes, spaces work).
    `Esc` stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
    `space space` goes back to typing, `space x` closes a pane. `space t` flips a split, and
