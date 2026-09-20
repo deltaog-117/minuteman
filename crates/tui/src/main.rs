@@ -915,6 +915,7 @@ fn run(
                     continue;
                 }
                 alt_tap_armed = false;
+                let key = with_shifted_letter_uppercased(key);
 
                 // `Alt` commands come first and work in every mode — typing in a shell, browsing,
                 // mid-chord — because a held `Alt` is what says "this is for the shell box, not
@@ -1497,9 +1498,38 @@ fn color_from_name(name: &str) -> Color {
     style::color(name)
 }
 
+/// Turns Shift plus a lowercase letter into the uppercase letter. With the keyboard protocol on,
+/// a terminal may report Shift+q as `q` with the Shift flag rather than as `Q`; every binding
+/// (`Q` quit-and-`cd`, `S`, ...) and every capital typed into a mini-shell is keyed on the
+/// uppercase character, so it is settled once here, before any of them look at the key.
+fn with_shifted_letter_uppercased(mut key: event::KeyEvent) -> event::KeyEvent {
+    if let KeyCode::Char(c) = key.code
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && c.is_ascii_lowercase()
+    {
+        key.code = KeyCode::Char(c.to_ascii_uppercase());
+    }
+    key
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shifted_lowercase_letter_becomes_the_capital() {
+        let key = |c, m| event::KeyEvent::new(KeyCode::Char(c), m);
+        let shifted = with_shifted_letter_uppercased(key('q', KeyModifiers::SHIFT));
+        assert_eq!(shifted.code, KeyCode::Char('Q'));
+        // Already a capital, unshifted, or not a letter: left exactly as it was.
+        for k in [
+            key('Q', KeyModifiers::SHIFT),
+            key('q', KeyModifiers::NONE),
+            key('1', KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(with_shifted_letter_uppercased(k), k);
+        }
+    }
 
     #[test]
     fn shell_area_centers_with_zero_offset() {

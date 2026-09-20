@@ -2286,6 +2286,27 @@ prompts, cancelling a running command, and the resize/move chord.
 
 `cargo test --workspace` passes. Not run against a real terminal emulator.
 
+### `Q` Under the Keyboard Protocol: Normalise Shifted Letters Once, at the Top of the Key Path
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+`Q` still did not move the shell after the wrapper was installed and the binary was run as `mman`.
+A scripted zsh session through the real wrapper worked for a plain `Q` and for the report
+`CSI 113:81;2u` (key `q`, shifted key `Q`), but failed for `CSI 113;2u`, where the terminal names
+only the unshifted key and the Shift flag. `crossterm` then yields `Char('q')` with `SHIFT`, and
+`keys.resolve(key.code)` ignores modifiers, so it resolved to `Quit`.
+
+#### Decision
+
+One function, `with_shifted_letter_uppercased`, runs on every key press before any binding, `Alt`
+command or shell input sees it. Resolving on `code` plus `modifiers` inside the keymap was
+rejected: it touches every binding and the config format for one case. Which report the user's
+kitty sends was not confirmed, so this fixes the reproduced failure, not a proven cause.
+
 ---
 
 ## 🧠 Usage Guidelines

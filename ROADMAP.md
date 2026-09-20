@@ -446,6 +446,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   pane with `Alt+m`; `Esc` is unchanged in the browser's own prompts, busy state and resize/move
   chord. Docs, `config.example.toml` and the status bar hint updated to match.
 
+- ✅ **`Q` under the keyboard protocol** – a terminal may report Shift+q as `q` plus the Shift
+  flag, and the key lookup ignores modifiers, so `Q` quit without recording the directory. Shift
+  plus a lowercase letter is now turned into the capital once, before any lookup. Reproduced on a
+  PTY through the real `mman` wrapper in zsh: the shell stayed put with the shifted-`q` report and
+  moved into the browsed directory after the fix, and with the plain and the alternate-key reports.
+
 ---
 
 ## 🔥 High Priority (Critical)

@@ -349,6 +349,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shell.
 - `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.
 
+### Fixed
+- `tui`: `Q` (quit and `cd`) did nothing different from `q` in a terminal that reports Shift+q as
+  a lowercase `q` with the Shift flag, which the keyboard protocol allows. Shift plus a lowercase
+  letter is now read as the capital before any key is looked up. This also makes capitals typed
+  into a mini-shell and the `Alt+Shift` check behave under the same reports.
+
 ### Removed
 - `tui`: the `minuteman` executable and the `mm` shell wrapper, replaced by `mman` (see
   *Changed*). Anything that ran `minuteman ...` or `mm` needs `mman`.
