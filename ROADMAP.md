@@ -440,6 +440,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   real binary on a PTY through `pyte`: toggling, both built-ins and the shell path, `Esc`
   killing `sleep 30`, files created, edited and deleted by another program and from inside a
   mini-shell appearing untouched, and a new hidden file staying hidden until toggled.
+- ✅ **`Esc` belongs to the mini-shell** – `Esc` used to leave typing mode, so a program inside a
+  pane that needs it (`vim`, `fzf`) lost focus mid-use. It is now sent to the shell like any
+  other key (`0x1b`). Typing mode is left by tapping `Alt`, clicking the browser, or closing the
+  pane with `Alt+m`; `Esc` is unchanged in the browser's own prompts, busy state and resize/move
+  chord. Docs, `config.example.toml` and the status bar hint updated to match.
 
 ---
 
@@ -526,7 +531,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 1. `cargo run -p tui` — the new neon theme and HUD (header, size/age columns, scrollbar, powerline
    status bar) are the default (`COLORTERM=truecolor` for full color;
    `name = "classic"` for the old look). Press `s` to open a shell and type in it (`Tab` completes, spaces work).
-   `Esc` stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
+   `Alt` (tap) stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
    `space space` goes back to typing, `space x` closes a pane. `space t` flips a split, and
    `space r`/`space m` plus `hjkl` resize/move (`Esc` leaves either mode).
    Try the new `Alt` layer too: `Alt+n` splits, `Alt+hjkl` moves the box, `Alt+a`/`Alt+d`

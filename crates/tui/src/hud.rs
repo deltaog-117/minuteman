@@ -487,7 +487,7 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
             fixed("t", "flip"),
             bound(Action::Leader, "type"),
         ],
-        Mode::Shell => vec![fixed("esc", "browse")],
+        Mode::Shell => vec![fixed("alt", "browse")],
         Mode::Resize | Mode::Move => vec![fixed("hjkl", "nudge"), fixed("esc", "done")],
         Mode::Busy => vec![fixed("esc", "cancel")],
         Mode::Prompt {

@@ -296,6 +296,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: `Esc` typed into a mini-shell now goes to the program running in it instead of leaving
+  typing mode. Full-screen programs such as `vim` and `fzf` use `Esc` themselves, and the old
+  behaviour dropped keyboard focus from under them. To leave typing, tap `Alt`, click the
+  browser, or press `Alt+m` to close the pane. The status bar hint for shell mode now reads
+  `alt browse`. `Esc` still cancels prompts, running commands, and the resize/move chord.
 - `tui`: hidden files are now hidden by default. Before, every file was listed. Set
   `show_hidden = true` in `config.toml` to keep the old behaviour.
 - `tui`: a command typed at `:` that is not a built-in used to answer `unknown command`; it now

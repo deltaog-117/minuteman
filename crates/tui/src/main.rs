@@ -1078,13 +1078,13 @@ fn run(
                     }
                 }
 
-                // Typing mode: every key belongs to the focused shell — `Tab`, `Space`, `o`, `%`
-                // and all the rest — except `Esc`, the one way out. Everything else about the
-                // panes is a `Leader` command from browse mode (see `pending_leader` above).
+                // Typing mode: every key belongs to the focused shell — `Tab`, `Space`, `o`, `%`,
+                // `Esc` and all the rest, since a program inside the pane (vim, fzf, ...) needs
+                // `Esc` for itself. The ways out are all `Alt`-layer or mouse: tap `Alt`, click
+                // the browser, or `Alt+m` to close the pane. Everything else about the panes is
+                // a `Leader` command from browse mode (see `pending_leader` above).
                 if shell_focused && let Some(panes) = shells.as_mut() {
-                    if key.code == KeyCode::Esc {
-                        shell_focused = false;
-                    } else if let Some(bytes) = popup_shell::encode_key(key) {
+                    if let Some(bytes) = popup_shell::encode_key(key) {
                         panes.focused_shell().write_input(&bytes)?;
                     }
                     continue;

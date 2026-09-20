@@ -56,7 +56,7 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
   marked entry when any are marked, falling back to the single selection otherwise.
 - 🔹 **Tiling mini-shells with a single leader key** – `s` opens a real `$SHELL` in a movable,
   resizable box; `space` is the one leader for everything else (see below). While you type, every
-  key goes to the shell — `Tab` completion included — except `Esc`.
+  key goes to the shell — `Tab` completion and `Esc` included.
 
 ---
 
@@ -139,7 +139,7 @@ named `init` must be passed as `./init`.
 
 `s` opens a shell in the current directory. There are two modes:
 
-- **Typing:** every key, `Space` and `Tab` included, goes to the shell. `Esc` leaves typing.
+- **Typing:** every key, `Space`, `Tab` and `Esc` included, goes to the shell, so programs like `vim` keep `Esc` for themselves. Tap `Alt` or click the browser to leave typing; `Alt+m` closes the pane.
 - **Browsing:** the shell stays visible and the file browser works normally. `space` is the leader:
 
 | After `space` | Action                                              |
@@ -184,7 +184,7 @@ implements the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboar
 kitty, foot, wezterm, ghostty, recent alacritty — because an ordinary terminal sends nothing at
 all for a modifier key alone. Minuteman asks for it at startup only if the terminal says it
 supports it, and gives it back on exit. Elsewhere the tap does nothing and every other `Alt` key
-works as before; `Esc` and the `space` leader still switch modes. While the protocol is on, the
+works as before; clicking the browser and the `space` leader still switch modes. While the protocol is on, the
 terminal reports every key as an escape code that Minuteman decodes again. If accented or
 composed characters (dead keys, `AltGr`) come out wrong inside a mini-shell, set
 `alt_tap = false` in `config.toml`.

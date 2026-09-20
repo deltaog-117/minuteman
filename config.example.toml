@@ -43,8 +43,7 @@ rename = ["r"]
 # A trailing "/" on the typed name creates a directory instead of a file.
 create = ["n"]
 # Opens the first shell pane in the current directory ("s" again does nothing once one is
-# already open — split instead). "esc" closes the focused pane, or exits shell mode entirely
-# once it's the last one open.
+# already open — split instead). Alt+m closes the pane under the pointer.
 shell = ["s"]
 # Jumps to the first entry whose name matches as you type.
 search = ["/"]
@@ -59,11 +58,11 @@ hidden = ["."]
 # later bulk action instead of acting on it immediately.
 select = ["v"]
 # The one leader key for every mini-shell command. With a shell open and not being typed into
-# (press "esc" in the shell to stop typing), leader followed by: leader again = type in the shell;
+# (tap Alt or click the browser to stop typing), leader followed by: leader again = type in the shell;
 # h/j/k/l or the arrows = focus the pane in that direction; "|" = split side by side; "-" = split
 # stacked; x = close the focused pane; r/m = resize/move mode (hjkl to nudge, esc to leave);
 # t = flip the split's orientation. Does nothing when no shell is open. While typing in a shell,
-# every key — this one included — goes to the shell, except "esc".
+# every key — this one included — goes to the shell.
 leader = ["space"]
 
 # Colors, text styles (bold, italic, ...), glyphs and fonts live in their own file,

@@ -2254,6 +2254,38 @@ row after `:mkdir`, when it had stayed on the same file, which is the path-prese
 working. My first version of the `mkdir` check also passed on the status line alone, because
 `mkdir made/deep` puts "made" there; the retest uses names that never appear in a message.
 
+### `Esc` Goes to the Mini-Shell: Remove the Typing-Mode Exit, Keep the `Alt` Ways Out
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+`Esc` was the one key Minuteman took from a focused mini-shell: it dropped keyboard focus back to
+the browser. A program inside the pane that uses `Esc` itself, such as `vim` or `fzf`, lost focus
+the first time it was pressed. Since the `Alt` layer and the `Alt` tap already cover leaving and
+closing, `Esc` no longer needed to be special.
+
+#### Decision
+
+Typing mode forwards every key, `Esc` included (`popup_shell::encode_key` already encoded it as
+`0x1b`), so the only change is deleting the intercept in `main.rs`. Ways out that remain: tap
+`Alt`, click the browser, `Alt+m` (closes the pane under the pointer, or the focused one) and
+`Alt+q` (closes all). `Esc` is untouched where it means something to the browser itself: text
+prompts, cancelling a running command, and the resize/move chord.
+
+#### Consequences
+
+- On a terminal without the kitty keyboard protocol the `Alt` tap does nothing, so the mouse or
+  `Alt+m` is the only way out of typing mode there.
+- The old README and `config.example.toml` text saying `Esc` closes a pane or stops typing was
+  stale or now wrong, and was rewritten.
+
+#### Verification
+
+`cargo test --workspace` passes. Not run against a real terminal emulator.
+
 ---
 
 ## 🧠 Usage Guidelines
