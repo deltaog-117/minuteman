@@ -778,6 +778,7 @@ mod tests {
     fn test_config() -> Config {
         Config {
             alt_tap: true,
+            browser_mouse: true,
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             ui: theming::Ui::default(),

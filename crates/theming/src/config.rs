@@ -31,6 +31,8 @@ use crate::ui::{RawUi, Ui};
 struct RawConfig {
     /// `None` when absent, so "unset" can default to on rather than serde's `false`.
     alt_tap: Option<bool>,
+    /// `None` when absent, for the same reason as `alt_tap`.
+    browser_mouse: Option<bool>,
     keys: RawKeyMap,
     theme: RawTheme,
     ui: RawUi,
@@ -52,6 +54,10 @@ pub struct Config {
     /// Needs the terminal's keyboard protocol, which reports every key differently (see the
     /// note in `config.example.toml`), so it can be turned off.
     pub alt_tap: bool,
+    /// Whether clicks and the wheel act on the three file columns. A switch rather than a
+    /// constant so a misbehaving terminal or a habit of clicking by accident can turn it off
+    /// without a rebuild; the mini-shell's own mouse gestures don't depend on it.
+    pub browser_mouse: bool,
     pub keys: KeyMap,
     pub theme: Theme,
     pub ui: Ui,
@@ -81,6 +87,7 @@ impl Config {
 
         Self {
             alt_tap: config.alt_tap.unwrap_or(true),
+            browser_mouse: config.browser_mouse.unwrap_or(true),
             keys: config.keys.into(),
             theme: config.theme.overlay(appearance.theme).into(),
             ui: config.ui.overlay(appearance.ui).into(),
@@ -138,6 +145,7 @@ mod tests {
         let text = include_str!("../../../config.example.toml");
         let raw: RawConfig = toml::from_str(text).unwrap();
         assert_eq!(raw.alt_tap, Some(true));
+        assert_eq!(raw.browser_mouse, Some(true));
         let keys: KeyMap = raw.keys.into();
         let default_keys: KeyMap = RawKeyMap::default().into();
         assert_eq!(keys, default_keys);
@@ -149,6 +157,14 @@ mod tests {
         assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).alt_tap);
         assert!(!Config::from_sources(Some("alt_tap = false\n"), None).alt_tap);
         assert!(Config::from_sources(Some("alt_tap = true\n"), None).alt_tap);
+    }
+
+    #[test]
+    fn browser_mouse_defaults_on_and_can_be_switched_off() {
+        assert!(Config::from_sources(None, None).browser_mouse);
+        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).browser_mouse);
+        assert!(!Config::from_sources(Some("browser_mouse = false\n"), None).browser_mouse);
+        assert!(Config::from_sources(Some("browser_mouse = true\n"), None).browser_mouse);
     }
 
     /// The same drift guard for `appearance.example.toml`, covering all four of its tables.

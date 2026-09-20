@@ -35,6 +35,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-18 | Batch Yank/Cut/Paste Continuation | `Clipboard` holds `Vec<PathBuf>`, `poll_bulk` re-spawns the next item itself (COA A) | ✅ Confirmed |
 | 2026-09-20 | Alt Layer for Mini-Shell Box | Held `Alt` drives the existing single box; independent floating windows rejected (COA A) | ✅ Confirmed |
 | 2026-09-20 | Alt Tap Switches Shell/Browser | Kitty keyboard protocol, enabled only when supported, with an `alt_tap` off switch | ✅ Confirmed |
+| 2026-09-20 | Browser Mouse Support | One shared `BrowserLayout` plus pure hit-testing in `browser_mouse.rs`, list state persisted across frames (COA A) | ✅ Confirmed |
 
 ---
 
@@ -1986,6 +1987,106 @@ The protocol was pushed exactly once, as flags 15, and popped on exit. With a ha
 answered the query no flags were pushed and ESC-prefixed `Alt+l` and `Alt+n` still worked; with
 `alt_tap = false` no flags were pushed either. Not verified: a real kitty, and above all whether
 composed characters survive the protocol there.
+
+---
+
+### Mouse in the File Browser: One Shared Layout and a Pure Hit-Test Module (COA A)
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Mouse capture was already on, but only for the mini-shell box: with no shell open the event
+handler returned at once, and with one open it handled box gestures only. Making the three file
+columns clickable had two obstacles. The column rectangles were computed inside `draw`, so the
+event loop could not hit-test them, and the middle column's `ListState` was rebuilt on every
+frame, so nothing remembered which entry was at the top of a scrolled list. Without that, a click
+on screen row 5 cannot be turned into an entry index.
+
+#### Options Considered
+
+- **A: a pure layout function and hit-test module, list state persisted.** `draw` and the mouse
+  handler both call `BrowserLayout::split`, so there is one source of truth for where things are.
+  Hit-testing is a pure function and can be fuzzed. Costs a small change to `draw`.
+- **B: `draw` records the rectangles and offset it used, and the event loop reads them.** Always
+  matches the screen, smaller diff, but the click lags a frame behind, `draw` gains a side
+  effect, and it is hard to test without a terminal.
+- **C: a general hitbox layer every region registers with.** Extensible, but far too much for
+  three panes and would have rewritten the working shell-mouse code.
+
+**Choice: A**, as recommended. Double-click was to open directories only, since there is nothing
+to open a file with yet; open-with was added to the roadmap for that.
+
+#### What Was Built
+
+- `crates/tui/src/browser_mouse.rs`: `BrowserLayout::split` (the same header / 20-40-40 columns /
+  status split `draw` used before), `hit_test` (returns a `Hit`: a parent row, a current row, a
+  blank part of a pane, or elsewhere), `ClickTracker` (400 ms window, time passed in so the edge
+  is testable), `wheel_target` (three entries a notch, clamped) and `apply_click`.
+- `main.rs`: the mouse arm now offers the event to the browser first, but only when the pointer
+  is not over the shell box, no drag is in progress (a drag that leaves the box must still end on
+  it) and no prompt is open. `draw` takes the layout from `BrowserLayout` and the list state from
+  `Overlay`, which already existed to keep `draw`'s argument list from growing.
+- `theming`: a top-level `browser_mouse` option (default `true`), the same shape as `alt_tap`,
+  so the whole feature can be switched off without a rebuild. The shell box's own mouse
+  gestures do not depend on it.
+
+#### Decisions Inside the Decision
+
+- **A click in the left column goes up and selects the entry clicked**, as proposed, rather than
+  jumping into it. A double-click there is ignored: the first click shifts every column, so the
+  second lands on a different entry than the one aimed at, and acting on it would climb twice.
+- **Clicking anywhere in the browser takes the keyboard back from a focused mini-shell.** Not
+  discussed in advance. Without it a mouse user would click a row and then find `j` typing into
+  the shell. It matches what tapping `Alt` does.
+- **The wheel over the preview column does nothing yet.** That column is about to get its own
+  scrolling (preview extras, stage 1), and the wheel belongs to it there.
+- **Failures go to the status bar.** Entering a directory that cannot be listed sets a status
+  message instead of returning the error, which would have ended the program. The key handler
+  for `enter` still propagates the same error; I left that alone as out of scope.
+- **No benchmark stub and no tracing.** The manifesto asks for both. `tui` is a binary crate, so
+  a benchmark cannot import the module, and the hit test is a constant-time computation on a
+  handful of rectangles. The workspace has no tracing dependency and adding one for this alone
+  would be the wrong place to start.
+
+#### A Behaviour Change to Know About
+
+Persisting the list state changes keyboard scrolling slightly. The state used to be rebuilt each
+frame, which by ratatui's rules should keep the selection pinned to the bottom edge once past the
+first screen; I inferred that and did not run the old binary to confirm it. Now the list scrolls
+only when the selection reaches an edge: after scrolling down and pressing `k` three times the top
+row stayed where it was, and three `j` presses at the bottom edge scrolled it by three.
+
+#### Verification
+
+`cargo test --workspace` passes (`theming` 34 tests, `tui` 135, up from 33 and 114). The 21 new
+`tui` tests include five property tests: the layout regions stay inside the area and never
+overlap; a hit never names an entry the list lacks and always the one drawn under the pointer;
+every visible row is clickable; the wheel stays in range and heads the right way; and a
+double-click needs the same row inside the window and never chains. Clippy is clean.
+
+The real binary was driven on a PTY at 100 by 30 with synthetic SGR mouse events, and the screen
+read back through `pyte`. A click on row 4 selected `f03.txt` and its contents appeared in the
+preview; a double-click on a directory entered it and the header named it; a double-click on a
+file left it selected and stayed put; the wheel over the middle column moved the selection by 3,
+and down-down-up ended on index 3; the wheel and clicks on the preview column and the header did
+nothing. A click on `f03.txt` in the left column, from inside a directory, went up and selected
+it, and a double-click in the left column two levels down climbed exactly one. In an 80-entry
+directory scrolled so the top row was `g11`, a click on the fourth visible row selected index 14,
+so the hit-test agrees with what is drawn once the list has scrolled. With a shell open and
+focused, a click on the preview column outside the box moved the keyboard back so `j` moved the
+selection, while without the click `j` went into the shell. With `browser_mouse = false` the same
+click did nothing.
+
+Harness detail worth keeping: the first attempt failed every "does something" check and passed
+every "does nothing" one. The harness was not answering the startup probes (keyboard protocol and
+graphics), and the app's probe readers swallowed the first bytes sent. This is the same effect
+the previous entry recorded as "the first key after startup is swallowed". Answering the two
+queries the way a kitty-protocol terminal does removed it, and a real terminal answers them
+anyway. Not verified: a real mouse in a real terminal, and terminals that report the wheel or
+button events differently from the SGR encoding used here.
 
 ---
 

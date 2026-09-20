@@ -402,11 +402,38 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   terminal without the protocol nothing changes and the tap does nothing. Verified against the
   real binary on a PTY that answered the protocol query like kitty and sent real protocol
   events; it could not be tried in a real kitty.
+- ✅ **Mouse support in the file browser** – the three columns now answer the mouse. A click on a
+  row in the middle column selects it; a double-click on a directory opens it (on a file it only
+  selects, since there is nowhere to send a file to be opened yet — see *Open-with* below). A
+  click on a row in the left column goes up a directory and selects that entry, and a
+  double-click there is ignored, because the columns have already shifted under the first click.
+  The wheel over the left or middle column moves the selection three entries at a time; over the
+  preview column it does nothing yet. Clicking anywhere in the browser hands the keyboard back
+  from a mini-shell, the same switch as tapping `Alt`. The shell box keeps priority over the
+  pointer, and a drag that begins on it still finishes on it. Behind the scenes `draw` and the
+  mouse handler now take their rectangles from one function (`browser_mouse::BrowserLayout`),
+  and the middle column's scroll position is kept between frames so a click can be mapped back to
+  the entry it hit. That changes keyboard scrolling slightly: the list only scrolls once the
+  selection reaches an edge of the view, instead of following it from the top each frame. A new
+  top-level `browser_mouse` option in `config.toml` (default `true`) turns the browser's mouse
+  off without affecting the shell box. Hit-testing, the double-click clock and the wheel step are
+  pure code with property tests. Verified against the real binary on a PTY through `pyte`; not
+  tried with a real mouse in a real terminal.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
+- **Preview extras, stage 1 — scrolling, hex view, archive listing** – the text preview cannot
+  scroll yet, and a binary or an archive shows only its file name. Add a scrollable preview
+  (wheel over the preview column, plus keys), a hex view for binary files, and a listing for
+  `zip`/`tar`/`tar.gz` archives, all in-process and testable in the `preview` crate.
+- **Preview extras, stage 2 — syntax highlighting** – colour source and config files in the text
+  preview with `syntect`, using the theme's palette where it can.
+- **Preview extras, stage 3 — external previewers for PDF and video** – a config-driven hook
+  that runs a user-chosen command (`pdftoppm`, `ffmpegthumbnailer`, ...) off the render thread
+  and feeds its image or text into the existing preview pipelines, falling back quietly to the
+  file name when the tool is missing or times out.
 - **UI overhaul, phase C — cinematic layer** – a boot splash, animated focus transitions,
   gradient borders/titles, a pulsing selection, a typewriter reveal on the preview, and an
   optional system/git HUD. Needs an animation tick on top of the existing 100ms poll.
@@ -420,6 +447,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟡 Medium Priority (Important)
 
+- **Open-with / file associations** – open the selected file in the program that suits it:
+  `enter` on a file, and double-click now that the mouse is wired up, run an opener chosen by
+  MIME type or extension from `config.toml` rules (falling back to `xdg-open`), with an
+  "open with..." prompt to pick another. Needs a way to hand the terminal over to a full-screen
+  opener (`$EDITOR`, `mpv`, ...) and take it back, the way the popup shell already does, and
+  to detach a GUI opener so it outlives the browser. Until this lands, double-click only opens
+  directories.
 - **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
   operations, with no plugin required.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
@@ -471,8 +505,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    the left/right button moves/resizes. Tapping `Alt` alone switches between the shell and the
    browser. If the mouse gestures do nothing, your window manager is probably grabbing
    `Alt`+drag. If accents come out wrong inside a mini-shell, set `alt_tap = false`.
+   Try the mouse too: click a row in the middle column, double-click a directory, click a row
+   in the left column to go up, scroll the wheel over either. Clicking the browser while a
+   mini-shell is focused gives the keyboard back to the browser. Set `browser_mouse = false` in
+   `config.toml` if you would rather leave the mouse to the shell box.
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks
-   (directory bookmarks — distinct from the file marks added earlier) are the remaining
-   candidates.
+4. Next cycle: preview extras, stage 1 (a scrollable preview, hex view and archive listing).
+   Richer status line and bookmarks/marks (directory bookmarks — distinct from the file marks
+   added earlier) remain the other 🔥 candidates.

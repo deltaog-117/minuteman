@@ -16,6 +16,7 @@
 
 mod alt_keys;
 mod app;
+mod browser_mouse;
 mod cli;
 mod glyphs;
 mod hud;
@@ -35,6 +36,7 @@ use alt_keys::AltCommand;
 use anyhow::Result;
 use app::App;
 use browser::BrowserState;
+use browser_mouse::{BrowserLayout, ClickTracker, Hit, Listing, Pane, Wheel};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     KeyboardEnhancementFlags, ModifierKeyCode, MouseButton, MouseEventKind,
@@ -265,10 +267,12 @@ fn snap_box_offset(
 /// (see `shell_area`), bundled together since `draw` only ever needs all three or none — keeps
 /// its own argument list from growing every time the shell overlay gains one more piece of state.
 /// Everything `draw` needs about the interactive state layered over the browser: what the app is
-/// doing (for the status bar) and the shell panes, if any are open.
+/// doing (for the status bar), the shell panes if any are open, and the middle column's scroll
+/// state, which `draw` updates and the mouse handler reads back to find the row under a click.
 struct Overlay<'a> {
     mode: hud::Mode,
     shell: Option<ShellView<'a>>,
+    current_list: &'a mut ListState,
 }
 
 struct ShellView<'a> {
@@ -613,6 +617,11 @@ fn run(
     let mut shell_chord: Option<ShellChordMode> = None;
     // Lets `app.status` messages clear themselves after a few seconds instead of lingering.
     let mut status_clock = hud::StatusClock::new(Instant::now());
+    // Kept across frames rather than rebuilt in `draw`, because a click has to be mapped back to
+    // a row and only the state that scrolled the list knows which entry is at its top.
+    let mut current_list = ListState::default();
+    // Tells a double-click on a row from two single clicks (see `browser_mouse`).
+    let mut clicks = ClickTracker::default();
 
     loop {
         app.poll_bulk(browser, vfs)?;
@@ -680,6 +689,7 @@ fn run(
                         offset: shell_offset,
                         size: shell_size,
                     }),
+                    current_list: &mut current_list,
                 },
             )
         })?;
@@ -707,6 +717,60 @@ fn run(
                     alt_tap_armed = false;
                 }
                 mouse_pos = Some((mouse.column, mouse.row));
+
+                // The browser gets the pointer only when nothing else has a claim on it: not over
+                // the shell box, not mid-drag (a drag that leaves the box must still finish it),
+                // and not under a prompt, which owns the selection until it is answered.
+                let frame_area: Rect = terminal.size()?.into();
+                let over_shell = shells.is_some()
+                    && shell_area(frame_area, shell_offset, shell_size)
+                        .contains(Position::new(mouse.column, mouse.row));
+                let dragging = dragging_divider.is_some()
+                    || dragging_shell.is_some()
+                    || dragging_shell_width.is_some()
+                    || alt_resizing.is_some();
+                if config.browser_mouse && !over_shell && !dragging && app.prompt.is_none() {
+                    let hit = browser_mouse::hit_test(
+                        &BrowserLayout::split(frame_area),
+                        Position::new(mouse.column, mouse.row),
+                        Listing::unscrolled(browser.parent_entries().len()),
+                        Listing {
+                            len: browser.current_entries().len(),
+                            offset: current_list.offset(),
+                        },
+                    );
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if hit != Hit::Elsewhere => {
+                            // Clicking the browser is how a mouse user says "stop typing in the
+                            // shell", the same as tapping `Alt`.
+                            shell_focused = false;
+                            pending_leader = false;
+                            shell_chord = None;
+                            if matches!(hit, Hit::ParentRow(_) | Hit::CurrentRow(_)) {
+                                let click = clicks.register(hit, Instant::now());
+                                if let Err(e) = browser_mouse::apply_click(browser, vfs, hit, click)
+                                {
+                                    app.status = Some(format!("cannot open: {e}"));
+                                }
+                            }
+                            continue;
+                        }
+                        // The preview column is left alone: it is about to grow its own scrolling.
+                        kind if matches!(hit.pane(), Some(Pane::Parent | Pane::Current)) => {
+                            if let Some(wheel) = Wheel::of(kind) {
+                                let len = browser.current_entries().len();
+                                browser.select_index(browser_mouse::wheel_target(
+                                    browser.selected_index(),
+                                    len,
+                                    wheel,
+                                ));
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
                 let Some(panes) = shells.as_mut() else {
                     continue;
                 };
@@ -1104,26 +1168,16 @@ fn draw(
     config: &Config,
     overlay: Overlay<'_>,
 ) {
-    let Overlay { mode, shell } = overlay;
-    // Header, the three file columns, then the status bar.
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
-    let (header_row, body_row, status_row) = (rows[0], rows[1], rows[2]);
-
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(40),
-            Constraint::Percentage(40),
-        ])
-        .split(body_row);
+    let Overlay {
+        mode,
+        shell,
+        current_list: current_state,
+    } = overlay;
+    // Header, the three file columns, then the status bar. The mouse handler hit-tests against
+    // this same split (see `browser_mouse`), so the two can't disagree about where a row is.
+    let layout = BrowserLayout::split(frame.area());
+    let (header_row, status_row) = (layout.header, layout.status);
+    let columns = [layout.parent, layout.current, layout.preview];
 
     // Read once: the status bar wants the selected directory's item count, and the preview pane
     // wants its listing — one `list_dir`, not two, per frame.
@@ -1169,10 +1223,9 @@ fn draw(
             entry_item(e, config, row, Some((plan, now)))
         })
         .collect();
-    let mut current_state = ListState::default();
-    if !browser.current_entries().is_empty() {
-        current_state.select(Some(browser.selected_index()));
-    }
+    // `select(None)` also rewinds the scroll offset, so an emptied directory doesn't leave the
+    // next one drawn from a stale row.
+    current_state.select(has_selection.then(|| browser.selected_index()));
     // The header carries the full path; the frame just names this directory.
     let title = browser
         .current_dir()
@@ -1183,7 +1236,7 @@ fn draw(
             .block(style::themed_block(config, &title, true))
             .highlight_style(selection_style),
         columns[1],
-        &mut current_state,
+        current_state,
     );
     hud::render_scrollbar(
         frame,

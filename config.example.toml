@@ -13,6 +13,12 @@
 # mini-shell, set this to false; Esc and the `space` leader still switch modes.
 alt_tap = true
 
+# Mouse in the file browser: a click selects a row in the middle column, a double-click on a
+# directory opens it, a click in the left column goes up and selects that entry, and the wheel
+# moves the selection. Clicking the browser also hands the keyboard back from a mini-shell. Set
+# this to false to leave the mouse to the mini-shell box only.
+browser_mouse = true
+
 [keys]
 move_down = ["j"]
 move_up = ["k"]

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: mouse support in the file browser. A click on a row in the middle column selects it, a
+  double-click on a directory opens it (on a file it only selects), and a click on a row in the
+  left column goes up a directory and selects that entry. The wheel over the left or middle
+  column moves the selection three entries at a time. Clicking the browser gives the keyboard
+  back from a mini-shell. The shell box keeps priority over the pointer, and nothing is handled
+  while a prompt is open.
+- `theming`: top-level `browser_mouse` in `config.toml` (default `true`) turns the browser's mouse
+  handling off; the mini-shell box's own mouse gestures are unaffected. See `config.example.toml`.
+- `tui`: `proptest` as a dev-dependency, for the property tests of the new mouse hit-testing.
 - `tui`: tapping `Alt` on its own switches between typing in the mini-shell and using the file
   browser. It relies on the kitty keyboard protocol, which Minuteman enables at startup only if
   the terminal supports it and disables on exit; elsewhere the tap does nothing.
@@ -261,6 +270,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: the middle column's scroll position is now kept between frames instead of being
+  recomputed from the top each frame, so the list only scrolls when the selection reaches an
+  edge of the view. Needed to map a click back to the entry it hit.
 - `tui`: `Alt`-prefixed letters are no longer forwarded to a shell in the mini-shell box:
   `Alt+b/f/d/t` (readline word motions) and `Alt+h/j/k/l` (tmux navigation) now drive the box
   instead. `Alt+q` no longer quits from browse mode. The `space` leader is unchanged.
