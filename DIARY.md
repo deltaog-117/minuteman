@@ -2307,6 +2307,39 @@ command or shell input sees it. Resolving on `code` plus `modifiers` inside the 
 rejected: it touches every binding and the config format for one case. Which report the user's
 kitty sends was not confirmed, so this fixes the reproduced failure, not a proven cause.
 
+### Caps Lock Under the Keyboard Protocol: Flip the Case After the `Alt` Layer
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+`Q` still did nothing after the Shift fix. Running `mman --cwd-file` by hand showed the file was
+never created, so the key was not reaching `QuitToCwd`. A probe script run in the user's kitty
+printed the raw reports: every one carried modifier mask 65 or 66, that is Caps Lock (64) with
+or without Shift (1). With Caps Lock on, `q` arrives as `CSI 113;65u`: lowercase codepoint, no
+Shift, and Caps Lock only as a flag that `crossterm` puts in `KeyEvent::state`. Nothing read it.
+
+#### Decision
+
+`with_caps_lock_applied` flips a letter's case when that flag is set, matching what a terminal
+without the protocol already sends, so Caps Lock+Shift+`q` is lowercase as everywhere else. The
+alternative, treating either Shift or Caps Lock as "capital", was rejected because it would type
+`Q` for Caps Lock+Shift+`q` in a mini-shell. It runs after the `Alt` commands so `Alt+h` and the
+others keep working with Caps Lock on.
+
+#### Consequences
+
+With Caps Lock on, `hjkl` stop navigating, exactly as in a terminal without the protocol and in
+ranger and vim, because the letters now arrive as `HJKL`.
+
+#### Verification
+
+`cargo test -p tui` passes (162 tests). Through the real zsh wrapper on a PTY, with the exact byte
+sequences from the probe: Caps Lock+`q` and Shift+`q` moved the shell, plain `q` and Caps
+Lock+Shift+`q` did not. Not verified with the physical keyboard.
+
 ---
 
 ## 🧠 Usage Guidelines

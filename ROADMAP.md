@@ -452,6 +452,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   PTY through the real `mman` wrapper in zsh: the shell stayed put with the shifted-`q` report and
   moved into the browsed directory after the fix, and with the plain and the alternate-key reports.
 
+- ✅ **`Q` with Caps Lock on** – a probe in the real kitty showed Caps Lock arrives as a flag
+  (modifier mask 65) with the letter still lowercase, so a capital typed with Caps Lock was read
+  as `q`. Caps Lock now flips a letter's case after the `Alt` layer has run, so `Alt` commands are
+  unaffected. Checked through the real `mman` wrapper in zsh with the exact sequences kitty sent:
+  Caps Lock+`q` and Shift+`q` moved the shell, plain `q` and Caps Lock+Shift+`q` did not.
+
 ---
 
 ## 🔥 High Priority (Critical)

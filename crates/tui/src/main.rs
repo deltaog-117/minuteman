@@ -41,7 +41,7 @@ use browser::BrowserState;
 use browser_mouse::{BrowserLayout, ClickTracker, Hit, Listing, Pane, Wheel};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, ModifierKeyCode, MouseButton, MouseEventKind,
+    KeyEventState, KeyboardEnhancementFlags, ModifierKeyCode, MouseButton, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -943,6 +943,7 @@ fn run(
                     }
                     continue;
                 }
+                let key = with_caps_lock_applied(key);
 
                 if pending_leader {
                     pending_leader = false;
@@ -1498,6 +1499,25 @@ fn color_from_name(name: &str) -> Color {
     style::color(name)
 }
 
+/// Applies Caps Lock to a letter the way every terminal without the keyboard protocol already
+/// does: it flips the case, so Caps Lock+`q` is `Q` and Caps Lock+Shift+`q` is `q`. With the
+/// protocol on, a terminal reports Caps Lock as a flag and leaves the letter as if it were off,
+/// which made `Q` (quit and `cd`) unreachable with Caps Lock on and Caps Lock useless in a
+/// mini-shell. Run after `Alt` commands are handled, so those keep working with it on.
+fn with_caps_lock_applied(mut key: event::KeyEvent) -> event::KeyEvent {
+    if let KeyCode::Char(c) = key.code
+        && key.state.contains(KeyEventState::CAPS_LOCK)
+        && c.is_ascii_alphabetic()
+    {
+        key.code = KeyCode::Char(if c.is_ascii_lowercase() {
+            c.to_ascii_uppercase()
+        } else {
+            c.to_ascii_lowercase()
+        });
+    }
+    key
+}
+
 /// Turns Shift plus a lowercase letter into the uppercase letter. With the keyboard protocol on,
 /// a terminal may report Shift+q as `q` with the Shift flag rather than as `Q`; every binding
 /// (`Q` quit-and-`cd`, `S`, ...) and every capital typed into a mini-shell is keyed on the
@@ -1528,6 +1548,26 @@ mod tests {
             key('1', KeyModifiers::SHIFT),
         ] {
             assert_eq!(with_shifted_letter_uppercased(k), k);
+        }
+    }
+
+    #[test]
+    fn caps_lock_flips_the_case_of_a_letter_and_nothing_else() {
+        let key = |c, state| {
+            let mut k = event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            k.state = state;
+            k
+        };
+        let caps = KeyEventState::CAPS_LOCK;
+        assert_eq!(with_caps_lock_applied(key('q', caps)).code, KeyCode::Char('Q'));
+        // Caps Lock with Shift held is lowercase again, as in every other terminal.
+        assert_eq!(with_caps_lock_applied(key('Q', caps)).code, KeyCode::Char('q'));
+        for k in [
+            key('q', KeyEventState::NONE),
+            key('1', caps),
+            key(' ', caps),
+        ] {
+            assert_eq!(with_caps_lock_applied(k), k);
         }
     }
 

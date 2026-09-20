@@ -350,6 +350,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.
 
 ### Fixed
+- `tui`: with Caps Lock on, `Q` (quit and `cd`) was read as `q`, and letters typed into a
+  mini-shell came out lowercase. In a terminal running the keyboard protocol, Caps Lock is
+  reported as a flag beside an unchanged lowercase letter. It now flips the letter's case, as in
+  a terminal without the protocol: Caps Lock+`q` is `Q`, Caps Lock+Shift+`q` is `q`. `Alt`
+  commands ignore Caps Lock.
 - `tui`: `Q` (quit and `cd`) did nothing different from `q` in a terminal that reports Shift+q as
   a lowercase `q` with the Shift flag, which the keyboard protocol allows. Shift plus a lowercase
   letter is now read as the capital before any key is looked up. This also makes capitals typed
