@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "minuteman"
+name = "mman"
 path = "src/main.rs"
 
 [dependencies]

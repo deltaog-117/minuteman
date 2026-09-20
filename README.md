@@ -32,12 +32,12 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
   browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
   auto-close-after-one-command.
 - 🔹 **The whole look in one file** – `appearance.toml` holds colors, glyphs, per-element text
-  styles (bold, italic, dim, underline, ...) and your font; `minuteman init-appearance` prints a
+  styles (bold, italic, dim, underline, ...) and your font; `mman init-appearance` prints a
   commented starting point. Directories and executables are bold by default, like Ranger's.
 - 🔹 **Glyph sets that match your font** – `[ui] glyphs = "nerd"` adds file-type icons and
   Powerline arrows (with a Nerd Font); `"unicode"` (default) needs nothing special; `"ascii"` is
-  for a Linux console. `minuteman glyphs` previews them, and
-  `minuteman init-terminal kitty|alacritty|wezterm` prints a matching font + neon color config.
+  for a Linux console. `mman glyphs` previews them, and
+  `mman init-terminal kitty|alacritty|wezterm` prints a matching font + neon color config.
 - 🔹 **HUD layout** – a header with a breadcrumb path and pills for marks, the clipboard and
   running jobs; size and age columns; a scrollbar; and a powerline-style status bar with a colored
   mode pill, the selection's permissions/size/type, your position in the list, and key hints that
@@ -79,6 +79,16 @@ cargo build --release
 
 ## 🚀 Usage
 
+The command is `mman`. Install it with Cargo, then run it, optionally starting in a directory:
+
+```bash
+cargo install --path crates/tui   # installs one executable: mman
+mman
+mman /path/to/dir
+```
+
+From a checkout, without installing:
+
 ```bash
 cargo run -p tui
 # or, starting in a specific directory:
@@ -92,13 +102,15 @@ hook, the same mechanism as ranger's `--choosedir` wrapper. Add this to your rc 
 (`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish`):
 
 ```bash
-eval "$(minuteman init zsh)"   # or: bash; fish: minuteman init fish | source
+eval "$(mman init zsh)"   # or: bash; fish: mman init fish | source
 ```
 
-That defines `mm`. Run `mm` instead of `minuteman`: `Q` quits and leaves your shell in the
-directory you were browsing, while `q` (and `:q`) quit and leave it where you started. Under the
-hood `mm` runs `minuteman --cwd-file <tmpfile>`; `Q` writes the directory there and the wrapper
-`cd`s to it. A directory literally named `init` must be passed as `./init`.
+That defines a shell function, also called `mman`, that wraps the real command: run `mman` as
+usual and `Q` quits and leaves your shell in the directory you were browsing, while `q` (and
+`:q`) quit and leave it where you started. Under the hood the function runs
+`command mman --cwd-file <tmpfile>`; `Q` writes the directory there and the wrapper `cd`s to it.
+`command mman` is also how to run the bare binary, without `cd`-on-quit. A directory literally
+named `init` must be passed as `./init`.
 
 ### Default keybindings
 
@@ -109,7 +121,7 @@ hood `mm` runs `minuteman --cwd-file <tmpfile>`; `Q` writes the directory there 
 | `l` / Enter | enter directory                               |
 | `h`         | leave directory                               |
 | `q`         | quit                                          |
-| `Q`         | quit and `cd` your shell to the directory you were in (needs the `mm` wrapper above) |
+| `Q`         | quit and `cd` your shell to the directory you were in (needs the `mman` wrapper above) |
 | `y`         | yank (copy) selection                         |
 | `m`         | cut (move) selection                          |
 | `p`         | paste                                         |
@@ -194,7 +206,7 @@ file, a missing file, even one that fails to parse never stops Minuteman from st
 - **`config.toml`** — keybindings. Copy [`config.example.toml`](config.example.toml) as a starting
   point.
 - **`appearance.toml`** — the whole look: colors, glyphs, text styles and the font. Print a fully
-  commented starting point with `minuteman init-appearance > ~/.config/minuteman/appearance.toml`
+  commented starting point with `mman init-appearance > ~/.config/minuteman/appearance.toml`
   (it's [`appearance.example.toml`](appearance.example.toml)).
 
 ```toml
@@ -237,7 +249,7 @@ executable = ["bold"]          # files with an execute bit
 doc = ["italic"]               # e.g. make documents italic
 title_focused = ["bold", "underline"]
 
-[font]    # used by `minuteman init-terminal` — see below
+[font]    # used by `mman init-terminal` — see below
 family = "JetBrainsMono Nerd Font Mono"
 size = 12.0
 ```
@@ -267,11 +279,11 @@ draws and how heavy or slanted its text is. To set up a font and icons:
    *JetBrainsMono Nerd Font Mono* from [nerdfonts.com](https://www.nerdfonts.com), or your
    distribution's `ttf-jetbrains-mono-nerd`-style package).
 2. Put your font in `[font]` in `appearance.toml`, then run
-   `minuteman init-terminal <kitty|alacritty|wezterm>` and paste the snippet into that terminal's
+   `mman init-terminal <kitty|alacritty|wezterm>` and paste the snippet into that terminal's
    config. It sets that font and a 16-color palette matching the neon theme; nothing is written
    for you. Prefer to keep your font? kitty's `symbol_map` line (in the snippet) borrows just the
    icons from *Symbols Nerd Font Mono*.
-3. Run `minuteman glyphs` — if the `[nerd]` rows show boxes or `?`, the font isn't set up yet.
+3. Run `mman glyphs` — if the `[nerd]` rows show boxes or `?`, the font isn't set up yet.
 4. Set `glyphs = "nerd"` under `[ui]` in `appearance.toml`.
 
 Without a Nerd Font, leave it on `unicode` (the default), or use `ascii` on a bare console. The

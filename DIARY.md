@@ -36,6 +36,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-20 | Alt Layer for Mini-Shell Box | Held `Alt` drives the existing single box; independent floating windows rejected (COA A) | ✅ Confirmed |
 | 2026-09-20 | Alt Tap Switches Shell/Browser | Kitty keyboard protocol, enabled only when supported, with an `alt_tap` off switch | ✅ Confirmed |
 | 2026-09-20 | Browser Mouse Support | One shared `BrowserLayout` plus pure hit-testing in `browser_mouse.rs`, list state persisted across frames (COA A) | ✅ Confirmed |
+| 2026-09-20 | Launch Command | Executable built as `mman` via the `[[bin]]` name; project, crates and config folder keep the Minuteman name | ✅ Confirmed |
 
 ---
 
@@ -2087,6 +2088,74 @@ the previous entry recorded as "the first key after startup is swallowed". Answe
 queries the way a kitty-protocol terminal does removed it, and a real terminal answers them
 anyway. Not verified: a real mouse in a real terminal, and terminals that report the wheel or
 button events differently from the SGR encoding used here.
+
+---
+
+### The Launch Command: Build the Binary as `mman`, Keep Everything Else Minuteman
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+`minuteman` is a mouthful to type every time a file manager is opened, and the goal was a short
+command that works for every user, not an alias in one person's `~/.zshrc`. I proposed three ways
+to ship one: a second `[[bin]]`, a symlink made at install time, or a second name defined by the
+shell wrapper. Each was rejected in turn, and the reasons are worth keeping.
+
+#### What Was Tried and Measured
+
+I tried the alternatives on a throwaway copy of the repo instead of arguing from memory.
+
+- **Two `[[bin]]` entries on one `main.rs`** builds both binaries, but Cargo warns on every build
+  that the file is "present in multiple build targets", and compiles the crate once per binary.
+- **A library plus two three-line binaries** (`main.rs` becomes `lib.rs`, one line changes from
+  `main` to `run_cli`) builds with no warnings and all 135 tests passed unchanged. It is the
+  layout the Rust template asks for, but each installed binary carries a full copy of the app.
+- **Sizes, release build:** 4.48 MB for `minuteman`, so about 9 MB for two, against 0.36 MB for a
+  launcher shim that only runs the sibling binary. This corrects my first estimate, where I
+  said the library split would avoid doubling: it saves compile time, not installed size.
+- **The symlink and wrapper-only options** cost nothing in size, but `cargo install` cannot make a
+  symlink, and a shell function is not a real executable.
+
+#### Decision
+
+Name the binary `mman`, and only that. Cargo keeps the binary name independent of the package
+name, which is the same route ripgrep (`rg`), Helix (`hx`) and Nushell (`nu`) take. There is one
+executable, no duplicate, no warning, `main.rs` stays the entry point it was, and
+`cargo install --path crates/tui` installs exactly `mman`. That last point was checked with a
+real install into a scratch directory.
+
+`mman` over `mm`: it reads as Minuteman, and a two-letter name is the likelier one to collide
+with a user's own alias or another package. The cost is that a web search for "mman" lands on
+`sys/mman.h`. I did not check the distro repositories for a package called `mman`; someone should,
+with `pacman -F bin/mman` or `apt-file search bin/mman`, before this is published.
+
+#### What Changed, and What Deliberately Did Not
+
+Changed: the `[[bin]]` name in `crates/tui/Cargo.toml`; the shell wrapper, which is now a function
+called `mman` that reaches the binary with `command mman` (a function that shares the binary's
+name would call itself forever without `command`, so a new test pins this, and pins that the old
+name is gone); the README, wherever it tells a person to run a command; and two lines of
+`config.example.toml` that named the wrapper. The `mm` wrapper and the `minuteman` executable no
+longer exist, which matters to nobody yet since nothing was released.
+
+Not changed, on the instruction to leave mentions of the name in the code alone: the project
+name, the crate layout, the license headers, and the config folder `~/.config/minuteman/`, so no
+one has to move a file. Code comments, help strings and the appearance example still say
+`minuteman init`, `minuteman glyphs` and `minuteman init-terminal` in `cli.rs`, `keymap.rs`,
+`appearance.rs`, `glyphs.rs`, `terminal_init.rs`, `shell_init.rs`, `main.rs` and
+`appearance.example.toml`. Those are now stale as instructions and are the obvious follow-up if
+the rule is ever relaxed. The error prefixes (`minuteman: ...`) also still name the app.
+
+#### Verification
+
+`cargo test --workspace` passes (`tui` 136 tests, one new); clippy is clean. In a real zsh with
+only `mman` on `PATH`, driven through a PTY, `whence -w mman` reported a function, `Q` after
+entering a directory left the shell in that directory, and `q` left it where it started. Not
+verified: the bash and fish wrappers were only checked as text by the unit tests, never run in
+those shells, and `mman` has not been tried outside the test harness on a real desktop.
 
 ---
 

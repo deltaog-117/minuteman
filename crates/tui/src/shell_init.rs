@@ -38,8 +38,10 @@ impl Shell {
         }
     }
 
-    /// The wrapper function to `eval`/`source` from the shell's rc file. Named `mm` so the real
-    /// `minuteman` binary stays directly runnable (without cd-on-quit) under its own name.
+    /// The wrapper function to `eval`/`source` from the shell's rc file. It takes the binary's own
+    /// name, `mman`, so there is one command to remember; the wrapper reaches the real binary
+    /// through `command mman`, which skips the function, and that is also how to run it without
+    /// cd-on-quit.
     pub fn wrapper(self) -> &'static str {
         match self {
             Self::Bash | Self::Zsh => POSIX_WRAPPER,
@@ -50,10 +52,10 @@ impl Shell {
 
 // `cd` only when the file is non-empty — `q`, `:q` and a crash never write it — and the
 // directory still exists, so a stale or racing delete can't make the wrapper fail loudly.
-const POSIX_WRAPPER: &str = r#"mm() {
+const POSIX_WRAPPER: &str = r#"mman() {
   local tmp dir rc
   tmp="$(mktemp "${TMPDIR:-/tmp}/minuteman-cwd.XXXXXX")" || return
-  command minuteman --cwd-file "$tmp" "$@"
+  command mman --cwd-file "$tmp" "$@"
   rc=$?
   if [ -s "$tmp" ]; then
     dir="$(cat -- "$tmp")"
@@ -66,9 +68,9 @@ const POSIX_WRAPPER: &str = r#"mm() {
 }
 "#;
 
-const FISH_WRAPPER: &str = r#"function mm
+const FISH_WRAPPER: &str = r#"function mman
     set -l tmp (mktemp -t minuteman-cwd.XXXXXX); or return
-    command minuteman --cwd-file $tmp $argv
+    command mman --cwd-file $tmp $argv
     set -l rc $status
     if test -s $tmp
         set -l dir (cat $tmp | string collect)
@@ -95,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn every_wrapper_passes_the_cwd_file_flag_and_defines_mm() {
+    fn every_wrapper_passes_the_cwd_file_flag_and_defines_mman() {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let w = shell.wrapper();
             assert!(
@@ -103,8 +105,25 @@ mod tests {
                 "{shell:?} wrapper lacks --cwd-file"
             );
             assert!(
-                w.starts_with("mm()") || w.starts_with("function mm"),
-                "{shell:?} wrapper doesn't define mm"
+                w.starts_with("mman()") || w.starts_with("function mman"),
+                "{shell:?} wrapper doesn't define mman"
+            );
+        }
+    }
+
+    /// The wrapper shares the binary's name, so calling it without `command` would recurse into
+    /// itself forever, and calling the old binary name would find nothing.
+    #[test]
+    fn every_wrapper_reaches_the_real_binary_through_command() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let w = shell.wrapper();
+            assert!(
+                w.contains("command mman --cwd-file"),
+                "{shell:?} wrapper doesn't call the binary through `command`"
+            );
+            assert!(
+                !w.contains("command minuteman"),
+                "{shell:?} wrapper still calls the old binary name"
             );
         }
     }

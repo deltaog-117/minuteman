@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: the executable is now installed as `mman`, so `cargo install --path crates/tui` puts a
+  short command on the `PATH`. See *Changed* and *Removed*.
 - `tui`: mouse support in the file browser. A click on a row in the middle column selects it, a
   double-click on a directory opens it (on a file it only selects), and a click on a row in the
   left column goes up a directory and selects that entry. The wheel over the left or middle
@@ -270,6 +272,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: the executable Cargo builds is `mman` instead of `minuteman`, and `mman init <shell>`
+  prints a wrapper function named `mman` (it was `mm`) that calls the binary through
+  `command mman`. The project, the crate layout and `~/.config/minuteman/` keep their names.
+  The README and `config.example.toml` say `mman` wherever they tell you to run a command.
 - `tui`: the middle column's scroll position is now kept between frames instead of being
   recomputed from the top each frame, so the list only scrolls when the selection reaches an
   edge of the view. Needed to map a click back to the entry it hit.
@@ -305,6 +311,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.
 
 ### Removed
+- `tui`: the `minuteman` executable and the `mm` shell wrapper, replaced by `mman` (see
+  *Changed*). Anything that ran `minuteman ...` or `mm` needs `mman`.
 - `theming`: `Action::ShellFocus`/`ShellSplitHorizontal`/`ShellSplitVertical`/`ShellPaneNext` and
   their `shell_focus`/`shell_split_horizontal`/`shell_split_vertical`/`shell_pane_next` config keys
   (`Tab`, `%`, `"`, `o`), replaced by the `space` leader commands above. Old config files that

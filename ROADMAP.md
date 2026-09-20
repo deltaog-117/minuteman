@@ -419,6 +419,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   off without affecting the shell box. Hit-testing, the double-click clock and the wheel step are
   pure code with property tests. Verified against the real binary on a PTY through `pyte`; not
   tried with a real mouse in a real terminal.
+- ✅ **`mman`, the command that launches Minuteman** – the project keeps its name, but the
+  executable Cargo builds and installs is now `mman`, so `cargo install --path crates/tui` puts
+  one short command on the user's `PATH`. The `init` shell wrapper is a function of the same name,
+  so there is one command to remember: run `mman`, and `Q` leaves the shell in the directory being
+  browsed. The wrapper reaches the real binary through `command mman`. Nothing else was renamed:
+  the config folder is still `~/.config/minuteman/`, and code comments that mention Minuteman by
+  name were left as they were. The old `minuteman` executable and the `mm` wrapper no longer exist.
+  Verified in a real zsh with only `mman` on `PATH`: `Q` moved the shell into the browsed
+  directory and `q` did not.
 
 ---
 
@@ -491,8 +500,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🎯 Next Actions (Immediate)
 
-0. Add `eval "$(minuteman init zsh)"` to `~/.zshrc`, reopen the terminal, run `mm`, navigate
-   somewhere, and press `Q` — your shell should follow; `q` should not.
+0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
+   is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
+   `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
 1. `cargo run -p tui` — the new neon theme and HUD (header, size/age columns, scrollbar, powerline
    status bar) are the default (`COLORTERM=truecolor` for full color;
    `name = "classic"` for the old look). Press `s` to open a shell and type in it (`Tab` completes, spaces work).
