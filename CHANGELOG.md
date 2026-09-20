@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: a `:` command can take over the whole terminal, so `:nvim ROADMAP.md` opens the editor.
+  A command whose program name is in `interactive_commands` (editors, pagers, `htop`, `mpv`,
+  `ssh`, `tmux`, `fzf` by default), or any command prefixed with `!` (`:!python3`), suspends the
+  interface, runs under `sh -c` in the browsed directory on the real terminal with the keyboard
+  attached, and brings the browser back repainted when it exits, with the exit status on the
+  status line and the listing re-read. `Ctrl-C` interrupts the program, not Minuteman.
+- `theming`: top-level `interactive_commands` in `config.toml` sets which program names get the
+  terminal (an empty list turns the name check off; `!` still works).
+- `shell_overlay`: `run_foreground`, which runs a command line under `sh -c` with the caller's
+  stdio inherited.
+- `tui`: `c` cancels everything pending in one press, from any directory: the yanked or cut
+  clipboard, every mark, and a running copy, move or command. It also works while an operation is
+  running. A running delete cannot be interrupted, and the status line says so. `theming` gains
+  `Action::Cancel` and `[keys] cancel` (default `c`).
+- `tui`: the arrow keys browse. Up and down move the selection, right opens the selected
+  directory and left goes up. Key names `up`, `down`, `left` and `right` are now accepted in
+  `[keys]`.
+- `browser`: `search`, a breadth-first, cancellable search below a directory for the nearest name
+  containing a query, using only `Vfs::list_dir`. `BrowserState::reveal` opens a path's directory
+  with the cursor on it, and `BrowserState::clear_marks` forgets every mark.
+- `tui`: `search_job`, which runs that search on the blocking pool, one job per keystroke.
 - `tui`: `.` shows or hides dot-prefixed files and directories in every column, keeping the
   cursor on the entry it was on. The parent column keeps listing the directory you are in even
   when that directory is itself hidden.
@@ -296,6 +317,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: `/` search now looks below the current directory as well as in it. The nearest match
+  wins, so a name in the directory you are in is still found first; otherwise the search walks
+  subdirectories one level at a time on the blocking pool (hidden entries only when shown, at
+  most 16 levels and 200,000 entries), opens the directory of the first hit with the cursor on
+  it, and says `searching…` or `no match` in front of the query. `Esc`, or deleting the query,
+  returns to the directory and row the search started from. `Enter` keeps the cursor where it
+  landed, and stops a walk still in progress.
+- `theming`: the default `move_down`, `move_up`, `enter` and `leave` bindings now include the
+  arrow keys. Naming a key in `config.toml` still replaces that action's whole list, so a config
+  that sets `move_down = ["j"]` drops the arrow unless it is listed.
+- `tui`: `parse` in `command` takes the list of interactive program names, and
+  `Prompt::SearchInput`'s `origin` is now a `SearchOrigin` (directory and index).
+- `tui`: `run` takes its read-only inputs as one `Session` struct.
 - `tui`: `Esc` typed into a mini-shell now goes to the program running in it instead of leaving
   typing mode. Full-screen programs such as `vim` and `fzf` use `Esc` themselves, and the old
   behaviour dropped keyboard focus from under them. To leave typing, tap `Alt`, click the
@@ -350,6 +384,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tui`: `Clipboard.path: PathBuf` is now `Clipboard.paths: Vec<PathBuf>`.
 
 ### Fixed
+- `tui`: cancelling a multi-item paste no longer lets the batch carry on if the cancel lands just
+  as an item finishes. Each item has its own cancel flag, so the request was forgotten and the
+  next item started.
 - `tui`: with Caps Lock on, `Q` (quit and `cd`) was read as `q`, and letters typed into a
   mini-shell came out lowercase. In a terminal running the keyboard protocol, Caps Lock is
   reported as a flag beside an unchanged lowercase letter. It now flips the letter's case, as in

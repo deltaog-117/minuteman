@@ -16,6 +16,8 @@
 
 //! Miller-column navigation state and logic — no rendering, no I/O beyond the `Vfs` trait.
 
+pub mod search;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -135,6 +137,13 @@ impl BrowserState {
         paths
     }
 
+    /// Forgets every mark and returns how many there were.
+    pub fn clear_marks(&mut self) -> usize {
+        let count = self.marked.len();
+        self.marked.clear();
+        count
+    }
+
     /// Drops any mark whose path no longer exists — call after a bulk action that may have
     /// deleted marked entries, since `BrowserState` has no other way to learn of that.
     pub fn prune_marks(&mut self, vfs: &dyn Vfs) {
@@ -189,6 +198,23 @@ impl BrowserState {
         self.current_dir = target;
         self.selected = 0;
         self.refresh(vfs)
+    }
+
+    /// Opens the directory `path` is in and puts the cursor on it — how a search hit far from
+    /// the browsed directory is shown. Stays put in the directory it is already in, so the
+    /// listing isn't re-read for a hit right here. A path with no parent (the root) is left
+    /// alone.
+    pub fn reveal(&mut self, vfs: &dyn Vfs, path: &Path) -> Result<(), VfsError> {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        if parent != self.current_dir {
+            self.goto(vfs, parent)?;
+        }
+        if let Some(index) = self.current_entries.iter().position(|e| e.path == path) {
+            self.selected = index;
+        }
+        Ok(())
     }
 
     pub fn move_down(&mut self) {
@@ -343,6 +369,58 @@ mod tests {
         state.leave(&vfs).unwrap();
         assert_eq!(state.current_dir(), root);
         assert_eq!(state.selected_entry().unwrap().name, "sub");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reveal_opens_the_parent_directory_and_selects_the_entry() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+
+        state
+            .reveal(&vfs, &root.join("sub").join("file.txt"))
+            .unwrap();
+        assert_eq!(state.current_dir(), root.join("sub"));
+        assert_eq!(state.selected_entry().unwrap().name, "file.txt");
+
+        // Already in that directory: the cursor just moves.
+        state
+            .reveal(&vfs, &root.join("sub").join("file.txt"))
+            .unwrap();
+        assert_eq!(state.current_dir(), root.join("sub"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reveal_fails_cleanly_when_the_directory_is_gone() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+
+        let result = state.reveal(&vfs, &root.join("vanished").join("x"));
+        assert!(result.is_err());
+        assert_eq!(
+            state.current_dir(),
+            root,
+            "a failed reveal must not move the browser"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn clear_marks_forgets_every_mark_and_counts_them() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+
+        assert_eq!(state.clear_marks(), 0);
+        state.toggle_mark();
+        assert_eq!(state.clear_marks(), 1);
+        assert!(state.marked_paths().is_empty());
 
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -476,6 +476,7 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
             bound(Action::ToggleHidden, "hidden"),
             bound(Action::Quit, "quit"),
             bound(Action::QuitToCwd, "quit+cd"),
+            bound(Action::Cancel, "cancel"),
         ],
         Mode::Leader => vec![
             fixed("hjkl", "focus"),
@@ -489,7 +490,7 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
         ],
         Mode::Shell => vec![fixed("alt", "browse")],
         Mode::Resize | Mode::Move => vec![fixed("hjkl", "nudge"), fixed("esc", "done")],
-        Mode::Busy => vec![fixed("esc", "cancel")],
+        Mode::Busy => vec![fixed("esc", "cancel"), bound(Action::Cancel, "cancel all")],
         Mode::Prompt {
             text_input: true, ..
         } => vec![fixed("enter", "ok"), fixed("esc", "cancel")],
@@ -781,6 +782,7 @@ mod tests {
             alt_tap: true,
             browser_mouse: true,
             show_hidden: false,
+            interactive_commands: Vec::new(),
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             ui: theming::Ui::default(),

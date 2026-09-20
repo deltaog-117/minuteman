@@ -458,6 +458,54 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   unaffected. Checked through the real `mman` wrapper in zsh with the exact sequences kitty sent:
   Caps Lock+`q` and Shift+`q` moved the shell, plain `q` and Caps Lock+Shift+`q` did not.
 
+- ✅ **`:nvim ROADMAP.md` — a `:` command can take over the terminal** – a command whose program
+  name is in the new `interactive_commands` list in `config.toml` (editors, pagers, `htop`, `mpv`,
+  `ssh`, `tmux`, `fzf` by default), or any command prefixed with `!` (`:!python3`), now suspends
+  the interface instead of running with its output captured. `App` only records the request
+  (`Handover`); `main` owns the terminal, so `TerminalGuard::run_foreground` leaves the alternate
+  screen, mouse capture, raw mode and the kitty keyboard flags, calls the new
+  `shell_overlay::run_foreground` (`sh -c` with inherited stdio, in the browsed directory), then
+  restores all four and forces a repaint with `Terminal::resize`, not `clear`, for the reason the
+  post-shell-redraw decision in `DIARY.md` gives. The listing is re-read afterwards and the exit
+  status shown. While the child runs, Minuteman swaps `SIGINT` for a do-nothing handler (a
+  handler, not `SIG_IGN`, because only a handler resets to the default across `exec`), so
+  `Ctrl-C` stops the program and not the browser. Chosen as COA A over running the command in a
+  mini-shell pane and over auto-detecting full-screen programs; this is the terminal handover
+  *Open-with* needs. Verified against the real binary on a PTY through `pyte`, with the real
+  `nvim`: it showed the file, an `Esc` reached it, `:wq` saved to disk, and the browser came back
+  repainted and responsive with `nvim ROADMAP.md: done`; `:!cat > file` received typed input
+  and Ctrl-D; `Ctrl-C` killed `:!sleep` while Minuteman survived; and with the terminal
+  answering the kitty protocol query the keyboard flags were popped before leaving the
+  alternate screen and pushed again after re-entering it. Not tried in a real kitty.
+- ✅ **`c` cancels everything pending** – a new `Action::Cancel` (`[keys] cancel`, default `c`)
+  clears the yanked or cut clipboard, every `v` mark, and cancels a running copy, move or `:`
+  command, all in one press and from any directory (the clipboard lives on `App`, not on a
+  directory, so this needed no new state). It works in the busy state too. A running delete has
+  no cancel hook and the status line says so. Chosen as COA B: cancel means everything. Doing this
+  exposed a bug worth fixing: each item of a batch paste gets its own cancel flag, so a cancel
+  landing as an item finished let the batch start the next one; `poll_bulk` now checks the
+  finished item's flag. Verified against the real binary: two marked files cut and taken into
+  another directory lost their pill and marks on `c`, the files were untouched on disk, `p` then
+  reported an empty clipboard, and `c` killed a running `sleep` (checked with `pgrep`).
+- ✅ **Arrow keys for browsing** – `down`/`up`/`right`/`left` are now key names the config
+  accepts and are in the default bindings for move down, move up, enter and leave. Arrows still
+  go to a focused mini-shell untouched. Verified against the real binary: down, up, right (into
+  a directory), left (back up, cursor on the directory left) and `q`.
+- ✅ **Smart `/` search** – `/aerend` typed in `~` now finds `~/Desktop/work/aerend`. The new
+  `browser::search::find_below` walks breadth-first through `Vfs::list_dir` only, so the nearest
+  match wins and a name in the current directory is found before anything deeper, and it takes a
+  cancel flag and never opens or `stat`s a path itself, which is what a remote backend will
+  need. `tui::search_job` runs it on the blocking pool, one job per keystroke, dropping (and so
+  cancelling) the previous one. The hit's directory opens with the cursor on it
+  (`BrowserState::reveal`); `Esc` or an emptied query returns to the directory and row the search
+  started from; `Enter` keeps the cursor; `searching…` and `no match` show in front of the query.
+  Bounded at 16 levels and 200,000 entries, hidden entries skipped unless shown. Chosen as COA A
+  over a background index with fuzzy scoring and over shelling out to `fd`. Tested with a
+  property test over random trees (the hit matches, nothing nearer matches, and "not found"
+  means nothing does) on an in-memory `Vfs` that implements only listing. Verified against the
+  real binary: the nearest of two same-named entries won, a deeper name was found, `Esc` and
+  `Enter` behaved as above, and a missing name said `no match`.
+
 ---
 
 ## 🔥 High Priority (Critical)
@@ -488,9 +536,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Open-with / file associations** – open the selected file in the program that suits it:
   `enter` on a file, and double-click now that the mouse is wired up, run an opener chosen by
   MIME type or extension from `config.toml` rules (falling back to `xdg-open`), with an
-  "open with..." prompt to pick another. Needs a way to hand the terminal over to a full-screen
-  opener (`$EDITOR`, `mpv`, ...) and take it back, the way the popup shell already does, and
-  to detach a GUI opener so it outlives the browser. Until this lands, double-click only opens
+  "open with..." prompt to pick another. The terminal handover a full-screen opener needs now
+  exists (`:nvim`, see above: `Handover`, `TerminalGuard::run_foreground`), so what is left is the
+  rules, the prompt, and detaching a GUI opener so it outlives the browser. Until this lands, double-click only opens
   directories.
 - **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
   operations, with no plugin required.
@@ -508,7 +556,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   Python, JS, etc., sandboxed by default.
 - **Optional Lua scripting tier** – lightweight `mlua`-based scripting for config/keybindings/
   simple commands, layered alongside the WASM plugin system.
-- **Fuzzy find / search within the browser.**
+- **Fuzzy ranking for `/` search** – search now finds the nearest substring match anywhere below
+  the directory. Still missing: subsequence matching (`aernd` finding `aerend`), ranking by match
+  quality rather than depth alone, and stepping through further matches (`n`/`N`, or the arrows
+  while the prompt is open).
+- **Arrow keys, `PageUp`/`PageDown`, `Home`/`End` in prompts and lists** – arrows browse now, but
+  the text prompts have no cursor movement, and paging and jumping to the first or last entry
+  have no keys.
 - **Event-driven refresh (inotify) instead of polling** – the live refresh re-lists the browsed
   directory twice a second, which costs one `readdir` plus a `stat` per entry and can lag a
   change by about half a second. Worth replacing with `notify` only if that is noticeable in very
@@ -559,6 +613,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Press `.` to show or hide dot-files. Try `:mkdir -p a/b`, `:touch x.txt` and `:ls -l` — the
    new entries appear at once, and so does a file you create from a mini-shell or another
    terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
+   Then the newest four: `/` plus the start of a name a few directories down (`Esc` returns,
+   `Enter` stays); the arrow keys; `v` two files, `m`, go to another directory, `c` drops the cut
+   and the marks; and `:nvim ROADMAP.md` (`:!cmd` for a program not in `interactive_commands`).
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: preview extras, stage 1 (a scrollable preview, hex view and archive listing).

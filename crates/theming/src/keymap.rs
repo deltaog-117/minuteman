@@ -46,6 +46,9 @@ pub enum Action {
     Search,
     /// Opens the `:`-command prompt.
     Command,
+    /// Cancels everything pending in one press, wherever the cursor is: the yanked or cut
+    /// clipboard, every `Select` mark, and a running copy/move/command.
+    Cancel,
     /// Shows or hides dot-prefixed entries in every column.
     ToggleHidden,
     /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
@@ -80,6 +83,7 @@ pub struct RawKeyMap {
     pub shell: Vec<String>,
     pub search: Vec<String>,
     pub command: Vec<String>,
+    pub cancel: Vec<String>,
     pub select: Vec<String>,
     pub hidden: Vec<String>,
     pub leader: Vec<String>,
@@ -88,10 +92,10 @@ pub struct RawKeyMap {
 impl Default for RawKeyMap {
     fn default() -> Self {
         Self {
-            move_down: vec!["j".into()],
-            move_up: vec!["k".into()],
-            enter: vec!["l".into(), "enter".into()],
-            leave: vec!["h".into()],
+            move_down: vec!["j".into(), "down".into()],
+            move_up: vec!["k".into(), "up".into()],
+            enter: vec!["l".into(), "right".into(), "enter".into()],
+            leave: vec!["h".into(), "left".into()],
             quit: vec!["q".into()],
             quit_to_cwd: vec!["Q".into()],
             yank: vec!["y".into()],
@@ -103,6 +107,7 @@ impl Default for RawKeyMap {
             shell: vec!["s".into()],
             search: vec!["/".into()],
             command: vec![":".into()],
+            cancel: vec!["c".into()],
             select: vec!["v".into()],
             hidden: vec![".".into()],
             leader: vec!["space".into()],
@@ -159,6 +164,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.shell, Action::Shell);
         bind_all(&raw.search, Action::Search);
         bind_all(&raw.command, Action::Command);
+        bind_all(&raw.cancel, Action::Cancel);
         bind_all(&raw.select, Action::Select);
         bind_all(&raw.hidden, Action::ToggleHidden);
         bind_all(&raw.leader, Action::Leader);
@@ -167,8 +173,8 @@ impl From<RawKeyMap> for KeyMap {
     }
 }
 
-/// Parses a single config key string (e.g. `"j"`, `"Q"`, `"enter"`, `"space"`) into a crossterm
-/// `KeyCode`. Unrecognised or multi-character (non-named) strings are skipped rather than
+/// Parses a single config key string (e.g. `"j"`, `"Q"`, `"enter"`, `"space"`, `"down"`) into a
+/// crossterm `KeyCode`. Unrecognised or multi-character (non-named) strings are skipped rather than
 /// causing a hard error — a typo in one binding shouldn't crash startup.
 ///
 /// Named keys (`"enter"`, `"Space"`, ...) match case-insensitively, but a single character keeps
@@ -181,6 +187,10 @@ fn parse_key(s: &str) -> Option<KeyCode> {
         "space" => Some(KeyCode::Char(' ')),
         "tab" => Some(KeyCode::Tab),
         "backspace" => Some(KeyCode::Backspace),
+        "up" => Some(KeyCode::Up),
+        "down" => Some(KeyCode::Down),
+        "left" => Some(KeyCode::Left),
+        "right" => Some(KeyCode::Right),
         _ => {
             let mut chars = s.chars();
             let first = chars.next()?;
@@ -216,8 +226,12 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('s')), Some(Action::Shell));
         assert_eq!(keymap.resolve(KeyCode::Char('/')), Some(Action::Search));
         assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
+        assert_eq!(keymap.resolve(KeyCode::Char('c')), Some(Action::Cancel));
         assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));
-        assert_eq!(keymap.resolve(KeyCode::Char('.')), Some(Action::ToggleHidden));
+        assert_eq!(
+            keymap.resolve(KeyCode::Char('.')),
+            Some(Action::ToggleHidden)
+        );
         assert_eq!(keymap.resolve(KeyCode::Char(' ')), Some(Action::Leader));
         // `Tab`, `o`, `%` and `"` used to be shell-pane keys; they belong to the shell now.
         for freed in [
@@ -232,11 +246,31 @@ mod tests {
     }
 
     #[test]
+    fn the_arrow_keys_browse_like_hjkl() {
+        let keymap: KeyMap = RawKeyMap::default().into();
+        assert_eq!(keymap.resolve(KeyCode::Down), Some(Action::MoveDown));
+        assert_eq!(keymap.resolve(KeyCode::Up), Some(Action::MoveUp));
+        assert_eq!(keymap.resolve(KeyCode::Left), Some(Action::Leave));
+        assert_eq!(keymap.resolve(KeyCode::Right), Some(Action::Enter));
+    }
+
+    #[test]
+    fn arrow_names_parse_case_insensitively() {
+        assert_eq!(parse_key("up"), Some(KeyCode::Up));
+        assert_eq!(parse_key("Down"), Some(KeyCode::Down));
+        assert_eq!(parse_key("LEFT"), Some(KeyCode::Left));
+        assert_eq!(parse_key("Right"), Some(KeyCode::Right));
+    }
+
+    #[test]
     fn keys_for_lists_every_binding_of_an_action() {
         let keymap: KeyMap = RawKeyMap::default().into();
         let mut enter = keymap.keys_for(Action::Enter);
         enter.sort_by_key(|c| format!("{c:?}"));
-        assert_eq!(enter, vec![KeyCode::Char('l'), KeyCode::Enter]);
+        assert_eq!(
+            enter,
+            vec![KeyCode::Char('l'), KeyCode::Enter, KeyCode::Right]
+        );
         assert_eq!(keymap.keys_for(Action::Quit), vec![KeyCode::Char('q')]);
     }
 

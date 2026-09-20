@@ -116,10 +116,10 @@ named `init` must be passed as `./init`.
 
 | Key         | Action                                       |
 |-------------|-----------------------------------------------|
-| `j`         | move down                                     |
-| `k`         | move up                                       |
-| `l` / Enter | enter directory                               |
-| `h`         | leave directory                               |
+| `j` / `↓`   | move down                                     |
+| `k` / `↑`   | move up                                       |
+| `l` / `→` / Enter | enter directory                         |
+| `h` / `←`   | leave directory                               |
 | `q`         | quit                                          |
 | `Q`         | quit and `cd` your shell to the directory you were in (needs the `mman` wrapper above) |
 | `y`         | yank (copy) selection                         |
@@ -129,8 +129,9 @@ named `init` must be passed as `./init`.
 | `r`         | rename selection                              |
 | `n`         | create — trailing `/` makes a directory       |
 | `s`         | shell — drop into `$SHELL` in the current dir |
-| `/`         | search — jump to the first matching entry as you type |
-| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory, `:mkdir [-p] <name>...`, `:touch <name>...`; anything else runs in `sh` in the current directory (`Esc` cancels) |
+| `/`         | search — jump to the nearest entry whose name contains what you type, in this directory or any below it (`Enter` stays, `Esc` goes back) |
+| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory, `:mkdir [-p] <name>...`, `:touch <name>...`; an editor or other full-screen program (`:nvim ROADMAP.md`, or any command after a `!`, as in `:!python3`) gets the whole terminal until it exits; anything else runs in `sh` in the current directory (`Esc` cancels) |
+| `c`         | cancel everything pending — the yank/cut clipboard, every mark, and a running copy/move/command — from any directory |
 | `.`         | show or hide dot-files (hidden by default; `show_hidden = true` in `config.toml` starts them shown) |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
 | `space`     | leader — commands for the mini-shell panes (below); inert with no shell open |
@@ -191,9 +192,9 @@ composed characters (dead keys, `AltGr`) come out wrong inside a mini-shell, set
 
 While a prompt is active (rename/create/delete-confirm/conflict/search/command), `Enter` submits
 and `Esc` cancels; the keybindings above are not resolved until the prompt closes. `Esc` while
-searching also restores the selection you had before the search started. While a paste or delete
-is running in the background, every key except `Esc` (cancel — copy/move only; delete can't be
-cancelled mid-flight) is ignored until it finishes, including `q`. Marks persist as you navigate
+searching also returns you to the directory and row you started from. While a paste or delete
+is running in the background, every key except `Esc` and `c` (cancel — copy/move only; delete
+can't be cancelled mid-flight) is ignored until it finishes, including `q`. Marks persist as you navigate
 directories until toggled off or consumed by a delete, and a marked entry is shown with a `*`
 prefix in the current pane.
 
@@ -212,11 +213,15 @@ file, a missing file, even one that fails to parse never stops Minuteman from st
 
 ```toml
 # config.toml
+# Programs a `:` command gives the whole terminal to (`:nvim notes.md`); `:!cmd` does it for any.
+interactive_commands = ["nvim", "vim", "vi", "nano", "emacs", "micro", "hx", "less", "more",
+                        "man", "htop", "btop", "top", "mpv", "ssh", "tmux", "fzf"]
+
 [keys]
-move_down = ["j"]
-move_up = ["k"]
-enter = ["l", "enter"]
-leave = ["h"]
+move_down = ["j", "down"]
+move_up = ["k", "up"]
+enter = ["l", "right", "enter"]
+leave = ["h", "left"]
 quit = ["q"]
 yank = ["y"]
 cut = ["m"]
@@ -227,6 +232,7 @@ create = ["n"]
 shell = ["s"]
 search = ["/"]
 command = [":"]
+cancel = ["c"]
 select = ["v"]
 leader = ["space"]
 ```

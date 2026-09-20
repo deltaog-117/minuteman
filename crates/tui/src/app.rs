@@ -25,12 +25,14 @@
 
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
 use browser::BrowserState;
+use browser::search::{Outcome as SearchOutcome, Query};
 use crossterm::event::KeyCode;
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use shared::{LocalVfs, Vfs, VfsError};
@@ -39,6 +41,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::command::{self, Command};
 use crate::live_refresh::LiveRefresh;
+use crate::search_job::{SearchJob, SearchState};
 
 /// How many lines of a shell command's output the status line shows before summarizing the rest.
 const STATUS_OUTPUT_LINES: usize = 8;
@@ -68,6 +71,24 @@ pub enum ConflictSource {
     Rename { target: PathBuf, new_name: String },
 }
 
+/// Where a `/` search started, so `Esc` (or an emptied query) can put the browser back: the
+/// directory it was in and the cursor's index there. A search can carry the browser into another
+/// directory, so the index alone is no longer enough.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOrigin {
+    pub dir: PathBuf,
+    pub index: usize,
+}
+
+/// A command waiting for the terminal: `main` suspends the interface, runs `line` under `sh -c`
+/// in `cwd`, and hands the result back through `App::finish_handover`. The app can't do that
+/// itself because it doesn't own the terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handover {
+    pub line: String,
+    pub cwd: PathBuf,
+}
+
 #[derive(Debug)]
 pub enum Prompt {
     RenameInput {
@@ -83,10 +104,10 @@ pub enum Prompt {
         targets: Vec<PathBuf>,
     },
     Conflict(ConflictSource),
-    /// Incremental filename search (`/`). `origin` is the selection index to restore on `Esc`.
+    /// Incremental filename search (`/`). `origin` is where to return to on `Esc`.
     SearchInput {
         buffer: String,
-        origin: usize,
+        origin: SearchOrigin,
     },
     /// The `:`-command prompt (`:q`, `:cd <path>`, `:mkdir`, `:touch`, or any shell command).
     CommandInput {
@@ -228,6 +249,12 @@ pub struct App {
     bulk: Option<BulkOp>,
     live: LiveRefresh,
     handle: tokio::runtime::Handle,
+    /// Program names a `:` command hands the terminal to (see `command::parse`).
+    interactive: Vec<String>,
+    handover: Option<Handover>,
+    /// The `/` prompt's search in flight, if any. Only ever `Some` while that prompt is open.
+    search_job: Option<SearchJob>,
+    search_state: SearchState,
 }
 
 impl App {
@@ -239,7 +266,17 @@ impl App {
             bulk: None,
             live: LiveRefresh::new(handle.clone()),
             handle,
+            interactive: Vec::new(),
+            handover: None,
+            search_job: None,
+            search_state: SearchState::Idle,
         }
+    }
+
+    /// Sets which program names `:` hands the terminal to.
+    pub fn with_interactive_commands(mut self, interactive: Vec<String>) -> Self {
+        self.interactive = interactive;
+        self
     }
 
     pub fn status_line(&self) -> String {
@@ -272,6 +309,10 @@ impl App {
             };
         }
         match &self.prompt {
+            Some(prompt @ Prompt::SearchInput { .. }) => match self.search_state.note() {
+                Some(note) => format!("{note} {}", prompt.display()),
+                None => prompt.display(),
+            },
             Some(prompt) => prompt.display(),
             None => self.status.clone().unwrap_or_default(),
         }
@@ -351,8 +392,18 @@ impl App {
         let past_label = bulk.kind.past_label();
 
         let is_delete = matches!(bulk.kind, BulkKind::Delete { .. });
+        // Each item of a batch gets its own cancel flag, so a cancel that lands just as an item
+        // finishes would otherwise be forgotten and the batch would carry on with the next one.
+        let cancelled = bulk
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed));
 
         match result {
+            Ok(Outcome::Completed | Outcome::Skipped) if cancelled => {
+                browser.reload(vfs)?;
+                self.status = Some(format!("{past_label} cancelled"));
+            }
             Ok(Outcome::Completed) => {
                 browser.reload(vfs)?;
                 if let BulkKind::Paste { clip, dst_dir, index, .. } = bulk.kind {
@@ -412,6 +463,46 @@ impl App {
             }
             None => self.status = Some("nothing cancellable in progress".into()),
         }
+    }
+
+    /// Cancels everything pending in one go, from any directory: the yanked or cut clipboard,
+    /// every mark, and a running copy/move/command. A cut only takes effect when pasted, so
+    /// forgetting one never touches disk. A running delete can't be interrupted (see `BulkOp`),
+    /// and the status line says so rather than pretending.
+    pub fn cancel_all(&mut self, browser: &mut BrowserState) {
+        let mut cancelled = Vec::new();
+        let mut uncancellable = false;
+        if let Some(bulk) = &self.bulk {
+            match &bulk.cancel {
+                Some(flag) => {
+                    flag.store(true, Ordering::Relaxed);
+                    cancelled.push(format!("running {}", bulk.kind.past_label()));
+                }
+                None => uncancellable = true,
+            }
+        }
+        if let Some(clip) = self.clipboard.take() {
+            let verb = match clip.mode {
+                ClipboardMode::Copy => "yank",
+                ClipboardMode::Move => "cut",
+            };
+            cancelled.push(format!("{verb} of {}", batch_label(&clip.paths)));
+        }
+        match browser.clear_marks() {
+            0 => {}
+            1 => cancelled.push("1 mark".into()),
+            marks => cancelled.push(format!("{marks} marks")),
+        }
+
+        self.status = Some(match (cancelled.is_empty(), uncancellable) {
+            (true, false) => "nothing to cancel".into(),
+            (true, true) => "a running delete cannot be cancelled".into(),
+            (false, false) => format!("cancelled: {}", cancelled.join(", ")),
+            (false, true) => format!(
+                "cancelled: {} (a running delete cannot be)",
+                cancelled.join(", ")
+            ),
+        });
     }
 
     /// Snapshots the current batch: every marked path if any are marked, otherwise just the
@@ -484,9 +575,13 @@ impl App {
     }
 
     pub fn begin_search(&mut self, browser: &BrowserState) {
+        self.end_search();
         self.prompt = Some(Prompt::SearchInput {
             buffer: String::new(),
-            origin: browser.selected_index(),
+            origin: SearchOrigin {
+                dir: browser.current_dir().to_path_buf(),
+                index: browser.selected_index(),
+            },
         });
     }
 
@@ -572,24 +667,27 @@ impl App {
             },
             Prompt::SearchInput { mut buffer, origin } => match code {
                 KeyCode::Esc => {
-                    browser.select_index(origin);
-                    self.status = Some("search cancelled".into());
+                    self.end_search();
+                    self.status = Some(match Self::restore_origin(vfs, browser, &origin) {
+                        Ok(()) => "search cancelled".into(),
+                        Err(e) => format!("search cancelled; could not go back: {e}"),
+                    });
                 }
-                KeyCode::Enter => {}
+                KeyCode::Enter => {
+                    // Still walking: stop where the cursor is rather than jump later, unasked.
+                    if self.search_job.is_some() {
+                        self.status = Some("search stopped".into());
+                    }
+                    self.end_search();
+                }
                 KeyCode::Backspace => {
                     buffer.pop();
-                    match browser.find_match(&buffer) {
-                        Some(idx) => browser.select_index(idx),
-                        None if buffer.is_empty() => browser.select_index(origin),
-                        None => {}
-                    }
+                    self.update_search(vfs, browser, &buffer, &origin);
                     self.prompt = Some(Prompt::SearchInput { buffer, origin });
                 }
                 KeyCode::Char(c) => {
                     buffer.push(c);
-                    if let Some(idx) = browser.find_match(&buffer) {
-                        browser.select_index(idx);
-                    }
+                    self.update_search(vfs, browser, &buffer, &origin);
                     self.prompt = Some(Prompt::SearchInput { buffer, origin });
                 }
                 _ => self.prompt = Some(Prompt::SearchInput { buffer, origin }),
@@ -611,6 +709,101 @@ impl App {
         Ok(flow)
     }
 
+    /// Reacts to the search text changing: looks in the directory the search started in first —
+    /// instantly, from the list already on screen — and otherwise walks everything below it on
+    /// the blocking pool (see `search_job`), the hit arriving later through `poll_search`. A
+    /// stale walk is dropped (and so cancelled) first. An empty query puts the browser back.
+    fn update_search(
+        &mut self,
+        vfs: &dyn Vfs,
+        browser: &mut BrowserState,
+        text: &str,
+        origin: &SearchOrigin,
+    ) {
+        self.search_job = None;
+        let Some(query) = Query::new(text) else {
+            self.search_state = SearchState::Idle;
+            if let Err(e) = Self::restore_origin(vfs, browser, origin) {
+                self.status = Some(format!("could not go back: {e}"));
+            }
+            return;
+        };
+
+        if browser.current_dir() == origin.dir
+            && let Some(index) = browser.find_match(text)
+        {
+            browser.select_index(index);
+            self.search_state = SearchState::Found;
+            return;
+        }
+        self.search_job = Some(SearchJob::start(
+            &self.handle,
+            origin.dir.clone(),
+            query,
+            browser.show_hidden(),
+        ));
+        self.search_state = SearchState::Searching;
+    }
+
+    /// Ends the `/` prompt's search, cancelling a walk still in flight.
+    fn end_search(&mut self) {
+        self.search_job = None;
+        self.search_state = SearchState::Idle;
+    }
+
+    /// Returns the browser to where a search began: its directory, then its cursor.
+    fn restore_origin(
+        vfs: &dyn Vfs,
+        browser: &mut BrowserState,
+        origin: &SearchOrigin,
+    ) -> Result<(), VfsError> {
+        if browser.current_dir() != origin.dir {
+            browser.goto(vfs, &origin.dir)?;
+        }
+        browser.select_index(origin.index);
+        Ok(())
+    }
+
+    /// Applies a finished search to the browser: opens the hit's directory with the cursor on it.
+    /// Call once per render tick, like `poll_bulk`.
+    pub fn poll_search(&mut self, browser: &mut BrowserState, vfs: &dyn Vfs) {
+        let Some(outcome) = self.search_job.as_mut().and_then(SearchJob::poll) else {
+            return;
+        };
+        self.search_job = None;
+        self.search_state = match outcome {
+            SearchOutcome::Found(path) => match browser.reveal(vfs, &path) {
+                Ok(()) => SearchState::Found,
+                Err(e) => {
+                    self.status = Some(format!("search: could not open {}: {e}", path.display()));
+                    SearchState::Idle
+                }
+            },
+            SearchOutcome::NotFound { truncated } => SearchState::NotFound { truncated },
+            SearchOutcome::Cancelled => SearchState::Idle,
+        };
+    }
+
+    /// The command waiting for the terminal, if a `:` command asked for one.
+    pub fn take_handover(&mut self) -> Option<Handover> {
+        self.handover.take()
+    }
+
+    /// Reports how a handed-over command ended and re-reads the listing, which it may have
+    /// changed (an editor saving, a pager doing nothing).
+    pub fn finish_handover(
+        &mut self,
+        browser: &mut BrowserState,
+        vfs: &dyn Vfs,
+        handover: &Handover,
+        result: &std::io::Result<ExitStatus>,
+    ) -> Result<()> {
+        browser.reload(vfs)?;
+        browser.prune_marks(vfs);
+        self.status = Some(handover_status(&handover.line, result));
+        Ok(())
+    }
+
     /// Parses and runs a `:`-command buffer (without the leading `:`). Built-ins run right here;
     /// anything else runs under `sh -c` on the blocking pool (see `command`). Problems surface
     /// as a status message rather than an error — a typo shouldn't need a `Result` unwind.
@@ -620,7 +813,7 @@ impl App {
         browser: &mut BrowserState,
         buffer: &str,
     ) -> Result<ControlFlow<()>> {
-        match command::parse(buffer) {
+        match command::parse(buffer, &self.interactive) {
             Ok(None) => {}
             Ok(Some(Command::Quit)) => return Ok(ControlFlow::Break(())),
             Ok(Some(Command::Cd(path))) => match browser.goto(vfs, Path::new(&path)) {
@@ -637,6 +830,15 @@ impl App {
                 self.run_builtin(vfs, browser, "touch", &names, file_ops::touch)?;
             }
             Ok(Some(Command::Shell(line))) => self.spawn_shell_command(browser, line),
+            Ok(Some(Command::Interactive(line))) if self.is_busy() => {
+                self.status = Some(format!("an operation is already in progress: {line}"));
+            }
+            Ok(Some(Command::Interactive(line))) => {
+                self.handover = Some(Handover {
+                    line,
+                    cwd: browser.current_dir().to_path_buf(),
+                });
+            }
             Err(message) => self.status = Some(message),
         }
         Ok(ControlFlow::Continue(()))
@@ -942,6 +1144,18 @@ fn shell_status(command: &str, outcome: &CommandOutcome) -> String {
     }
 }
 
+/// The status line for a command that had the terminal to itself.
+fn handover_status(line: &str, result: &std::io::Result<ExitStatus>) -> String {
+    match result {
+        Ok(status) if status.success() => format!("{line}: done"),
+        Ok(status) => match status.code() {
+            Some(code) => format!("{line}: exited with code {code}"),
+            None => format!("{line}: ended by a signal"),
+        },
+        Err(e) => format!("could not run '{line}': {e}"),
+    }
+}
+
 fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -1020,7 +1234,8 @@ mod tests {
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
             let runtime = tokio::runtime::Runtime::new().unwrap();
-            let app = App::new(runtime.handle().clone());
+            let app =
+                App::new(runtime.handle().clone()).with_interactive_commands(vec!["nvim".into()]);
             let browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
             Self {
                 _runtime: runtime,
@@ -1050,6 +1265,39 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             assert!(!self.app.is_busy(), "command did not finish in time");
+        }
+
+        /// Presses one key at the open prompt, as the event loop would.
+        fn press(&mut self, code: KeyCode) {
+            let flow = self
+                .app
+                .handle_prompt_key(code, &LocalVfs, &mut self.browser)
+                .unwrap();
+            assert_eq!(flow, ControlFlow::Continue(()));
+        }
+
+        fn type_text(&mut self, text: &str) {
+            for c in text.chars() {
+                self.press(KeyCode::Char(c));
+            }
+        }
+
+        /// Waits for the `/` prompt's background walk to finish, applying its result the way the
+        /// render loop does.
+        fn wait_for_search(&mut self) {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while self.app.search_job.is_some() && Instant::now() < deadline {
+                self.app.poll_search(&mut self.browser, &LocalVfs);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(
+                self.app.search_job.is_none(),
+                "search did not finish in time"
+            );
+        }
+
+        fn selected_name(&self) -> String {
+            self.browser.selected_entry().unwrap().name.clone()
         }
 
         fn listed(&self) -> Vec<String> {
@@ -1136,5 +1384,275 @@ mod tests {
         f.wait_for_idle();
 
         assert_eq!(f.app.status.as_deref(), Some("cancelled: sleep 30"));
+    }
+
+    #[test]
+    fn a_listed_program_asks_for_the_terminal_instead_of_running_captured() {
+        let mut f = Fixture::new("handover-listed");
+
+        f.run("nvim ROADMAP.md");
+
+        assert!(
+            !f.app.is_busy(),
+            "nothing runs until main hands the terminal over"
+        );
+        assert_eq!(
+            f.app.take_handover(),
+            Some(Handover {
+                line: "nvim ROADMAP.md".into(),
+                cwd: f.root.clone(),
+            })
+        );
+        assert_eq!(f.app.take_handover(), None, "a handover is taken once");
+    }
+
+    #[test]
+    fn a_bang_asks_for_the_terminal_for_any_program() {
+        let mut f = Fixture::new("handover-bang");
+
+        f.run("!python3 -i");
+
+        let handover = f.app.take_handover().expect("a handover was requested");
+        assert_eq!(handover.line, "python3 -i");
+    }
+
+    #[test]
+    fn a_handover_is_refused_while_another_operation_runs() {
+        let mut f = Fixture::new("handover-busy");
+
+        f.run("sleep 30");
+        f.run("nvim notes.md");
+
+        assert_eq!(f.app.take_handover(), None);
+        assert!(
+            f.app
+                .status
+                .clone()
+                .unwrap()
+                .contains("already in progress")
+        );
+        f.app.cancel_bulk();
+        f.wait_for_idle();
+    }
+
+    #[test]
+    fn finishing_a_handover_reports_how_it_ended_and_shows_what_it_changed() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut f = Fixture::new("handover-finish");
+        f.run("nvim x.md");
+        let handover = f.app.take_handover().unwrap();
+        std::fs::write(f.root.join("x.md"), b"saved by the editor").unwrap();
+
+        f.app
+            .finish_handover(
+                &mut f.browser,
+                &LocalVfs,
+                &handover,
+                &Ok(ExitStatus::from_raw(0)),
+            )
+            .unwrap();
+        assert_eq!(f.app.status.as_deref(), Some("nvim x.md: done"));
+        assert_eq!(f.listed(), vec!["x.md"]);
+
+        f.app
+            .finish_handover(
+                &mut f.browser,
+                &LocalVfs,
+                &handover,
+                &Ok(ExitStatus::from_raw(3 << 8)),
+            )
+            .unwrap();
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("nvim x.md: exited with code 3")
+        );
+
+        let missing = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        f.app
+            .finish_handover(&mut f.browser, &LocalVfs, &handover, &missing)
+            .unwrap();
+        assert!(
+            f.app
+                .status
+                .clone()
+                .unwrap()
+                .starts_with("could not run 'nvim x.md'")
+        );
+    }
+
+    #[test]
+    fn cancel_forgets_a_cut_and_the_marks_from_any_directory() {
+        let mut f = Fixture::new("cancel-all");
+        for name in ["a", "b", "c"] {
+            std::fs::write(f.root.join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(f.root.join("elsewhere")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        f.browser.select_index(1);
+        f.browser.toggle_mark();
+        f.browser.select_index(2);
+        f.browser.toggle_mark();
+        f.app.cut(&f.browser);
+        assert!(f.app.clipboard.is_some());
+
+        // Somewhere else entirely, as the request says: "no matter the directory I am".
+        f.browser
+            .goto(&LocalVfs, &f.root.join("elsewhere"))
+            .unwrap();
+        f.app.cancel_all(&mut f.browser);
+
+        assert!(f.app.clipboard.is_none());
+        assert!(f.browser.marked_paths().is_empty());
+        let status = f.app.status.clone().unwrap();
+        assert!(status.starts_with("cancelled: cut of "), "{status}");
+        assert!(status.ends_with("2 marks"), "{status}");
+        for name in ["a", "b", "c"] {
+            assert!(
+                f.root.join(name).exists(),
+                "a cancelled cut must not touch {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_says_so_when_there_is_nothing_to_cancel() {
+        let mut f = Fixture::new("cancel-nothing");
+        f.app.cancel_all(&mut f.browser);
+        assert_eq!(f.app.status.as_deref(), Some("nothing to cancel"));
+    }
+
+    #[test]
+    fn cancel_also_stops_a_running_command() {
+        let mut f = Fixture::new("cancel-running");
+        f.run("sleep 30");
+        assert!(f.app.is_busy());
+
+        f.app.cancel_all(&mut f.browser);
+        f.wait_for_idle();
+
+        assert_eq!(f.app.status.as_deref(), Some("cancelled: sleep 30"));
+    }
+
+    fn deep_tree(f: &Fixture) {
+        std::fs::create_dir_all(f.root.join("a").join("b")).unwrap();
+        std::fs::write(f.root.join("a").join("b").join("aerend.md"), b"").unwrap();
+        std::fs::write(f.root.join("notes.txt"), b"").unwrap();
+        std::fs::write(f.root.join("zzz.txt"), b"").unwrap();
+    }
+
+    #[test]
+    fn a_search_walks_into_subdirectories_and_opens_the_hit() {
+        let mut f = Fixture::new("search-deep");
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aerend");
+        f.wait_for_search();
+
+        assert_eq!(f.browser.current_dir(), f.root.join("a").join("b"));
+        assert_eq!(f.selected_name(), "aerend.md");
+    }
+
+    #[test]
+    fn a_match_in_the_directory_already_open_is_selected_without_a_walk() {
+        let mut f = Fixture::new("search-local");
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("notes");
+
+        assert!(f.app.search_job.is_none());
+        assert_eq!(f.browser.current_dir(), f.root);
+        assert_eq!(f.selected_name(), "notes.txt");
+    }
+
+    #[test]
+    fn escape_returns_to_the_directory_and_row_the_search_started_from() {
+        let mut f = Fixture::new("search-escape");
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+        f.browser.select_index(2);
+        let started_on = f.selected_name();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aerend");
+        f.wait_for_search();
+        assert_ne!(f.browser.current_dir(), f.root);
+
+        f.press(KeyCode::Esc);
+        assert_eq!(f.browser.current_dir(), f.root);
+        assert_eq!(f.selected_name(), started_on);
+        assert_eq!(f.app.status.as_deref(), Some("search cancelled"));
+        assert!(f.app.prompt.is_none());
+    }
+
+    #[test]
+    fn enter_keeps_the_cursor_where_the_search_landed() {
+        let mut f = Fixture::new("search-enter");
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aerend");
+        f.wait_for_search();
+        f.press(KeyCode::Enter);
+
+        assert!(f.app.prompt.is_none());
+        assert_eq!(f.browser.current_dir(), f.root.join("a").join("b"));
+        assert_eq!(f.selected_name(), "aerend.md");
+    }
+
+    #[test]
+    fn a_name_that_exists_nowhere_leaves_the_cursor_and_says_no_match() {
+        let mut f = Fixture::new("search-miss");
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("nothing-like-this");
+        f.wait_for_search();
+
+        assert_eq!(f.browser.current_dir(), f.root);
+        assert!(
+            f.app.status_line().starts_with("no match "),
+            "{}",
+            f.app.status_line()
+        );
+    }
+
+    #[test]
+    fn emptying_the_query_puts_the_browser_back() {
+        let mut f = Fixture::new("search-backspace");
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aerend");
+        f.wait_for_search();
+        assert_ne!(f.browser.current_dir(), f.root);
+        for _ in 0.."aerend".len() {
+            f.press(KeyCode::Backspace);
+        }
+
+        assert!(f.app.search_job.is_none(), "an empty query starts no walk");
+        assert_eq!(f.browser.current_dir(), f.root);
+        assert_eq!(f.browser.selected_index(), 0);
+        assert!(f.app.prompt.is_some(), "the prompt stays open");
+    }
+
+    #[test]
+    fn a_new_keystroke_replaces_the_walk_before_it() {
+        let mut f = Fixture::new("search-replace");
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aer");
+        f.type_text("end");
+        f.wait_for_search();
+
+        assert_eq!(f.selected_name(), "aerend.md");
     }
 }

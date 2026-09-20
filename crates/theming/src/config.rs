@@ -36,9 +36,26 @@ struct RawConfig {
     /// `None` when absent, so "unset" can default to hidden rather than serde's `false` meaning
     /// the same thing by accident.
     show_hidden: Option<bool>,
+    /// `None` when absent, so "unset" means the built-in list while an explicit `[]` means none.
+    interactive_commands: Option<Vec<String>>,
     keys: RawKeyMap,
     theme: RawTheme,
     ui: RawUi,
+}
+
+/// Programs that draw on the whole terminal or read the keyboard, so a `:` command that names
+/// one needs the real terminal rather than a captured pipe. Editors, pagers, monitors, a media
+/// player, a remote shell and a multiplexer; anything else can still be forced with `:!`.
+const INTERACTIVE_COMMANDS: &[&str] = &[
+    "nvim", "vim", "vi", "nano", "emacs", "micro", "hx", "less", "more", "man", "htop", "btop",
+    "top", "mpv", "ssh", "tmux", "fzf",
+];
+
+fn default_interactive_commands() -> Vec<String> {
+    INTERACTIVE_COMMANDS
+        .iter()
+        .map(|&name| name.into())
+        .collect()
 }
 
 /// `appearance.toml`: the whole look in one file.
@@ -63,6 +80,9 @@ pub struct Config {
     pub browser_mouse: bool,
     /// Whether dot-prefixed entries start out visible; the `hidden` key flips it at runtime.
     pub show_hidden: bool,
+    /// Program names a `:` command hands the whole terminal to (`:nvim notes.md`), instead of
+    /// running with its output captured. `:!cmd` does the same for any one command.
+    pub interactive_commands: Vec<String>,
     pub keys: KeyMap,
     pub theme: Theme,
     pub ui: Ui,
@@ -94,6 +114,9 @@ impl Config {
             alt_tap: config.alt_tap.unwrap_or(true),
             browser_mouse: config.browser_mouse.unwrap_or(true),
             show_hidden: config.show_hidden.unwrap_or(false),
+            interactive_commands: config
+                .interactive_commands
+                .unwrap_or_else(default_interactive_commands),
             keys: config.keys.into(),
             theme: config.theme.overlay(appearance.theme).into(),
             ui: config.ui.overlay(appearance.ui).into(),
@@ -140,7 +163,7 @@ mod tests {
         let raw: RawConfig = toml::from_str("[keys]\nmove_down = [\"n\"]\n").unwrap();
         assert_eq!(raw.keys.move_down, vec!["n".to_string()]);
         // move_up was not specified, so it keeps the default.
-        assert_eq!(raw.keys.move_up, vec!["k".to_string()]);
+        assert_eq!(raw.keys.move_up, vec!["k".to_string(), "up".to_string()]);
     }
 
     /// The shipped `config.example.toml` must always parse and, being nothing but the built-in
@@ -153,9 +176,27 @@ mod tests {
         assert_eq!(raw.alt_tap, Some(true));
         assert_eq!(raw.browser_mouse, Some(true));
         assert_eq!(raw.show_hidden, Some(false));
+        assert_eq!(
+            raw.interactive_commands,
+            Some(default_interactive_commands())
+        );
         let keys: KeyMap = raw.keys.into();
         let default_keys: KeyMap = RawKeyMap::default().into();
         assert_eq!(keys, default_keys);
+    }
+
+    #[test]
+    fn interactive_commands_default_to_the_built_in_list_and_can_be_replaced() {
+        let defaults = Config::from_sources(None, None).interactive_commands;
+        assert!(defaults.iter().any(|name| name == "nvim"));
+        assert_eq!(
+            Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).interactive_commands,
+            defaults
+        );
+        let custom = Config::from_sources(Some("interactive_commands = [\"kak\"]\n"), None);
+        assert_eq!(custom.interactive_commands, vec!["kak".to_string()]);
+        let none = Config::from_sources(Some("interactive_commands = []\n"), None);
+        assert!(none.interactive_commands.is_empty());
     }
 
     #[test]

@@ -38,6 +38,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-20 | Browser Mouse Support | One shared `BrowserLayout` plus pure hit-testing in `browser_mouse.rs`, list state persisted across frames (COA A) | ✅ Confirmed |
 | 2026-09-20 | Launch Command | Executable built as `mman` via the `[[bin]]` name; project, crates and config folder keep the Minuteman name | ✅ Confirmed |
 | 2026-09-20 | Hidden Files, `:` Commands, Live Refresh | Filter where a listing is stored (COA A); built-ins plus `sh -c` fall-through (COA C); poll by re-listing and comparing, no new dependency | ✅ Confirmed |
+| 2026-09-20 | `:` Terminal Handover, `c` Cancel-All, Arrow Keys, Nearest-First Search | Suspend and hand over the real terminal (COA A, name list plus `!`); cancel means everything (COA B); arrows in the default bindings (COA A); breadth-first walk on the blocking pool (COA A) | ✅ Confirmed |
 
 ---
 
@@ -2339,6 +2340,107 @@ ranger and vim, because the letters now arrive as `HJKL`.
 `cargo test -p tui` passes (162 tests). Through the real zsh wrapper on a PTY, with the exact byte
 sequences from the probe: Caps Lock+`q` and Shift+`q` moved the shell, plain `q` and Caps
 Lock+Shift+`q` did not. Not verified with the physical keyboard.
+
+### `:nvim`, `c`, Arrow Keys and Nearest-First `/` Search: Four Requests, One Cycle
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Four requests arrived together: open other programs from the `:` prompt (`:nvim ROADMAP.md`), a
+`c` key that cancels an operation such as a cut whatever directory the cursor is in, arrow keys
+for browsing, and a `/` search that finds `aerend` from `~` by looking through the directories
+below. Each was put as three courses of action first; the choices are below.
+
+#### `:` commands that need the terminal
+
+`:` commands ran under `sh -c` with stdin closed and output piped, so a full-screen program could
+not work. Options: **A**, suspend the interface and give the program the real terminal, as
+ranger's `:shell` does; **B**, run it in a mini-shell pane; **C**, run every command on a pty and
+promote it when it enters the alternate screen. **A** was chosen: it is what `nvim` expects, and it
+is the handover *Open-with* will need. B is cheaper but boxes the editor into 80% x 70% of the
+screen; C changes every `:` command for a heuristic. Which commands count is decided by a
+configurable list of program names (`interactive_commands`) plus a `!` prefix for anything else,
+because a fixed list is wrong for someone's editor and a prefix alone makes the common case
+tedious. The name is compared by file name, and only the first word counts, so `ls nvim` stays
+captured.
+
+The app cannot suspend the terminal because `main` owns it, so `App` records a `Handover` and the
+loop takes it at the top of the next turn. Leaving mirrors `TerminalGuard::drop` and returning
+mirrors its setup, including popping and re-pushing the keyboard protocol flags, in that order.
+The repaint is `Terminal::resize`, not `clear`, for the reason recorded under *Post-Shell Redraw*
+above. `run` reached eight parameters, so its read-only inputs became a `Session` struct rather
+than an `allow` on the lint.
+
+One thing had to be added that was not asked for. With raw mode off, the terminal turns `Ctrl-C`
+into `SIGINT` for the whole foreground process group, Minuteman included, so interrupting
+`:!ping host` would have killed the browser. `run_foreground` installs a handler that does
+nothing for the duration. A handler and not `SIG_IGN`, because an ignored signal stays ignored
+across `exec` and the child could then not be interrupted at all, whereas a handler resets to the
+default. It costs one `libc` dependency, already in the tree through `crossterm`.
+
+#### `c` cancels everything
+
+Options: **A**, clear the clipboard only; **B**, clear the clipboard, the marks and cancel a
+running operation; **C**, clipboard first, marks on a second press. **B** was chosen: the request
+was "cancel this operation entirely". The clipboard is state on `App`, not on a directory, so
+"whatever directory I am in" needed nothing extra, and a cut does nothing on disk until it is
+pasted, so cancelling one only forgets it. A running delete has no cancel hook, and the status
+line says that rather than claiming success. The busy state used to swallow every key but `Esc`;
+it now also accepts `c`.
+
+Making "cancel" mean everything turned up an old bug. Each item of a batch paste gets a fresh
+cancel flag, so a cancel that landed as one item finished was forgotten and the next item started.
+`poll_bulk` now reads the finished item's flag before continuing. The status hint for `cancel`
+sits last in the normal-mode list: hints are dropped from the tail on a narrow bar, and putting
+it earlier pushed `quit` off a 100-column bar, which an existing test caught.
+
+#### Arrow keys
+
+Options: **A**, add the key names to the config parser and the default bindings; **B**, hard-wire
+them as always-on aliases; **C**, A plus `PageUp`/`PageDown`/`Home`/`End`. **A** was chosen to keep
+bindings config-driven. The cost is that a config naming `move_down = ["j"]` replaces the list and
+loses the arrow, which is how `enter = ["l", "enter"]` already behaved and is now stated in
+`config.example.toml`. C was left for later, since paging needs the viewport height.
+
+#### Nearest-first `/` search
+
+Options: **A**, a breadth-first walk on the blocking pool; **B**, a background index scored with a
+fuzzy matcher; **C**, shelling out to `fd`/`find`. **A** was chosen. Breadth-first order makes the
+nearest match win and makes the current directory's own entries come first, which is what the
+old search did, and a walk stops at the first hit instead of paying for the whole tree. It uses
+only `Vfs::list_dir`, checks a cancel flag between directories and never `stat`s or opens a path
+itself, so it will work over SSH when the backend exists; C would have bypassed `Vfs`, and B pays
+for a full walk of `~` before the first key. The limits are 16 levels and 200,000 entries, with
+"no match" saying when a limit stopped the walk. Symlinks to directories are listed as
+directories, so the depth limit is also what ends a loop.
+
+Each keystroke starts a new job and drops the old one; a job owns its channel and sets its cancel
+flag on drop, so a slow search for `aer` can neither keep walking nor answer late. The directory
+the search started in is checked first from the list already on screen, so the common case has no
+delay at all. `Esc` had to change from restoring an index to restoring a directory and an index,
+because a hit can be anywhere. `Enter` while a walk is still running stops it and stays put,
+because jumping later, unasked, seemed worse than making the user press `/` again. Ranking beyond
+depth and stepping through further matches are on the roadmap.
+
+#### Verification
+
+`cargo test --workspace` passes (`tui` 186, `browser` 30, `shell_overlay` 15, `theming` 38) and
+`cargo clippy --workspace --all-targets` is clean. A property test on an in-memory `Vfs` that only
+implements listing checks that the hit matches, that nothing nearer matches, and that "not found"
+means nothing does. Its first run failed on a fixture that let a file have children, which no
+disk can; the search was right. On a PTY through `pyte` against the real binary: arrows browse;
+`c` cleared a cut and two marks from another directory and left the files alone, and killed a
+running `sleep`; `/` found the nearer of two entries, a deeper one, and reported a missing name,
+with `Esc` and `Enter` as described; the real `nvim` opened, took `Esc`, saved with `:wq`, and the
+browser came back repainted and responsive; `:!cat > file` received typed input; `Ctrl-C` ended
+`:!sleep` and left Minuteman running; and with the terminal answering the kitty protocol query,
+the flags were popped before the alternate screen was left and pushed after it was re-entered.
+Two harness findings: `pyte` prints a DCS string as text, which `nvim` sends at startup, so the
+harness strips those as it already strips APC; and `nvim` keeps its file name on the second-to-last
+row, not the last. Not verified in a real kitty or with a physical keyboard.
 
 ---
 

@@ -23,11 +23,23 @@ browser_mouse = true
 # below flips it while browsing.
 show_hidden = false
 
+# Programs that take over the whole terminal. A `:` command whose first word is one of these
+# (":nvim ROADMAP.md", ":less log.txt") suspends Minuteman, runs it on the real terminal, and
+# brings the browser back when it exits. Prefix any other command with "!" to do the same for
+# just that one (":!python3"). Every other `:` command is run with its output captured.
+interactive_commands = [
+    "nvim", "vim", "vi", "nano", "emacs", "micro", "hx", "less", "more", "man", "htop", "btop",
+    "top", "mpv", "ssh", "tmux", "fzf",
+]
+
 [keys]
-move_down = ["j"]
-move_up = ["k"]
-enter = ["l", "enter"]
-leave = ["h"]
+# The arrow keys browse like hjkl: up/down move the selection, right opens the selected
+# directory and left goes up. Naming a key here replaces the whole list for that action, so
+# keep "down", "up", "right" and "left" in it if you change these.
+move_down = ["j", "down"]
+move_up = ["k", "up"]
+enter = ["l", "right", "enter"]
+leave = ["h", "left"]
 quit = ["q"]
 # Quits like `quit`, but also records the directory you were browsing so the `mman` shell wrapper
 # (see `mman init` in the README) can `cd` your shell there. Single-character keys are
@@ -45,13 +57,20 @@ create = ["n"]
 # Opens the first shell pane in the current directory ("s" again does nothing once one is
 # already open — split instead). Alt+m closes the pane under the pointer.
 shell = ["s"]
-# Jumps to the first entry whose name matches as you type.
+# Finds the nearest entry whose name contains what you type, looking in this directory first and
+# then in every directory below it, and jumps there as you type. Enter stays where the search
+# landed, Esc goes back to where it started.
 search = ["/"]
 # Opens the :-command prompt. ":q"/":quit" exits, ":cd <path>" jumps to a directory,
 # ":mkdir [-p] <name>..." and ":touch <name>..." create things right here, and anything else is
 # run as a shell command in the current directory (":ls -l", ":git mv a b", ":rm old.log"), with
-# its output on the status line. Quote names that contain spaces.
+# its output on the status line. Quote names that contain spaces. See `interactive_commands`
+# above for running editors and other full-screen programs.
 command = [":"]
+# Cancels everything pending, in whatever directory you are: the yanked or cut clipboard, every
+# mark, and a running copy, move or command. Nothing on disk is touched by a cut until it is
+# pasted, so cancelling one just forgets it.
+cancel = ["c"]
 # Shows or hides dot-prefixed files and directories in every column.
 hidden = ["."]
 # Toggles a mark on the current entry, Ranger-style — press once per file to queue it for a

@@ -24,6 +24,7 @@ mod hud;
 mod image_preview;
 mod live_refresh;
 mod popup_shell;
+mod search_job;
 mod shell_init;
 mod shell_layout;
 mod style;
@@ -32,6 +33,7 @@ mod text_preview;
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::time::{Duration, Instant, SystemTime};
 
 use alt_keys::AltCommand;
@@ -84,18 +86,50 @@ impl TerminalGuard {
     /// alternate keys keep `Shift`+letter arriving as a capital instead of a lowercase letter
     /// with a shift bit. Only call this once the terminal has said it supports the protocol.
     fn enhance_keyboard(&mut self) -> Result<()> {
-        execute!(
-            io::stdout(),
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
-        )?;
+        execute!(io::stdout(), PushKeyboardEnhancementFlags(keyboard_flags()))?;
         self.keyboard_enhanced = true;
         Ok(())
     }
+
+    /// Hands the real terminal to `line` (run under `sh -c` in `cwd`) and takes it back when it
+    /// exits: leaves the alternate screen, mouse capture, raw mode and the keyboard protocol so
+    /// the program sees an ordinary terminal, then restores all four and forces a full repaint.
+    /// The outer `Result` is a terminal failure (fatal — the guard's `Drop` cleans up); the inner
+    /// one is the command's own, reported to the user. The terminal is restored even when the
+    /// command could not be started.
+    fn run_foreground(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        cwd: &Path,
+        line: &str,
+    ) -> Result<io::Result<ExitStatus>> {
+        if self.keyboard_enhanced {
+            execute!(io::stdout(), PopKeyboardEnhancementFlags)?;
+        }
+        execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+        disable_raw_mode()?;
+
+        let result = shell_overlay::run_foreground(cwd, line);
+
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        if self.keyboard_enhanced {
+            execute!(io::stdout(), PushKeyboardEnhancementFlags(keyboard_flags()))?;
+        }
+        // `resize` rather than `clear`: it empties the screen and the back buffer so the next
+        // frame repaints everything, without `clear`'s cursor-position query, which a terminal
+        // that is slow to answer can turn into a hang.
+        terminal.resize(Rect::from(terminal.size()?))?;
+        Ok(result)
+    }
+}
+
+/// The kitty keyboard protocol flags Minuteman runs with (see `enhance_keyboard`).
+fn keyboard_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
 }
 
 impl Drop for TerminalGuard {
@@ -543,7 +577,8 @@ fn main() -> Result<()> {
     // freezes the render loop. Kept alive for the rest of `main` — dropping it would shut the
     // pool down out from under any operation still running.
     let runtime = tokio::runtime::Runtime::new()?;
-    let mut app = App::new(runtime.handle().clone());
+    let mut app = App::new(runtime.handle().clone())
+        .with_interactive_commands(config.interactive_commands.clone());
 
     let mut guard = TerminalGuard::new()?;
     // Both probes must run after entering the alternate screen but before the event loop reads
@@ -563,12 +598,24 @@ fn main() -> Result<()> {
         &mut browser,
         &mut app,
         &mut previews,
-        &config,
-        args.cwd_file.as_deref(),
+        Session {
+            config: &config,
+            guard: &guard,
+            cwd_file: args.cwd_file.as_deref(),
+        },
     );
 
     drop(guard);
     result
+}
+
+/// What `run` reads from `main` but never changes.
+struct Session<'a> {
+    config: &'a Config,
+    /// Needed to hand the terminal to a `:` command (see `TerminalGuard::run_foreground`).
+    guard: &'a TerminalGuard,
+    /// The `--cwd-file` to record the browsed directory in on `Q`, if one was given.
+    cwd_file: Option<&'a Path>,
 }
 
 fn run(
@@ -577,9 +624,13 @@ fn run(
     browser: &mut BrowserState,
     app: &mut App,
     previews: &mut Previews,
-    config: &Config,
-    cwd_file: Option<&Path>,
+    session: Session<'_>,
 ) -> Result<()> {
+    let Session {
+        config,
+        guard,
+        cwd_file,
+    } = session;
     // The tmux-style split-pane shell tree (see `shell_layout`) — `Some` for the whole time any
     // shell pane is open. Never suspends raw mode/the alternate screen: it's just tiled into the
     // frame's own area (below the status bar) as part of the normal draw.
@@ -633,6 +684,15 @@ fn run(
 
     loop {
         app.poll_bulk(browser, vfs)?;
+        app.poll_search(browser, vfs);
+        // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
+        // browser steps aside until it exits. Checked here, once per turn of the loop, because
+        // the app that recognised the command doesn't own the terminal.
+        if let Some(handover) = app.take_handover() {
+            let result = guard.run_foreground(terminal, &handover.cwd, &handover.line)?;
+            previews.reload();
+            app.finish_handover(browser, vfs, &handover, &result)?;
+        }
         // Picks up files made or changed by a mini-shell, a `:` command or another program; a
         // change to the selected file itself needs its preview re-read, since that is otherwise
         // keyed on the path alone.
@@ -1102,6 +1162,8 @@ fn run(
                 if app.is_busy() {
                     if key.code == KeyCode::Esc {
                         app.cancel_bulk();
+                    } else if config.keys.resolve(key.code) == Some(Action::Cancel) {
+                        app.cancel_all(browser);
                     }
                     continue;
                 }
@@ -1128,6 +1190,7 @@ fn run(
                     Some(Action::Create) => app.begin_create(),
                     Some(Action::Search) => app.begin_search(browser),
                     Some(Action::Command) => app.begin_command(),
+                    Some(Action::Cancel) => app.cancel_all(browser),
                     Some(Action::Select) => browser.toggle_mark(),
                     Some(Action::ToggleHidden) => {
                         let shown = browser.toggle_hidden(vfs)?;
