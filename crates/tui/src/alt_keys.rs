@@ -29,8 +29,12 @@ use crate::shell_layout::NudgeDir;
 pub enum AltCommand {
     /// `Alt+h/j/k/l`: nudge the whole box.
     Move(NudgeDir),
-    /// `Alt+a/s/d/f`: grow the box's left/bottom/top/right edge outward.
+    /// `Alt+a/d`: grow the box's left/top edge outward.
     Grow(NudgeDir),
+    /// `Alt+f`: shrink the box horizontally, pulling its right edge in.
+    ShrinkWidth,
+    /// `Alt+s`: shrink the box vertically, pulling its bottom edge in.
+    ShrinkHeight,
     /// `Alt+z/x/c/v`: move focus to the pane on that side.
     Focus(NudgeDir),
     /// `Alt+Shift+S`: split the focused pane into a new shell (or open the first one).
@@ -48,7 +52,7 @@ pub enum AltCommand {
 /// The command `key` means, or `None` when it isn't an `Alt` command at all — in which case the
 /// caller must treat it like any other key.
 ///
-/// Split is `Alt+Shift+S`, not `Alt+s`, because `Alt+s` already grows the box downward; the two
+/// Split is `Alt+Shift+S`, not `Alt+s`, because `Alt+s` already shrinks the box vertically; the two
 /// are told apart by the character's case, so a bare `Alt+s` can never split by accident.
 /// `Ctrl+Alt` combinations are left alone: they are not part of this scheme.
 pub fn parse(key: KeyEvent) -> Option<AltCommand> {
@@ -64,9 +68,9 @@ pub fn parse(key: KeyEvent) -> Option<AltCommand> {
         'k' => AltCommand::Move(NudgeDir::Up),
         'l' => AltCommand::Move(NudgeDir::Right),
         'a' => AltCommand::Grow(NudgeDir::Left),
-        's' => AltCommand::Grow(NudgeDir::Down),
+        's' => AltCommand::ShrinkHeight,
         'd' => AltCommand::Grow(NudgeDir::Up),
-        'f' => AltCommand::Grow(NudgeDir::Right),
+        'f' => AltCommand::ShrinkWidth,
         'z' => AltCommand::Focus(NudgeDir::Left),
         'x' => AltCommand::Focus(NudgeDir::Down),
         'c' => AltCommand::Focus(NudgeDir::Up),
@@ -96,9 +100,9 @@ mod tests {
             ('k', AltCommand::Move(NudgeDir::Up)),
             ('l', AltCommand::Move(NudgeDir::Right)),
             ('a', AltCommand::Grow(NudgeDir::Left)),
-            ('s', AltCommand::Grow(NudgeDir::Down)),
+            ('s', AltCommand::ShrinkHeight),
             ('d', AltCommand::Grow(NudgeDir::Up)),
-            ('f', AltCommand::Grow(NudgeDir::Right)),
+            ('f', AltCommand::ShrinkWidth),
             ('z', AltCommand::Focus(NudgeDir::Left)),
             ('x', AltCommand::Focus(NudgeDir::Down)),
             ('c', AltCommand::Focus(NudgeDir::Up)),
@@ -126,7 +130,7 @@ mod tests {
     fn alt_shift_s_splits_but_a_bare_alt_s_only_grows() {
         let shifted = KeyEvent::new(KeyCode::Char('S'), KeyModifiers::ALT | KeyModifiers::SHIFT);
         assert_eq!(parse(shifted), Some(AltCommand::Split));
-        assert_eq!(parse(alt('s')), Some(AltCommand::Grow(NudgeDir::Down)));
+        assert_eq!(parse(alt('s')), Some(AltCommand::ShrinkHeight));
     }
 
     #[test]

@@ -152,14 +152,15 @@ use the `space` leader if you need to keep them.
 | Keys | Action |
 |------|--------|
 | `Alt`+`h` `j` `k` `l` | move the whole box left / down / up / right |
-| `Alt`+`a` `s` `d` `f`  | grow the box's left / bottom / top / right edge outward |
+| `Alt`+`a` / `Alt`+`d`  | grow the box's left / top edge outward |
+| `Alt`+`f` / `Alt`+`s`  | shrink the box horizontally / vertically (top-left stays put) |
 | `Alt`+`z` `x` `c` `v`  | focus the pane to the left / below / above / right |
 | `Alt`+`Shift`+`s`      | new shell: splits the focused pane (opens the first one if none) |
 | `Alt`+`t` / `Alt`+`b`  | snap the box to the top / bottom centre of the screen |
 | `Alt`+`e`              | close the pane under the pointer (the focused one if it isn't over any) |
 | `Alt`+`q`              | close every shell |
 | `Alt`+left-drag        | move the box, grabbing it anywhere |
-| `Alt`+right-drag       | resize the box from its bottom-right corner (also shrinks it) |
+| `Alt`+right-drag       | resize the box from its bottom-right corner (grows or shrinks) |
 
 Some window managers grab `Alt`+drag before the terminal sees it; if the mouse gestures do
 nothing, change that binding in the window manager.

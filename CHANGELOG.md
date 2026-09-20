@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `tui`: an `Alt` layer for the mini-shell box, active in every mode. `Alt+h/j/k/l` moves the
-  box, `Alt+a/s/d/f` grows its left/bottom/top/right edge, `Alt+z/x/c/v` focuses the pane on
+  box, `Alt+a`/`Alt+d` grow its left/top edge, `Alt+f`/`Alt+s` shrink it horizontally/vertically, `Alt+z/x/c/v` focuses the pane on
   that side, `Alt+Shift+S` splits the focused pane (or opens the first shell), `Alt+t`/`Alt+b`
   snap the box to the top/bottom centre, `Alt+e` closes the pane under the pointer and `Alt+q`
   closes every shell. `Alt`+left-drag moves the box from anywhere on it; `Alt`+right-drag

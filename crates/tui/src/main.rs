@@ -154,7 +154,7 @@ fn shell_params_for(frame_area: Rect, target: Rect) -> ((i32, i32), (i32, i32)) 
 
 /// Grows the side of the box named by `dir` outward by `SHELL_BOX_RESIZE_STEP`, leaving the other
 /// three sides where they are — unlike the chord's fallback, which grows symmetrically. Stops at
-/// the edge of the screen. Growth only: shrinking is what the mouse's `Alt`+right-drag is for.
+/// the edge of the screen. Growth only: shrinking is `resize_box_corner`'s job.
 fn grow_box_edge(
     frame_area: Rect,
     offset: (i32, i32),
@@ -374,6 +374,19 @@ fn apply_alt_command(
         AltCommand::Grow(dir) => {
             (*shell_offset, *shell_size) =
                 grow_box_edge(frame_area, *shell_offset, *shell_size, dir);
+            panes.resize(shell_area(frame_area, *shell_offset, *shell_size))?;
+            None
+        }
+        AltCommand::ShrinkWidth | AltCommand::ShrinkHeight => {
+            // The same corner resize the mouse does, so the top-left stays put and the box can
+            // never drop below its minimum size.
+            let delta = if command == AltCommand::ShrinkWidth {
+                (-SHELL_BOX_RESIZE_STEP, 0)
+            } else {
+                (0, -SHELL_BOX_RESIZE_STEP)
+            };
+            (*shell_offset, *shell_size) =
+                resize_box_corner(frame_area, *shell_offset, *shell_size, delta);
             panes.resize(shell_area(frame_area, *shell_offset, *shell_size))?;
             None
         }

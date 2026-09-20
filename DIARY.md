@@ -1813,7 +1813,7 @@ font having those faces.
 
 The request was to make `Alt` the leader for every mini-shell command: `Alt`+left-drag moves the
 shell and `Alt`+right-drag resizes it; `Alt+hjkl` moves it, `Alt+asdf` resizes it toward
-left/bottom/top/right, `Alt+zxcv` cycles between shells in those directions, `Alt+t`/`Alt+b`
+left/bottom/top/right (later changed, see below), `Alt+zxcv` cycles between shells in those directions, `Alt+t`/`Alt+b`
 snap to the top/bottom centre, `Alt+q` closes all and `Alt+e` closes the hovered one, and
 `Alt+S` makes a new shell. As written it had three problems. `h` and `z` were both described as
 "right" (a typo for left). `Alt+s` was both "resize to the bottom" and "new shell". And it talked
@@ -1849,6 +1849,11 @@ right call for an experiment with a real cost attached.
   downward" (it sits in the `asdf` group) and the split moves to the shifted key, told apart by
   the character's case. One place to change if a different key is preferred. With no shell open
   it opens the first one, so it also replaces `s` from any mode.
+- **Revised the same day: `Alt+f` and `Alt+s` shrink, `Alt+a` and `Alt+d` grow.** After trying
+  it, the user asked for `f` to make the box narrower and `s` to make it shorter. They reuse the
+  mouse's corner resize (`resize_box_corner`), so the top-left stays put, a press is 2 cells,
+  and the box stops at its minimum size. Keyboard growth to the right and downward is gone;
+  `Alt`+right-drag still does it. The next two paragraphs describe the original all-grow design.
 - **`Alt+asdf` grow the box's edge, never a pane divider.** I had said the chord's
   divider-first-then-box fallback would be kept. On reflection that is incoherent for a
   directional edge key: `a` would sometimes move the box's left side and sometimes an internal
