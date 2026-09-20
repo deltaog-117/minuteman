@@ -755,6 +755,18 @@ impl ShellPanes {
         self.focused
     }
 
+    /// The focused pane's on-screen rect against `area`, so a caller can pick a split direction
+    /// from its shape. Falls back to `area` itself, which is only reachable if `focused` were
+    /// stale — something every mutation already rules out.
+    pub fn focused_rect(&self, area: Rect) -> Rect {
+        let mut rects = Vec::new();
+        leaf_rects(&self.root, area, &mut rects);
+        rects
+            .into_iter()
+            .find(|(id, _)| *id == self.focused)
+            .map_or(area, |(_, rect)| rect)
+    }
+
     /// The currently-focused pane's shell — always present: every mutation that could remove or
     /// replace the focused leaf also reassigns `focused` to one that still exists.
     pub fn focused_shell(&mut self) -> &mut PopupShell {
@@ -831,6 +843,21 @@ impl ShellPanes {
                 Ok(Some(self))
             }
         }
+    }
+
+    /// Closes every pane, killing and reaping each shell — dropping a `ShellPanes` would leave
+    /// the child processes running, since `PopupShell` has no `Drop` of its own. Iterates over a
+    /// snapshot of the ids so it terminates even if a close were ever to report `NotFound`.
+    pub fn close_all(mut self, area: Rect) -> anyhow::Result<()> {
+        let mut ids = Vec::new();
+        leaf_ids(&self.root, &mut ids);
+        for id in ids {
+            match self.close(id, area)? {
+                Some(rest) => self = rest,
+                None => return Ok(()),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1114,6 +1141,29 @@ mod tests {
             }
             SplitOutcome::NotFound(..) => panic!("expected Split"),
         }
+    }
+
+    #[test]
+    fn close_all_tears_down_a_split_tree_without_error() {
+        let area = Rect::new(0, 0, 80, 24);
+        let panes = ShellPanes::open(&std::env::temp_dir(), area).unwrap();
+        let panes = panes
+            .split(SplitDirection::Horizontal, &std::env::temp_dir(), area)
+            .unwrap();
+        let panes = panes
+            .split(SplitDirection::Vertical, &std::env::temp_dir(), area)
+            .unwrap();
+        panes.close_all(area).unwrap();
+    }
+
+    #[test]
+    fn focused_rect_of_a_lone_pane_is_the_whole_area() {
+        let area = Rect::new(2, 3, 80, 24);
+        let panes = ShellPanes::open(&std::env::temp_dir(), area).unwrap();
+        assert_eq!(panes.focused_rect(area), area);
+
+        let id = panes.focused_id();
+        assert!(panes.close(id, area).unwrap().is_none());
     }
 
     #[test]

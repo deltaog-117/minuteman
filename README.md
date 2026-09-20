@@ -142,6 +142,28 @@ hood `mm` runs `minuteman --cwd-file <tmpfile>`; `Q` writes the directory there 
 Pressing `space` lists these in the status bar. Clicking a pane focuses it and starts typing;
 dragging a divider, the box's title bar, or its right border resizes and moves things.
 
+#### The `Alt` layer
+
+Holding `Alt` drives the shell box directly, in every mode — typing, browsing, or mid-chord — and
+the shell inside never sees these keys. That means `Alt+b`, `Alt+f`, `Alt+d`, `Alt+t` (readline's
+word motions) and `Alt+hjkl` (tmux-style navigation) no longer reach a shell running in the box;
+use the `space` leader if you need to keep them.
+
+| Keys | Action |
+|------|--------|
+| `Alt`+`h` `j` `k` `l` | move the whole box left / down / up / right |
+| `Alt`+`a` `s` `d` `f`  | grow the box's left / bottom / top / right edge outward |
+| `Alt`+`z` `x` `c` `v`  | focus the pane to the left / below / above / right |
+| `Alt`+`Shift`+`s`      | new shell: splits the focused pane (opens the first one if none) |
+| `Alt`+`t` / `Alt`+`b`  | snap the box to the top / bottom centre of the screen |
+| `Alt`+`e`              | close the pane under the pointer (the focused one if it isn't over any) |
+| `Alt`+`q`              | close every shell |
+| `Alt`+left-drag        | move the box, grabbing it anywhere |
+| `Alt`+right-drag       | resize the box from its bottom-right corner (also shrinks it) |
+
+Some window managers grab `Alt`+drag before the terminal sees it; if the mouse gestures do
+nothing, change that binding in the window manager.
+
 While a prompt is active (rename/create/delete-confirm/conflict/search/command), `Enter` submits
 and `Esc` cancels; the keybindings above are not resolved until the prompt closes. `Esc` while
 searching also restores the selection you had before the search started. While a paste or delete

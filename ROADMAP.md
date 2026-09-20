@@ -365,6 +365,27 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   commented default; a `[theme]`/`[ui]` still in `config.toml` keeps working, with the
   appearance file winning per field. Verified against the real binary: attributes read off the
   screen for the defaults, a custom file, and legacy layering; a malformed file falls back.
+- ✅ **`Alt` layer for the mini-shell box** – holding `Alt` now drives the box directly, in every
+  mode, without touching the `space` leader chord (which still owns the explicit `|`/`-` splits,
+  flipping a split, and the divider-resize and `r`/`m` modes). `Alt+hjkl` moves the box, `Alt+asdf` grows its
+  left/bottom/top/right edge outward one edge at a time, `Alt+zxcv` focuses the pane on that
+  side, `Alt+Shift+S` splits the focused pane (picking side-by-side or stacked from its shape,
+  and opening the first shell when none is open), `Alt+t`/`Alt+b` snap the box to the top or
+  bottom centre, `Alt+e` closes the pane under the pointer (the focused one if the pointer isn't
+  over any) and `Alt+q` closes every shell. With the mouse, `Alt`+left-drag grabs the box
+  anywhere and `Alt`+right-drag resizes it from the bottom-right corner (growing or shrinking).
+  Chosen as COA A — the existing single box with tiled panes — over independent floating
+  windows, so "the shell" in a move or resize is the whole box, not one pane. **Reverses** the
+  earlier decision not to use `Alt`-prefixed keys (see the chord entry above): a shell in the box
+  no longer receives `Alt+b/f/d/t` (readline word motions) or `Alt+hjkl` (tmux navigation), by
+  request. Split is `Alt+Shift+S` rather than `Alt+s` because `Alt+s` was also asked to grow the
+  box downward. New pure `tui::alt_keys` module parses the keys; new `shell_params_for` inverts
+  `shell_area`, which is what makes one-sided edge growth and exact snapping possible;
+  `ShellPanes` gained `focused_rect` and `close_all` (a dropped `ShellPanes` would leave its
+  child shells running). `Alt+q` used to be a plain `q` and quit from browse mode; it no longer
+  does. Verified against the real binary through a PTY read with `pyte`: every key above moved,
+  grew, focused, split, snapped or closed exactly as described, plain letters still reached a
+  focused shell.
 
 ---
 
@@ -428,6 +449,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    `Esc` stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
    `space space` goes back to typing, `space x` closes a pane. `space t` flips a split, and
    `space r`/`space m` plus `hjkl` resize/move (`Esc` leaves either mode).
+   Try the new `Alt` layer too: `Alt+Shift+S` splits, `Alt+hjkl` moves the box, `Alt+asdf` grows
+   an edge, `Alt+zxcv` changes pane, `Alt+t`/`Alt+b` snap to the top/bottom, `Alt+e`/`Alt+q`
+   close one/all, and `Alt`+drag with the left/right button moves/resizes. If the mouse
+   gestures do nothing, your window manager is probably grabbing `Alt`+drag.
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks

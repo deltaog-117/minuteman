@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+mod alt_keys;
 mod app;
 mod cli;
 mod glyphs;
@@ -30,12 +31,13 @@ use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+use alt_keys::AltCommand;
 use anyhow::Result;
 use app::App;
 use browser::BrowserState;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -44,7 +46,7 @@ use crossterm::terminal::{
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
@@ -89,13 +91,8 @@ const MIN_SHELL_BOX_HEIGHT: u16 = 6;
 /// across the whole screen. `draw` calls this same function for rendering, so a pane's pty size
 /// can never drift from its actual rendered rect.
 fn shell_area(frame_area: Rect, offset: (i32, i32), size_adjust: (i32, i32)) -> Rect {
-    let browser_area = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(frame_area)[0];
-
-    let default_width = browser_area.width.saturating_mul(4) / 5;
-    let default_height = browser_area.height.saturating_mul(7) / 10;
+    let browser_area = shell_bounds(frame_area);
+    let (default_width, default_height) = default_shell_size(browser_area);
 
     // Clamped to `u16::MAX` before the cast (size_adjust, like offset, is never itself clamped at
     // the accumulator — see the resize-chord handling in `run` — so an extreme value must not
@@ -118,6 +115,121 @@ fn shell_area(frame_area: Rect, offset: (i32, i32), size_adjust: (i32, i32)) -> 
     let y = (centered_y + offset.1).clamp(min_y, max_y.max(min_y));
 
     Rect::new(x as u16, y as u16, width, height)
+}
+
+/// The region the shell box must stay inside: the frame minus the one-row status bar.
+fn shell_bounds(frame_area: Rect) -> Rect {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(frame_area)[0]
+}
+
+/// The box's size when `size_adjust` is `(0, 0)`: 80% of `bounds`' width, 70% of its height.
+fn default_shell_size(bounds: Rect) -> (u16, u16) {
+    (
+        bounds.width.saturating_mul(4) / 5,
+        bounds.height.saturating_mul(7) / 10,
+    )
+}
+
+/// The inverse of `shell_area`: the `(offset, size_adjust)` pair that makes it return `target`.
+/// `shell_area` only knows "centered, then nudged", so anything that wants a box pinned to one
+/// edge or anchored at one corner — growing a single side, snapping to the top — has to be
+/// expressed as the offset and size adjustment that produce that rect. `target` must already lie
+/// inside `shell_bounds` and respect the minimum size, or `shell_area` will clamp it again.
+fn shell_params_for(frame_area: Rect, target: Rect) -> ((i32, i32), (i32, i32)) {
+    let bounds = shell_bounds(frame_area);
+    let (default_width, default_height) = default_shell_size(bounds);
+    let centered_x = bounds.x as i32 + (bounds.width as i32 - target.width as i32) / 2;
+    let centered_y = bounds.y as i32 + (bounds.height as i32 - target.height as i32) / 2;
+    (
+        (target.x as i32 - centered_x, target.y as i32 - centered_y),
+        (
+            target.width as i32 - default_width as i32,
+            target.height as i32 - default_height as i32,
+        ),
+    )
+}
+
+/// Grows the side of the box named by `dir` outward by `SHELL_BOX_RESIZE_STEP`, leaving the other
+/// three sides where they are — unlike the chord's fallback, which grows symmetrically. Stops at
+/// the edge of the screen. Growth only: shrinking is what the mouse's `Alt`+right-drag is for.
+fn grow_box_edge(
+    frame_area: Rect,
+    offset: (i32, i32),
+    size_adjust: (i32, i32),
+    dir: NudgeDir,
+) -> ((i32, i32), (i32, i32)) {
+    let bounds = shell_bounds(frame_area);
+    let area = shell_area(frame_area, offset, size_adjust);
+    let (bounds_right, bounds_bottom) = (
+        bounds.x as i32 + bounds.width as i32,
+        bounds.y as i32 + bounds.height as i32,
+    );
+    let (mut left, mut top) = (area.x as i32, area.y as i32);
+    let (mut right, mut bottom) = (left + area.width as i32, top + area.height as i32);
+    match dir {
+        NudgeDir::Left => left = (left - SHELL_BOX_RESIZE_STEP).max(bounds.x as i32),
+        NudgeDir::Right => right = (right + SHELL_BOX_RESIZE_STEP).min(bounds_right),
+        NudgeDir::Up => top = (top - SHELL_BOX_RESIZE_STEP).max(bounds.y as i32),
+        NudgeDir::Down => bottom = (bottom + SHELL_BOX_RESIZE_STEP).min(bounds_bottom),
+    }
+    let target = Rect::new(
+        left as u16,
+        top as u16,
+        (right - left) as u16,
+        (bottom - top) as u16,
+    );
+    shell_params_for(frame_area, target)
+}
+
+/// Moves the box's bottom-right corner by `delta` cells while its top-left stays put — what
+/// `Alt`+right-drag does, so dragging right/down grows it and left/up shrinks it. Clamped to the
+/// minimum size and to the screen.
+fn resize_box_corner(
+    frame_area: Rect,
+    offset: (i32, i32),
+    size_adjust: (i32, i32),
+    delta: (i32, i32),
+) -> ((i32, i32), (i32, i32)) {
+    let bounds = shell_bounds(frame_area);
+    let area = shell_area(frame_area, offset, size_adjust);
+    let room_width =
+        (bounds.x as i32 + bounds.width as i32 - area.x as i32).max(MIN_SHELL_BOX_WIDTH as i32);
+    let room_height =
+        (bounds.y as i32 + bounds.height as i32 - area.y as i32).max(MIN_SHELL_BOX_HEIGHT as i32);
+    let width = (area.width as i32 + delta.0).clamp(MIN_SHELL_BOX_WIDTH as i32, room_width);
+    let height = (area.height as i32 + delta.1).clamp(MIN_SHELL_BOX_HEIGHT as i32, room_height);
+    shell_params_for(
+        frame_area,
+        Rect::new(area.x, area.y, width as u16, height as u16),
+    )
+}
+
+/// The offset that pins the box to the top or bottom edge of the screen while keeping it
+/// horizontally centered, at its current size. Computed exactly rather than by pushing the offset
+/// to a huge value and letting `shell_area` clamp it, because the offset accumulator is never
+/// itself clamped — an inflated value would take just as many key presses to come back from.
+fn snap_box_offset(
+    frame_area: Rect,
+    offset: (i32, i32),
+    size_adjust: (i32, i32),
+    to_top: bool,
+) -> (i32, i32) {
+    let bounds = shell_bounds(frame_area);
+    let area = shell_area(frame_area, offset, size_adjust);
+    let x = bounds.x as i32 + (bounds.width as i32 - area.width as i32) / 2;
+    let y = if to_top {
+        bounds.y as i32
+    } else {
+        bounds.y as i32 + bounds.height as i32 - area.height as i32
+    };
+    shell_params_for(
+        frame_area,
+        Rect::new(x as u16, y as u16, area.width, area.height),
+    )
+    .0
 }
 
 /// The tiled shell panes plus the box's current offset/size adjustment from its centered default
@@ -204,6 +316,114 @@ fn apply_shell_chord(
         },
     }
     Ok(())
+}
+
+/// Opens a shell box from scratch: centered at its default size, like every fresh spawn.
+fn fresh_shell_box(
+    cwd: &Path,
+    frame_area: Rect,
+    shell_offset: &mut (i32, i32),
+    shell_size: &mut (i32, i32),
+) -> Result<ShellPanes> {
+    *shell_offset = (0, 0);
+    *shell_size = (0, 0);
+    ShellPanes::open(cwd, shell_area(frame_area, *shell_offset, *shell_size))
+}
+
+/// Carries out one `Alt` command (see `alt_keys`) against the shell box, returning a status
+/// message when there is something worth telling the user. Works the same whether the shell has
+/// the keyboard or not, since `Alt` never reaches a shell at all. `hovered` is where the pointer
+/// last was, for the one command (`CloseHovered`) that acts on whatever is under it.
+fn apply_alt_command(
+    command: AltCommand,
+    shells: &mut Option<ShellPanes>,
+    shell_offset: &mut (i32, i32),
+    shell_size: &mut (i32, i32),
+    hovered: Option<(u16, u16)>,
+    cwd: &Path,
+    frame_area: Rect,
+) -> Result<Option<String>> {
+    let Some(mut panes) = shells.take() else {
+        // With nothing open there is nothing to move or close, but a new shell is exactly what
+        // `Split` is for, so it doubles as "open the first one".
+        if command != AltCommand::Split {
+            return Ok(Some("no shell open".into()));
+        }
+        return Ok(
+            match fresh_shell_box(cwd, frame_area, shell_offset, shell_size) {
+                Ok(opened) => {
+                    *shells = Some(opened);
+                    None
+                }
+                Err(e) => Some(format!("failed to start shell: {e}")),
+            },
+        );
+    };
+
+    let area = shell_area(frame_area, *shell_offset, *shell_size);
+    let status = match command {
+        AltCommand::Move(dir) => {
+            match dir {
+                NudgeDir::Left => shell_offset.0 -= SHELL_MOVE_STEP,
+                NudgeDir::Right => shell_offset.0 += SHELL_MOVE_STEP,
+                NudgeDir::Up => shell_offset.1 -= SHELL_MOVE_STEP,
+                NudgeDir::Down => shell_offset.1 += SHELL_MOVE_STEP,
+            }
+            None
+        }
+        AltCommand::Grow(dir) => {
+            (*shell_offset, *shell_size) =
+                grow_box_edge(frame_area, *shell_offset, *shell_size, dir);
+            panes.resize(shell_area(frame_area, *shell_offset, *shell_size))?;
+            None
+        }
+        AltCommand::Focus(dir) => {
+            (!panes.focus_direction(dir, area)).then(|| "no shell that way".into())
+        }
+        AltCommand::Split => {
+            // Terminal cells are about twice as tall as wide, so a pane at least twice as wide as
+            // it is tall is the one that looks landscape and should be cut side by side.
+            let rect = panes.focused_rect(area);
+            let direction = if rect.width >= rect.height.saturating_mul(2) {
+                SplitDirection::Horizontal
+            } else {
+                SplitDirection::Vertical
+            };
+            panes = panes.split(direction, cwd, area)?;
+            None
+        }
+        AltCommand::SnapTop | AltCommand::SnapBottom => {
+            *shell_offset = snap_box_offset(
+                frame_area,
+                *shell_offset,
+                *shell_size,
+                command == AltCommand::SnapTop,
+            );
+            None
+        }
+        AltCommand::CloseAll => {
+            panes.close_all(area)?;
+            return Ok(Some("shells closed".into()));
+        }
+        AltCommand::CloseHovered => {
+            // Off the box entirely (or before any mouse movement) there is nothing hovered, so
+            // fall back to the focused pane rather than making a keyboard-only user unable to
+            // close anything.
+            if let Some((col, row)) = hovered {
+                panes.focus_at(area, col, row);
+            }
+            let id = panes.focused_id();
+            match panes.close(id, area)? {
+                Some(rest) => {
+                    panes = rest;
+                    Some("pane closed".into())
+                }
+                None => return Ok(Some("shell closed".into())),
+            }
+        }
+    };
+    *shells = Some(panes);
+    Ok(status)
 }
 
 /// The image and text preview pipelines, bundled together since every call site drives both in
@@ -327,6 +547,12 @@ fn run(
     // The mouse column last seen while dragging the box's own right border, to resize its width
     // (see `shell_size`). `None` means no such drag is in progress.
     let mut dragging_shell_width: Option<u16> = None;
+    // The mouse position last seen while `Alt`+right-dragging to resize the box from its
+    // bottom-right corner (see `resize_box_corner`). `None` means no such drag is in progress.
+    let mut alt_resizing: Option<(u16, u16)> = None;
+    // Where the pointer last was, from any mouse event — what "hovered" means to `Alt+e`. `None`
+    // until the mouse first moves.
+    let mut mouse_pos: Option<(u16, u16)> = None;
     // Set for exactly one keystroke after `Leader` (space) is pressed while panes are open,
     // waiting to see whether it's followed by `r` (resize chord), `m` (move chord), or `t` (an
     // immediate orientation toggle, no chord); any other key just drops it. See `ShellChordMode`.
@@ -425,12 +651,46 @@ fn run(
                 }
             }
             Event::Mouse(mouse) => {
+                mouse_pos = Some((mouse.column, mouse.row));
                 let Some(panes) = shells.as_mut() else {
                     continue;
                 };
                 let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
                 let right_edge = area.x + area.width.saturating_sub(1);
+                let over_box = area.contains(Position::new(mouse.column, mouse.row));
+                let alt_held = mouse.modifiers.contains(KeyModifiers::ALT);
                 match mouse.kind {
+                    // `Alt` + left button anywhere on the box grabs the whole box, exactly like
+                    // its title bar does, so it takes priority over every border and divider hit
+                    // below — those would otherwise swallow a grab that lands on them. The drag
+                    // itself is the ordinary `dragging_shell` one, so it needs no `Alt` to keep
+                    // going: releasing the key mid-drag doesn't drop the box.
+                    MouseEventKind::Down(MouseButton::Left) if alt_held && over_box => {
+                        dragging_shell = Some((mouse.column, mouse.row));
+                        if panes.focus_at(area, mouse.column, mouse.row) {
+                            shell_focused = true;
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Right) if alt_held && over_box => {
+                        alt_resizing = Some((mouse.column, mouse.row));
+                    }
+                    MouseEventKind::Drag(MouseButton::Right) => {
+                        if let Some((last_col, last_row)) = alt_resizing {
+                            let frame_area: Rect = terminal.size()?.into();
+                            (shell_offset, shell_size) = resize_box_corner(
+                                frame_area,
+                                shell_offset,
+                                shell_size,
+                                (
+                                    mouse.column as i32 - last_col as i32,
+                                    mouse.row as i32 - last_row as i32,
+                                ),
+                            );
+                            alt_resizing = Some((mouse.column, mouse.row));
+                            panes.resize(shell_area(frame_area, shell_offset, shell_size))?;
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Right) => alt_resizing = None,
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(divider) = panes
                             .dividers(area)
@@ -496,6 +756,33 @@ fn run(
             }
             Event::Key(key) => {
                 if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                // `Alt` commands come first and work in every mode — typing in a shell, browsing,
+                // mid-chord — because a held `Alt` is what says "this is for the shell box, not
+                // the shell inside it". Skipped only under a text prompt, which owns the keyboard.
+                if app.prompt.is_none()
+                    && let Some(command) = alt_keys::parse(key)
+                {
+                    pending_leader = false;
+                    shell_chord = None;
+                    dragging_divider = None;
+                    // A new shell is where you'd want to type, same as the leader's split.
+                    if command == AltCommand::Split {
+                        shell_focused = true;
+                    }
+                    if let Some(message) = apply_alt_command(
+                        command,
+                        &mut shells,
+                        &mut shell_offset,
+                        &mut shell_size,
+                        mouse_pos,
+                        browser.current_dir(),
+                        terminal.size()?.into(),
+                    )? {
+                        app.status = Some(message);
+                    }
                     continue;
                 }
 
@@ -697,12 +984,12 @@ fn run(
                     // tree here would silently drop the running one without closing it. Use a
                     // split instead once a shell is already open.
                     Some(Action::Shell) if shells.is_none() => {
-                        // Every fresh spawn starts centered at its default size, same as before
-                        // the box was made draggable/resizable.
-                        shell_offset = (0, 0);
-                        shell_size = (0, 0);
-                        let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
-                        match ShellPanes::open(browser.current_dir(), area) {
+                        match fresh_shell_box(
+                            browser.current_dir(),
+                            terminal.size()?.into(),
+                            &mut shell_offset,
+                            &mut shell_size,
+                        ) {
                             Ok(panes) => {
                                 shells = Some(panes);
                                 shell_focused = true;
@@ -1114,5 +1401,117 @@ mod tests {
         let tiny = shell_area(frame, (0, 0), (-10_000, -10_000));
         assert_eq!(tiny.width, MIN_SHELL_BOX_WIDTH);
         assert_eq!(tiny.height, MIN_SHELL_BOX_HEIGHT);
+    }
+
+    #[test]
+    fn shell_params_for_is_the_exact_inverse_of_shell_area() {
+        // Swept rather than sampled: every position and a spread of sizes that fit the bounds,
+        // on both an even and an odd-sized screen, since the centering math rounds differently.
+        for frame in [Rect::new(0, 0, 100, 40), Rect::new(0, 0, 91, 33)] {
+            let bounds = shell_bounds(frame);
+            for width in (MIN_SHELL_BOX_WIDTH..=bounds.width).step_by(7) {
+                for height in (MIN_SHELL_BOX_HEIGHT..=bounds.height).step_by(5) {
+                    for x in (0..=bounds.width - width).step_by(3) {
+                        for y in 0..=bounds.height - height {
+                            let target = Rect::new(x, y, width, height);
+                            let (offset, size) = shell_params_for(frame, target);
+                            assert_eq!(shell_area(frame, offset, size), target);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grow_box_edge_moves_only_the_named_side() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let before = shell_area(frame, (0, 0), (0, 0));
+        let step = SHELL_BOX_RESIZE_STEP as u16;
+        let grown = |dir| {
+            let (offset, size) = grow_box_edge(frame, (0, 0), (0, 0), dir);
+            shell_area(frame, offset, size)
+        };
+
+        let left = grown(NudgeDir::Left);
+        assert_eq!((left.x, left.width), (before.x - step, before.width + step));
+        assert_eq!((left.y, left.height), (before.y, before.height));
+
+        let right = grown(NudgeDir::Right);
+        assert_eq!((right.x, right.width), (before.x, before.width + step));
+
+        let up = grown(NudgeDir::Up);
+        assert_eq!((up.y, up.height), (before.y - step, before.height + step));
+        assert_eq!((up.x, up.width), (before.x, before.width));
+
+        let down = grown(NudgeDir::Down);
+        assert_eq!((down.y, down.height), (before.y, before.height + step));
+    }
+
+    #[test]
+    fn grow_box_edge_stops_at_the_screen_edge() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let (mut offset, mut size) = ((0, 0), (0, 0));
+        for _ in 0..200 {
+            (offset, size) = grow_box_edge(frame, offset, size, NudgeDir::Left);
+            (offset, size) = grow_box_edge(frame, offset, size, NudgeDir::Up);
+        }
+        let area = shell_area(frame, offset, size);
+        assert_eq!((area.x, area.y), (0, 0));
+        // The far sides never moved while the near ones were being grown out.
+        assert_eq!(area.x + area.width, 90);
+        assert_eq!(area.y + area.height, 33);
+    }
+
+    #[test]
+    fn resize_box_corner_keeps_the_top_left_and_respects_the_limits() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let before = shell_area(frame, (0, 0), (0, 0));
+
+        let (offset, size) = resize_box_corner(frame, (0, 0), (0, 0), (-6, -3));
+        let smaller = shell_area(frame, offset, size);
+        assert_eq!((smaller.x, smaller.y), (before.x, before.y));
+        assert_eq!(
+            (smaller.width, smaller.height),
+            (before.width - 6, before.height - 3)
+        );
+
+        let (offset, size) = resize_box_corner(frame, (0, 0), (0, 0), (-10_000, -10_000));
+        let floor = shell_area(frame, offset, size);
+        assert_eq!(
+            (floor.width, floor.height),
+            (MIN_SHELL_BOX_WIDTH, MIN_SHELL_BOX_HEIGHT)
+        );
+
+        let (offset, size) = resize_box_corner(frame, (0, 0), (0, 0), (10_000, 10_000));
+        let ceiling = shell_area(frame, offset, size);
+        assert_eq!((ceiling.x, ceiling.y), (before.x, before.y));
+        assert_eq!(
+            (ceiling.x + ceiling.width, ceiling.y + ceiling.height),
+            (100, 39)
+        );
+    }
+
+    #[test]
+    fn snap_box_offset_pins_to_the_top_or_bottom_and_stays_centered() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let default = shell_area(frame, (0, 0), (0, 0));
+
+        // Starting from an off-center box, so the horizontal re-centering is actually exercised.
+        let start = (17, -4);
+        let top = shell_area(frame, snap_box_offset(frame, start, (0, 0), true), (0, 0));
+        assert_eq!((top.x, top.y), (default.x, 0));
+        assert_eq!((top.width, top.height), (default.width, default.height));
+
+        let bottom = shell_area(frame, snap_box_offset(frame, start, (0, 0), false), (0, 0));
+        assert_eq!((bottom.x, bottom.y + bottom.height), (default.x, 39));
+    }
+
+    #[test]
+    fn snapping_leaves_a_small_offset_not_an_inflated_one() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let offset = snap_box_offset(frame, (0, 0), (0, 0), true);
+        // Bounded by the screen, so a single opposite nudge is never lost in accumulated slack.
+        assert!(offset.1.abs() <= 40, "offset {offset:?}");
     }
 }

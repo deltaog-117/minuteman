@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: an `Alt` layer for the mini-shell box, active in every mode. `Alt+h/j/k/l` moves the
+  box, `Alt+a/s/d/f` grows its left/bottom/top/right edge, `Alt+z/x/c/v` focuses the pane on
+  that side, `Alt+Shift+S` splits the focused pane (or opens the first shell), `Alt+t`/`Alt+b`
+  snap the box to the top/bottom centre, `Alt+e` closes the pane under the pointer and `Alt+q`
+  closes every shell. `Alt`+left-drag moves the box from anywhere on it; `Alt`+right-drag
+  resizes it from the bottom-right corner.
 - `theming`: `appearance.toml` (in `~/.config/minuteman/`) holds the whole look in one file:
   `[theme]` colors, `[ui]` glyphs, and two new tables. `minuteman init-appearance` prints the
   fully commented default (`appearance.example.toml`).
@@ -250,6 +256,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: `Alt`-prefixed letters are no longer forwarded to a shell in the mini-shell box:
+  `Alt+b/f/d/t` (readline word motions) and `Alt+h/j/k/l` (tmux navigation) now drive the box
+  instead. `Alt+q` no longer quits from browse mode. The `space` leader is unchanged.
 - `tui`: directories and executables are now bold by default (like Ranger). Every bold in the
   interface was hardcoded before and is now a `[style]` default.
 - `theming`: a `[theme]` or `[ui]` table in `config.toml` is still honored, but values in

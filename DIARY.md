@@ -33,6 +33,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-18 | Shell Pane Container Sizing | Centered 80%/70% box, not the full browser area | ✅ Confirmed |
 | 2026-09-18 | Shell Box Drag Mechanism | Drag the box's title bar by mouse, offset re-added to `shell_area` (COA A) | ✅ Confirmed |
 | 2026-09-18 | Batch Yank/Cut/Paste Continuation | `Clipboard` holds `Vec<PathBuf>`, `poll_bulk` re-spawns the next item itself (COA A) | ✅ Confirmed |
+| 2026-09-20 | Alt Layer for Mini-Shell Box | Held `Alt` drives the existing single box; independent floating windows rejected (COA A) | ✅ Confirmed |
 
 ---
 
@@ -1799,6 +1800,113 @@ table, and with a malformed file warned and used the default font. `init-appeara
 byte-identical to `appearance.example.toml` and parses as TOML with the four tables. Not
 verified: how the italic and underline look in your terminal font, since that depends on the
 font having those faces.
+
+---
+
+### Alt Layer for the Mini-Shell Box: One Held Modifier, the Existing Single Box (COA A)
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+The request was to make `Alt` the leader for every mini-shell command: `Alt`+left-drag moves the
+shell and `Alt`+right-drag resizes it; `Alt+hjkl` moves it, `Alt+asdf` resizes it toward
+left/bottom/top/right, `Alt+zxcv` cycles between shells in those directions, `Alt+t`/`Alt+b`
+snap to the top/bottom centre, `Alt+q` closes all and `Alt+e` closes the hovered one, and
+`Alt+S` makes a new shell. As written it had three problems. `h` and `z` were both described as
+"right" (a typo for left). `Alt+s` was both "resize to the bottom" and "new shell". And it talked
+about several individually movable shells, while the code has one box holding a tiled split
+tree.
+
+It also reverses a deliberate choice. The `space` chord entry in `ROADMAP.md` explicitly refused
+`Alt+hjkl` because a shell running inside a pane may use it (tmux navigation), and `Alt+b/f/d/t`
+are readline's word motions. Making `Alt` the leader takes all of those away from the shell.
+That was accepted, in the user's words "trying out", with the cost stated up front.
+
+#### Options Considered
+
+- **A: keep the single box with tiled panes and add the `Alt` layer over it.** Smallest change,
+  nothing shipped is lost. Cost: "the shell" in a move/resize is the whole box, not one pane.
+- **B: independent floating windows** (`Vec<FloatingShell>`, per-window rect and z-order,
+  tiling removed). The most literal reading of the request, but a rewrite that deletes about
+  1,350 lines of tiling code and its tests, and needs overlap hit-testing.
+- **C: several floating boxes, each keeping its own split tree.** Independent windows without
+  losing tiling, but two levels of "shell" make `Alt+e` and `Alt+zxcv` ambiguous.
+
+I recommended C; the user chose **A** as the easiest and the easiest to revert, which is the
+right call for an experiment with a real cost attached.
+
+#### Decision & Rationale
+
+- **`Alt` is parsed in one pure place.** `tui::alt_keys::parse` maps a `KeyEvent` to an
+  `AltCommand` and nothing else, so the whole key table is unit-tested without a terminal.
+  Hardcoded rather than routed through `KeyMap`, which has no modifier awareness — the same
+  precedent as the leader chord's own keys. It is checked before the leader and the typing mode,
+  so it works in every mode, and it is skipped only under a text prompt.
+- **`Alt+Shift+S` is the split, not `Alt+s`.** Both were asked for; `Alt+s` stays "grow
+  downward" (it sits in the `asdf` group) and the split moves to the shifted key, told apart by
+  the character's case. One place to change if a different key is preferred. With no shell open
+  it opens the first one, so it also replaces `s` from any mode.
+- **`Alt+asdf` grow the box's edge, never a pane divider.** I had said the chord's
+  divider-first-then-box fallback would be kept. On reflection that is incoherent for a
+  directional edge key: `a` would sometimes move the box's left side and sometimes an internal
+  divider depending on the pane layout. Dividers stay reachable by mouse and by `space r`. The
+  keys only grow; shrinking is `Alt`+right-drag.
+- **Edge growth needed the inverse of `shell_area`.** The box was only ever "centered, then
+  nudged by `offset` and `size_adjust`", so growing one side, anchoring a corner or snapping to
+  an edge had no direct representation. `shell_params_for` computes the `(offset, size_adjust)`
+  that makes `shell_area` return a target rect, and grow, corner-resize and snap all build on
+  it. Snapping computes the exact offset instead of pushing it to a huge value and letting
+  `shell_area` clamp, because the offset accumulator is never clamped and an inflated value
+  would take as many presses to undo.
+- **`Alt+e` falls back to the focused pane** when the pointer is not over the box (or has not
+  moved yet), so a keyboard-only user is not left unable to close anything.
+- **Split direction is picked from the pane's shape.** A pane at least twice as wide as tall
+  (cells are about twice as tall as wide) splits side by side, otherwise stacked, so repeated
+  `Alt+Shift+S` does not just carve ever-narrower slivers.
+- **`Alt+left-drag` reuses the title-bar drag state** (`dragging_shell`), and is matched before
+  the divider and border hits, which would otherwise swallow a grab that lands on them. Releasing
+  `Alt` mid-drag does not drop the box.
+
+#### Implementation Notes
+
+- `ShellPanes::close_all` is new because dropping a `ShellPanes` does not stop its children:
+  `PopupShell` has no `Drop`, only an explicit `close`. It iterates over a snapshot of the leaf
+  ids so it terminates even if a close reported `NotFound`. `ShellPanes::focused_rect` is new
+  for the split direction.
+- `Alt+q` used to be a plain `q` in browse mode and quit the app, because `KeyMap::resolve`
+  ignores modifiers. It now reports "no shell open". Not fixed: other `Alt`+letter keys in
+  browse mode that are not part of this scheme still resolve as the plain letter.
+- Not done: shrink keys, and an `Alt` hint in the status bar (the leader's hints list its keys;
+  these are only in the README for now).
+- Known risk, not something the code can fix: several window managers (KDE, and i3/sway with
+  `Alt` as the modifier) grab `Alt`+drag before the terminal sees it.
+
+#### Verification
+
+`cargo test --workspace` passes (191 tests, 13 new in `tui`); clippy is clean. Ran the real
+binary on a PTY through `pyte`, sending real `ESC`-prefixed keys and SGR mouse sequences with the
+`Alt` bit set. `Alt+l` ×3 moved the box by 6 columns and back with `Alt+h` ×3; `Alt+j` ×2 and
+`Alt+k` ×2 moved it by 4 rows and back. Two presses of each of `Alt+a/d/f/s` moved only the left,
+top, right and bottom edge respectively, by 4 cells, with the other three edges unchanged. `Alt+S`
+split a 96×27 box side by side, the new pane took focus, `Alt+z`/`Alt+v` moved typing between the
+left and right pane (and `Alt+v` at the edge said "no shell that way"), and a second `Alt+S` on
+the narrower pane stacked; `Alt+c`/`Alt+x` moved between the stacked panes. With the pointer over
+the left pane, `Alt+e` closed that pane and left the others. `Alt+t` pinned the box to row 0 and
+`Alt+b` to the row above the status bar, both horizontally centred with the size unchanged, and a
+following `Alt+k` moved exactly 2 rows, so no offset slack was left behind. `Alt`+left-drag by
+(+7, +3) from the middle of a pane moved the box by exactly that. `Alt`+right-drag by (−10, 0),
+(0, −5) and (+6, +3) resized it with the top-left fixed, and `stty size` inside the shell
+reported the matching pty size (23×90). With no shell open, `Alt+q` kept the app alive and said
+"no shell open" instead of quitting, `Alt+S` opened the first shell, and `Alt+q` with shells open
+closed them all. Plain `t b q e h j k l a s d f z x c v` typed into a focused shell arrived
+untouched. One harness detail: the first key after startup is swallowed by the terminal
+capability probe because nothing on the PTY answers it, so the harness sends one throwaway key
+first; a real terminal answers the probe and this does not happen. Not verified: `Alt`+drag in a
+real terminal under a window manager that grabs it, and how the keys feel in a real terminal
+emulator.
 
 ---
 
