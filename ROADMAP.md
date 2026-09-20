@@ -369,23 +369,39 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   mode, without touching the `space` leader chord (which still owns the explicit `|`/`-` splits,
   flipping a split, and the divider-resize and `r`/`m` modes). `Alt+hjkl` moves the box, `Alt+a`/`Alt+d` grow its
   left/top edge outward and `Alt+f`/`Alt+s` shrink it horizontally/vertically (top-left fixed), `Alt+zxcv` focuses the pane on that
-  side, `Alt+Shift+S` splits the focused pane (picking side-by-side or stacked from its shape,
+  side, `Alt+n` splits the focused pane (picking side-by-side or stacked from its shape,
   and opening the first shell when none is open), `Alt+t`/`Alt+b` snap the box to the top or
-  bottom centre, `Alt+e` closes the pane under the pointer (the focused one if the pointer isn't
+  bottom centre, `Alt+m` closes the pane under the pointer (the focused one if the pointer isn't
   over any) and `Alt+q` closes every shell. With the mouse, `Alt`+left-drag grabs the box
   anywhere and `Alt`+right-drag resizes it from the bottom-right corner (growing or shrinking).
   Chosen as COA A — the existing single box with tiled panes — over independent floating
   windows, so "the shell" in a move or resize is the whole box, not one pane. **Reverses** the
   earlier decision not to use `Alt`-prefixed keys (see the chord entry above): a shell in the box
   no longer receives `Alt+b/f/d/t` (readline word motions) or `Alt+hjkl` (tmux navigation), by
-  request. Split is `Alt+Shift+S` rather than `Alt+s` because `Alt+s` was also asked to resize
-  the box. New pure `tui::alt_keys` module parses the keys; new `shell_params_for` inverts
+  request. Split started as `Alt+Shift+S` (`Alt+s` was taken by resize) and was then moved to
+  `Alt+n`, with close-pane moving from `Alt+e` to `Alt+m`. New pure `tui::alt_keys` module parses the keys; new `shell_params_for` inverts
   `shell_area`, which is what makes one-sided edge growth and exact snapping possible;
   `ShellPanes` gained `focused_rect` and `close_all` (a dropped `ShellPanes` would leave its
   child shells running). `Alt+q` used to be a plain `q` and quit from browse mode; it no longer
   does. Verified against the real binary through a PTY read with `pyte`: every key above moved,
   grew, focused, split, snapped or closed exactly as described, plain letters still reached a
   focused shell.
+- ✅ **Tapping `Alt` alone switches between the mini-shell and the file browser** – pressing and
+  releasing `Alt` with nothing in between toggles whether keys go to the shell or to the
+  browser, the same switch `Esc` and `space space` already make, but in both directions from
+  one key. A terminal sends nothing at all for a modifier on its own, so this uses the kitty
+  keyboard protocol: at startup Minuteman asks the terminal whether it supports it and, if so,
+  turns it on (and off again on exit). A tap is an `Alt` release that follows an `Alt` press
+  with no other key or mouse press between, so `Alt+n`, an `Alt`-drag, or `Alt` then `x` never
+  toggle. Turning the protocol on makes the terminal report every key as an escape code, so key
+  handling now treats a held key's repeat events as typing and ignores releases, and requests
+  alternate keys so `Shift`+letter still arrives as a capital. The same change moved the
+  new-shell key to `Alt+n` and close-pane to `Alt+m`, retiring `Alt+Shift+S` and `Alt+e`. New
+  top-level `alt_tap` option in `config.toml` (default `true`) turns the protocol off, because
+  it can plausibly break composed characters (dead keys, `AltGr`) typed into a shell. On a
+  terminal without the protocol nothing changes and the tap does nothing. Verified against the
+  real binary on a PTY that answered the protocol query like kitty and sent real protocol
+  events; it could not be tried in a real kitty.
 
 ---
 
@@ -449,10 +465,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    `Esc` stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
    `space space` goes back to typing, `space x` closes a pane. `space t` flips a split, and
    `space r`/`space m` plus `hjkl` resize/move (`Esc` leaves either mode).
-   Try the new `Alt` layer too: `Alt+Shift+S` splits, `Alt+hjkl` moves the box, `Alt+a`/`Alt+d`
-   grow it left/up, `Alt+f`/`Alt+s` shrink it wide/tall, `Alt+zxcv` changes pane, `Alt+t`/`Alt+b` snap to the top/bottom, `Alt+e`/`Alt+q`
-   close one/all, and `Alt`+drag with the left/right button moves/resizes. If the mouse
-   gestures do nothing, your window manager is probably grabbing `Alt`+drag.
+   Try the new `Alt` layer too: `Alt+n` splits, `Alt+hjkl` moves the box, `Alt+a`/`Alt+d`
+   grow it left/up, `Alt+f`/`Alt+s` shrink it wide/tall, `Alt+zxcv` changes pane,
+   `Alt+t`/`Alt+b` snap to the top/bottom, `Alt+m`/`Alt+q` close one/all, and `Alt`+drag with
+   the left/right button moves/resizes. Tapping `Alt` alone switches between the shell and the
+   browser. If the mouse gestures do nothing, your window manager is probably grabbing
+   `Alt`+drag. If accents come out wrong inside a mini-shell, set `alt_tap = false`.
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Pick the next roadmap item from 🔥 High Priority: richer status line or bookmarks/marks

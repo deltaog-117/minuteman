@@ -29,6 +29,8 @@ use crate::ui::{RawUi, Ui};
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 struct RawConfig {
+    /// `None` when absent, so "unset" can default to on rather than serde's `false`.
+    alt_tap: Option<bool>,
     keys: RawKeyMap,
     theme: RawTheme,
     ui: RawUi,
@@ -46,6 +48,10 @@ pub(crate) struct RawAppearance {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Whether tapping `Alt` on its own switches between the mini-shell and the file browser.
+    /// Needs the terminal's keyboard protocol, which reports every key differently (see the
+    /// note in `config.example.toml`), so it can be turned off.
+    pub alt_tap: bool,
     pub keys: KeyMap,
     pub theme: Theme,
     pub ui: Ui,
@@ -74,6 +80,7 @@ impl Config {
         let appearance: RawAppearance = parse("appearance.toml", appearance);
 
         Self {
+            alt_tap: config.alt_tap.unwrap_or(true),
             keys: config.keys.into(),
             theme: config.theme.overlay(appearance.theme).into(),
             ui: config.ui.overlay(appearance.ui).into(),
@@ -130,9 +137,18 @@ mod tests {
     fn shipped_example_config_parses_and_matches_defaults() {
         let text = include_str!("../../../config.example.toml");
         let raw: RawConfig = toml::from_str(text).unwrap();
+        assert_eq!(raw.alt_tap, Some(true));
         let keys: KeyMap = raw.keys.into();
         let default_keys: KeyMap = RawKeyMap::default().into();
         assert_eq!(keys, default_keys);
+    }
+
+    #[test]
+    fn alt_tap_defaults_on_and_can_be_switched_off() {
+        assert!(Config::from_sources(None, None).alt_tap);
+        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).alt_tap);
+        assert!(!Config::from_sources(Some("alt_tap = false\n"), None).alt_tap);
+        assert!(Config::from_sources(Some("alt_tap = true\n"), None).alt_tap);
     }
 
     /// The same drift guard for `appearance.example.toml`, covering all four of its tables.

@@ -155,15 +155,26 @@ use the `space` leader if you need to keep them.
 | `Alt`+`a` / `Alt`+`d`  | grow the box's left / top edge outward |
 | `Alt`+`f` / `Alt`+`s`  | shrink the box horizontally / vertically (top-left stays put) |
 | `Alt`+`z` `x` `c` `v`  | focus the pane to the left / below / above / right |
-| `Alt`+`Shift`+`s`      | new shell: splits the focused pane (opens the first one if none) |
+| `Alt`+`n`              | new shell: splits the focused pane (opens the first one if none) |
 | `Alt`+`t` / `Alt`+`b`  | snap the box to the top / bottom centre of the screen |
-| `Alt`+`e`              | close the pane under the pointer (the focused one if it isn't over any) |
+| `Alt`+`m`              | close the pane under the pointer (the focused one if it isn't over any) |
 | `Alt`+`q`              | close every shell |
+| `Alt`, tapped alone    | switch between typing in the shell and using the file browser (needs the kitty keyboard protocol, see below) |
 | `Alt`+left-drag        | move the box, grabbing it anywhere |
 | `Alt`+right-drag       | resize the box from its bottom-right corner (grows or shrinks) |
 
 Some window managers grab `Alt`+drag before the terminal sees it; if the mouse gestures do
 nothing, change that binding in the window manager.
+
+Tapping `Alt` on its own (pressed and released with nothing in between) needs a terminal that
+implements the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) —
+kitty, foot, wezterm, ghostty, recent alacritty — because an ordinary terminal sends nothing at
+all for a modifier key alone. Minuteman asks for it at startup only if the terminal says it
+supports it, and gives it back on exit. Elsewhere the tap does nothing and every other `Alt` key
+works as before; `Esc` and the `space` leader still switch modes. While the protocol is on, the
+terminal reports every key as an escape code that Minuteman decodes again. If accented or
+composed characters (dead keys, `AltGr`) come out wrong inside a mini-shell, set
+`alt_tap = false` in `config.toml`.
 
 While a prompt is active (rename/create/delete-confirm/conflict/search/command), `Enter` submits
 and `Esc` cancels; the keybindings above are not resolved until the prompt closes. `Esc` while

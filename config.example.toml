@@ -5,6 +5,14 @@
 # file that fails to parse are all fine: Minuteman falls back per-field rather than refusing to
 # start.
 
+# Tapping Alt on its own (pressed and released with nothing in between) switches between typing
+# in the mini-shell and using the file browser. A bare modifier key is only reported by
+# terminals with the kitty keyboard protocol (kitty, foot, wezterm, ghostty, recent alacritty),
+# and turning it on makes the terminal report every key as an escape code, which Minuteman
+# decodes back. If accented or composed characters (dead keys, AltGr) come out wrong inside a
+# mini-shell, set this to false; Esc and the `space` leader still switch modes.
+alt_tap = true
+
 [keys]
 move_down = ["j"]
 move_up = ["k"]

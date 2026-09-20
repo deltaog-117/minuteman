@@ -777,6 +777,7 @@ mod tests {
     /// The built-in keys and neon theme, without reading anyone's real config file.
     fn test_config() -> Config {
         Config {
+            alt_tap: true,
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             ui: theming::Ui::default(),

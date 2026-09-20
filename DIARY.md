@@ -34,6 +34,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-18 | Shell Box Drag Mechanism | Drag the box's title bar by mouse, offset re-added to `shell_area` (COA A) | ✅ Confirmed |
 | 2026-09-18 | Batch Yank/Cut/Paste Continuation | `Clipboard` holds `Vec<PathBuf>`, `poll_bulk` re-spawns the next item itself (COA A) | ✅ Confirmed |
 | 2026-09-20 | Alt Layer for Mini-Shell Box | Held `Alt` drives the existing single box; independent floating windows rejected (COA A) | ✅ Confirmed |
+| 2026-09-20 | Alt Tap Switches Shell/Browser | Kitty keyboard protocol, enabled only when supported, with an `alt_tap` off switch | ✅ Confirmed |
 
 ---
 
@@ -1809,6 +1810,9 @@ font having those faces.
 **Author:** deltaog-117
 **Status:** Confirmed
 
+> **Later the same day:** new shell became `Alt+n` and close-pane `Alt+m`; `Alt+Shift+S` and
+> `Alt+e` below are the original names. See the Alt-tap entry after this one.
+
 #### Context / Background
 
 The request was to make `Alt` the leader for every mini-shell command: `Alt`+left-drag moves the
@@ -1912,6 +1916,76 @@ capability probe because nothing on the PTY answers it, so the harness sends one
 first; a real terminal answers the probe and this does not happen. Not verified: `Alt`+drag in a
 real terminal under a window manager that grabs it, and how the keys feel in a real terminal
 emulator.
+
+---
+
+### Tapping Alt Alone Switches Shell and Browser: the Kitty Keyboard Protocol, Behind an Off Switch
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+The request: pressing `Alt` alone alternates between the mini-shell and the file manager; `Alt+n`
+opens new shells; `Alt+m` closes them. The second and third parts are key changes. The first
+is not, because an ordinary terminal sends *nothing* when a modifier is pressed by itself — there
+is no byte to read. The only mechanism is the kitty keyboard protocol, which reports modifier
+keys and key releases. The user's terminal is kitty, so it is available to them; it is not
+universal (kitty, foot, wezterm, ghostty and recent alacritty implement it).
+
+#### Decision & Rationale
+
+- **The tap is a release, not a press.** Toggling when `Alt` goes down would also fire on every
+  `Alt+n`. Instead an `Alt` press arms a flag, any other key press or mouse press disarms it, and
+  an `Alt` release that still finds it armed toggles. So `Alt+n`, an `Alt`-drag, and `Alt` then
+  `x` never switch modes; only a lone press-and-release does. Plain mouse motion does not
+  disarm it. There is no time limit, so holding `Alt` for a while and releasing it still counts.
+- **What "alternate" means:** it flips whether keys go to the shell or the browser, the switch
+  `Esc` and `space space` already make, and does nothing with no shell open or a prompt showing.
+- **Ask first, then enable, and give it back.** The terminal is asked whether it supports the
+  protocol; only then are the flags pushed, after the graphics-protocol probe so neither reads
+  the other's reply, and popped again when the terminal guard drops, including on a panic.
+  On a terminal without it nothing is enabled, the ESC-prefixed `Alt` keys keep working, and the
+  tap simply does nothing.
+- **All four flags are required, and each has a reason.** Reporting every key as an escape code
+  is what makes a bare modifier visible at all; event types supply the release that ends a tap;
+  alternate keys make `Shift`+letter arrive as a capital, since without them crossterm reports a
+  lowercase letter plus a shift bit and capitals typed into a shell would come out lowercase;
+  disambiguate is the baseline the others build on.
+- **Repeats are typing.** With event types on, a held key produces repeat events and every key
+  produces a release. The event loop used to drop anything that was not a press, which would
+  have stopped held keys from repeating. It now ignores releases only.
+- **`Alt+n` is the split and `Alt+m` closes the focused or hovered pane.** They replace
+  `Alt+Shift+S` and `Alt+e` outright rather than adding aliases, taking "responsible for" to
+  mean the key moves. `Alt+q` still closes everything. If `Alt+m` was meant to close all, it is
+  one line in `alt_keys::parse`.
+
+#### The Risk, and Why There Is an Off Switch
+
+Crossterm cannot request the protocol's associated-text flag, so with every key reported as an
+escape code the application receives key codes, not composed text. A dead key or `AltGr`
+sequence (typing `ã`, `ç` or `é` on some layouts) may therefore arrive as its base letter. I
+could not test this against a real kitty, and the user is likely to type such characters. The
+top-level `alt_tap` option in `config.toml` (default `true`) skips the protocol entirely, and
+its comment in `config.example.toml` says why. The fallback is complete: `Esc` and the `space`
+leader still switch modes.
+
+#### Verification
+
+`cargo test --workspace` passes (`theming` 33 tests, `tui` 114); clippy is clean. The PTY harness
+now answers the protocol query the way kitty does and sends real protocol events. A bare `Alt`
+press and release toggled between the SHELL and NORMAL modes in both directions; `Alt+l` and
+`Alt+h` as full press-key-release-release sequences, an `Alt`-held mouse drag, and `Alt` then `x`
+then `Alt` released each left the mode alone; `Esc` still left typing; a tap with no shell open
+did nothing and the app stayed alive. Text with capitals, including `Zz` and `Q`, reached a real
+bash intact, and a held key sent as three repeat events typed three extra characters. `Alt+n`
+with no shell opened the first one and with one open split it; `Alt+m` over the left pane closed
+just that pane (2 to 1) and on the last pane closed the box; the retired `Alt+e` did nothing.
+The protocol was pushed exactly once, as flags 15, and popped on exit. With a harness that never
+answered the query no flags were pushed and ESC-prefixed `Alt+l` and `Alt+n` still worked; with
+`alt_tap = false` no flags were pushed either. Not verified: a real kitty, and above all whether
+composed characters survive the protocol there.
 
 ---
 

@@ -37,7 +37,7 @@ pub enum AltCommand {
     ShrinkHeight,
     /// `Alt+z/x/c/v`: move focus to the pane on that side.
     Focus(NudgeDir),
-    /// `Alt+Shift+S`: split the focused pane into a new shell (or open the first one).
+    /// `Alt+n`: split the focused pane into a new shell (or open the first one).
     Split,
     /// `Alt+t`: snap the box to the top centre of the screen.
     SnapTop,
@@ -45,16 +45,15 @@ pub enum AltCommand {
     SnapBottom,
     /// `Alt+q`: close every shell.
     CloseAll,
-    /// `Alt+e`: close only the pane under the pointer.
+    /// `Alt+m`: close only the pane under the pointer.
     CloseHovered,
 }
 
 /// The command `key` means, or `None` when it isn't an `Alt` command at all — in which case the
 /// caller must treat it like any other key.
 ///
-/// Split is `Alt+Shift+S`, not `Alt+s`, because `Alt+s` already shrinks the box vertically; the two
-/// are told apart by the character's case, so a bare `Alt+s` can never split by accident.
-/// `Ctrl+Alt` combinations are left alone: they are not part of this scheme.
+/// Only lowercase letters are commands: `Alt+Shift+<letter>` is not part of this scheme.
+/// `Ctrl+Alt` combinations are left alone too.
 pub fn parse(key: KeyEvent) -> Option<AltCommand> {
     if !key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
         return None;
@@ -75,11 +74,11 @@ pub fn parse(key: KeyEvent) -> Option<AltCommand> {
         'x' => AltCommand::Focus(NudgeDir::Down),
         'c' => AltCommand::Focus(NudgeDir::Up),
         'v' => AltCommand::Focus(NudgeDir::Right),
-        'S' => AltCommand::Split,
+        'n' => AltCommand::Split,
         't' => AltCommand::SnapTop,
         'b' => AltCommand::SnapBottom,
         'q' => AltCommand::CloseAll,
-        'e' => AltCommand::CloseHovered,
+        'm' => AltCommand::CloseHovered,
         _ => return None,
     })
 }
@@ -107,11 +106,11 @@ mod tests {
             ('x', AltCommand::Focus(NudgeDir::Down)),
             ('c', AltCommand::Focus(NudgeDir::Up)),
             ('v', AltCommand::Focus(NudgeDir::Right)),
-            ('S', AltCommand::Split),
+            ('n', AltCommand::Split),
             ('t', AltCommand::SnapTop),
             ('b', AltCommand::SnapBottom),
             ('q', AltCommand::CloseAll),
-            ('e', AltCommand::CloseHovered),
+            ('m', AltCommand::CloseHovered),
         ];
         for (c, expected) in table {
             assert_eq!(parse(alt(c)), Some(expected), "Alt+{c}");
@@ -120,17 +119,18 @@ mod tests {
 
     #[test]
     fn a_key_without_alt_is_never_a_command() {
-        for c in "hjklasdfzxcvStbqe".chars() {
+        for c in "hjklasdfzxcvntbqm".chars() {
             let plain = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
             assert_eq!(parse(plain), None, "plain {c}");
         }
     }
 
     #[test]
-    fn alt_shift_s_splits_but_a_bare_alt_s_only_grows() {
+    fn the_retired_split_and_close_keys_are_no_longer_commands() {
+        // `Alt+Shift+S` and `Alt+e` were the old split and close-pane keys.
         let shifted = KeyEvent::new(KeyCode::Char('S'), KeyModifiers::ALT | KeyModifiers::SHIFT);
-        assert_eq!(parse(shifted), Some(AltCommand::Split));
-        assert_eq!(parse(alt('s')), Some(AltCommand::ShrinkHeight));
+        assert_eq!(parse(shifted), None);
+        assert_eq!(parse(alt('e')), None);
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn unbound_alt_keys_and_non_character_keys_are_not_commands() {
-        assert_eq!(parse(alt('m')), None);
+        assert_eq!(parse(alt('o')), None);
         assert_eq!(parse(alt('A')), None);
         assert_eq!(
             parse(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),

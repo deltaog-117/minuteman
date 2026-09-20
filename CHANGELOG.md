@@ -8,10 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: tapping `Alt` on its own switches between typing in the mini-shell and using the file
+  browser. It relies on the kitty keyboard protocol, which Minuteman enables at startup only if
+  the terminal supports it and disables on exit; elsewhere the tap does nothing.
+- `theming`: top-level `alt_tap` in `config.toml` (default `true`) turns that protocol off. See
+  `config.example.toml`.
 - `tui`: an `Alt` layer for the mini-shell box, active in every mode. `Alt+h/j/k/l` moves the
-  box, `Alt+a`/`Alt+d` grow its left/top edge, `Alt+f`/`Alt+s` shrink it horizontally/vertically, `Alt+z/x/c/v` focuses the pane on
-  that side, `Alt+Shift+S` splits the focused pane (or opens the first shell), `Alt+t`/`Alt+b`
-  snap the box to the top/bottom centre, `Alt+e` closes the pane under the pointer and `Alt+q`
+  box, `Alt+a`/`Alt+d` grow its left/top edge, `Alt+f`/`Alt+s` shrink it horizontally/vertically,
+  `Alt+z/x/c/v` focuses the pane on that side, `Alt+n` splits the focused pane (or opens the first shell), `Alt+t`/`Alt+b`
+  snap the box to the top/bottom centre, `Alt+m` closes the pane under the pointer and `Alt+q`
   closes every shell. `Alt`+left-drag moves the box from anywhere on it; `Alt`+right-drag
   resizes it from the bottom-right corner.
 - `theming`: `appearance.toml` (in `~/.config/minuteman/`) holds the whole look in one file:

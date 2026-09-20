@@ -37,11 +37,13 @@ use app::App;
 use browser::BrowserState;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    KeyboardEnhancementFlags, ModifierKeyCode, MouseButton, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use ratatui::Terminal;
@@ -58,18 +60,45 @@ use theming::{Action, Config, GlyphSet};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
-struct TerminalGuard;
+struct TerminalGuard {
+    /// Whether `enhance_keyboard` pushed flags that `drop` must pop again.
+    keyboard_enhanced: bool,
+}
 
 impl TerminalGuard {
     fn new() -> Result<Self> {
         enable_raw_mode()?;
         execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-        Ok(Self)
+        Ok(Self {
+            keyboard_enhanced: false,
+        })
+    }
+
+    /// Switches the terminal to the kitty keyboard protocol, which is the only way a bare `Alt`
+    /// press-and-release is reported at all. Every flag is needed: all keys as escape codes makes
+    /// modifier-only keys visible, event types add the release that says the tap ended, and
+    /// alternate keys keep `Shift`+letter arriving as a capital instead of a lowercase letter
+    /// with a shift bit. Only call this once the terminal has said it supports the protocol.
+    fn enhance_keyboard(&mut self) -> Result<()> {
+        execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
+        )?;
+        self.keyboard_enhanced = true;
+        Ok(())
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.keyboard_enhanced {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     }
@@ -504,10 +533,15 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let mut app = App::new(runtime.handle().clone());
 
-    let guard = TerminalGuard::new()?;
-    // Must run after entering the alternate screen but before the event loop reads any input —
-    // it briefly reads/writes stdio itself to probe the terminal's graphics-protocol support.
+    let mut guard = TerminalGuard::new()?;
+    // Both probes must run after entering the alternate screen but before the event loop reads
+    // any input — each briefly reads/writes stdio itself. The keyboard one goes first so its
+    // reply is fully consumed before the graphics probe starts reading stdio directly.
+    let keyboard_protocol = config.alt_tap && supports_keyboard_enhancement().unwrap_or(false);
     let mut previews = Previews::new(runtime.handle().clone());
+    if keyboard_protocol {
+        guard.enhance_keyboard()?;
+    }
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -563,7 +597,11 @@ fn run(
     // The mouse position last seen while `Alt`+right-dragging to resize the box from its
     // bottom-right corner (see `resize_box_corner`). `None` means no such drag is in progress.
     let mut alt_resizing: Option<(u16, u16)> = None;
-    // Where the pointer last was, from any mouse event — what "hovered" means to `Alt+e`. `None`
+    // Set when `Alt` is pressed on its own and cleared by any other key or mouse press, so that
+    // releasing it while still set means it was tapped alone — which switches between typing in
+    // the shell and using the browser. Only ever set when the terminal reports bare modifiers.
+    let mut alt_tap_armed = false;
+    // Where the pointer last was, from any mouse event — what "hovered" means to `Alt+m`. `None`
     // until the mouse first moves.
     let mut mouse_pos: Option<(u16, u16)> = None;
     // Set for exactly one keystroke after `Leader` (space) is pressed while panes are open,
@@ -664,6 +702,10 @@ fn run(
                 }
             }
             Event::Mouse(mouse) => {
+                // Alt held for a drag or click is a gesture, not a tap; plain motion is not.
+                if !matches!(mouse.kind, MouseEventKind::Moved) {
+                    alt_tap_armed = false;
+                }
                 mouse_pos = Some((mouse.column, mouse.row));
                 let Some(panes) = shells.as_mut() else {
                     continue;
@@ -768,9 +810,33 @@ fn run(
                 }
             }
             Event::Key(key) => {
-                if key.kind != KeyEventKind::Press {
+                // A bare modifier key only shows up when the keyboard protocol is on. Only `Alt`
+                // means anything; releasing it with nothing pressed in between is the tap.
+                if let KeyCode::Modifier(modifier) = key.code {
+                    if matches!(
+                        modifier,
+                        ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt
+                    ) {
+                        match key.kind {
+                            KeyEventKind::Press => alt_tap_armed = true,
+                            KeyEventKind::Repeat => {}
+                            KeyEventKind::Release => {
+                                let tapped = std::mem::take(&mut alt_tap_armed);
+                                if tapped && shells.is_some() && app.prompt.is_none() {
+                                    shell_focused = !shell_focused;
+                                    pending_leader = false;
+                                    shell_chord = None;
+                                }
+                            }
+                        }
+                    }
                     continue;
                 }
+                // Releases carry no input, but a held key's repeats do: they are typing.
+                if key.kind == KeyEventKind::Release {
+                    continue;
+                }
+                alt_tap_armed = false;
 
                 // `Alt` commands come first and work in every mode — typing in a shell, browsing,
                 // mid-chord — because a held `Alt` is what says "this is for the shell box, not
