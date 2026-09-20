@@ -428,6 +428,18 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   name were left as they were. The old `minuteman` executable and the `mm` wrapper no longer exist.
   Verified in a real zsh with only `mman` on `PATH`: `Q` moved the shell into the browsed
   directory and `q` did not.
+- ✅ **Hidden-file toggle, `:` commands and live refresh** – `.` shows or hides dot-files in every
+  column (hidden by default; `show_hidden` in `config.toml` sets the starting state), filtered
+  where a listing is stored so the cursor, `/` search and mouse clicks all index the list on
+  screen. The `:` prompt now runs `mkdir [-p]` and `touch` in-process through `Vfs` and hands
+  everything else to `sh -c` in the browsed directory on the blocking pool, with output on the
+  status line and `Esc` to kill it. The lists refresh on their own: about twice a second the
+  directory is re-listed off-thread and compared with the screen, which catches creates,
+  removals, renames and in-place writes (a directory's own mtime would miss the last), and
+  re-reads the selected file's preview when it changed. No new dependency. Verified against the
+  real binary on a PTY through `pyte`: toggling, both built-ins and the shell path, `Esc`
+  killing `sleep 30`, files created, edited and deleted by another program and from inside a
+  mini-shell appearing untouched, and a new hidden file staying hidden until toggled.
 
 ---
 
@@ -480,6 +492,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Optional Lua scripting tier** – lightweight `mlua`-based scripting for config/keybindings/
   simple commands, layered alongside the WASM plugin system.
 - **Fuzzy find / search within the browser.**
+- **Event-driven refresh (inotify) instead of polling** – the live refresh re-lists the browsed
+  directory twice a second, which costs one `readdir` plus a `stat` per entry and can lag a
+  change by about half a second. Worth replacing with `notify` only if that is noticeable in very
+  large directories; it would need a watch method on `Vfs` so a remote backend can offer its own.
+- **Show all of a `:` command's output** – the status line holds eight lines for five seconds.
+  A scrollable output pane (or a pager) would make `:ls -l` or `:git status` usable.
+- **Cancel a `:` command's whole process tree** – `Esc` kills the `sh` it started but not a
+  process that shell already forked into the background.
 - **Byte-level/percentage progress for large single files** – current progress is one tick per
   *file*, so a single huge file shows no movement until it's done. Needs `Vfs::copy_file` to
   support a streaming copy with periodic callbacks instead of one atomic `std::fs::copy` call.
@@ -519,6 +539,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    in the left column to go up, scroll the wheel over either. Clicking the browser while a
    mini-shell is focused gives the keyboard back to the browser. Set `browser_mouse = false` in
    `config.toml` if you would rather leave the mouse to the shell box.
+   Press `.` to show or hide dot-files. Try `:mkdir -p a/b`, `:touch x.txt` and `:ls -l` — the
+   new entries appear at once, and so does a file you create from a mini-shell or another
+   terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: preview extras, stage 1 (a scrollable preview, hex view and archive listing).

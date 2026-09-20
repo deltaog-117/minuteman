@@ -473,6 +473,7 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
             bound(Action::Search, "search"),
             bound(Action::Command, "cmd"),
             bound(Action::Select, "mark"),
+            bound(Action::ToggleHidden, "hidden"),
             bound(Action::Quit, "quit"),
             bound(Action::QuitToCwd, "quit+cd"),
         ],
@@ -779,6 +780,7 @@ mod tests {
         Config {
             alt_tap: true,
             browser_mouse: true,
+            show_hidden: false,
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             ui: theming::Ui::default(),

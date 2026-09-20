@@ -46,6 +46,8 @@ pub enum Action {
     Search,
     /// Opens the `:`-command prompt.
     Command,
+    /// Shows or hides dot-prefixed entries in every column.
+    ToggleHidden,
     /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
     /// later bulk action (e.g. `Delete`) instead of acting on it immediately.
     Select,
@@ -79,6 +81,7 @@ pub struct RawKeyMap {
     pub search: Vec<String>,
     pub command: Vec<String>,
     pub select: Vec<String>,
+    pub hidden: Vec<String>,
     pub leader: Vec<String>,
 }
 
@@ -101,6 +104,7 @@ impl Default for RawKeyMap {
             search: vec!["/".into()],
             command: vec![":".into()],
             select: vec!["v".into()],
+            hidden: vec![".".into()],
             leader: vec!["space".into()],
         }
     }
@@ -156,6 +160,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.search, Action::Search);
         bind_all(&raw.command, Action::Command);
         bind_all(&raw.select, Action::Select);
+        bind_all(&raw.hidden, Action::ToggleHidden);
         bind_all(&raw.leader, Action::Leader);
 
         Self { bindings }
@@ -212,6 +217,7 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('/')), Some(Action::Search));
         assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
         assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));
+        assert_eq!(keymap.resolve(KeyCode::Char('.')), Some(Action::ToggleHidden));
         assert_eq!(keymap.resolve(KeyCode::Char(' ')), Some(Action::Leader));
         // `Tab`, `o`, `%` and `"` used to be shell-pane keys; they belong to the shell now.
         for freed in [

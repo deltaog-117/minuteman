@@ -33,6 +33,9 @@ struct RawConfig {
     alt_tap: Option<bool>,
     /// `None` when absent, for the same reason as `alt_tap`.
     browser_mouse: Option<bool>,
+    /// `None` when absent, so "unset" can default to hidden rather than serde's `false` meaning
+    /// the same thing by accident.
+    show_hidden: Option<bool>,
     keys: RawKeyMap,
     theme: RawTheme,
     ui: RawUi,
@@ -58,6 +61,8 @@ pub struct Config {
     /// constant so a misbehaving terminal or a habit of clicking by accident can turn it off
     /// without a rebuild; the mini-shell's own mouse gestures don't depend on it.
     pub browser_mouse: bool,
+    /// Whether dot-prefixed entries start out visible; the `hidden` key flips it at runtime.
+    pub show_hidden: bool,
     pub keys: KeyMap,
     pub theme: Theme,
     pub ui: Ui,
@@ -88,6 +93,7 @@ impl Config {
         Self {
             alt_tap: config.alt_tap.unwrap_or(true),
             browser_mouse: config.browser_mouse.unwrap_or(true),
+            show_hidden: config.show_hidden.unwrap_or(false),
             keys: config.keys.into(),
             theme: config.theme.overlay(appearance.theme).into(),
             ui: config.ui.overlay(appearance.ui).into(),
@@ -146,6 +152,7 @@ mod tests {
         let raw: RawConfig = toml::from_str(text).unwrap();
         assert_eq!(raw.alt_tap, Some(true));
         assert_eq!(raw.browser_mouse, Some(true));
+        assert_eq!(raw.show_hidden, Some(false));
         let keys: KeyMap = raw.keys.into();
         let default_keys: KeyMap = RawKeyMap::default().into();
         assert_eq!(keys, default_keys);
@@ -157,6 +164,14 @@ mod tests {
         assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).alt_tap);
         assert!(!Config::from_sources(Some("alt_tap = false\n"), None).alt_tap);
         assert!(Config::from_sources(Some("alt_tap = true\n"), None).alt_tap);
+    }
+
+    #[test]
+    fn show_hidden_defaults_off_and_can_be_switched_on() {
+        assert!(!Config::from_sources(None, None).show_hidden);
+        assert!(!Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).show_hidden);
+        assert!(Config::from_sources(Some("show_hidden = true\n"), None).show_hidden);
+        assert!(!Config::from_sources(Some("show_hidden = false\n"), None).show_hidden);
     }
 
     #[test]

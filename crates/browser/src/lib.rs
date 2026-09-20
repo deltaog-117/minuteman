@@ -30,19 +30,67 @@ pub struct BrowserState {
     /// Ranger-style marks: paths toggled via `Select`, persisting across navigation until
     /// explicitly toggled off or consumed by a bulk action (e.g. `Delete`).
     marked: HashSet<PathBuf>,
+    /// Whether dot-prefixed entries appear in the listings. Filtering happens when a listing is
+    /// stored, not when it is drawn, so `selected`, `/` search and mouse hit-testing all index
+    /// the same list the user sees.
+    show_hidden: bool,
+}
+
+/// A dot-prefixed name is hidden, the Unix convention every shell and file manager shares.
+fn is_hidden(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// Drops hidden entries unless `show_hidden`, but never `keep`: the parent column must still
+/// list the directory being browsed even when that directory is itself hidden, or the column
+/// would have nothing to highlight.
+fn filter_hidden(
+    entries: Vec<DirEntryInfo>,
+    show_hidden: bool,
+    keep: Option<&Path>,
+) -> Vec<DirEntryInfo> {
+    if show_hidden {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|e| !is_hidden(&e.name) || keep == Some(e.path.as_path()))
+        .collect()
 }
 
 impl BrowserState {
+    /// A browser that shows hidden entries. Use `with_show_hidden` to start with them filtered.
     pub fn new(vfs: &dyn Vfs, start_dir: PathBuf) -> Result<Self, VfsError> {
+        Self::with_show_hidden(vfs, start_dir, true)
+    }
+
+    pub fn with_show_hidden(
+        vfs: &dyn Vfs,
+        start_dir: PathBuf,
+        show_hidden: bool,
+    ) -> Result<Self, VfsError> {
         let mut state = Self {
             current_dir: start_dir,
             parent_entries: Vec::new(),
             current_entries: Vec::new(),
             selected: 0,
             marked: HashSet::new(),
+            show_hidden,
         };
         state.refresh(vfs)?;
         Ok(state)
+    }
+
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Flips whether hidden entries are listed and re-lists, keeping the cursor on the same
+    /// entry when it is still visible. Returns the new setting.
+    pub fn toggle_hidden(&mut self, vfs: &dyn Vfs) -> Result<bool, VfsError> {
+        self.show_hidden = !self.show_hidden;
+        self.reload(vfs)?;
+        Ok(self.show_hidden)
     }
 
     pub fn current_dir(&self) -> &std::path::Path {
@@ -96,7 +144,11 @@ impl BrowserState {
     /// Entries of the selected item, if it's a directory — used to render the preview pane.
     pub fn preview_entries(&self, vfs: &dyn Vfs) -> Vec<DirEntryInfo> {
         match self.selected_entry() {
-            Some(entry) if entry.is_dir => vfs.list_dir(&entry.path).unwrap_or_default(),
+            Some(entry) if entry.is_dir => filter_hidden(
+                vfs.list_dir(&entry.path).unwrap_or_default(),
+                self.show_hidden,
+                None,
+            ),
             _ => Vec::new(),
         }
     }
@@ -182,21 +234,74 @@ impl BrowserState {
         Ok(())
     }
 
-    /// Re-lists the current and parent directories, clamping the selection if the entry count
-    /// shrank. Call after a filesystem mutation made outside `BrowserState` (copy/move/delete/
-    /// create/rename), since those don't otherwise update this state.
+    /// Re-lists the current and parent directories. The cursor stays on the same entry by path
+    /// (falling back to the same index, clamped, if that entry is gone), so a file appearing
+    /// above it doesn't make the selection jump. Call after a filesystem mutation made outside
+    /// `BrowserState` (copy/move/delete/create/rename), since those don't otherwise update it.
     pub fn reload(&mut self, vfs: &dyn Vfs) -> Result<(), VfsError> {
-        self.refresh(vfs)
+        let previous = self.selected_path();
+        self.refresh(vfs)?;
+        self.reselect(previous);
+        Ok(())
+    }
+
+    /// Swaps in listings fetched elsewhere (e.g. on a background thread) if they differ from
+    /// what is stored, and returns whether anything changed. `dir` is the directory `current`
+    /// was read from: a result for a directory the user has since left is dropped, so a slow
+    /// listing can never overwrite a newer one. Both listings are unfiltered, as `Vfs` returns
+    /// them.
+    pub fn apply_listing(
+        &mut self,
+        dir: &Path,
+        current: Vec<DirEntryInfo>,
+        parent: Vec<DirEntryInfo>,
+    ) -> bool {
+        if dir != self.current_dir {
+            return false;
+        }
+        let current = filter_hidden(current, self.show_hidden, None);
+        let parent = filter_hidden(parent, self.show_hidden, Some(&self.current_dir));
+        if current == self.current_entries && parent == self.parent_entries {
+            return false;
+        }
+
+        let previous = self.selected_path();
+        self.current_entries = current;
+        self.parent_entries = parent;
+        self.reselect(previous);
+        true
+    }
+
+    fn selected_path(&self) -> Option<PathBuf> {
+        self.selected_entry().map(|e| e.path.clone())
+    }
+
+    /// Moves the cursor back onto `previous` if it is still listed, else clamps the old index.
+    fn reselect(&mut self, previous: Option<PathBuf>) {
+        let found = previous.and_then(|path| {
+            self.current_entries
+                .iter()
+                .position(|entry| entry.path == path)
+        });
+        self.selected = found.unwrap_or_else(|| {
+            self.selected
+                .min(self.current_entries.len().saturating_sub(1))
+        });
     }
 
     fn refresh(&mut self, vfs: &dyn Vfs) -> Result<(), VfsError> {
-        self.current_entries = vfs.list_dir(&self.current_dir)?;
+        self.current_entries =
+            filter_hidden(vfs.list_dir(&self.current_dir)?, self.show_hidden, None);
         self.selected = self
             .selected
             .min(self.current_entries.len().saturating_sub(1));
 
         self.parent_entries = match self.current_dir.parent() {
-            Some(parent) => vfs.list_dir(parent).unwrap_or_default(),
+            Some(parent) => filter_hidden(
+                vfs.list_dir(parent).unwrap_or_default(),
+                self.show_hidden,
+                Some(&self.current_dir),
+            ),
             None => Vec::new(),
         };
 
@@ -341,6 +446,162 @@ mod tests {
         let result = state.goto(&vfs, &root.join("sub").join("file.txt"));
         assert!(matches!(result, Err(VfsError::NotADirectory(_))));
         assert_eq!(state.current_dir(), root);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn make_hidden_tree() -> PathBuf {
+        let root = make_tree();
+        std::fs::write(root.join(".secret"), b"hi").unwrap();
+        std::fs::create_dir_all(root.join(".dotdir")).unwrap();
+        std::fs::write(root.join(".dotdir").join(".inner"), b"hi").unwrap();
+        std::fs::write(root.join(".dotdir").join("visible"), b"hi").unwrap();
+        root
+    }
+
+    fn names(entries: &[DirEntryInfo]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn hidden_entries_are_filtered_from_every_listing_until_toggled_on() {
+        let root = make_hidden_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::with_show_hidden(&vfs, root.clone(), false).unwrap();
+
+        assert_eq!(names(state.current_entries()), vec!["sub"]);
+
+        assert!(state.toggle_hidden(&vfs).unwrap());
+        assert_eq!(
+            names(state.current_entries()),
+            vec![".dotdir", "sub", ".secret"]
+        );
+
+        assert!(!state.toggle_hidden(&vfs).unwrap());
+        assert_eq!(names(state.current_entries()), vec!["sub"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn preview_entries_honour_the_hidden_setting() {
+        let root = make_hidden_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::with_show_hidden(&vfs, root.clone(), true).unwrap();
+        assert_eq!(state.selected_entry().unwrap().name, ".dotdir");
+        assert_eq!(
+            names(&state.preview_entries(&vfs)),
+            vec![".inner", "visible"]
+        );
+
+        // Hiding `.dotdir` moves the cursor to `sub`; make `.dotdir` the cursor again by way of
+        // `select_index` while hidden entries are shown, then compare its filtered preview.
+        state.toggle_hidden(&vfs).unwrap();
+        state.toggle_hidden(&vfs).unwrap();
+        state.select_index(0);
+        assert_eq!(state.selected_entry().unwrap().name, ".dotdir");
+        let shown = state.preview_entries(&vfs).len();
+        assert_eq!(shown, 2);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_parent_column_still_lists_the_hidden_directory_being_browsed() {
+        let root = make_hidden_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::with_show_hidden(&vfs, root.clone(), true).unwrap();
+        state.enter(&vfs).unwrap();
+        assert_eq!(state.current_dir(), root.join(".dotdir"));
+
+        state.toggle_hidden(&vfs).unwrap();
+
+        assert_eq!(names(state.current_entries()), vec!["visible"]);
+        assert!(names(state.parent_entries()).contains(&".dotdir"));
+        assert!(!names(state.parent_entries()).contains(&".secret"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn toggling_hidden_keeps_the_cursor_on_the_same_entry() {
+        let root = make_hidden_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::with_show_hidden(&vfs, root.clone(), false).unwrap();
+        assert_eq!(state.selected_entry().unwrap().name, "sub");
+
+        state.toggle_hidden(&vfs).unwrap();
+
+        assert_eq!(state.selected_entry().unwrap().name, "sub");
+        assert_eq!(state.selected_index(), 1);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reload_keeps_the_cursor_on_its_entry_when_a_new_one_sorts_above_it() {
+        let root = make_tree();
+        std::fs::write(root.join("zeta.txt"), b"hi").unwrap();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+        state.select_index(1);
+        assert_eq!(state.selected_entry().unwrap().name, "zeta.txt");
+
+        std::fs::write(root.join("alpha.txt"), b"hi").unwrap();
+        state.reload(&vfs).unwrap();
+
+        assert_eq!(state.selected_entry().unwrap().name, "zeta.txt");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn apply_listing_reports_a_change_only_when_the_listing_differs() {
+        let root = make_tree();
+        let dir = root.join("sub");
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, dir.clone()).unwrap();
+
+        // `root` is the parent column here, and it is private to this test — unlike the shared
+        // temp dir, nothing else mutates it while the test runs.
+        let unchanged = (vfs.list_dir(&dir).unwrap(), vfs.list_dir(&root).unwrap());
+        assert!(!state.apply_listing(&dir, unchanged.0, unchanged.1));
+
+        std::fs::write(dir.join("new.txt"), b"hi").unwrap();
+        let fresh = (vfs.list_dir(&dir).unwrap(), vfs.list_dir(&root).unwrap());
+        assert!(state.apply_listing(&dir, fresh.0, fresh.1));
+        assert_eq!(names(state.current_entries()), vec!["file.txt", "new.txt"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn apply_listing_notices_a_file_growing_in_place() {
+        let root = make_tree();
+        let dir = root.join("sub");
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, dir.clone()).unwrap();
+
+        std::fs::write(dir.join("file.txt"), b"a much longer body").unwrap();
+        let fresh = (vfs.list_dir(&dir).unwrap(), vfs.list_dir(&root).unwrap());
+
+        assert!(state.apply_listing(&dir, fresh.0, fresh.1));
+        assert_eq!(state.selected_entry().unwrap().size, 18);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn apply_listing_drops_a_result_for_a_directory_we_have_left() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+        let stale = (vfs.list_dir(&root).unwrap(), Vec::new());
+        state.enter(&vfs).unwrap();
+        let before = state.current_entries().to_vec();
+
+        assert!(!state.apply_listing(&root, stale.0, stale.1));
+        assert_eq!(state.current_entries(), before.as_slice());
 
         std::fs::remove_dir_all(&root).unwrap();
     }

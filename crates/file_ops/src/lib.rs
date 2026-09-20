@@ -193,6 +193,32 @@ pub fn create_new_file(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
     vfs.create_file(path).map_err(Into::into)
 }
 
+/// Creates `path` and any missing parents, like `mkdir -p`: an already-existing directory is
+/// success, but an existing non-directory in the way is still an `AlreadyExists` error.
+pub fn create_directory_all(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
+    if vfs.is_dir(path) {
+        return Ok(());
+    }
+    if vfs.exists(path) {
+        return Err(VfsError::AlreadyExists(path.to_path_buf()).into());
+    }
+    // Outermost missing ancestor first, so each `create_dir` finds its parent already made.
+    let mut missing: Vec<&Path> = path
+        .ancestors()
+        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !vfs.exists(ancestor))
+        .collect();
+    missing.reverse();
+    missing
+        .into_iter()
+        .try_for_each(|dir| vfs.create_dir(dir))
+        .map_err(Into::into)
+}
+
+/// Creates an empty file, or refreshes an existing file's modified time (see `Vfs::touch`).
+pub fn touch(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
+    vfs.touch(path).map_err(Into::into)
+}
+
 /// Renames `path` to `new_name` within the same parent directory.
 pub fn rename(
     vfs: &dyn Vfs,
@@ -239,6 +265,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn create_directory_all_makes_every_missing_level_and_tolerates_existing_ones() {
+        let dir = scratch_dir("mkdir-p");
+        let deep = dir.join("a").join("b").join("c");
+
+        create_directory_all(&LocalVfs, &deep).unwrap();
+        assert!(deep.is_dir());
+
+        create_directory_all(&LocalVfs, &deep).unwrap();
+        create_directory_all(&LocalVfs, &dir.join("a")).unwrap();
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn create_directory_all_refuses_to_replace_a_file() {
+        let dir = scratch_dir("mkdir-p-file");
+        let file = dir.join("taken");
+        std::fs::write(&file, b"hi").unwrap();
+
+        assert!(matches!(
+            create_directory_all(&LocalVfs, &file),
+            Err(FileOpsError::Vfs(VfsError::AlreadyExists(_)))
+        ));
+        assert!(create_directory_all(&LocalVfs, &file.join("child")).is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

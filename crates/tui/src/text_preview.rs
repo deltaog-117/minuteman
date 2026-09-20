@@ -35,14 +35,24 @@ pub enum PreviewStatus {
 }
 
 enum ReadOutcome {
-    Read { path: PathBuf, content: String },
-    Failed { path: PathBuf },
+    Read {
+        path: PathBuf,
+        generation: u64,
+        content: String,
+    },
+    Failed {
+        path: PathBuf,
+        generation: u64,
+    },
 }
 
 pub struct TextPreview {
     current: Option<PathBuf>,
     status: PreviewStatus,
     content: String,
+    /// Counts reads started. Only the latest one's result is kept, so a slow read begun before
+    /// the file changed can't overwrite the newer read of the same path.
+    generation: u64,
     read_tx: UnboundedSender<ReadOutcome>,
     read_rx: UnboundedReceiver<ReadOutcome>,
     handle: tokio::runtime::Handle,
@@ -55,6 +65,7 @@ impl TextPreview {
             current: None,
             status: PreviewStatus::Empty,
             content: String::new(),
+            generation: 0,
             read_tx,
             read_rx,
             handle,
@@ -67,6 +78,14 @@ impl TextPreview {
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Re-reads the current file without clearing what is shown, for when it changed on disk
+    /// while staying selected. A no-op when nothing previewable is selected.
+    pub fn reload(&mut self) {
+        if let Some(path) = self.current.clone() {
+            self.spawn_read(path);
+        }
     }
 
     /// Call once per render tick. Starts reading `selected` if it's a new text file, and drains
@@ -89,11 +108,14 @@ impl TextPreview {
         }
 
         while let Ok(outcome) = self.read_rx.try_recv() {
-            let path = match &outcome {
-                ReadOutcome::Read { path, .. } | ReadOutcome::Failed { path } => path,
+            let (path, generation) = match &outcome {
+                ReadOutcome::Read {
+                    path, generation, ..
+                }
+                | ReadOutcome::Failed { path, generation } => (path, *generation),
             };
-            if Some(path) != self.current.as_ref() {
-                continue; // stale — selection moved on before this read finished
+            if Some(path) != self.current.as_ref() || generation != self.generation {
+                continue; // stale — selection moved on, or a newer read superseded this one
             }
             match outcome {
                 ReadOutcome::Read { content, .. } => {
@@ -105,12 +127,18 @@ impl TextPreview {
         }
     }
 
-    fn spawn_read(&self, path: PathBuf) {
+    fn spawn_read(&mut self, path: PathBuf) {
+        self.generation += 1;
+        let generation = self.generation;
         let tx = self.read_tx.clone();
         self.handle.spawn_blocking(move || {
             let outcome = match preview::load_text(&path) {
-                Some(content) => ReadOutcome::Read { path, content },
-                None => ReadOutcome::Failed { path },
+                Some(content) => ReadOutcome::Read {
+                    path,
+                    generation,
+                    content,
+                },
+                None => ReadOutcome::Failed { path, generation },
             };
             let _ = tx.send(outcome);
         });

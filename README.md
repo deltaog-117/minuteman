@@ -130,7 +130,8 @@ named `init` must be passed as `./init`.
 | `n`         | create — trailing `/` makes a directory       |
 | `s`         | shell — drop into `$SHELL` in the current dir |
 | `/`         | search — jump to the first matching entry as you type |
-| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory |
+| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory, `:mkdir [-p] <name>...`, `:touch <name>...`; anything else runs in `sh` in the current directory (`Esc` cancels) |
+| `.`         | show or hide dot-files (hidden by default; `show_hidden = true` in `config.toml` starts them shown) |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
 | `space`     | leader — commands for the mini-shell panes (below); inert with no shell open |
 

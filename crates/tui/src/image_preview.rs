@@ -46,10 +46,12 @@ pub enum PreviewStatus {
 enum DecodeOutcome {
     Decoded {
         path: PathBuf,
+        generation: u64,
         protocol: Box<StatefulProtocol>,
     },
     Failed {
         path: PathBuf,
+        generation: u64,
     },
 }
 
@@ -58,6 +60,8 @@ pub struct ImagePreview {
     protocol: ThreadProtocol,
     current: Option<PathBuf>,
     status: PreviewStatus,
+    /// Counts decodes started; only the latest one's result is kept (see `TextPreview`).
+    generation: u64,
     decode_tx: UnboundedSender<DecodeOutcome>,
     decode_rx: UnboundedReceiver<DecodeOutcome>,
     resize_request_rx: UnboundedReceiver<ResizeRequest>,
@@ -81,6 +85,7 @@ impl ImagePreview {
             protocol: ThreadProtocol::new(resize_request_tx, None),
             current: None,
             status: PreviewStatus::Empty,
+            generation: 0,
             decode_tx,
             decode_rx,
             resize_request_rx,
@@ -96,6 +101,14 @@ impl ImagePreview {
 
     pub fn protocol_mut(&mut self) -> &mut ThreadProtocol {
         &mut self.protocol
+    }
+
+    /// Decodes the current image again without clearing what is shown, for when it changed on
+    /// disk while staying selected. A no-op when no image is selected.
+    pub fn reload(&mut self) {
+        if let Some(path) = self.current.clone() {
+            self.spawn_decode(path);
+        }
     }
 
     /// Call once per render tick. Starts decoding `selected` if it's a new image, and drains any
@@ -118,11 +131,14 @@ impl ImagePreview {
         }
 
         while let Ok(outcome) = self.decode_rx.try_recv() {
-            let path = match &outcome {
-                DecodeOutcome::Decoded { path, .. } | DecodeOutcome::Failed { path } => path,
+            let (path, generation) = match &outcome {
+                DecodeOutcome::Decoded {
+                    path, generation, ..
+                }
+                | DecodeOutcome::Failed { path, generation } => (path, *generation),
             };
-            if Some(path) != self.current.as_ref() {
-                continue; // stale — selection moved on before this decode finished
+            if Some(path) != self.current.as_ref() || generation != self.generation {
+                continue; // stale — selection moved on, or a newer decode superseded this one
             }
             match outcome {
                 DecodeOutcome::Decoded { protocol, .. } => {
@@ -147,7 +163,9 @@ impl ImagePreview {
         }
     }
 
-    fn spawn_decode(&self, path: PathBuf) {
+    fn spawn_decode(&mut self, path: PathBuf) {
+        self.generation += 1;
+        let generation = self.generation;
         let tx = self.decode_tx.clone();
         let picker = self.picker.clone();
         self.handle.spawn_blocking(move || {
@@ -155,8 +173,9 @@ impl ImagePreview {
                 Some(image) => DecodeOutcome::Decoded {
                     protocol: Box::new(picker.new_resize_protocol(image)),
                     path,
+                    generation,
                 },
-                None => DecodeOutcome::Failed { path },
+                None => DecodeOutcome::Failed { path, generation },
             };
             let _ = tx.send(outcome);
         });

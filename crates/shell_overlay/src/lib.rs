@@ -24,7 +24,9 @@
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
+mod command;
 mod popup;
+pub use command::{CommandOutcome, CommandOutput, run_command};
 pub use popup::{ExitOutcome, PopupShell};
 
 /// Serializes tests (here and in `popup`) that temporarily override the process-wide `$SHELL`

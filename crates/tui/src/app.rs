@@ -27,13 +27,21 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use anyhow::Result;
 use browser::BrowserState;
 use crossterm::event::KeyCode;
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use shared::{LocalVfs, Vfs, VfsError};
+use shell_overlay::CommandOutcome;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+use crate::command::{self, Command};
+use crate::live_refresh::LiveRefresh;
+
+/// How many lines of a shell command's output the status line shows before summarizing the rest.
+const STATUS_OUTPUT_LINES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardMode {
@@ -80,7 +88,7 @@ pub enum Prompt {
         buffer: String,
         origin: usize,
     },
-    /// The `:`-command prompt (`:q`, `:cd <path>`, ...).
+    /// The `:`-command prompt (`:q`, `:cd <path>`, `:mkdir`, `:touch`, or any shell command).
     CommandInput {
         buffer: String,
     },
@@ -157,6 +165,8 @@ enum BulkKind {
         dst: PathBuf,
     },
     Delete { targets: Vec<PathBuf> },
+    /// A `:` command line running under `sh -c`, from `started`.
+    Shell { command: String, started: Instant },
 }
 
 impl BulkKind {
@@ -167,6 +177,7 @@ impl BulkKind {
                 ClipboardMode::Move => "moving",
             },
             BulkKind::Delete { .. } => "deleting",
+            BulkKind::Shell { .. } => "running",
         }
     }
 
@@ -177,6 +188,7 @@ impl BulkKind {
                 ClipboardMode::Move => "move",
             },
             BulkKind::Delete { .. } => "delete",
+            BulkKind::Shell { .. } => "command",
         }
     }
 }
@@ -184,10 +196,12 @@ impl BulkKind {
 enum BulkMsg {
     Progress { path: String },
     Done(Result<Outcome, FileOpsError>),
+    ShellDone(std::io::Result<CommandOutcome>),
 }
 
 /// A background operation in flight. `cancel` is `None` for `Delete`, since
 /// `Vfs::remove_dir_all` is one opaque blocking call with no per-item hook to check against.
+/// A `Shell` command is cancelled by killing its shell.
 struct BulkOp {
     kind: BulkKind,
     items_done: u64,
@@ -212,6 +226,7 @@ pub struct App {
     pub prompt: Option<Prompt>,
     pub status: Option<String>,
     bulk: Option<BulkOp>,
+    live: LiveRefresh,
     handle: tokio::runtime::Handle,
 }
 
@@ -222,6 +237,7 @@ impl App {
             prompt: None,
             status: None,
             bulk: None,
+            live: LiveRefresh::new(handle.clone()),
             handle,
         }
     }
@@ -231,6 +247,9 @@ impl App {
             return match &bulk.kind {
                 BulkKind::Delete { targets } => {
                     format!("{}… {}", bulk.kind.progressing_label(), batch_label(targets))
+                }
+                BulkKind::Shell { command, .. } => {
+                    format!("{}… {command} — Esc to cancel", bulk.kind.progressing_label())
                 }
                 BulkKind::Paste { clip, index, .. } => {
                     let cancel_hint = if bulk.cancel.is_some() {
@@ -270,11 +289,24 @@ impl App {
             }
             _ => None,
         };
+        // A command has no item count, so its pill counts elapsed seconds instead — which also
+        // keeps the gauge moving while it runs.
+        let done = match &bulk.kind {
+            BulkKind::Shell { started, .. } => started.elapsed().as_secs(),
+            _ => bulk.items_done,
+        };
         Some(Progress {
             label: bulk.kind.progressing_label(),
-            done: bulk.items_done,
+            done,
             batch,
         })
+    }
+
+    /// Keeps the browser's lists in step with changes made on disk behind its back (see
+    /// `live_refresh`). Call once per render tick; returns whether the selected file itself
+    /// changed, so its preview needs re-reading.
+    pub fn poll_disk(&mut self, browser: &mut BrowserState, vfs: &LocalVfs, now: Instant) -> bool {
+        self.live.poll(browser, vfs, now)
     }
 
     /// Drains any progress/completion messages from the running background operation, if any.
@@ -285,6 +317,7 @@ impl App {
         };
 
         let mut done = None;
+        let mut shell_done = None;
         while let Ok(msg) = bulk.rx.try_recv() {
             match msg {
                 BulkMsg::Progress { path } => {
@@ -292,7 +325,23 @@ impl App {
                     bulk.current = path;
                 }
                 BulkMsg::Done(result) => done = Some(result),
+                BulkMsg::ShellDone(result) => shell_done = Some(result),
             }
+        }
+
+        if let Some(result) = shell_done {
+            let bulk = self.bulk.take().expect("checked Some above");
+            // Whatever the command did to the directory, show it now rather than on the next
+            // background refresh; it may also have deleted marked paths.
+            browser.reload(vfs)?;
+            browser.prune_marks(vfs);
+            if let BulkKind::Shell { command, .. } = bulk.kind {
+                self.status = Some(match result {
+                    Ok(outcome) => shell_status(&command, &outcome),
+                    Err(e) => format!("could not run '{command}': {e}"),
+                });
+            }
+            return Ok(());
         }
 
         let Some(result) = done else {
@@ -336,8 +385,8 @@ impl App {
                         dst,
                     }));
                 }
-                BulkKind::Delete { .. } => {
-                    self.status = Some("delete failed: unexpected conflict".into());
+                BulkKind::Delete { .. } | BulkKind::Shell { .. } => {
+                    self.status = Some(format!("{past_label} failed: unexpected conflict"));
                 }
             },
             // A delete can fail partway through a multi-target batch, having already removed
@@ -562,7 +611,8 @@ impl App {
         Ok(flow)
     }
 
-    /// Parses and runs a `:`-command buffer (without the leading `:`). Unknown commands surface
+    /// Parses and runs a `:`-command buffer (without the leading `:`). Built-ins run right here;
+    /// anything else runs under `sh -c` on the blocking pool (see `command`). Problems surface
     /// as a status message rather than an error — a typo shouldn't need a `Result` unwind.
     fn run_command(
         &mut self,
@@ -570,22 +620,89 @@ impl App {
         browser: &mut BrowserState,
         buffer: &str,
     ) -> Result<ControlFlow<()>> {
-        let mut parts = buffer.split_whitespace();
-        let Some(cmd) = parts.next() else {
-            return Ok(ControlFlow::Continue(()));
-        };
-        let rest = parts.collect::<Vec<_>>().join(" ");
-
-        match cmd {
-            "q" | "quit" => return Ok(ControlFlow::Break(())),
-            "cd" if !rest.is_empty() => match browser.goto(vfs, Path::new(&rest)) {
-                Ok(()) => self.status = Some(format!("cd {rest}")),
+        match command::parse(buffer) {
+            Ok(None) => {}
+            Ok(Some(Command::Quit)) => return Ok(ControlFlow::Break(())),
+            Ok(Some(Command::Cd(path))) => match browser.goto(vfs, Path::new(&path)) {
+                Ok(()) => self.status = Some(format!("cd {path}")),
                 Err(e) => self.status = Some(format!("cd failed: {e}")),
             },
-            "cd" => self.status = Some("cd: missing path".into()),
-            other => self.status = Some(format!("unknown command: {other}")),
+            Ok(Some(Command::Mkdir { parents: true, names })) => {
+                self.run_builtin(vfs, browser, "mkdir", &names, file_ops::create_directory_all)?;
+            }
+            Ok(Some(Command::Mkdir { parents: false, names })) => {
+                self.run_builtin(vfs, browser, "mkdir", &names, file_ops::create_directory)?;
+            }
+            Ok(Some(Command::Touch { names })) => {
+                self.run_builtin(vfs, browser, "touch", &names, file_ops::touch)?;
+            }
+            Ok(Some(Command::Shell(line))) => self.spawn_shell_command(browser, line),
+            Err(message) => self.status = Some(message),
         }
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// Applies `op` to each of `names` (relative to the browsed directory) and reports the
+    /// outcome, reloading the listing so the result is visible at once. Keeps going past a
+    /// failure, like coreutils, so one bad name doesn't stop the rest.
+    fn run_builtin(
+        &mut self,
+        vfs: &dyn Vfs,
+        browser: &mut BrowserState,
+        verb: &str,
+        names: &[String],
+        op: fn(&dyn Vfs, &Path) -> Result<(), FileOpsError>,
+    ) -> Result<()> {
+        let mut done = 0;
+        let mut first_error = None;
+        for name in names {
+            match op(vfs, &browser.current_dir().join(name)) {
+                Ok(()) => done += 1,
+                Err(e) => {
+                    first_error.get_or_insert_with(|| format!("{verb} {name}: {e}"));
+                }
+            }
+        }
+        browser.reload(vfs)?;
+
+        self.status = Some(match (first_error, names) {
+            (Some(error), _) if done > 0 => format!("{error} ({done} of {} done)", names.len()),
+            (Some(error), _) => error,
+            (None, [single]) => format!("{verb} {single}"),
+            (None, _) => format!("{verb}: {done} done"),
+        });
+        Ok(())
+    }
+
+    /// Runs `line` under `sh -c` in the browsed directory on the blocking pool, so a slow
+    /// command never freezes the render loop. `Esc` kills it (see `cancel_bulk`).
+    fn spawn_shell_command(&mut self, browser: &BrowserState, line: String) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
+        let (tx, rx) = unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_bg = Arc::clone(&cancel);
+        let cwd = browser.current_dir().to_path_buf();
+        let line_bg = line.clone();
+
+        self.handle.spawn_blocking(move || {
+            let _ = tx.send(BulkMsg::ShellDone(shell_overlay::run_command(
+                &cwd, &line_bg, &cancel_bg,
+            )));
+        });
+
+        self.bulk = Some(BulkOp {
+            kind: BulkKind::Shell {
+                command: line,
+                started: Instant::now(),
+            },
+            items_done: 0,
+            current: String::new(),
+            cancel: Some(cancel),
+            rx,
+        });
     }
 
     fn resolve_conflict(
@@ -792,6 +909,39 @@ impl App {
     }
 }
 
+/// One status-line summary of a finished command: its output (lines joined, so `ls` fits on the
+/// bar) when it printed any, else just that it ran, and the exit code when it failed.
+fn shell_status(command: &str, outcome: &CommandOutcome) -> String {
+    let CommandOutcome::Finished(output) = outcome else {
+        return format!("cancelled: {command}");
+    };
+    let lines: Vec<&str> = output
+        .text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut shown = lines
+        .iter()
+        .take(STATUS_OUTPUT_LINES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if lines.len() > STATUS_OUTPUT_LINES {
+        shown.push_str(&format!(" (+{} more lines)", lines.len() - STATUS_OUTPUT_LINES));
+    } else if output.truncated {
+        shown.push_str(" (output truncated)");
+    }
+
+    match (output.code, shown.is_empty()) {
+        (Some(0), true) => format!("ran: {command}"),
+        (Some(0), false) => shown,
+        (Some(code), true) => format!("exit {code}: {command}"),
+        (Some(code), false) => format!("exit {code}: {shown}"),
+        (None, _) => format!("killed by a signal: {command}"),
+    }
+}
+
 fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -803,5 +953,188 @@ fn batch_label(paths: &[PathBuf]) -> String {
     match paths {
         [single] => display_name(single),
         many => format!("{} items", many.len()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shell_overlay::CommandOutput;
+
+    fn finished(code: i32, text: &str) -> CommandOutcome {
+        CommandOutcome::Finished(CommandOutput {
+            code: Some(code),
+            text: text.into(),
+            truncated: false,
+        })
+    }
+
+    #[test]
+    fn a_quiet_success_says_it_ran_and_a_chatty_one_shows_its_output() {
+        assert_eq!(shell_status("true", &finished(0, "")), "ran: true");
+        assert_eq!(shell_status("ls", &finished(0, "a\n\nb\n")), "a | b");
+    }
+
+    #[test]
+    fn a_failure_carries_its_exit_code_and_any_message() {
+        assert_eq!(shell_status("false", &finished(1, "")), "exit 1: false");
+        assert_eq!(
+            shell_status("ls x", &finished(2, "ls: cannot access 'x'\n")),
+            "exit 2: ls: cannot access 'x'"
+        );
+    }
+
+    #[test]
+    fn long_output_is_summarized_and_cancellation_and_signals_are_named() {
+        let many = (1..=12).map(|n| format!("{n}\n")).collect::<String>();
+        assert_eq!(
+            shell_status("seq 12", &finished(0, &many)),
+            "1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 (+4 more lines)"
+        );
+        assert_eq!(
+            shell_status("sleep 9", &CommandOutcome::Cancelled),
+            "cancelled: sleep 9"
+        );
+        let killed = CommandOutcome::Finished(CommandOutput {
+            code: None,
+            text: String::new(),
+            truncated: false,
+        });
+        assert_eq!(shell_status("x", &killed), "killed by a signal: x");
+    }
+
+    struct Fixture {
+        _runtime: tokio::runtime::Runtime,
+        root: PathBuf,
+        app: App,
+        browser: BrowserState,
+    }
+
+    impl Fixture {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "minuteman-app-test-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let app = App::new(runtime.handle().clone());
+            let browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+            Self {
+                _runtime: runtime,
+                root,
+                app,
+                browser,
+            }
+        }
+
+        fn flow(&mut self, line: &str) -> ControlFlow<()> {
+            self.app
+                .run_command(&LocalVfs, &mut self.browser, line)
+                .unwrap()
+        }
+
+        /// Runs a command that must not ask the app to quit.
+        fn run(&mut self, line: &str) {
+            assert_eq!(self.flow(line), ControlFlow::Continue(()), "{line}");
+        }
+
+        /// Waits for a background `:` command to finish, applying its result the way the render
+        /// loop does.
+        fn wait_for_idle(&mut self) {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while self.app.is_busy() && Instant::now() < deadline {
+                self.app.poll_bulk(&mut self.browser, &LocalVfs).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(!self.app.is_busy(), "command did not finish in time");
+        }
+
+        fn listed(&self) -> Vec<String> {
+            self.browser
+                .current_entries()
+                .iter()
+                .map(|e| e.name.clone())
+                .collect()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn mkdir_and_touch_create_things_and_show_them_at_once() {
+        let mut f = Fixture::new("builtins");
+
+        f.run("mkdir -p deep/er");
+        f.run("touch notes.txt 'two words.txt'");
+
+        assert!(f.root.join("deep/er").is_dir());
+        assert!(f.root.join("two words.txt").is_file());
+        assert_eq!(f.listed(), vec!["deep", "notes.txt", "two words.txt"]);
+        assert_eq!(f.app.status.as_deref(), Some("touch: 2 done"));
+    }
+
+    #[test]
+    fn a_failing_name_is_reported_but_does_not_stop_the_rest() {
+        let mut f = Fixture::new("partial");
+        std::fs::write(f.root.join("taken"), b"x").unwrap();
+
+        f.run("mkdir taken fresh");
+
+        assert!(f.root.join("fresh").is_dir());
+        let status = f.app.status.clone().unwrap();
+        assert!(status.starts_with("mkdir taken: "), "{status}");
+        assert!(status.ends_with("(1 of 2 done)"), "{status}");
+    }
+
+    #[test]
+    fn cd_and_quit_still_work() {
+        let mut f = Fixture::new("cd");
+        std::fs::create_dir(f.root.join("sub")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.run("cd sub");
+        assert_eq!(f.browser.current_dir(), f.root.join("sub"));
+        assert_eq!(f.flow("quit"), ControlFlow::Break(()));
+    }
+
+    #[test]
+    fn any_other_command_runs_in_the_shell_and_its_effects_appear() {
+        let mut f = Fixture::new("shell");
+
+        f.run("echo hi > made-by-sh.txt && echo done");
+        assert!(f.app.is_busy());
+        f.wait_for_idle();
+
+        assert_eq!(f.app.status.as_deref(), Some("done"));
+        assert_eq!(f.listed(), vec!["made-by-sh.txt"]);
+    }
+
+    #[test]
+    fn a_failed_shell_command_reports_its_exit_code() {
+        let mut f = Fixture::new("shell-fail");
+
+        f.run("exit 4");
+        f.wait_for_idle();
+
+        assert_eq!(f.app.status.as_deref(), Some("exit 4: exit 4"));
+    }
+
+    #[test]
+    fn escape_cancels_a_running_shell_command() {
+        let mut f = Fixture::new("shell-cancel");
+
+        f.run("sleep 30");
+        assert!(f.app.is_busy());
+        f.app.cancel_bulk();
+        f.wait_for_idle();
+
+        assert_eq!(f.app.status.as_deref(), Some("cancelled: sleep 30"));
     }
 }

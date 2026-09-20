@@ -18,9 +18,11 @@ mod alt_keys;
 mod app;
 mod browser_mouse;
 mod cli;
+mod command;
 mod glyphs;
 mod hud;
 mod image_preview;
+mod live_refresh;
 mod popup_shell;
 mod shell_init;
 mod shell_layout;
@@ -491,6 +493,12 @@ impl Previews {
         self.image.update(selected);
         self.text.update(selected);
     }
+
+    /// Re-reads whichever preview is showing the selected file, after it changed on disk.
+    fn reload(&mut self) {
+        self.image.reload();
+        self.text.reload();
+    }
 }
 
 fn main() -> Result<()> {
@@ -529,7 +537,7 @@ fn main() -> Result<()> {
 
     let config = Config::load();
     let vfs = LocalVfs;
-    let mut browser = BrowserState::new(&vfs, start_dir)?;
+    let mut browser = BrowserState::with_show_hidden(&vfs, start_dir, config.show_hidden)?;
 
     // Backs the blocking thread pool that copy/move/delete run on so a large operation never
     // freezes the render loop. Kept alive for the rest of `main` — dropping it would shut the
@@ -625,6 +633,12 @@ fn run(
 
     loop {
         app.poll_bulk(browser, vfs)?;
+        // Picks up files made or changed by a mini-shell, a `:` command or another program; a
+        // change to the selected file itself needs its preview re-read, since that is otherwise
+        // keyed on the path alone.
+        if app.poll_disk(browser, vfs, Instant::now()) {
+            previews.reload();
+        }
         previews.update(browser.selected_entry().map(|e| e.path.as_path()));
 
         if let Some(mut panes) = shells.take() {
@@ -1113,6 +1127,12 @@ fn run(
                     Some(Action::Search) => app.begin_search(browser),
                     Some(Action::Command) => app.begin_command(),
                     Some(Action::Select) => browser.toggle_mark(),
+                    Some(Action::ToggleHidden) => {
+                        let shown = browser.toggle_hidden(vfs)?;
+                        app.status = Some(
+                            if shown { "hidden files shown" } else { "hidden files hidden" }.into(),
+                        );
+                    }
                     // Starts the resize/move chord for shell panes (see `pending_leader` and
                     // `ShellChordMode`). Stays inert — same as before panes existed to chord
                     // against — whenever no shell is open.

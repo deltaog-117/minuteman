@@ -37,6 +37,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-20 | Alt Tap Switches Shell/Browser | Kitty keyboard protocol, enabled only when supported, with an `alt_tap` off switch | ✅ Confirmed |
 | 2026-09-20 | Browser Mouse Support | One shared `BrowserLayout` plus pure hit-testing in `browser_mouse.rs`, list state persisted across frames (COA A) | ✅ Confirmed |
 | 2026-09-20 | Launch Command | Executable built as `mman` via the `[[bin]]` name; project, crates and config folder keep the Minuteman name | ✅ Confirmed |
+| 2026-09-20 | Hidden Files, `:` Commands, Live Refresh | Filter where a listing is stored (COA A); built-ins plus `sh -c` fall-through (COA C); poll by re-listing and comparing, no new dependency | ✅ Confirmed |
 
 ---
 
@@ -2156,6 +2157,102 @@ only `mman` on `PATH`, driven through a PTY, `whence -w mman` reported a functio
 entering a directory left the shell in that directory, and `q` left it where it started. Not
 verified: the bash and fish wrappers were only checked as text by the unit tests, never run in
 those shells, and `mman` has not been tried outside the test harness on a real desktop.
+
+---
+
+### Hidden Files, `:` Commands and Live Refresh: Filter Where It's Stored, Built-ins Plus `sh`, Poll by Re-listing
+
+**Date:** 2026-09-20
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Three requests arrived together: a key to show or hide hidden files, running commands such as
+`mkdir`, `touch` and `cd` from the `:` prompt without opening a mini-shell, and lists that update
+by themselves when something is created by a shell or a command instead of only after the user
+visits another panel. Before this the browser listed every dot-file, had no filter at all, and
+only reloaded after its own paste, delete, rename and create.
+
+#### Courses of Action Considered
+
+**Hidden files.** (A) Filter in `BrowserState` when a listing is stored. (B) Filter inside
+`Vfs::list_dir`, which changes the trait for every backend. (C) Filter while drawing, which
+leaves `selected`, `/` search and mouse hit-testing indexing a list the user does not see.
+Chose A. The key is `.`, not `s`: `s` already opens the shell, and moving it would have broken
+muscle memory for a feature that had a free key.
+
+**Commands.** (A) Built-ins only, through `Vfs`. (B) Everything through `sh -c`. (C) Built-ins
+first, anything else to `sh -c`. Chose C. `cd`, `mkdir [-p]`, `touch` and `q` are built in;
+`rm` and `mv` are deliberately not, so nothing implies a confirmation the shell path does not
+give. A built-in defers to the shell when given syntax it cannot honour (`*`, `|`, `&&`, `$`,
+`~`, an unknown flag such as `mkdir -m 700`), because doing the wrong thing quietly there is worse
+than running it.
+
+**Refresh.** (A) Poll the directory's mtime. (B) `notify`/inotify. (C) Reload when a command
+finishes and after mini-shell activity. I recommended A first, and it was wrong: a directory's
+mtime changes when an entry is added, removed or renamed, not when a file inside it is written,
+so editing `notes.txt` would never have refreshed its size or its preview. I said so when asked,
+and the design changed to re-list the directory about twice a second on the blocking pool and
+compare the whole listing (`DirEntryInfo` already derives `PartialEq` and carries name, size,
+modified time and mode) with what is on screen. That needs no dependency, no mtime logic and no
+second stat path, and it goes through `Vfs::list_dir`, so a future backend inherits it.
+`notify` stays a roadmap item, for the case where polling is noticeable in a huge directory.
+
+#### What Changed That Was Not Asked For, and Why
+
+- `reload` now keeps the cursor on the same entry by path. With a background refresh a new file
+  sorting above the cursor would otherwise move the selection every half second.
+- The previews carry a generation counter. Re-reading a changed file starts a second read of the
+  same path, and without it a slow first read could finish last and overwrite the newer content.
+- The parent column always lists the directory being browsed, even a hidden one, or it would have
+  nothing to highlight after toggling inside `~/.config`.
+- `Vfs::touch` exists because coreutils `touch` on an existing file sets its modified time, which
+  `create_file` (fails if present) cannot do.
+- The refresher lives in `App`, not as another parameter to `run`, which was already at clippy's
+  limit of seven.
+
+#### Decision
+
+Shipped as chosen. Hidden files default to hidden (`show_hidden = false`), which is a change in
+behaviour from listing everything; `show_hidden = true` restores it. Shell commands reuse the
+existing background-operation slot, so the UI is `BUSY` while one runs and `Esc` cancels it. The
+header pill counts seconds for a command, since it has no item count.
+
+#### Known Limits
+
+- A refresh can lag a change by up to about half a second, and costs one `readdir` plus one `stat`
+  per entry on each pass. Not measured in a directory of tens of thousands of entries.
+- `Esc` kills the `sh` a command started, not a process it had already forked into the background.
+- `sh -c` is not an interactive shell: no aliases or functions, and a `cd` inside the command does
+  not move the browser. Output shows eight lines at most, for five seconds. A program that reads
+  stdin sees end-of-file rather than waiting.
+- If the browsed directory itself is deleted underneath the app, the list keeps what it had.
+- Not verified: a real terminal emulator (only `pyte` on a PTY), and any filesystem other than
+  the local one.
+
+#### Verification
+
+`cargo test --workspace` passes (`tui` 160 tests, up from 136) and clippy is clean. New tests cover
+the hidden filter in every listing, path-preserving reload, `apply_listing` including a stale result
+for a directory that was left, the command parser (with a property test that quoting any words and
+splitting them returns the same words), the runner's cwd, stderr merging, output cap, cancellation
+and a backgrounded child, the built-ins and shell path through `App`, and the refresher seeing a
+create, an in-place write and a delete. Against the compiled binary, three scripted PTY sessions
+through `pyte`, 28 checks in all: `.` toggling; `:mkdir -p`, `:touch` with a quoted name and
+`:echo ... > file` producing files that are listed at once; the failing-command exit code; `:cd`;
+`sleep 30` showing BUSY and `Esc` cancelling it within seconds; files created, rewritten and
+deleted by another program appearing untouched, with the selected file's preview showing the new
+text; a file made inside a mini-shell showing up in the list behind the box; and a new hidden file
+staying hidden through refreshes until `.` is pressed.
+
+The harness needed three fixes of its own, none of them app bugs. It answered `ESC[6n` but the
+probe sends `ESC[5n` and `ESC[16t` too, so the screen stayed blank until those were answered. An
+empty `$HOME` made zsh start its new-user wizard, which ate the first letter typed into the
+mini-shell, so the session sets `SHELL=/bin/sh`. And a check assumed the cursor was on the first
+row after `:mkdir`, when it had stayed on the same file, which is the path-preserving reload
+working. My first version of the `mkdir` check also passed on the status line alone, because
+`mkdir made/deep` puts "made" there; the retest uses names that never appear in a message.
 
 ---
 

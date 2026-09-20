@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: `.` shows or hides dot-prefixed files and directories in every column, keeping the
+  cursor on the entry it was on. The parent column keeps listing the directory you are in even
+  when that directory is itself hidden.
+- `theming`: top-level `show_hidden` in `config.toml` (default `false`) sets whether hidden
+  entries are listed at startup, and `[keys] hidden` (default `.`) rebinds the toggle. See
+  `config.example.toml`.
+- `tui`: the `:` prompt runs commands without a mini-shell. `:mkdir [-p] <name>...` and
+  `:touch <name>...` are built in and go through `Vfs`; `:cd` and `:q` are unchanged. Names may be
+  quoted (`:mkdir 'two words'`). Any other command, and any built-in given shell syntax it can't
+  honour (`*`, `|`, `&&`, `$VAR`, `~`, `mkdir -m 700`), runs under `sh -c` in the browsed
+  directory on the blocking pool. Its output (up to eight lines) lands on the status line, a
+  non-zero exit shows as `exit N: ...`, and `Esc` kills a command that is still running. The
+  header pill counts the seconds a running command has taken.
+- `tui`: the file lists refresh on their own. About twice a second the browsed directory and its
+  parent are re-listed off-thread and compared with what is on screen, so a file made, removed,
+  renamed or written to by a mini-shell, a `:` command or another program shows up without
+  leaving the directory. The selected text or image file's preview is re-read when that file
+  changes.
+- `shell_overlay`: `run_command`, which runs one command line under `sh -c` with stdin closed,
+  stdout and stderr merged in order, output capped at 64 KiB, and cancellation by flag.
+- `shared`: `Vfs::touch`, which creates an empty file or sets an existing file's modified time to
+  now. `file_ops`: `touch` and `create_directory_all` (`mkdir -p`).
+- `browser`: `BrowserState::with_show_hidden`, `show_hidden`, `toggle_hidden` and
+  `apply_listing`.
 - `tui`: the executable is now installed as `mman`, so `cargo install --path crates/tui` puts a
   short command on the `PATH`. See *Changed* and *Removed*.
 - `tui`: mouse support in the file browser. A click on a row in the middle column selects it, a
@@ -272,6 +296,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: hidden files are now hidden by default. Before, every file was listed. Set
+  `show_hidden = true` in `config.toml` to keep the old behaviour.
+- `tui`: a command typed at `:` that is not a built-in used to answer `unknown command`; it now
+  runs in `sh`. `sh -c` is not an interactive shell, so aliases and shell functions are not
+  available, and a `cd` inside the command does not move the browser (use `:cd`).
+- `browser`: `BrowserState::reload` now keeps the cursor on the same entry by path, falling back
+  to the same index only when that entry is gone. Before, a file appearing above the cursor
+  moved the selection.
+- `tui`: text and image previews drop the result of a read or decode that a newer one has
+  superseded, not only one for a path that is no longer selected.
 - `tui`: the executable Cargo builds is `mman` instead of `minuteman`, and `mman init <shell>`
   prints a wrapper function named `mman` (it was `mm`) that calls the binary through
   `command mman`. The project, the crate layout and `~/.config/minuteman/` keep their names.

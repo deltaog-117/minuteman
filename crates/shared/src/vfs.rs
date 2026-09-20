@@ -45,6 +45,10 @@ pub trait Vfs {
     /// an existing file at `path`.
     fn create_file(&self, path: &Path) -> Result<(), VfsError>;
 
+    /// Creates an empty file at `path`, or, if a file is already there, sets its modified time
+    /// to now without touching its content (the `touch` command's contract).
+    fn touch(&self, path: &Path) -> Result<(), VfsError>;
+
     /// Copies a single file. Fails with `VfsError::AlreadyExists` if `dst` already exists —
     /// never silently overwrites.
     fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), VfsError>;
@@ -131,6 +135,18 @@ impl Vfs for LocalVfs {
             .create_new(true)
             .open(path)
             .map(|_| ())
+            .map_err(|source| map_io_err(path, source))
+    }
+
+    fn touch(&self, path: &Path) -> Result<(), VfsError> {
+        // `create(true)` without `truncate` leaves an existing file's content alone, and opening
+        // for write is what `set_modified` needs.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .and_then(|file| file.set_modified(std::time::SystemTime::now()))
             .map_err(|source| map_io_err(path, source))
     }
 
@@ -261,6 +277,33 @@ mod tests {
 
         assert!(matches!(result, Err(VfsError::AlreadyExists(_))));
         assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn touch_creates_a_missing_file_and_keeps_an_existing_files_content() {
+        let dir = scratch_dir("touch");
+        let vfs = LocalVfs;
+
+        let fresh = dir.join("fresh.txt");
+        vfs.touch(&fresh).unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"");
+
+        let existing = dir.join("existing.txt");
+        std::fs::write(&existing, b"keep me").unwrap();
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&existing)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        vfs.touch(&existing).unwrap();
+
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep me");
+        assert!(std::fs::metadata(&existing).unwrap().modified().unwrap() > long_ago);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
