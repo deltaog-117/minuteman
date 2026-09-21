@@ -20,11 +20,13 @@ mod browser_mouse;
 mod cli;
 mod command;
 mod context_menu;
+mod git_status;
 mod glyphs;
 mod hud;
 mod image_preview;
 mod inspect;
 mod live_refresh;
+mod marked_size;
 mod open;
 mod osc52;
 mod overlay_view;
@@ -592,6 +594,7 @@ fn main() -> Result<()> {
     // pool down out from under any operation still running.
     let runtime = tokio::runtime::Runtime::new()?;
     let mut app = App::new(runtime.handle().clone())
+        .with_git_status(config.git_status)
         .with_interactive_commands(config.interactive_commands.clone());
 
     let mut guard = TerminalGuard::new()?;
@@ -721,6 +724,7 @@ fn run(
         if app.poll_disk(browser, vfs, Instant::now()) {
             previews.reload();
         }
+        app.poll_hud(browser, Instant::now());
         previews.update(browser.selected_entry().map(|e| e.path.as_path()));
 
         if let Some(mut panes) = shells.take() {
@@ -1708,6 +1712,7 @@ fn draw(
             path: browser.current_dir(),
             home: std::env::var_os("HOME").map(PathBuf::from),
             marks: browser.marked_paths().len(),
+            marks_total: app.marked_total(),
             clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
             progress: app.progress(),
         },
@@ -1736,6 +1741,11 @@ fn draw(
                 browser.current_entries().len(),
             ),
             message: &message,
+            git: app.git_repo(),
+            git_entry: app
+                .git_repo()
+                .zip(browser.selected_entry())
+                .and_then(|(repo, entry)| repo.state_of(&entry.path)),
         },
         config,
     );

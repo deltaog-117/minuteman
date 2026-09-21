@@ -40,7 +40,7 @@ use crate::hud::format_size;
 
 /// A folder with more entries than this is reported as "at least" rather than walked to the end,
 /// so inspecting `/` cannot keep the blocking pool busy for minutes.
-const TALLY_LIMIT: u64 = 500_000;
+pub(crate) const TALLY_LIMIT: u64 = 500_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {

@@ -20,6 +20,12 @@ alt_tap = true
 # keyboard back from a mini-shell. Set this to false to leave the mouse to the mini-shell box only.
 browser_mouse = true
 
+# The status bar's git segment: the branch, how far it is ahead of or behind its upstream, counts
+# of staged, modified and untracked files, and the state of the selected file. It runs `git status`
+# in the background (read-only, without taking git's index lock) whenever you browse inside a
+# repository. Set this to false to never run git.
+git_status = true
+
 # Whether dot-prefixed files and directories are listed when Minuteman starts. The `hidden` key
 # below flips it while browsing.
 show_hidden = false

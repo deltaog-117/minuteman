@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: the status bar shows the repository the browsed directory is in. On the right, before
+  the position, a segment reads `⎇ main ↑2 ↓1 +3 ~2 ?1` — the branch (or `@0123456` when detached),
+  how far it is ahead of and behind its upstream, and the counts of staged, modified and untracked
+  files, with conflicts as `!n`; counts of zero are left out, so a clean branch is just its name.
+  On the left, after the type, the selected entry's own state (`modified`, `staged`, `untracked`,
+  `staged+modified`, `conflict`) appears when it is not clean, and a folder shows the state of what
+  it holds. Both segments are dropped on a narrow bar before any file detail is, and only show in
+  the normal mode. The answer comes from `git status --porcelain=v2 --branch -z` run on the
+  blocking pool with `--no-optional-locks` (so it never takes git's index lock and cannot make a
+  `git commit` elsewhere fail), refreshed three seconds after the last run finished, cancelled when
+  you leave the repository and killed after ten seconds. Whether a directory is in a repository is
+  decided by looking for `.git`, so browsing elsewhere never starts a process; a missing `git`
+  just means no segment. New module `git_status` (a pure parser, `Repo`, `GitStatus`).
+- `tui`: the `◆ N marked` pill in the header gains the marked entries' total size, `◆ 3 marked │
+  1.4 GiB`, or `at least …` when the walk hit its 500,000-entry limit. The sum runs on the blocking
+  pool and starts again whenever the marks change; the previous total stays up until the new one
+  lands. A marked folder counts everything below it, once, even if something inside it is marked
+  too. New module `marked_size`.
+- `theming`: top-level `git_status` in `config.toml` (default `true`); `false` never runs `git`.
+- `tui`: glyph-set entries for the git segment (`branch`, `ahead`, `behind`, `staged`, `modified`,
+  `untracked`, `conflicted`); the ASCII set uses `^`/`v` and no branch symbol. `minuteman glyphs`
+  prints them.
 - `tui`: a right-click context menu. Right-clicking a file or folder selects it and opens a menu
   at the pointer with Open, Open with ▸, Cut, Copy, Paste into folder (folders only), Rename,
   Delete, Mark/Unmark, Copy path and Inspect; right-clicking empty space offers New file or

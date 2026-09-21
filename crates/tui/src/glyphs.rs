@@ -68,6 +68,16 @@ pub struct Glyphs {
     pub yanked: &'static str,
     pub cut: &'static str,
     pub marked: &'static str,
+    /// The git segment: in front of the branch name (empty when the set has none), the branch's
+    /// distance from its upstream, and the counts of staged, modified, untracked and conflicted
+    /// files.
+    pub branch: &'static str,
+    pub ahead: &'static str,
+    pub behind: &'static str,
+    pub staged: &'static str,
+    pub modified: &'static str,
+    pub untracked: &'static str,
+    pub conflicted: &'static str,
     /// Stands in for a missing value (a directory's size, an unknown age).
     pub none: &'static str,
     pub arrow_right: &'static str,
@@ -98,6 +108,13 @@ static UNICODE: Glyphs = Glyphs {
     yanked: "⧉",
     cut: "✂",
     marked: "◆",
+    branch: "⎇",
+    ahead: "↑",
+    behind: "↓",
+    staged: "+",
+    modified: "~",
+    untracked: "?",
+    conflicted: "!",
     none: "—",
     arrow_right: POWERLINE_RIGHT,
     arrow_left: POWERLINE_LEFT,
@@ -112,6 +129,7 @@ static NERD: Glyphs = Glyphs {
     yanked: "\u{f0c5}",
     cut: "\u{f0c4}",
     marked: "\u{f00c}",
+    branch: "\u{e0a0}",
     powerline: true,
     icons: Some(Icons {
         dir: "\u{f07b}",
@@ -138,6 +156,13 @@ static ASCII: Glyphs = Glyphs {
     yanked: "",
     cut: "",
     marked: "",
+    branch: "",
+    ahead: "^",
+    behind: "v",
+    staged: "+",
+    modified: "~",
+    untracked: "?",
+    conflicted: "!",
     none: "-",
     arrow_right: ">",
     arrow_left: "<",
@@ -226,6 +251,10 @@ pub fn sample(set: GlyphSet) -> String {
         "  arrows       {} {} {}\n",
         g.arrow_right, g.arrow_right_thin, g.arrow_left
     ));
+    out.push_str(&format!(
+        "  git          {} main {}2 {}1 {}3 {}2 {}1 {}1\n",
+        g.branch, g.ahead, g.behind, g.staged, g.modified, g.untracked, g.conflicted
+    ));
     match &g.icons {
         Some(icons) => {
             out.push_str("  icons        ");
@@ -265,6 +294,13 @@ mod tests {
             g.yanked,
             g.cut,
             g.marked,
+            g.branch,
+            g.ahead,
+            g.behind,
+            g.staged,
+            g.modified,
+            g.untracked,
+            g.conflicted,
             g.none,
             g.arrow_right,
             g.arrow_left,

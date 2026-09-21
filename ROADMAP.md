@@ -526,6 +526,32 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   over a PTY with SGR mouse sequences: the file and directory menus opened, the submenu opened on
   hover, Open with ran a program on a file, Inspect showed a file and a folder, Delete reached
   its confirmation prompt, and Cut then Paste into folder moved a file on disk.
+- ✅ **Richer status line — marked-set size and git status** – the two gaps left in the HUD.
+  The header's `◆ 3 marked` pill now adds what the marks total (`◆ 3 marked │ 1.4 GiB`,
+  `at least …` past the 500,000-entry walk limit): new `tui::marked_size` sums files by `lstat` and
+  folders through the same `tally_dir` walk Inspect uses, on the blocking pool, restarting when the
+  marks change and keeping the previous total on screen until the new one lands (no flicker); paths
+  under a marked folder are skipped, so a folder and a marked child count once. The status bar
+  gains a git segment on the right (`⎇ main ↑2 ↓1 +3 ~2 ?1`) and the selected entry's state on the
+  left (`modified`, `staged`, `untracked`, `staged+modified`, `conflict`; a folder shows the merged
+  state of what is inside). New `tui::git_status` runs `git --no-optional-locks status
+  --porcelain=v2 --branch -z` on the blocking pool — no index lock, cancelled when the directory
+  leaves the repository, killed after 10 s, re-run 3 s after the last run finished — with a pure
+  parser (`parse`) over its bytes; whether a directory is in a repository is decided in-process by
+  looking for `.git`, so browsing elsewhere spawns nothing. Chosen as COA A (shell out to `git`,
+  no new dependency) over the `gix` crate (B) and marked-size only (C). Both segments drop first on
+  a narrow bar; the ASCII glyph set draws them in ASCII. A top-level `git_status` option in
+  `config.toml` (default `true`) is the off switch. Property-tested: the parser round-trips any
+  ordinary records (names with spaces, counts add up) and never panics on arbitrary bytes, the
+  state merge is commutative, associative and idempotent, and marked totals equal the sum of the
+  file sizes whatever their order, nesting or repeats. Tests against the real `git` confirm a
+  status run leaves `.git/index` untouched (with a control showing a plain `git status` does not).
+  Verified against the real binary in a PTY read through `pyte`, in a scratch repository: the
+  branch and `+1 ~2 ?1` appeared, each file showed its own state and a folder showed `modified`,
+  a clean file showed the branch and no state word, marking one file then two changed the pill from
+  `2.0K` to `2.2K`, a marked folder showed its 500 B, `c` cleared the pill, `:cd` out of the
+  repository dropped the segment at once and back restored it, and with `git_status = false` no
+  segment and no `git` process appeared.
 
 ---
 
@@ -544,9 +570,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **UI overhaul, phase C — cinematic layer** – a boot splash, animated focus transitions,
   gradient borders/titles, a pulsing selection, a typewriter reveal on the preview, and an
   optional system/git HUD. Needs an animation tick on top of the existing 100ms poll.
-- **Richer status line, remainder** – the HUD now shows permissions, size, type, item count and
-  position for the selection; still missing are the cumulative size of the marked entries and
-  (where applicable) git status.
 - **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
   frequently visited paths don't require re-navigating the miller columns each time.
 
@@ -591,6 +614,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   paths once a backend exists (owner and on-disk size need a `Vfs` method). The menu could grow
   keyboard-first access (a key to open it on the selection), per-item shortcut hints, and a
   configurable item list.
+- **Git status, follow-ups** – the segment refreshes every three seconds, so a `:git commit` or a
+  commit made in a mini-shell shows up after up to that long; it could refresh at once when the
+  live refresh sees a change or a `:` command ends. Also missing: the stash count, ignored files,
+  a per-file column in the listing (the state shows for the selection only), and a marked-set
+  total that refreshes when a marked file grows (it is taken when the marks change).
 - **Fuzzy ranking for `/` search** – search now finds the nearest substring match anywhere below
   the directory. Still missing: subsequence matching (`aernd` finding `aerend`), ranking by match
   quality rather than depth alone, and stepping through further matches (`n`/`N`, or the arrows
@@ -652,12 +680,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Press `.` to show or hide dot-files. Try `:mkdir -p a/b`, `:touch x.txt` and `:ls -l` — the
    new entries appear at once, and so does a file you create from a mini-shell or another
    terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
-   Then the newest four: `/` plus the start of a name a few directories down (`Esc` returns,
+   Then the newest: open a repository — the status bar shows `⎇ branch` with the counts and the
+   selected file's state; `v` a few files and the header pill adds their total size;
+   `git_status = false` in `config.toml` turns the git segment off.
+   Before that, four earlier ones: `/` plus the start of a name a few directories down (`Esc` returns,
    `Enter` stays); the arrow keys; `v` two files, `m`, go to another directory, `c` drops the cut
    and the marks; and `:nvim ROADMAP.md` (`:!cmd` for a program not in `interactive_commands`).
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: preview extras, stage 1 (a scrollable preview, hex view and archive listing), or
    the mouse's stage 2 (multi-select and breadcrumb clicks).
-   Richer status line and bookmarks/marks (directory bookmarks — distinct from the file marks
-   added earlier) remain the other 🔥 candidates.
+   Bookmarks (directory bookmarks — distinct from the file marks added earlier) and the preview
+   extras' later stages remain the other 🔥 candidates.

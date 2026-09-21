@@ -40,6 +40,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-20 | Hidden Files, `:` Commands, Live Refresh | Filter where a listing is stored (COA A); built-ins plus `sh -c` fall-through (COA C); poll by re-listing and comparing, no new dependency | ✅ Confirmed |
 | 2026-09-20 | `:` Terminal Handover, `c` Cancel-All, Arrow Keys, Nearest-First Search | Suspend and hand over the real terminal (COA A, name list plus `!`); cancel means everything (COA B); arrows in the default bindings (COA A); breadth-first walk on the blocking pool (COA A) | ✅ Confirmed |
 | 2026-09-21 | Right-Click Menu, Inspect Panel, Open With | Menu and modal panel inside `tui` with pure geometry, config-driven Open with, detached launch (COA B); `.desktop` discovery, multi-select clicks and drag and drop deferred | ✅ Confirmed |
+| 2026-09-21 | Richer Status Line: Marked Size and Git | Marked total in the header pill via the Inspect walk; git segment from `git status --porcelain=v2` run off-thread with `--no-optional-locks` (COA A); `gix` and a marked-size-only cut rejected | ✅ Confirmed |
 
 ---
 
@@ -2545,6 +2546,116 @@ was not tracked down, and a left click was not tried as the first event to see w
 older than this change), and the harness reads text
 out of a diff-drawn screen, so it can only ask whether a label appeared, not where. Not verified
 in a real desktop session beyond `xdg-open` being invoked, and not with a physical mouse.
+
+### Richer Status Line: Marked-Set Size and Git Status, Shelling Out to `git` Off the Render Thread
+
+**Date:** 2026-09-21
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+The HUD's status line showed permissions, size, type, item count and position for the selection,
+and the roadmap listed two gaps: what the marked entries add up to, and, where it applies, git
+status. Both need work that can take seconds (walking a marked folder, running `git` in a large
+repository), so the question was where that work runs and what it is allowed to cost. Three
+courses of action were put first.
+
+#### Options Considered
+
+**A**, both pieces, with git read by running `git status --porcelain=v2 --branch -z` on the
+blocking pool and marked sizes summed with the walk Inspect already has. **B**, both pieces, with
+git read in-process through the `gix` crate. **C**, marked size only, with git split into a later
+feature. **A** was chosen. B removes the dependency on a `git` binary but brings a large
+dependency tree and slower builds for a decoration, and ties the code to local paths just as a
+remote `Vfs` is queued. C leaves half of the roadmap item open. A adds no dependency, and both of
+its risks are contained: a missing `git` means no segment, and a slow one is cut off by a timeout.
+
+#### Where the two figures go
+
+The marked total went into the header's existing `◆ N marked` pill (`◆ 3 marked │ 1.4 GiB`),
+because that is where the count already is and the header has room; the divider is the glyph set's
+own, so the ASCII set stays ASCII (the first version used a middle dot, and the existing
+ASCII-only test failed on it). The git state went into the status bar: the repository on the right
+beside the position, the selected entry's state on the left after its type. Both are added only if
+they fit beside the segments that are always shown, so a narrow bar loses git before it loses a
+file detail, and neither appears in the leader, resize, busy or prompt modes, which have their own
+status.
+
+#### Marked size
+
+`marked_size::total_of` sums a set of paths: a file or link by its `lstat` length, a folder through
+`inspect::tally_dir` (so it does not follow symlinks and shares the 500,000-entry limit, spent
+across all the marked folders together). A marked folder already contains whatever is marked
+inside it, so paths under one are skipped; sorting makes everything below a folder contiguous
+after it, which is why remembering the latest folder is enough, and `dir.txt` sorting right after
+`dir` while not being inside it is covered by a test. The tracker (`MarkedSize`) starts a fresh
+walk whenever the marks change and cancels the one before it. It keeps showing the previous total
+until the new one lands, because clearing it made the pill flicker on every mark. The sum is taken
+when the marks change and is not refreshed: re-walking a marked folder twice a second would cost
+far more than the figure is worth, and the roadmap says so.
+
+#### Git status
+
+`git_status` has a pure parser over the porcelain-v2 bytes (branch and upstream headers, ordinary,
+renamed, unmerged and untracked records; anything unrecognised is skipped so a newer git cannot
+break it), a `Repo` that maps every changed path, and every folder above one, to a state, and a
+`GitStatus` that runs one job at a time. Four decisions are worth recording.
+
+- `--no-optional-locks`. A plain `git status` refreshes a stale index, which takes the index lock
+  and rewrites it; a refresh landing while the user runs `git commit` in a mini-shell would make
+  their commit fail with "index.lock exists". A test makes the index stale on purpose, runs the
+  status job, and checks the index's modification time is unchanged, then runs a plain
+  `git status` as a control and checks that one does change it, so the assertion cannot pass
+  vacuously.
+- Repository detection is in-process. Looking for `.git` up the ancestors costs a few `stat`s, so
+  browsing outside a repository never starts a process, and a `git init` made later is noticed on
+  the next refresh with no special case.
+- The state of a folder is the merge of what is inside it (a conflict outranks everything, an
+  untracked file only shows when nothing tracked changed, different tracked changes read as
+  staged-and-modified). Merge being commutative, associative and idempotent is what lets the
+  ancestors be folded in any order; the five states are few enough that the test checks every
+  combination rather than sampling.
+- Timing. The next run starts three seconds after the last one finished, not three seconds after
+  it started, so a slow repository gets a proportionally lazier refresh. A run is cancelled when
+  the browsed directory leaves the repository (the segment goes at once, not after the next run)
+  and killed after ten seconds. Output is read on its own thread, since a status listing larger
+  than the pipe buffer would otherwise block git while the job waits for it to exit, and is capped
+  at 32 MiB.
+
+The `git_status` option in `config.toml` (default on) is the off switch, since this starts a
+process in the background.
+
+#### Trade-offs and what was left
+
+The git segment can lag a commit by up to three seconds; refreshing when the live refresh sees a
+change or a `:` command ends is on the roadmap. A repository whose `git status` takes more than ten
+seconds never shows a segment. The per-file state shows for the selection only, not as a column.
+There is no benchmark: neither piece is on a hot path (one job every few seconds, off the render
+thread), and the workspace has no benchmark harness, so adding one would have meant a new
+dependency for nothing to guard. There is no logging either, as the project has none and writing
+to stderr would draw over the interface. The project also has no `scripts/check` yet, so
+`cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` were run by hand; `cargo fmt
+--check` already reports differences in `app.rs`, `main.rs` and `shell_layout.rs` at the last
+commit, which were left alone as unrelated.
+
+#### Verification
+
+`cargo test --workspace` passes (`tui` 268 including the new ones) and `cargo clippy --workspace
+--all-targets -- -D warnings` is clean. Property tests: ordinary porcelain records round-trip with
+paths containing spaces and counts that add up; arbitrary bytes never panic the parser; marked
+totals equal the sum of the file sizes in any order, nesting or with repeats. Two tests found
+mistakes of mine before the binary was run: the narrow-bar test assumed the file-state segment
+would be dropped at 60 columns when it still fits (the assertion was wrong, the behaviour is
+intended), and the ASCII-only test caught the middle dot. On a PTY against the real binary, read
+through `pyte`, in a scratch repository with one staged, two modified (one inside a folder) and
+one untracked file: the bar showed `⎇ main` and `+1 ~2 ?1`; each file, and the folder, showed its
+own state; a clean file showed the branch and no state word; marking one file showed `1 marked │
+2.0K` and a second `2.2K`; a marked folder showed `500B`; `c` removed the pill; `:cd` out of the
+repository removed the segment at once and `:cd` back restored it; and with `git_status = false`
+neither the segment nor a `git status` process appeared. Not tried in a real terminal emulator,
+against a very large repository, or with a worktree or submodule (the `.git` file case is handled
+by looking for any `.git` entry but was not exercised).
 
 ---
 

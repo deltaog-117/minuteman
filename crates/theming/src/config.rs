@@ -42,6 +42,8 @@ struct RawConfig {
     alt_tap: Option<bool>,
     /// `None` when absent, for the same reason as `alt_tap`.
     browser_mouse: Option<bool>,
+    /// `None` when absent, for the same reason as `alt_tap`.
+    git_status: Option<bool>,
     /// `None` when absent, so "unset" can default to hidden rather than serde's `false` meaning
     /// the same thing by accident.
     show_hidden: Option<bool>,
@@ -89,6 +91,9 @@ pub struct Config {
     /// constant so a misbehaving terminal or a habit of clicking by accident can turn it off
     /// without a rebuild; the mini-shell's own mouse gestures don't depend on it.
     pub browser_mouse: bool,
+    /// Whether the status bar shows the branch and the selection's git state. It runs the `git`
+    /// binary in the background, so it is a switch for anyone who would rather it never did.
+    pub git_status: bool,
     /// Whether dot-prefixed entries start out visible; the `hidden` key flips it at runtime.
     pub show_hidden: bool,
     /// Program names a `:` command hands the whole terminal to (`:nvim notes.md`), instead of
@@ -127,6 +132,7 @@ impl Config {
         Self {
             alt_tap: config.alt_tap.unwrap_or(true),
             browser_mouse: config.browser_mouse.unwrap_or(true),
+            git_status: config.git_status.unwrap_or(true),
             show_hidden: config.show_hidden.unwrap_or(false),
             interactive_commands: config
                 .interactive_commands
@@ -190,6 +196,7 @@ mod tests {
         let raw: RawConfig = toml::from_str(text).unwrap();
         assert_eq!(raw.alt_tap, Some(true));
         assert_eq!(raw.browser_mouse, Some(true));
+        assert_eq!(raw.git_status, Some(true));
         assert_eq!(raw.show_hidden, Some(false));
         assert_eq!(
             raw.interactive_commands,
@@ -228,6 +235,13 @@ mod tests {
         assert!(!Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).show_hidden);
         assert!(Config::from_sources(Some("show_hidden = true\n"), None).show_hidden);
         assert!(!Config::from_sources(Some("show_hidden = false\n"), None).show_hidden);
+    }
+
+    #[test]
+    fn git_status_defaults_on_and_can_be_switched_off() {
+        assert!(Config::from_sources(None, None).git_status);
+        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).git_status);
+        assert!(!Config::from_sources(Some("git_status = false\n"), None).git_status);
     }
 
     #[test]

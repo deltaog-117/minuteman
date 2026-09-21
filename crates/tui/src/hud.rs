@@ -32,7 +32,9 @@ use shared::DirEntryInfo;
 use theming::{Action, Config};
 
 use crate::app::{ClipboardMode, Progress};
+use crate::git_status::{FileState, Head, Repo};
 use crate::glyphs::{self, Glyphs};
+use crate::marked_size::Total;
 use crate::style;
 
 // ---------------------------------------------------------------------------------------------
@@ -280,6 +282,8 @@ pub struct HeaderView<'a> {
     pub path: &'a Path,
     pub home: Option<PathBuf>,
     pub marks: usize,
+    /// What the marks add up to, once known; shown after the count.
+    pub marks_total: Option<Total>,
     pub clipboard: Option<(ClipboardMode, usize)>,
     pub progress: Option<Progress>,
 }
@@ -336,10 +340,11 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
         pills.push(pill(text, &theme.config_fg));
     }
     if view.marks > 0 {
-        pills.push(pill(
-            g.pill(g.marked, &format!("{} marked", view.marks)),
-            &theme.accent_fg,
-        ));
+        let mut text = format!("{} marked", view.marks);
+        if let Some(total) = view.marks_total {
+            text.push_str(&format!(" {} {}", g.divider, total.label()));
+        }
+        pills.push(pill(g.pill(g.marked, &text), &theme.accent_fg));
     }
     let mut right = Vec::with_capacity(pills.len() * 2);
     for (i, p) in pills.into_iter().enumerate() {
@@ -432,6 +437,40 @@ pub struct StatusView<'a> {
     /// `(1-based position of the selection, entries in the directory)`.
     pub position: (usize, usize),
     pub message: &'a str,
+    /// The repository the browsed directory is in, when git answered.
+    pub git: Option<&'a Repo>,
+    /// The selected entry's state in that repository; `None` for a clean one.
+    pub git_entry: Option<FileState>,
+}
+
+/// The git segment's text: `⎇ main ↑2 ↓1 +3 ~2 ?1`. Counts that are zero are left out, so a clean
+/// branch is just its name.
+pub fn git_summary(repo: &Repo, g: &Glyphs) -> String {
+    let head = match &repo.head {
+        Head::Branch(name) => name.clone(),
+        Head::Detached(id) => format!("@{id}"),
+    };
+    let mut parts = vec![g.pill(g.branch, &head)];
+    if let Some((ahead, behind)) = repo.ahead_behind {
+        if ahead > 0 {
+            parts.push(format!("{}{ahead}", g.ahead));
+        }
+        if behind > 0 {
+            parts.push(format!("{}{behind}", g.behind));
+        }
+    }
+    let counts = repo.counts;
+    for (symbol, count) in [
+        (g.staged, counts.staged),
+        (g.modified, counts.modified),
+        (g.untracked, counts.untracked),
+        (g.conflicted, counts.conflicted),
+    ] {
+        if count > 0 {
+            parts.push(format!("{symbol}{count}"));
+        }
+    }
+    parts.join(" ")
 }
 
 pub fn key_label(code: KeyCode) -> String {
@@ -525,6 +564,13 @@ fn mode_pill(mode: Mode, theme: &theming::Theme) -> (String, Color) {
 struct Segment {
     text: String,
     style: Style,
+}
+
+/// Cells a segment takes beyond its text: a space each side and one separator.
+const SEGMENT_PADDING: usize = 3;
+
+fn segment_cost(seg: &Segment) -> usize {
+    text_width(&seg.text) + SEGMENT_PADDING
 }
 
 fn segment_bg(seg: &Segment) -> Color {
@@ -680,10 +726,50 @@ pub fn render_status_bar(
                 style: seg_style,
             });
         }
-        right.push(Segment {
+        let position = Segment {
             text: format!("{}/{}", view.position.0, view.position.1),
             style: seg_style,
-        });
+        };
+
+        // The git segments are the first thing to go on a narrow bar: they are added only if they
+        // fit beside everything that is always shown, so they never crowd out the file details.
+        let mut used: usize = left
+            .iter()
+            .chain(std::iter::once(&position))
+            .map(segment_cost)
+            .sum();
+        if let (Some(state), Some(_)) = (view.git_entry, view.git) {
+            let color = match state {
+                FileState::Conflicted => &theme.danger_fg,
+                _ => &theme.accent_fg,
+            };
+            let text = state.label().to_string();
+            if used + text_width(&text) + SEGMENT_PADDING <= width {
+                used += text_width(&text) + SEGMENT_PADDING;
+                left.push(Segment {
+                    text,
+                    style: style::styled(
+                        Style::default().fg(style::color(color)).bg(bar_bg),
+                        styles.status,
+                    ),
+                });
+            }
+        }
+        if let Some(repo) = view.git {
+            let text = git_summary(repo, g);
+            if used + text_width(&text) + SEGMENT_PADDING <= width {
+                right.push(Segment {
+                    text,
+                    style: style::styled(
+                        Style::default()
+                            .fg(style::color(&theme.accent_fg))
+                            .bg(bar_bg),
+                        styles.status,
+                    ),
+                });
+            }
+        }
+        right.push(position);
     }
 
     let left_line = left_segments(&left, arrows, divider, g);
@@ -781,6 +867,7 @@ mod tests {
         Config {
             alt_tap: true,
             browser_mouse: true,
+            git_status: true,
             show_hidden: false,
             interactive_commands: Vec::new(),
             open_with: Vec::new(),
@@ -990,6 +1077,8 @@ mod tests {
             dir_items: Some(3),
             position: (2, 9),
             message,
+            git: None,
+            git_entry: None,
         }
     }
 
@@ -1113,9 +1202,15 @@ mod tests {
     fn the_ascii_set_draws_the_header_and_status_bar_in_ascii_only() {
         let config = config_with(theming::GlyphSet::Ascii);
         let file = entry("main.rs", false);
-        let status = render_to_text(120, |f, a| {
-            render_status_bar(f, a, &view(Mode::Normal, Some(&file), "msg"), &config)
-        });
+        let repo = sample_repo();
+        let mut with_git = view(Mode::Normal, Some(&file), "msg");
+        with_git.git = Some(&repo);
+        with_git.git_entry = Some(FileState::Modified);
+        let status = render_to_text(140, |f, a| render_status_bar(f, a, &with_git, &config));
+        assert!(
+            status.contains("modified"),
+            "the git segments were not drawn: {status:?}"
+        );
         let header = render_to_text(120, |f, a| {
             render_header(
                 f,
@@ -1124,6 +1219,10 @@ mod tests {
                     path: Path::new("/home/me/dev"),
                     home: Some("/home/me".into()),
                     marks: 2,
+                    marks_total: Some(Total {
+                        bytes: 3 * 1024 * 1024,
+                        exact: true,
+                    }),
                     clipboard: Some((ClipboardMode::Copy, 1)),
                     progress: Some(Progress {
                         label: "copying",
@@ -1150,6 +1249,7 @@ mod tests {
                     path: Path::new("/x"),
                     home: None,
                     marks: 1,
+                    marks_total: None,
                     clipboard: Some((ClipboardMode::Move, 2)),
                     progress: None,
                 },
@@ -1176,6 +1276,7 @@ mod tests {
                             path,
                             home: Some("/home/me".into()),
                             marks: 12,
+                            marks_total: None,
                             clipboard: Some((ClipboardMode::Move, 3)),
                             progress: Some(Progress {
                                 label: "copying",
@@ -1186,6 +1287,11 @@ mod tests {
                         &config,
                     )
                 });
+                let repo = sample_repo();
+                let mut with_git = view(Mode::Normal, Some(&file), "a message that is long");
+                with_git.git = Some(&repo);
+                with_git.git_entry = Some(FileState::StagedModified);
+                render_to_text(width, |f, a| render_status_bar(f, a, &with_git, &config));
                 for mode in [
                     Mode::Normal,
                     Mode::Shell,
@@ -1208,5 +1314,143 @@ mod tests {
                 }
             }
         }
+    }
+    fn sample_repo() -> Repo {
+        use crate::git_status::{Counts, Parsed};
+        Repo::new(
+            PathBuf::from("/repo"),
+            Parsed {
+                head: Head::Branch("main".into()),
+                ahead_behind: Some((2, 1)),
+                counts: Counts {
+                    staged: 3,
+                    modified: 2,
+                    untracked: 1,
+                    conflicted: 0,
+                },
+                entries: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn the_git_summary_lists_the_branch_then_only_the_nonzero_counts() {
+        let g = Glyphs::for_set(theming::GlyphSet::Unicode);
+        assert_eq!(git_summary(&sample_repo(), g), "⎇ main ↑2 ↓1 +3 ~2 ?1");
+
+        let mut clean = sample_repo();
+        clean.ahead_behind = Some((0, 0));
+        clean.counts = Default::default();
+        assert_eq!(git_summary(&clean, g), "⎇ main");
+
+        let mut detached = sample_repo();
+        detached.head = Head::Detached("0123456".into());
+        detached.ahead_behind = None;
+        detached.counts = Default::default();
+        assert_eq!(git_summary(&detached, g), "⎇ @0123456");
+    }
+
+    #[test]
+    fn the_ascii_git_summary_has_no_branch_symbol_and_plain_arrows() {
+        let g = Glyphs::for_set(theming::GlyphSet::Ascii);
+        assert_eq!(git_summary(&sample_repo(), g), "main ^2 v1 +3 ~2 ?1");
+    }
+
+    #[test]
+    fn the_status_bar_shows_the_branch_and_the_selected_files_state() {
+        let config = test_config();
+        let file = entry("main.rs", false);
+        let repo = sample_repo();
+        let mut v = view(Mode::Normal, Some(&file), "");
+        v.git = Some(&repo);
+        v.git_entry = Some(FileState::Modified);
+        let text = render_to_text(140, |f, a| render_status_bar(f, a, &v, &config));
+        assert!(text.contains("modified"), "{text:?}");
+        assert!(text.contains("⎇ main ↑2 ↓1 +3 ~2 ?1"), "{text:?}");
+        assert!(text.contains("2/9"), "the position must stay: {text:?}");
+    }
+
+    #[test]
+    fn a_clean_selection_shows_the_branch_but_no_state() {
+        let config = test_config();
+        let file = entry("main.rs", false);
+        let repo = sample_repo();
+        let mut v = view(Mode::Normal, Some(&file), "");
+        v.git = Some(&repo);
+        let text = render_to_text(140, |f, a| render_status_bar(f, a, &v, &config));
+        assert!(text.contains("⎇ main"), "{text:?}");
+        assert!(
+            !text.contains("modified") && !text.contains("untracked"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_bar_drops_the_git_segments_before_the_file_details() {
+        let config = test_config();
+        let file = entry("main.rs", false);
+        let repo = sample_repo();
+        let mut v = view(Mode::Normal, Some(&file), "");
+        v.git = Some(&repo);
+        v.git_entry = Some(FileState::Modified);
+
+        let text = render_to_text(60, |f, a| render_status_bar(f, a, &v, &config));
+        assert!(
+            !text.contains("⎇"),
+            "the branch does not fit beside the details: {text:?}"
+        );
+        for kept in ["main.rs", "rw-r--r--", "14K", "rs", "2/9"] {
+            assert!(text.contains(kept), "{kept:?} was crowded out: {text:?}");
+        }
+        let roomy = render_to_text(140, |f, a| render_status_bar(f, a, &v, &config));
+        assert!(roomy.contains("⎇ main"), "{roomy:?}");
+    }
+
+    #[test]
+    fn git_is_not_shown_in_modes_that_have_their_own_status() {
+        let config = test_config();
+        let file = entry("main.rs", false);
+        let repo = sample_repo();
+        let mut v = view(Mode::Leader, Some(&file), "");
+        v.git = Some(&repo);
+        let text = render_to_text(140, |f, a| render_status_bar(f, a, &v, &config));
+        assert!(!text.contains("⎇"), "{text:?}");
+    }
+
+    #[test]
+    fn the_marked_pill_gains_the_total_once_it_is_known() {
+        let config = test_config();
+        let render = |total: Option<Total>| {
+            render_to_text(100, |f, a| {
+                render_header(
+                    f,
+                    a,
+                    &HeaderView {
+                        path: Path::new("/x"),
+                        home: None,
+                        marks: 3,
+                        marks_total: total,
+                        clipboard: None,
+                        progress: None,
+                    },
+                    &config,
+                )
+            })
+        };
+        assert!(render(None).contains("3 marked"));
+        assert!(!render(None).contains('│'));
+        let sized = render(Some(Total {
+            bytes: 1536,
+            exact: true,
+        }));
+        assert!(
+            sized.contains(&format!("3 marked │ {}", format_size(1536))),
+            "{sized:?}"
+        );
+        let bound = render(Some(Total {
+            bytes: 1536,
+            exact: false,
+        }));
+        assert!(bound.contains("at least"), "{bound:?}");
     }
 }

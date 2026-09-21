@@ -40,8 +40,10 @@ use shell_overlay::CommandOutcome;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::command::{self, Command};
+use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
 use crate::live_refresh::LiveRefresh;
+use crate::marked_size::{MarkedSize, Total};
 use crate::open;
 use crate::search_job::{SearchJob, SearchState};
 
@@ -250,6 +252,10 @@ pub struct App {
     pub status: Option<String>,
     bulk: Option<BulkOp>,
     live: LiveRefresh,
+    /// What the marked entries add up to, for the header pill (see `marked_size`).
+    marked_size: MarkedSize,
+    /// The browsed directory's repository, for the status bar (see `git_status`).
+    git: GitStatus,
     handle: tokio::runtime::Handle,
     /// Program names a `:` command hands the terminal to (see `command::parse`).
     interactive: Vec<String>,
@@ -267,12 +273,20 @@ impl App {
             status: None,
             bulk: None,
             live: LiveRefresh::new(handle.clone()),
+            marked_size: MarkedSize::new(handle.clone()),
+            git: GitStatus::new(handle.clone(), true),
             handle,
             interactive: Vec::new(),
             handover: None,
             search_job: None,
             search_state: SearchState::Idle,
         }
+    }
+
+    /// Turns the status bar's git segment on or off (`git_status` in `config.toml`).
+    pub fn with_git_status(mut self, enabled: bool) -> Self {
+        self.git = GitStatus::new(self.handle.clone(), enabled);
+        self
     }
 
     /// Sets which program names `:` hands the terminal to.
@@ -350,6 +364,24 @@ impl App {
     /// changed, so its preview needs re-reading.
     pub fn poll_disk(&mut self, browser: &mut BrowserState, vfs: &LocalVfs, now: Instant) -> bool {
         self.live.poll(browser, vfs, now)
+    }
+
+    /// Keeps the figures the HUD shows about the browsed directory and the marks up to date: the
+    /// marked entries' total size and the repository's git status. Both run their work on the
+    /// blocking pool (see `marked_size` and `git_status`); call once per render tick.
+    pub fn poll_hud(&mut self, browser: &BrowserState, now: Instant) {
+        self.marked_size.poll(&browser.marked_paths());
+        self.git.poll(browser.current_dir(), now);
+    }
+
+    /// What the marks add up to, once a walk has finished.
+    pub fn marked_total(&self) -> Option<Total> {
+        self.marked_size.total()
+    }
+
+    /// The repository the browsed directory is in, when git answered.
+    pub fn git_repo(&self) -> Option<&Repo> {
+        self.git.repo()
     }
 
     /// Drains any progress/completion messages from the running background operation, if any.
