@@ -22,6 +22,9 @@ use std::path::Path;
 
 use image::DynamicImage;
 
+pub mod archive;
+pub mod hex;
+
 const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp",
 ];
@@ -113,6 +116,61 @@ pub fn load_text(path: &Path) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// What the preview pane shows for a file that is not an image or a folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Loaded {
+    Text(String),
+    /// A binary file's first bytes, for the hex view.
+    Bytes(hex::Head),
+    Archive(archive::Listing),
+    /// The file should have a preview but could not be read, or is too big for one.
+    Failed,
+    /// Not a regular file (a socket, a device, a named pipe): nothing to show.
+    Unsupported,
+}
+
+/// Whether `head`, the start of a file, looks like text: no null byte and valid UTF-8 (a
+/// multi-byte character cut by the end of `head` does not count against it).
+pub fn looks_like_text(head: &[u8]) -> bool {
+    if head.contains(&0) {
+        return false;
+    }
+    match std::str::from_utf8(head) {
+        Ok(_) => true,
+        // `error_len() == None` is a character that was merely cut off at the end.
+        Err(error) => error.error_len().is_none(),
+    }
+}
+
+/// Decides what to show for the regular file at `path` and reads it, which can take a while on a
+/// slow disk — call it off the render thread. In order: an archive (by name) is listed; a file
+/// that is text, by its name or its content, is read whole up to 1 MiB; everything else is shown
+/// as bytes. A text-named file over the size cap, or one that cannot be read, is `Failed`.
+pub fn load(path: &Path) -> Loaded {
+    let Some(head) = hex::read_head(path) else {
+        // `read_head` refuses anything that is not a regular file, and a regular file it could
+        // not read is a failure worth saying so; tell the two apart by asking again.
+        return match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => Loaded::Failed,
+            _ => Loaded::Unsupported,
+        };
+    };
+    if let Some(listing) = archive::list(path) {
+        return Loaded::Archive(listing);
+    }
+    let named_text = is_text(path);
+    if named_text && head.total > MAX_TEXT_PREVIEW_BYTES {
+        return Loaded::Failed;
+    }
+    if head.total <= MAX_TEXT_PREVIEW_BYTES
+        && (named_text || looks_like_text(&head.bytes))
+        && let Some(text) = load_text(path)
+    {
+        return Loaded::Text(text);
+    }
+    Loaded::Bytes(head)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +260,69 @@ mod tests {
 
         assert!(load_text(&path).is_none());
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn text_is_told_from_binary_by_content() {
+        assert!(looks_like_text(b"plain words\nand more"));
+        assert!(looks_like_text("naïve — ünïcode".as_bytes()));
+        assert!(looks_like_text(b""));
+        assert!(!looks_like_text(b"has a \0 in it"));
+        assert!(!looks_like_text(&[0xff, 0xfe, 0x41]));
+        // A character cut in half by the end of what was read is not a reason to call it binary.
+        let cut = &"é".as_bytes()[..1];
+        assert!(looks_like_text(&[b"ab", cut].concat()));
+    }
+
+    #[test]
+    fn load_picks_text_bytes_or_an_archive_for_each_kind_of_file() {
+        let dir = scratch_dir("load");
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+
+        assert_eq!(load(&write("a.txt", b"hi")), Loaded::Text("hi".into()));
+        // No known extension, but plainly text.
+        assert_eq!(load(&write("notes", b"hi")), Loaded::Text("hi".into()));
+        // A text name over a binary body falls back to the bytes.
+        assert!(matches!(
+            load(&write("bin.txt", &[0, 1, 2])),
+            Loaded::Bytes(_)
+        ));
+        assert!(matches!(
+            load(&write("prog", &[0x7f, b'E', 0, 0])),
+            Loaded::Bytes(_)
+        ));
+        // A damaged archive is just bytes; if it happens to be readable text, it is text.
+        assert!(matches!(
+            load(&write("bad.zip", &[0x50, 0x4b, 0, 1])),
+            Loaded::Bytes(_)
+        ));
+        assert_eq!(
+            load(&write("words.zip", b"not a zip")),
+            Loaded::Text("not a zip".into())
+        );
+
+        let big = write(
+            "big.txt",
+            &vec![b'a'; (MAX_TEXT_PREVIEW_BYTES + 1) as usize],
+        );
+        assert_eq!(
+            load(&big),
+            Loaded::Failed,
+            "a text-named file over the cap still fails"
+        );
+        let big_unnamed = write(
+            "big.data",
+            &vec![b'a'; (MAX_TEXT_PREVIEW_BYTES + 1) as usize],
+        );
+        assert!(matches!(load(&big_unnamed), Loaded::Bytes(_)));
+
+        assert_eq!(load(&dir), Loaded::Unsupported);
+        assert_eq!(load(&dir.join("missing")), Loaded::Unsupported);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

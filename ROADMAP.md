@@ -552,15 +552,39 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `2.0K` to `2.2K`, a marked folder showed its 500 B, `c` cleared the pill, `:cd` out of the
   repository dropped the segment at once and back restored it, and with `git_status = false` no
   segment and no `git` process appeared.
+- ✅ **Preview extras, stage 1 — scrolling, hex view, archive listing** – the preview column now
+  scrolls (`J`/`K`, new `[keys] preview_down`/`preview_up`, half a screen each; the wheel over the
+  column, three rows), and it shows something for every regular file. New `tui::preview_view` draws
+  text, hex and archive content with a scrollbar; new `tui::text_preview::Scroll` holds the
+  position (clamped when drawn, since the pane's height and the content's length are only known
+  then; reset when the selection changes, kept when the file changes on disk). The `preview` crate
+  gained `hex` (first 64 KiB, 16/8/4 bytes a row by pane width, formatted only for the rows on
+  screen), `archive` (zip, tar and tar.gz listings) and `load`, which picks text, bytes or an
+  archive by name and content. Chosen as COA A (in-process `zip` and `tar` crates, `flate2` for
+  gzip) over shelling out to `bsdtar` (B) and hand-parsing the formats (C). Archives are untrusted
+  input opened by moving the cursor over them, so each read is bounded: 5,000 entries, 256 MiB
+  inflated (cut-off listings say so), plain tars skipped by seeking, zips with a central directory
+  over 8 MiB or in zip64 refused before the crate allocates, and names cleaned of control and
+  direction-changing characters. Text is now told from binary by content, so an extensionless text
+  file shows as text and a `.txt` full of binary falls back to the hex view instead of `preview
+  failed`. Property-tested: hex rows round-trip every byte at any width, archives of random names
+  and sizes list back exactly in all three formats, the scroll offset is always within the content,
+  the scrollbar thumb spans the bar, a cleaned name never holds an unsafe character, and no pane
+  size or scroll position panics for any content. A test that made the zip guard's first version
+  fail (it looked only at the last end-of-directory record, which a reader may skip) led to it
+  checking all of them. A worst-case frame (1 MiB of text scrolled to the end) takes about 43 ms in
+  release, inside the 100 ms tick (an ignored benchmark test). Verified against the real binary in
+  a PTY read through `pyte`: `J`, `K` and the wheel scrolled a long text and stopped with the last
+  line as the last row, a binary showed a hex dump and a 200 KiB one said `first 64K of 200K
+  shown`, a zip and a tar.gz showed their summaries and entries, an archive holding an
+  OSC-title escape in a name showed it defused and sent nothing to the terminal, a `.txt` of binary
+  showed hex, a file with no extension showed text, and a named pipe showed only its name with the
+  browser still responsive.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-- **Preview extras, stage 1 — scrolling, hex view, archive listing** – the text preview cannot
-  scroll yet, and a binary or an archive shows only its file name. Add a scrollable preview
-  (wheel over the preview column, plus keys), a hex view for binary files, and a listing for
-  `zip`/`tar`/`tar.gz` archives, all in-process and testable in the `preview` crate.
 - **Preview extras, stage 2 — syntax highlighting** – colour source and config files in the text
   preview with `syntect`, using the theme's palette where it can.
 - **Preview extras, stage 3 — external previewers for PDF and video** – a config-driven hook
@@ -619,6 +643,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   live refresh sees a change or a `:` command ends. Also missing: the stash count, ignored files,
   a per-file column in the listing (the state shows for the selection only), and a marked-set
   total that refreshes when a marked file grows (it is taken when the marks change).
+- **Preview polish** – the scroll keys are not in the status bar's hints; the hex view has no
+  jump to an offset or search; archives with `xz`, `zstd`, `bzip2` or `7z` compression and zip64
+  archives (over 65,535 entries or 4 GiB) show as bytes; a text over 1 MiB says `preview failed`
+  rather than showing its start; a scrolled 1 MiB text re-wraps everything above the visible rows on
+  each frame (about 43 ms at the far end), which caching wrapped lines would remove; and the
+  scroll position is not remembered per file.
 - **Fuzzy ranking for `/` search** – search now finds the nearest substring match anywhere below
   the directory. Still missing: subsequence matching (`aernd` finding `aerend`), ranking by match
   quality rather than depth alone, and stepping through further matches (`n`/`N`, or the arrows
@@ -673,22 +703,23 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    in the left column to go up, scroll the wheel over either. Clicking the browser while a
    mini-shell is focused gives the keyboard back to the browser. Set `browser_mouse = false` in
    `config.toml` if you would rather leave the mouse to the shell box.
-   Then the newest: right-click a file for its menu (hover "Open with", pick Inspect), right-click
+   Then, from the menu cycle: right-click a file for its menu (hover "Open with", pick Inspect), right-click
    a folder and Cut/Copy elsewhere then "Paste into folder", right-click empty space for the
    directory menu, and double-click a file to open it. Put `[[open_with]]` entries in
    `config.toml` (see `config.example.toml`) to fill the "Open with" submenu.
    Press `.` to show or hide dot-files. Try `:mkdir -p a/b`, `:touch x.txt` and `:ls -l` — the
    new entries appear at once, and so does a file you create from a mini-shell or another
    terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
-   Then the newest: open a repository — the status bar shows `⎇ branch` with the counts and the
-   selected file's state; `v` a few files and the header pill adds their total size;
-   `git_status = false` in `config.toml` turns the git segment off.
+   Then the newest: `J`/`K` (or the wheel over the right column) scroll the preview of a long text
+   file; select a binary for its hex dump, and a `.zip`, `.tar` or `.tar.gz` for its listing.
+   Before that, the git segment: open a repository (the status bar shows the branch, and `v` a
+   few files for the header's total size; `git_status = false` turns the git segment off).
    Before that, four earlier ones: `/` plus the start of a name a few directories down (`Esc` returns,
    `Enter` stays); the arrow keys; `v` two files, `m`, go to another directory, `c` drops the cut
    and the marks; and `:nvim ROADMAP.md` (`:!cmd` for a program not in `interactive_commands`).
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: preview extras, stage 1 (a scrollable preview, hex view and archive listing), or
-   the mouse's stage 2 (multi-select and breadcrumb clicks).
+4. Next cycle: preview extras, stage 2 (syntax highlighting), or the mouse's stage 2
+   (multi-select and breadcrumb clicks), or built-in trash and undo.
    Bookmarks (directory bookmarks — distinct from the file marks added earlier) and the preview
    extras' later stages remain the other 🔥 candidates.

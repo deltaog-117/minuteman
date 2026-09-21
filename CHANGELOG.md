@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: the preview column scrolls. `J` and `K` (new `[keys] preview_down` and `preview_up`,
+  `Action::PreviewDown` and `PreviewUp`) move it half a screen, and the mouse wheel over the column
+  moves it three rows, as it does in the file columns. It works on text, hex dumps and archive
+  listings; a scrollbar appears over the frame's right edge when the content is longer than the
+  pane, and the position resets when the selection changes but survives the file changing on disk.
+  The position is clamped when drawn, so scrolling past either end just stops.
+- `tui` and `preview`: a hex view for binary files. Anything that is not an image, an archive or
+  text shows its first 64 KiB as offset, hex bytes and an ASCII column, with as many bytes to a row
+  (16, 8 or 4) as the pane is wide, and a last line saying `first 64K of 200K shown` when the file
+  is longer. Only the rows on screen are formatted. New `preview::hex`.
+- `preview` and `tui`: archive listings. `.zip`, `.jar`, `.tar`, `.tar.gz` and `.tgz` show a
+  summary (`zip │ 15 entries │ 1.4K unpacked`), then each entry with its unpacked size, folders
+  ending in `/`, and a note when entries were left out. Nothing is extracted, and every read is
+  bounded: at most 5,000 entries are kept, a `.tar.gz` is inflated for at most 256 MiB (a cut-off
+  listing says so rather than passing for a whole one), a plain `.tar` is skipped through by
+  seeking, and a zip whose central directory claims to be over 8 MiB, or uses zip64, is shown as
+  bytes instead of being opened. Entry names are cleaned of control and direction-changing
+  characters before they reach the screen. New `preview::archive`; new dependencies `zip` (with no
+  compression codecs, since only the directory is read), `tar` and `flate2` (already built for
+  `image`).
+- `preview`: `preview::load`, which decides what to show for a file (text, bytes, an archive, or
+  neither) and reads it, and `looks_like_text`, which tells text from binary by content.
+- `tui`: `preview_view`, which draws the three kinds of content and their scrollbar, with its row
+  contents as plain functions.
+- `theming`: `preview_down` and `preview_up` under `[keys]`, defaulting to `J` and `K`. See
+  `config.example.toml`.
 - `tui`: the status bar shows the repository the browsed directory is in. On the right, before
   the position, a segment reads `⎇ main ↑2 ↓1 +3 ~2 ?1` — the branch (or `@0123456` when detached),
   how far it is ahead of and behind its upstream, and the counts of staged, modified and untracked
@@ -365,6 +391,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: a file with no known extension that turns out to be text (a `.service` file, a `notes`
+  file) now shows its text, and a binary one shows a hex dump; both used to show only the file
+  name. A file named like text but holding binary bytes (a `.txt` that is not) shows a hex dump
+  instead of `preview failed`. A text-named file over 1 MiB still says `preview failed`, and a
+  socket, device or named pipe still shows only its name (a named pipe is never opened, since that
+  would wait for a writer forever).
+- `tui`: the wheel over the preview column, which did nothing, now scrolls it.
+- `tui`: ratatui is built with its `unstable-rendered-line-info` feature, for
+  `Paragraph::line_count`, which the scrolling text preview needs to know how many rows wrapped
+  text takes.
 - `tui`: double-clicking a file in the middle column opens it with the desktop's default program;
   it used to do nothing. Double-clicking a directory still opens the directory.
 - `tui`: `/` search now looks below the current directory as well as in it. The nearest match

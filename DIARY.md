@@ -41,6 +41,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-20 | `:` Terminal Handover, `c` Cancel-All, Arrow Keys, Nearest-First Search | Suspend and hand over the real terminal (COA A, name list plus `!`); cancel means everything (COA B); arrows in the default bindings (COA A); breadth-first walk on the blocking pool (COA A) | ✅ Confirmed |
 | 2026-09-21 | Right-Click Menu, Inspect Panel, Open With | Menu and modal panel inside `tui` with pure geometry, config-driven Open with, detached launch (COA B); `.desktop` discovery, multi-select clicks and drag and drop deferred | ✅ Confirmed |
 | 2026-09-21 | Richer Status Line: Marked Size and Git | Marked total in the header pill via the Inspect walk; git segment from `git status --porcelain=v2` run off-thread with `--no-optional-locks` (COA A); `gix` and a marked-size-only cut rejected | ✅ Confirmed |
+| 2026-09-21 | Preview Extras, Stage 1 | Scrolling preview (`J`/`K`, wheel), hex view of the first 64 KiB, in-process zip/tar/tar.gz listing with every read bounded (COA A); shelling out to `bsdtar` and hand-parsing rejected | ✅ Confirmed |
 
 ---
 
@@ -2656,6 +2657,121 @@ repository removed the segment at once and `:cd` back restored it; and with `git
 neither the segment nor a `git status` process appeared. Not tried in a real terminal emulator,
 against a very large repository, or with a worktree or submodule (the `.git` file case is handled
 by looking for any `.git` entry but was not exercised).
+
+### Preview Extras, Stage 1: A Scrolling Preview, a Hex View and Archive Listings, Every Read Bounded
+
+**Date:** 2026-09-21
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+The preview column showed a text file's start and nothing else: it could not scroll, and a binary
+or an archive showed only its name. The roadmap's first stage of preview extras was a scrollable
+preview, a hex view for binaries and a listing for `zip`, `tar` and `tar.gz`. Scrolling and the
+hex view have one sensible design each; archive listing is where the choice was, so three courses
+of action were put first for it. The two smaller questions raised with them (which keys scroll, and
+whether text-named binary should fall back to hex) were answered by taking the proposed defaults
+when the reply was "A. proceed".
+
+#### Options Considered
+
+**A**, list archives in-process with the `zip` and `tar` crates (and `flate2` for gzip). **B**,
+run `bsdtar -tvf` off-thread. **C**, parse the tar headers and the zip central directory by hand.
+**A** was chosen. B covers almost every format but shows nothing on a machine without `bsdtar`,
+its output differs between versions, and it is a process per selected archive that is hard to test
+deterministically. C has the fewest dependencies and the most code, all of it parsing untrusted
+input I would then maintain (zip64, tar long names, pax headers). A adds two crates but keeps the
+feature in-process, testable with generated archives and bounded by construction. B stays
+available later for the formats A skips, as the external-previewer hook stage 3 already plans.
+`zip` is built with no default features: listing reads only the directory, so no compression codec
+is needed, which keeps the dependency small.
+
+#### Scrolling
+
+The position is a `Scroll { offset, viewport }`. A key or a wheel notch adds to the offset with no
+upper limit, and the drawing code calls `fit`, which records the pane's height and clamps the
+offset, because neither that height nor the content's length is known until it is drawn. Doing
+the clamp at draw time rather than in the key handler is what keeps the handler free of layout
+knowledge, and the clamped value is written back so the position never drifts past the end. A key
+moves half the viewport (at least a row), the wheel three rows like the file columns. The offset
+resets when the selected path changes and is kept when the same file is re-read after changing on
+disk, so a log being appended to does not jump to the top. `J` and `K` are the defaults
+(`preview_down` and `preview_up`); they were unbound. For text, the wrapped height comes from
+`Paragraph::line_count`, which ratatui offers only behind `unstable-rendered-line-info`, and is
+cached per width and per content because measuring walks the whole text. The scrollbar reuses the
+list scrollbar, with the offset stretched over `0..total - 1` (`scrollbar_position`) since a
+scrolled view stops at `total - viewport` and the thumb would otherwise never reach the bottom.
+
+#### Hex view
+
+Only the first 64 KiB of a file is read, so a huge binary costs what a small one does. Rows are
+formatted from those bytes when drawn, for the visible rows only, because how many bytes fit in a
+row (16, 8 or 4) depends on the pane's width, which changes on resize. `preview::load` decides what
+a file is: an archive by name, then text if its name says so or, new here, if its first 64 KiB is
+valid UTF-8 with no null byte, and otherwise bytes. Sniffing was needed because a hex view for
+"everything else" would otherwise have shown `notes` or a `.service` file as hex. A text-named
+file holding binary bytes now shows hex rather than `preview failed`; a text-named file over 1 MiB
+still fails, as before. A file that is not a regular file is checked with `metadata` before it is
+opened, because opening a named pipe for reading blocks until something writes to it; a test with
+a real `mkfifo` guards that, and so does the PTY run.
+
+#### Archives are untrusted input
+
+Listing runs merely because the cursor passes over a file, so the limits matter more than the
+parsing. At most 5,000 entries are kept. A `.tar.gz` is inflated for at most 256 MiB, through a
+`Capped` reader that fails when the limit is hit and more data is coming, not `Read::take`, which
+ends quietly: the tar reader takes a quiet end for the archive's real end, so a cut-off listing
+would have passed for a whole one. A plain `.tar` is skipped through with `entries_with_seek`, so
+listing costs its headers, tested on a 200 MiB sparse file. For a zip, the `zip` crate reads the
+whole central directory into memory when it opens the file, so a hostile one could ask for a great
+deal; the last 64 KiB is read first and the file is refused if its end-of-directory record claims
+more than 8 MiB or uses zip64 (all-ones fields), and then it is shown as bytes. My first version of
+that check looked only at the record nearest the end of the file; a test I wrote to put a small
+fake there and a greedy real one before it failed, because a reader is free to skip a record that
+turns out to be bogus and use an earlier one. It now checks every place that looks like a record,
+and one claiming too much refuses the file. Names come from the archive's author, so they are
+cleaned before drawing: control characters (an escape sequence in a name could retitle or repaint
+the terminal) and the invisible characters that reorder text (a right-to-left override can make
+`evil` + U+202E + `txt.exe` read as `evilexe.txt`) become `?`, and a name is cut at 1,024
+characters. The PTY run put an OSC title sequence in a name and checked that none reached the
+terminal.
+
+#### Trade-offs and what was left
+
+`xz`, `zstd`, `bzip2` and `7z` archives, and zip64 ones, show as bytes. A text over 1 MiB says
+`preview failed` instead of showing its start. The scroll keys are not in the status bar's hints,
+which are already crowded. A text scrolled to the end of a 1 MiB file makes ratatui wrap
+everything above the visible rows each frame; an ignored benchmark test measures about 43 ms in a
+release build, inside the 100 ms tick, so caching wrapped lines was not done. `TextPreview` keeps
+its name although it now serves every non-image file; renaming it would have touched code with no
+behaviour to gain, so its module doc says what it covers instead. There is no logging, as the
+project has none, and `scripts/check` still does not exist, so the format check, clippy and the
+tests were run by hand; `cargo fmt --check` still reports the differences in `app.rs`, `main.rs`
+and `shell_layout.rs` that predate this work.
+
+#### Verification
+
+`cargo test --workspace` passes (`preview` 34, `tui` 287, `theming` 40, `browser` 30) and
+`cargo clippy --workspace --all-targets -- -D warnings` is clean. Property tests: every byte of a
+buffer appears once, in order, across the hex rows at any width; zip, tar and tar.gz of random
+names and sizes list back exactly; the offset that gets drawn is always within the content; the
+scrollbar thumb spans the bar and only moves down; a cleaned name never holds an unsafe character;
+the zip guard follows its record's own fields; no pane size or scroll position panics for any kind
+of content. Three of my own tests were wrong and were fixed rather than the code: the hex test
+expected the last row to be as long as the others, the tar test expected a truncated data section
+to be detectable (a seek past the end of a file is not an error), and one expected a text-looking
+`bad.zip` to show bytes. On a PTY against the real binary, read through `pyte`, 21 checks passed:
+`J`, `K` and the wheel scrolled a 200-line text and stopped with the last line as the last row,
+without moving the file selection; a binary showed `00000000  00 01 02 03 04 05 06 07` at 8 bytes a
+row in that pane width; a 200 KiB file said `first 64K of 200K shown` after scrolling to the end;
+a zip and a tar.gz showed their summary and entries; an archive whose name held an OSC title
+sequence showed `evil?]0;pwned?name.txt` and sent nothing to the terminal; a `.txt` of binary
+showed hex; an extensionless text file showed text; and a named pipe showed only its name with
+the browser still responsive. The harness lost its first keystroke after start-up, as the earlier
+entries note, which cost one wasted run before a throwaway key was added. Not tried in a real
+terminal emulator, with a physical wheel, or against an archive from an untrusted source beyond
+the generated ones.
 
 ---
 

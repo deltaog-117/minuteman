@@ -51,6 +51,10 @@ pub enum Action {
     Cancel,
     /// Shows or hides dot-prefixed entries in every column.
     ToggleHidden,
+    /// Scrolls the preview pane down by half a screen (text, hex dump or archive listing).
+    PreviewDown,
+    /// Scrolls the preview pane up by half a screen.
+    PreviewUp,
     /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
     /// later bulk action (e.g. `Delete`) instead of acting on it immediately.
     Select,
@@ -86,6 +90,8 @@ pub struct RawKeyMap {
     pub cancel: Vec<String>,
     pub select: Vec<String>,
     pub hidden: Vec<String>,
+    pub preview_down: Vec<String>,
+    pub preview_up: Vec<String>,
     pub leader: Vec<String>,
 }
 
@@ -110,6 +116,8 @@ impl Default for RawKeyMap {
             cancel: vec!["c".into()],
             select: vec!["v".into()],
             hidden: vec![".".into()],
+            preview_down: vec!["J".into()],
+            preview_up: vec!["K".into()],
             leader: vec!["space".into()],
         }
     }
@@ -167,6 +175,8 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.cancel, Action::Cancel);
         bind_all(&raw.select, Action::Select);
         bind_all(&raw.hidden, Action::ToggleHidden);
+        bind_all(&raw.preview_down, Action::PreviewDown);
+        bind_all(&raw.preview_up, Action::PreviewUp);
         bind_all(&raw.leader, Action::Leader);
 
         Self { bindings }
@@ -233,6 +243,11 @@ mod tests {
             Some(Action::ToggleHidden)
         );
         assert_eq!(keymap.resolve(KeyCode::Char(' ')), Some(Action::Leader));
+        assert_eq!(
+            keymap.resolve(KeyCode::Char('J')),
+            Some(Action::PreviewDown)
+        );
+        assert_eq!(keymap.resolve(KeyCode::Char('K')), Some(Action::PreviewUp));
         // `Tab`, `o`, `%` and `"` used to be shell-pane keys; they belong to the shell now.
         for freed in [
             KeyCode::Tab,

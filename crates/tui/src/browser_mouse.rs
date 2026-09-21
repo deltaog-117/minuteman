@@ -210,6 +210,15 @@ impl Wheel {
     }
 }
 
+/// How many rows one wheel notch scrolls the preview column by: the same step it moves the
+/// selection by in the file columns.
+pub fn wheel_rows(wheel: Wheel) -> isize {
+    match wheel {
+        Wheel::Down => WHEEL_STEP as isize,
+        Wheel::Up => -(WHEEL_STEP as isize),
+    }
+}
+
 /// The selection after one wheel notch, kept inside a list of `len` entries (`0` when empty).
 pub fn wheel_target(selected: usize, len: usize, wheel: Wheel) -> usize {
     let last = len.saturating_sub(1);
@@ -400,6 +409,8 @@ mod tests {
         assert_eq!(wheel_target(1, 50, Wheel::Up), 0);
         assert_eq!(wheel_target(0, 0, Wheel::Down), 0);
         assert_eq!(wheel_target(0, 0, Wheel::Up), 0);
+        assert_eq!(wheel_rows(Wheel::Down), 3);
+        assert_eq!(wheel_rows(Wheel::Up), -3);
     }
 
     #[test]

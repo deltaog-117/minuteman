@@ -31,6 +31,7 @@ mod open;
 mod osc52;
 mod overlay_view;
 mod popup_shell;
+mod preview_view;
 mod search_job;
 mod shell_init;
 mod shell_layout;
@@ -70,7 +71,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui_image::StatefulImage;
 use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
@@ -539,9 +540,14 @@ impl Previews {
         }
     }
 
-    fn update(&mut self, selected: Option<&Path>) {
-        self.image.update(selected);
-        self.text.update(selected);
+    /// `selected` is the entry under the cursor. An image goes to the image pipeline; any other
+    /// file (text, an archive, a binary) to the one that reads it for the scrolling pane; a folder
+    /// to neither, since the pane lists its children instead.
+    fn update(&mut self, selected: Option<&DirEntryInfo>) {
+        let file = selected.filter(|e| !e.is_dir).map(|e| e.path.as_path());
+        self.image.update(file);
+        self.text
+            .update(file.filter(|path| !preview::is_image(path)));
     }
 
     /// Re-reads whichever preview is showing the selected file, after it changed on disk.
@@ -725,7 +731,7 @@ fn run(
             previews.reload();
         }
         app.poll_hud(browser, Instant::now());
-        previews.update(browser.selected_entry().map(|e| e.path.as_path()));
+        previews.update(browser.selected_entry());
 
         if let Some(mut panes) = shells.take() {
             let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
@@ -990,7 +996,15 @@ fn run(
                             ));
                             continue;
                         }
-                        // The preview column is left alone: it is about to grow its own scrolling.
+                        // The wheel over the preview column scrolls what it shows (text, hex,
+                        // an archive's listing); over an image or a folder's children it is a
+                        // no-op, since those have nothing to scroll.
+                        kind if matches!(hit.pane(), Some(Pane::Preview)) => {
+                            if let Some(wheel) = Wheel::of(kind) {
+                                previews.text.scroll_rows(browser_mouse::wheel_rows(wheel));
+                                continue;
+                            }
+                        }
                         kind if matches!(hit.pane(), Some(Pane::Parent | Pane::Current)) => {
                             if let Some(wheel) = Wheel::of(kind) {
                                 let len = browser.current_entries().len();
@@ -1398,6 +1412,8 @@ fn run(
                     Some(Action::Command) => app.begin_command(),
                     Some(Action::Cancel) => app.cancel_all(browser),
                     Some(Action::Select) => browser.toggle_mark(),
+                    Some(Action::PreviewDown) => previews.text.scroll_half_pages(1),
+                    Some(Action::PreviewUp) => previews.text.scroll_half_pages(-1),
                     Some(Action::ToggleHidden) => {
                         let shown = browser.toggle_hidden(vfs)?;
                         app.status = Some(
@@ -1637,9 +1653,10 @@ fn draw(
     let is_selected_image = browser
         .selected_entry()
         .is_some_and(|e| !e.is_dir && preview::is_image(&e.path));
-    let is_selected_text = browser
-        .selected_entry()
-        .is_some_and(|e| !e.is_dir && preview::is_text(&e.path));
+    // Any other file has something to show — text, an archive's listing or a hex dump — unless
+    // it is not a regular file (a socket, a pipe), which reads back as `Empty`.
+    let is_selected_file = browser.selected_entry().is_some_and(|e| !e.is_dir)
+        && previews.text.status() != TextPreviewStatus::Empty;
 
     if is_selected_image {
         let block = style::themed_block(config, "preview", false);
@@ -1661,28 +1678,8 @@ fn draw(
             }
             ImagePreviewStatus::Empty => {}
         }
-    } else if is_selected_text {
-        let block = style::themed_block(config, "preview", false);
-        let inner = block.inner(columns[2]);
-        frame.render_widget(block, columns[2]);
-        let style = Style::default().fg(color_from_name(&config.theme.file_fg));
-        match previews.text.status() {
-            TextPreviewStatus::Ready => {
-                frame.render_widget(
-                    Paragraph::new(previews.text.content())
-                        .style(style)
-                        .wrap(Wrap { trim: false }),
-                    inner,
-                );
-            }
-            TextPreviewStatus::Loading => {
-                frame.render_widget(Paragraph::new("loading preview…"), inner);
-            }
-            TextPreviewStatus::Failed => {
-                frame.render_widget(Paragraph::new("preview failed"), inner);
-            }
-            TextPreviewStatus::Empty => {}
-        }
+    } else if is_selected_file {
+        preview_view::render(frame, columns[2], &mut previews.text, config);
     } else if let Some(children) = &dir_preview {
         let items: Vec<ListItem> = children
             .iter()

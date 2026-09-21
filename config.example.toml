@@ -93,6 +93,10 @@ command = [":"]
 cancel = ["c"]
 # Shows or hides dot-prefixed files and directories in every column.
 hidden = ["."]
+# Scrolls the preview column (text, the hex view of a binary file, an archive's listing) by half a
+# screen; the wheel over that column scrolls it too. Capitals: "J" is Shift+j, distinct from "j".
+preview_down = ["J"]
+preview_up = ["K"]
 # Toggles a mark on the current entry, Ranger-style — press once per file to queue it for a
 # later bulk action instead of acting on it immediately.
 select = ["v"]
