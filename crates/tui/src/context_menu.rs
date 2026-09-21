@@ -47,6 +47,8 @@ pub enum MenuCommand {
     ToggleMark,
     CopyPath,
     Inspect,
+    /// Opens the disk usage view on the folder that was clicked, or the browsed one.
+    DiskUsage,
     ToggleHidden,
     Refresh,
 }
@@ -173,6 +175,9 @@ pub fn entries(context: &Context, open_with: &[String]) -> Vec<Entry> {
                 Entry::item("Copy path", MenuCommand::CopyPath),
                 Entry::item("Inspect", MenuCommand::Inspect),
             ]);
+            if is_dir {
+                list.push(Entry::item("Disk usage", MenuCommand::DiskUsage));
+            }
             list
         }
         Target::Blank => vec![
@@ -191,6 +196,7 @@ pub fn entries(context: &Context, open_with: &[String]) -> Vec<Entry> {
             Entry::Separator,
             Entry::item("Copy path", MenuCommand::CopyPath),
             Entry::item("Inspect this folder", MenuCommand::Inspect),
+            Entry::item("Disk usage", MenuCommand::DiskUsage),
         ],
     }
 }
@@ -575,9 +581,19 @@ mod tests {
                 "Hide hidden files",
                 "Refresh",
                 "Copy path",
-                "Inspect this folder"
+                "Inspect this folder",
+                "Disk usage"
             ]
         );
+    }
+
+    #[test]
+    fn only_a_folder_or_blank_space_offers_disk_usage() {
+        let mut context = file_context();
+        assert!(!labels(&entries(&context, &[])).contains(&"Disk usage"));
+        context.target = Target::Entry { is_dir: true };
+        let list = entries(&context, &[]);
+        assert_eq!(labels(&list).last(), Some(&"Disk usage"));
     }
 
     #[test]

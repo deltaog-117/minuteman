@@ -580,6 +580,34 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   OSC-title escape in a name showed it defused and sent nothing to the terminal, a `.txt` of binary
   showed hex, a file with no extension showed text, and a named pipe showed only its name with the
   browser still responsive.
+- ✅ **Disk usage view** – `u` (or "Disk usage" in the right-click menu of a folder or of empty
+  space) opens a modal, full-screen view of what takes the space in the browsed folder, biggest
+  first, with a size, a share and a bar per entry; `enter` opens a folder, `h` goes up (past the
+  starting folder too, keeping the cursor on the one left), `a` switches between size on disk and
+  apparent size, `r` rescans, `q`/`Esc` close it. New `tui::disk_usage` scans one folder at a time
+  on the blocking pool (`scan_level`: files first, then each subfolder as its total is known),
+  cancelled when the view moves on or closes, and keeps a stack of the levels on the way down, so
+  going back is instant and memory never holds a whole tree; new `tui::disk_usage_view` draws it
+  from pure layout, hit-test, scroll and bar functions. Chosen as COA A (a `du`-style modal view)
+  over a recursive-size column in the browser (B) and an ncdu-style cached tree with delete
+  built in (C). Sizes are allocated blocks by default (both sizes are recorded in one scan, so the
+  switch is free), hard links count once, the scan stays on its filesystem and never follows a
+  symlink, an unreadable subfolder marks its parent `!`, a folder's 20,000 biggest entries get
+  rows and the rest fold into one, and at most 10,000,000 entries are looked at. Property-tested:
+  folder totals equal the sum of the files below them on random trees, folding many files keeps
+  every byte and every one of the largest, the cursor stays on its row while rows arrive and are
+  re-sorted, the selected row is always on screen and the view scrolls only when it must, shares
+  and bars stay in range, and a click maps to the row drawn at that spot. Tests also cover hard
+  links, a symlink loop, another filesystem (by pretending the root is on a device nothing below it
+  is on), a folder mode 000, cancellation, the entry limit and the ASCII glyph set. A warm scan of
+  `/usr` (580,370 entries) takes 2.85 s against `du`'s 2.9 to 3.0 s (an ignored benchmark test; the
+  first, cold run took 20 s, which is the disk). Verified against the real binary in a PTY read
+  through `pyte`, in a folder with nested folders, a hard link, a sparse 10 MB file and a symlink
+  to itself: the view opened with the biggest folder first, a hard-linked pair showed one size and
+  one `0B`, the sparse file took almost nothing on disk and jumped to the top at `9.5M` after `a`,
+  `enter` opened a folder and `h` came back with the cursor on it, `enter` on a file did nothing, a
+  click selected a row, `r` rescanned, `q` closed the view without quitting, and the folder's
+  right-click menu offered Disk usage and opened it.
 
 ---
 
@@ -649,6 +677,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   rather than showing its start; a scrolled 1 MiB text re-wraps everything above the visible rows on
   each frame (about 43 ms at the far end), which caching wrapped lines would remove; and the
   scroll position is not remembered per file.
+- **Disk usage, follow-ups** – delete or mark from inside the view (the `d` and `v` flows exist
+  but the view has no way to hand a selection to them); keep the scanned tree so opening a folder is
+  instant instead of a rescan; sort by name or entry count; show modified times and the owner; an
+  option for the starting measure; key hints that follow rebound keys (they are fixed text, and
+  `a`, `r`, `PageUp`, `PageDown`, `Home` and `End` are not configurable); refresh when the live
+  refresh sees a change; and a `Vfs` method that reports allocated size, without which the view
+  cannot work on `ssh://` paths once a backend exists (it reads `std::fs` metadata directly).
 - **Fuzzy ranking for `/` search** – search now finds the nearest substring match anywhere below
   the directory. Still missing: subsequence matching (`aernd` finding `aerend`), ranking by match
   quality rather than depth alone, and stepping through further matches (`n`/`N`, or the arrows
@@ -710,7 +745,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Press `.` to show or hide dot-files. Try `:mkdir -p a/b`, `:touch x.txt` and `:ls -l` — the
    new entries appear at once, and so does a file you create from a mini-shell or another
    terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
-   Then the newest: `J`/`K` (or the wheel over the right column) scroll the preview of a long text
+   Then the newest: `u` for the disk usage view (`enter` a folder, `h` back, `a` apparent size,
+   `q` closes it), and the same from a folder's right-click menu.
+   Before that: `J`/`K` (or the wheel over the right column) scroll the preview of a long text
    file; select a binary for its hex dump, and a `.zip`, `.tar` or `.tar.gz` for its listing.
    Before that, the git segment: open a repository (the status bar shows the branch, and `v` a
    few files for the header's total size; `git_status = false` turns the git segment off).

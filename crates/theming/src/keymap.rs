@@ -51,6 +51,9 @@ pub enum Action {
     Cancel,
     /// Shows or hides dot-prefixed entries in every column.
     ToggleHidden,
+    /// Opens the disk usage view: what is taking the space in the browsed folder, biggest first,
+    /// with folders that can be opened to look inside.
+    DiskUsage,
     /// Scrolls the preview pane down by half a screen (text, hex dump or archive listing).
     PreviewDown,
     /// Scrolls the preview pane up by half a screen.
@@ -92,6 +95,7 @@ pub struct RawKeyMap {
     pub hidden: Vec<String>,
     pub preview_down: Vec<String>,
     pub preview_up: Vec<String>,
+    pub disk_usage: Vec<String>,
     pub leader: Vec<String>,
 }
 
@@ -118,6 +122,7 @@ impl Default for RawKeyMap {
             hidden: vec![".".into()],
             preview_down: vec!["J".into()],
             preview_up: vec!["K".into()],
+            disk_usage: vec!["u".into()],
             leader: vec!["space".into()],
         }
     }
@@ -177,6 +182,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.hidden, Action::ToggleHidden);
         bind_all(&raw.preview_down, Action::PreviewDown);
         bind_all(&raw.preview_up, Action::PreviewUp);
+        bind_all(&raw.disk_usage, Action::DiskUsage);
         bind_all(&raw.leader, Action::Leader);
 
         Self { bindings }
@@ -248,6 +254,7 @@ mod tests {
             Some(Action::PreviewDown)
         );
         assert_eq!(keymap.resolve(KeyCode::Char('K')), Some(Action::PreviewUp));
+        assert_eq!(keymap.resolve(KeyCode::Char('u')), Some(Action::DiskUsage));
         // `Tab`, `o`, `%` and `"` used to be shell-pane keys; they belong to the shell now.
         for freed in [
             KeyCode::Tab,

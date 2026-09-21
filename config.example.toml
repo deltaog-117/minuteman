@@ -97,6 +97,11 @@ hidden = ["."]
 # screen; the wheel over that column scrolls it too. Capitals: "J" is Shift+j, distinct from "j".
 preview_down = ["J"]
 preview_up = ["K"]
+# Opens the disk usage view for the folder you are in: what takes the space, biggest first, with a
+# bar and a share for each. Inside it, enter opens a folder, h goes up, a switches between the
+# size on disk and the apparent size, r scans again and q or Esc closes it. Hard links are counted
+# once, other filesystems and symlinks are not entered. Also in the right-click menu.
+disk_usage = ["u"]
 # Toggles a mark on the current entry, Ranger-style — press once per file to queue it for a
 # later bulk action instead of acting on it immediately.
 select = ["v"]

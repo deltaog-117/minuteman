@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: a disk usage view. `u` (new `[keys] disk_usage`, `Action::DiskUsage`), or "Disk usage" in
+  the right-click menu of a folder or of empty space, covers the screen with what is taking the
+  space in the browsed folder, biggest first: each entry with its size, its share of the folder
+  and a bar, and a totals line (`784K │ 13 entries │ on disk │ scanning 1,204`). `enter` (or `l`,
+  or the arrow) opens a folder to look inside it, `h` goes back up (and above the folder you
+  started in, with the cursor on the one just left), `a` switches between the size on disk and the
+  apparent size, `r` scans again, `PageUp`/`PageDown`/`Home`/`End` move, the wheel and a click
+  move and select, and `q`, `Esc` or `u` close the view (not the program). Rows arrive as the
+  scan runs; the cursor stays on the biggest row until you move it, then on the row you chose.
+  The size is the space allocated on disk by default, as `du` shows; a file with several hard
+  links is counted once; the scan stays on the filesystem it started on (a folder on another one
+  is listed as such and not entered) and never follows a symlink, so `/proc`, network mounts and
+  link loops are safe. A folder that could not be fully read is marked `!`. Only the folder shown
+  is scanned, on the blocking pool and cancelled when the view closes or moves on, and at most
+  10,000,000 entries are looked at (past that the sizes say they are lower bounds); a folder's
+  20,000 biggest entries get a row each and the rest are folded into one `N smaller entries` row.
+  New modules `disk_usage` (the scan and the view's state, with no terminal in it) and
+  `disk_usage_view` (layout, hit-testing and drawing). On a warm cache scanning `/usr` (580,370
+  entries) takes about as long as `du` does (2.9 s against 2.9 to 3.0 s).
+- `theming`: `disk_usage` under `[keys]`, defaulting to `u`. See `config.example.toml`.
+- `tui`: `App::begin_disk_usage`, and `MenuCommand::DiskUsage` in the context menu.
 - `tui`: the preview column scrolls. `J` and `K` (new `[keys] preview_down` and `preview_up`,
   `Action::PreviewDown` and `PreviewUp`) move it half a screen, and the mouse wheel over the column
   moves it three rows, as it does in the file columns. It works on text, hex dumps and archive

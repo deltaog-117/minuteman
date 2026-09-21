@@ -20,6 +20,8 @@ mod browser_mouse;
 mod cli;
 mod command;
 mod context_menu;
+mod disk_usage;
+mod disk_usage_view;
 mod git_status;
 mod glyphs;
 mod hud;
@@ -64,6 +66,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     supports_keyboard_enhancement,
 };
+use disk_usage::DiskUsageView;
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect::InspectView;
 use ratatui::Terminal;
@@ -326,6 +329,15 @@ struct Overlay<'a> {
     /// The right-click menu and the Inspect panel, drawn last so they sit over everything.
     menu: Option<&'a ContextMenu>,
     inspect: Option<&'a InspectView>,
+    /// The disk usage view, which covers the whole screen when open.
+    usage: Option<&'a DiskUsageView>,
+}
+
+/// The two read-only panels a menu command can open, passed together so `run_menu_command` does
+/// not grow an argument for each one.
+struct Panels<'a> {
+    inspect: &'a mut Option<InspectView>,
+    usage: &'a mut Option<DiskUsageView>,
 }
 
 struct ShellView<'a> {
@@ -709,11 +721,16 @@ fn run(
     let mut menu: Option<ContextMenu> = None;
     // The Inspect panel while one is open; modal in the same way.
     let mut inspect: Option<InspectView> = None;
+    // The disk usage view while one is open; modal, and drawn over the whole screen.
+    let mut usage: Option<DiskUsageView> = None;
 
     loop {
         app.poll_bulk(browser, vfs)?;
         app.poll_search(browser, vfs);
         if let Some(view) = inspect.as_mut() {
+            view.poll();
+        }
+        if let Some(view) = usage.as_mut() {
             view.poll();
         }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
@@ -798,6 +815,7 @@ fn run(
                     current_list: &mut current_list,
                     menu: menu.as_ref(),
                     inspect: inspect.as_ref(),
+                    usage: usage.as_ref(),
                 },
             )
         })?;
@@ -831,8 +849,29 @@ fn run(
                 // and not under a prompt, which owns the selection until it is answered.
                 let frame_area: Rect = terminal.size()?.into();
 
-                // The Inspect panel and the menu are modal: they take every mouse event until
-                // they close, so a click meant to dismiss one never also selects the row under it.
+                // The disk usage view, the Inspect panel and the menu are modal: they take every
+                // mouse event until they close, so a click meant to dismiss one never also
+                // selects the row under it.
+                if let Some(view) = usage.as_mut() {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let places = disk_usage_view::layout(frame_area);
+                            let pointer = Position::new(mouse.column, mouse.row);
+                            let len = view.rows().len();
+                            if let Some(row) =
+                                disk_usage_view::row_at(&places, view.top().get(), len, pointer)
+                            {
+                                view.move_to(row);
+                            }
+                        }
+                        kind => {
+                            if let Some(wheel) = Wheel::of(kind) {
+                                view.move_by(browser_mouse::wheel_rows(wheel));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if inspect.is_some() {
                     if matches!(mouse.kind, MouseEventKind::Down(_)) {
                         inspect = None;
@@ -885,7 +924,10 @@ fn run(
                                 app,
                                 vfs,
                                 config,
-                                &mut inspect,
+                                &mut Panels {
+                                    inspect: &mut inspect,
+                                    usage: &mut usage,
+                                },
                             )?;
                         }
                         continue;
@@ -1180,8 +1222,62 @@ fn run(
                 }
                 let key = with_caps_lock_applied(key);
 
-                // The Inspect panel and the menu are modal: they own the keyboard until they
-                // close, ahead of the leader, the chords and the shell.
+                // The disk usage view, the Inspect panel and the menu are modal: they own the
+                // keyboard until they close, ahead of the leader, the chords and the shell.
+                if let Some(view) = usage.as_mut() {
+                    let close = match key.code {
+                        KeyCode::Esc => true,
+                        KeyCode::Char('a') => {
+                            view.toggle_measure();
+                            false
+                        }
+                        KeyCode::Char('r') => {
+                            view.rescan();
+                            false
+                        }
+                        KeyCode::PageDown => {
+                            view.page(1);
+                            false
+                        }
+                        KeyCode::PageUp => {
+                            view.page(-1);
+                            false
+                        }
+                        KeyCode::Home => {
+                            view.move_to(0);
+                            false
+                        }
+                        KeyCode::End => {
+                            view.move_to(usize::MAX);
+                            false
+                        }
+                        code => match config.keys.resolve(code) {
+                            Some(Action::MoveDown) => {
+                                view.move_by(1);
+                                false
+                            }
+                            Some(Action::MoveUp) => {
+                                view.move_by(-1);
+                                false
+                            }
+                            Some(Action::Enter) => {
+                                view.enter();
+                                false
+                            }
+                            Some(Action::Leave) => {
+                                view.leave();
+                                false
+                            }
+                            // Quitting from inside the view closes the view, not Minuteman.
+                            Some(Action::Quit | Action::QuitToCwd | Action::DiskUsage) => true,
+                            _ => false,
+                        },
+                    };
+                    if close {
+                        usage = None;
+                    }
+                    continue;
+                }
                 if inspect.is_some() {
                     if matches!(
                         key.code,
@@ -1216,7 +1312,10 @@ fn run(
                                 app,
                                 vfs,
                                 config,
-                                &mut inspect,
+                                &mut Panels {
+                                    inspect: &mut inspect,
+                                    usage: &mut usage,
+                                },
                             )?;
                         }
                         MenuOutcome::Dismiss => menu = None,
@@ -1412,6 +1511,9 @@ fn run(
                     Some(Action::Command) => app.begin_command(),
                     Some(Action::Cancel) => app.cancel_all(browser),
                     Some(Action::Select) => browser.toggle_mark(),
+                    Some(Action::DiskUsage) => {
+                        usage = Some(app.begin_disk_usage(browser.current_dir().to_path_buf()));
+                    }
                     Some(Action::PreviewDown) => previews.text.scroll_half_pages(1),
                     Some(Action::PreviewUp) => previews.text.scroll_half_pages(-1),
                     Some(Action::ToggleHidden) => {
@@ -1475,7 +1577,7 @@ fn run_menu_command(
     app: &mut App,
     vfs: &LocalVfs,
     config: &Config,
-    inspect: &mut Option<InspectView>,
+    panels: &mut Panels<'_>,
 ) -> Result<()> {
     // The keys are all ignored while an operation runs; the ones below would start another
     // operation or a prompt over it.
@@ -1522,7 +1624,10 @@ fn run_menu_command(
                 subject.display()
             ));
         }
-        (MenuCommand::Inspect, _) => *inspect = app.begin_inspect(&subject),
+        (MenuCommand::Inspect, _) => *panels.inspect = app.begin_inspect(&subject),
+        (MenuCommand::DiskUsage, _) => {
+            *panels.usage = Some(app.begin_disk_usage(subject.clone()));
+        }
         (MenuCommand::ToggleHidden, _) => {
             let shown = browser.toggle_hidden(vfs)?;
             app.status = Some(
@@ -1574,6 +1679,7 @@ fn draw(
         current_list: current_state,
         menu,
         inspect,
+        usage,
     } = overlay;
     // Header, the three file columns, then the status bar. The mouse handler hit-tests against
     // this same split (see `browser_mouse`), so the two can't disagree about where a row is.
@@ -1751,6 +1857,9 @@ fn draw(
     // covers the status bar and can be dragged off-center by its title bar (see `shell_area`).
     if let Some(ShellView { panes, offset, size }) = shell {
         panes.render(frame, shell_area(frame.area(), offset, size), config);
+    }
+    if let Some(view) = usage {
+        disk_usage_view::render(frame, view, config);
     }
     if let Some(menu) = menu {
         overlay_view::render_menu(frame, menu, config);

@@ -40,6 +40,7 @@ use shell_overlay::CommandOutcome;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::command::{self, Command};
+use crate::disk_usage::DiskUsageView;
 use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
 use crate::live_refresh::LiveRefresh;
@@ -281,6 +282,11 @@ impl App {
             search_job: None,
             search_state: SearchState::Idle,
         }
+    }
+
+    /// Opens the disk usage view on `path`, starting its scan on the blocking pool.
+    pub fn begin_disk_usage(&self, path: PathBuf) -> DiskUsageView {
+        DiskUsageView::open(self.handle.clone(), path)
     }
 
     /// Turns the status bar's git segment on or off (`git_status` in `config.toml`).

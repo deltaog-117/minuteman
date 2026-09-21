@@ -42,6 +42,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-21 | Right-Click Menu, Inspect Panel, Open With | Menu and modal panel inside `tui` with pure geometry, config-driven Open with, detached launch (COA B); `.desktop` discovery, multi-select clicks and drag and drop deferred | ✅ Confirmed |
 | 2026-09-21 | Richer Status Line: Marked Size and Git | Marked total in the header pill via the Inspect walk; git segment from `git status --porcelain=v2` run off-thread with `--no-optional-locks` (COA A); `gix` and a marked-size-only cut rejected | ✅ Confirmed |
 | 2026-09-21 | Preview Extras, Stage 1 | Scrolling preview (`J`/`K`, wheel), hex view of the first 64 KiB, in-process zip/tar/tar.gz listing with every read bounded (COA A); shelling out to `bsdtar` and hand-parsing rejected | ✅ Confirmed |
+| 2026-09-21 | Disk Usage View | Modal `du`-style view scanning one folder at a time off-thread, on-disk size by default, hard links once, same filesystem only, symlinks not followed (COA A); a size column (B) and a cached tree with delete (C) rejected | ✅ Confirmed |
 
 ---
 
@@ -2772,6 +2773,128 @@ the browser still responsive. The harness lost its first keystroke after start-u
 entries note, which cost one wasted run before a throwaway key was added. Not tried in a real
 terminal emulator, with a physical wheel, or against an archive from an untrusted source beyond
 the generated ones.
+
+### Disk Usage View: A Modal `du`-Style Screen, One Folder Scanned at a Time
+
+**Date:** 2026-09-21
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Minuteman could tell you the size of a folder (Inspect) but not where the space in it went, and
+`inspect::tally_dir` returns only a grand total: nothing about which child holds the bytes. The
+request was a disk usage view. It is a new screen rather than a tweak, so three courses of action
+were put first, and the four smaller questions raised with them were answered by taking the
+proposed defaults ("A. defaults").
+
+#### Options Considered
+
+**A**, a full-screen modal view listing the current folder's children biggest first with a size,
+share and bar, where `enter` opens a subfolder and `h` goes back. **B**, no new screen, a toggle
+that fills the browser's size column with recursive folder sizes and sorts by them. **C**, A with
+the scan cached as a tree so drilling down is instant, and marking and deleting from inside it
+through the existing `d` flow. **A** was chosen. B is small but shows one level, has no bars and
+does not answer "what is eating my disk". C is the most useful and close to two features: a cache
+of a whole tree can use a lot of memory, and delete-from-view has to stay consistent with it. A
+delivers the core, seeing where the space went and looking inside, and C's extras can build on it
+later. The defaults taken: `u` opens it, the size is what is allocated on disk with the apparent
+size a key away, hard links count once and the scan stays on its filesystem without following
+symlinks, and there is no delete in this cycle.
+
+#### What a size means
+
+`std::fs` gives both numbers from one `lstat`: `blocks() * 512` is the space on disk (the unit is
+512 bytes whatever the filesystem's block size) and `len()` is the apparent size. Both are kept in
+a `Sizes` for every row, so `a` re-sorts without scanning again; a sparse file is the case that
+shows why both matter (10,000,000 bytes long and about nothing on disk, checked in the PTY run).
+A file with more than one link is remembered by `(device, inode)` and counts once, at the first
+place the scan meets it, so `hl1` and `hl2` show one size and one `0B`. The scan compares each
+folder's device with the starting folder's and lists another filesystem's mount point as such
+without entering it, which is what keeps a scan of `/` out of `/proc` and network mounts, and it
+reads entries with `DirEntry::metadata`, which does not follow a symlink, so a link is the size of
+the link and a loop cannot hang it. A folder's own node (a few KiB) counts toward it, as in `du`.
+A subfolder that cannot be read marks its parent `!` rather than silently undercounting.
+
+#### One level at a time
+
+Only the folder on screen is scanned. Opening a subfolder scans that one; the levels on the way
+down stay on a stack, so `h` restores the level above from memory. That gives back instantly, and
+memory holds the rows of a few folders, not a tree. The price is that opening a folder rescans it
+instead of reading a cache, and hard links are deduplicated per scan, not across levels; both are
+the trade C would not make and are listed as follow-ups. Going above the folder the view was
+opened on replaces the bottom level with the parent and puts the cursor on the folder just left,
+by remembering its path until that row arrives (`reselect`). The scan sends rows over a channel as
+it goes: every file and link at once, then each subfolder when its total is known, so a large
+first subfolder does not hide the small files. Dropping the view sets the job's cancel flag, and a
+`seen` counter shared with the scan feeds the `scanning 1,204` in the totals line.
+
+Two bounds keep it safe. A folder with a million files must not become a million rows, so at most
+20,000 of a folder's biggest files get a row each (the list is sorted and folded when it doubles,
+so the cost per file stays constant) and the rest become one `N smaller entries` row, with a test
+that no byte is lost or invented in the folding and that every entry of the largest size is kept.
+And a scan looks at no more than 10,000,000 entries, after which its sizes are labelled lower
+bounds.
+
+#### The cursor
+
+The first version made the cursor follow the row it was on while rows streamed in and were
+sorted, which is right once you have moved it and wrong before: the first small file to arrive
+kept the cursor while bigger rows sorted in above it, so `enter` opened nothing and the first row
+was not selected. Two tests caught it (one expected `enter` to open the biggest folder, one
+expected the cursor at the top). It now stays on the first row, the biggest so far, until the user
+moves it, with a `moved` flag on each level, and follows the chosen row from then on. A property
+test keeps that promise across random arrivals; another checks the selected row is always on
+screen and the view scrolls only when it must.
+
+#### The screen
+
+`disk_usage_view` holds the geometry as functions (`layout`, `row_at`, `scroll_top`,
+`share_percent`, `gauge_cells`, `elide_left`), and draws only the rows on screen. The bar reuses
+the glyph set's gauge, so the ASCII set stays ASCII (a test checks a whole screen), and the
+scrollbar is drawn for the rows' region. What keys move by, and which row a click hits, depend on
+things known only when drawing (the height, the first row shown), so the drawing code records them
+in `Cell`s on the view; drawing takes `&self`, like the other overlays. The view is modal, like
+Inspect: it takes every key and mouse event, `q`, `Q`, `Esc` and `u` close the view and not the
+program, movement, `enter` and `h` follow the configured keys, and `a`, `r`, `PageUp`,
+`PageDown`, `Home` and `End` are fixed, as the leader chord's keys already are.
+`run_menu_command` had reached seven arguments and clippy's limit, so the two panels it can open
+are passed together as a `Panels` value.
+
+#### Trade-offs and what was left
+
+No delete or mark from the view, no cached tree, no sort other than by size, and the key hints
+in the footer are fixed text, so they are wrong if `enter` or `h` are rebound. The view reads
+`std::fs` directly, so it is local-only, the same as Inspect's owner and on-disk rows; a `Vfs`
+method for allocated size is what a remote backend would need. All of this is on the roadmap.
+The first run of the throughput benchmark took 20 s over `/usr` and looked slow; a warm run took
+2.85 s against `du`'s 2.9 to 3.0 s, so it was the disk, not the scan. As before there is no
+logging, and `scripts/check` does not exist, so the format check, clippy and the tests were run
+by hand; `cargo fmt --check` still reports the differences in `app.rs`, `main.rs` and
+`shell_layout.rs` that predate this work, and the two import-order ones this work added to
+`main.rs` were fixed.
+
+#### Verification
+
+`cargo test --workspace` passes (`tui` 321 including 34 new, `preview` 34, `theming` 40, `browser`
+30) and `cargo clippy --workspace --all-targets -- -D warnings` is clean. Two of my own tests were
+wrong and were fixed, not the code (the view tests shared a scratch directory and raced when run in
+parallel, and one expected `10M` where 10,000,000 bytes is `9.5M` in binary units), and clippy
+found three things in my code (an eight-argument function, a manual multiple-of check, an
+assertion against a literal bool). On a PTY against the real binary, read through `pyte`, 21
+checks passed: `u` opened the view and the scan finished; the totals line named the entries and
+the measure; the biggest folder was first with a share and a bar; sizes ran biggest to smallest; a
+hard-linked pair showed one size and one `0B`; a sparse 10 MB file took almost nothing on disk; a
+symlink to the folder itself showed as a link and was not followed; `a` switched to the apparent
+size and put the sparse file on top at `9.5M`, and `a` again went back; `enter` opened a folder
+and listed its contents biggest first with the nested folder's total; `h` returned with the cursor
+on the folder just left; `enter` on a file did nothing; a click selected the row under the pointer;
+`r` rescanned; `q` closed the view and left the browser intact; a folder's right-click menu offered
+Disk usage and choosing it opened the view; and `Esc` closed it. The harness lost its first
+keystroke after start-up, as the earlier entries note, and a throwaway key was sent first. Not
+tried in a real terminal emulator, on a network filesystem, or with a real mount point inside the
+scanned folder (the other-filesystem rule was tested by pretending the root was on another
+device).
 
 ---
 
