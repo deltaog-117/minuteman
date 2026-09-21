@@ -40,7 +40,9 @@ use shell_overlay::CommandOutcome;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::command::{self, Command};
+use crate::inspect::InspectView;
 use crate::live_refresh::LiveRefresh;
+use crate::open;
 use crate::search_job::{SearchJob, SearchState};
 
 /// How many lines of a shell command's output the status line shows before summarizing the rest.
@@ -592,6 +594,12 @@ impl App {
     }
 
     pub fn begin_paste(&mut self, browser: &BrowserState) {
+        self.begin_paste_into(browser.current_dir().to_path_buf());
+    }
+
+    /// Pastes the clipboard into `dst_dir` — the browsed directory for `Paste`, or a folder that
+    /// was right-clicked for the menu's "Paste into folder".
+    pub fn begin_paste_into(&mut self, dst_dir: PathBuf) {
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
             return;
@@ -600,8 +608,56 @@ impl App {
             self.status = Some("clipboard is empty".into());
             return;
         };
-        let dst_dir = browser.current_dir().to_path_buf();
         self.spawn_paste_item(clip, dst_dir, 0, ConflictPolicy::Abort);
+    }
+
+    /// Opens the Inspect panel for `path`, or says on the status line why it cannot.
+    pub fn begin_inspect(&mut self, path: &Path) -> Option<InspectView> {
+        match InspectView::open(&self.handle, path) {
+            Ok(view) => Some(view),
+            Err(message) => {
+                self.status = Some(message);
+                None
+            }
+        }
+    }
+
+    /// Opens `path` with whatever the desktop has registered for its type.
+    pub fn open_default(&mut self, browser: &BrowserState, path: &Path) {
+        self.open_with(browser, open::DEFAULT_OPENER, path);
+    }
+
+    /// Opens `path` with `command` (see `open::command_line` for where the path goes). A program
+    /// in the `interactive_commands` list takes over the terminal like a `:` command does; any
+    /// other is started on its own, since it opens a window and must not be waited on.
+    pub fn open_with(&mut self, browser: &BrowserState, command: &str, path: &Path) {
+        let Some(program) = open::program_of(command) else {
+            self.status = Some("open with: the command is empty".into());
+            return;
+        };
+        // `VAR=value prog` is shell syntax, not a program name to look for.
+        if !program.contains('=') && !open::program_exists(program) {
+            self.status = Some(format!("{program}: command not found"));
+            return;
+        }
+        let line = open::command_line(command, path);
+        if command::names_interactive_program(program, &self.interactive) {
+            if self.is_busy() {
+                self.status = Some(format!("an operation is already in progress: {line}"));
+            } else {
+                self.handover = Some(Handover {
+                    line,
+                    cwd: browser.current_dir().to_path_buf(),
+                });
+            }
+            return;
+        }
+        self.status = Some(
+            match shell_overlay::spawn_detached(browser.current_dir(), &line) {
+                Ok(()) => format!("opening {} with {program}", display_name(path)),
+                Err(e) => format!("cannot open {}: {e}", display_name(path)),
+            },
+        );
     }
 
     /// Routes a raw key to the active prompt. No-op if there is no active prompt. Returns
@@ -1654,5 +1710,87 @@ mod tests {
         f.wait_for_search();
 
         assert_eq!(f.selected_name(), "aerend.md");
+    }
+
+    #[test]
+    fn open_with_an_interactive_program_asks_for_the_terminal_with_the_path_quoted() {
+        let mut f = Fixture::new("open-interactive");
+        let file = f.root.join("my notes.md");
+        std::fs::write(&file, b"").unwrap();
+
+        f.app.open_with(&f.browser, "sh", &file);
+        assert_eq!(
+            f.app.take_handover(),
+            None,
+            "sh is not on the interactive list"
+        );
+
+        f.app.interactive.push("sh".into());
+        f.app.open_with(&f.browser, "sh -e", &file);
+        let handover = f.app.take_handover().expect("a handover was requested");
+        assert_eq!(handover.line, format!("sh -e '{}'", file.display()));
+        assert_eq!(handover.cwd, f.root);
+    }
+
+    #[test]
+    fn open_with_a_missing_program_says_so_instead_of_failing_silently() {
+        let mut f = Fixture::new("open-missing");
+        f.app
+            .open_with(&f.browser, "minuteman-no-such-program", &f.root);
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("minuteman-no-such-program: command not found")
+        );
+        assert_eq!(f.app.take_handover(), None);
+    }
+
+    #[test]
+    fn open_with_a_window_program_starts_it_detached_on_the_quoted_path() {
+        let mut f = Fixture::new("open-detached");
+        let file = f.root.join("it's here.txt");
+        std::fs::write(&file, b"").unwrap();
+        let record = f.root.join("record");
+
+        // `sh` stands in for a viewer: it writes the one file argument it was given (`$0`) to the
+        // path it was given after it (`$1`).
+        f.app.open_with(
+            &f.browser,
+            &format!(
+                "sh -c 'printf %s \"$0\" > \"$1\"' {{}} {}",
+                open::shell_quote(&record.to_string_lossy())
+            ),
+            &file,
+        );
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read_to_string(&record)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            assert!(Instant::now() < deadline, "the program never ran");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&record).unwrap(),
+            file.to_string_lossy()
+        );
+        assert!(!f.app.is_busy(), "a detached program is never waited on");
+    }
+
+    #[test]
+    fn paste_into_a_folder_puts_the_copy_there_and_not_beside_the_source() {
+        let mut f = Fixture::new("paste-into");
+        std::fs::write(f.root.join("a.txt"), b"a").unwrap();
+        std::fs::create_dir(f.root.join("dest")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        f.browser
+            .select_index(f.listed().iter().position(|n| n == "a.txt").unwrap());
+        f.app.yank(&f.browser);
+
+        f.app.begin_paste_into(f.root.join("dest"));
+        f.wait_for_idle();
+
+        assert!(f.root.join("dest").join("a.txt").exists());
+        assert_eq!(f.listed().iter().filter(|n| *n == "a.txt").count(), 1);
     }
 }

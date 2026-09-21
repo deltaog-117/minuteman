@@ -59,6 +59,31 @@ pub fn run_foreground(cwd: &Path, line: &str) -> std::io::Result<ExitStatus> {
         .status()
 }
 
+/// Starts `line` under `sh -c` with `cwd` as its working directory and returns at once, leaving it
+/// running on its own: no terminal input or output, and its own process group so a `Ctrl-C`
+/// meant for Minuteman does not reach it. This is for a program that opens its own window (an
+/// image viewer, a browser). A thread reaps it when it ends, so it never lingers as a zombie.
+///
+/// # Errors
+///
+/// Returns the I/O error if `sh` cannot be spawned.
+pub fn spawn_detached(cwd: &Path, line: &str) -> std::io::Result<()> {
+    let mut sh = Command::new("sh");
+    sh.arg("-c")
+        .arg(line)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut sh, 0);
+    let mut child = sh.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Keeps `Ctrl-C` for the child while it owns the terminal. With raw mode off, the terminal turns
 /// that key into `SIGINT` for the whole foreground process group — this process included — so
 /// interrupting `:!ping host` would otherwise take Minuteman down with it. A handler that does
@@ -185,6 +210,30 @@ mod tests {
         assert_eq!(status.code(), Some(7));
         assert!(dir.join("marker").exists());
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_detached_command_runs_in_the_given_directory_without_being_waited_on() {
+        let dir = scratch("detached");
+        spawn_detached(&dir, "pwd > where.txt").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let written = loop {
+            match std::fs::read_to_string(dir.join("where.txt")) {
+                Ok(text) if !text.is_empty() => break text,
+                _ => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the command never ran"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        };
+        assert_eq!(
+            std::path::Path::new(written.trim()).canonicalize().unwrap(),
+            dir.canonicalize().unwrap()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

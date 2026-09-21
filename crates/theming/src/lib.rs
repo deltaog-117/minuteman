@@ -25,7 +25,7 @@ pub mod theme;
 pub mod ui;
 
 pub use appearance::{Font, Mods, Styles};
-pub use config::Config;
+pub use config::{Config, OpenWith};
 pub use keymap::{Action, KeyMap};
 pub use theme::Theme;
 pub use ui::{GlyphSet, Ui};

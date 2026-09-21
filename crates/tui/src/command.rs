@@ -113,7 +113,7 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
 
 /// Whether `program` — the first word of a command line — is one of `interactive`, by file name,
 /// so `/usr/bin/nvim` counts the same as `nvim`.
-fn names_interactive_program(program: &str, interactive: &[String]) -> bool {
+pub fn names_interactive_program(program: &str, interactive: &[String]) -> bool {
     let name = std::path::Path::new(program)
         .file_name()
         .and_then(|name| name.to_str())

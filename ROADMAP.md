@@ -505,6 +505,27 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   means nothing does) on an in-memory `Vfs` that implements only listing. Verified against the
   real binary: the nearest of two same-named entries won, a deeper name was found, `Esc` and
   `Enter` behaved as above, and a missing name said `no match`.
+- ✅ **Right-click context menu, Inspect panel, Open / Open with** – right-clicking a file or folder
+  selects it and opens a menu at the pointer (Open, Open with ▸, Cut, Copy, Paste into folder,
+  Rename, Delete, Mark, Copy path, Inspect); empty space opens a directory menu (New, Paste,
+  Show/Hide hidden, Refresh, Copy path, Inspect this folder). `tui::context_menu` holds the
+  contents, geometry and hit-testing as pure code (the `browser_mouse` pattern), so the rectangle
+  `overlay_view` draws and the one a click is tested against are one function; every item calls
+  the `App` or `BrowserState` method its key already calls. `tui::inspect` reads one `lstat` and,
+  for a folder, counts what is below it on the blocking pool (cancelled when the panel closes,
+  capped at 500,000 entries); owner, on-disk size and link count are local-only, as `Vfs` has no
+  such fields. Open runs `xdg-open`; Open with reads `[[open_with]]` from `config.toml` (falling
+  back to `$VISUAL`/`$EDITOR`), hands the terminal over for a program in `interactive_commands`
+  and otherwise starts it detached (`shell_overlay::spawn_detached`). Double-clicking a file now
+  opens it too. Copy path uses OSC 52. Chosen as COA B (menu with submenus and a modal Inspect
+  panel inside `tui`, config-driven Open with) over a flat menu (A) and a multi-crate build with
+  `.desktop` discovery, drag and drop and multi-select clicks (C), whose extras are queued
+  below. Property-tested: shell quoting round-trips through a real `sh` for any file name,
+  a menu and its submenu stay on screen for any pointer position, and no sequence of moves,
+  clicks and keys can highlight a missing or disabled row. Verified against the real binary
+  over a PTY with SGR mouse sequences: the file and directory menus opened, the submenu opened on
+  hover, Open with ran a program on a file, Inspect showed a file and a folder, Delete reached
+  its confirmation prompt, and Cut then Paste into folder moved a file on disk.
 
 ---
 
@@ -533,13 +554,21 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟡 Medium Priority (Important)
 
-- **Open-with / file associations** – open the selected file in the program that suits it:
-  `enter` on a file, and double-click now that the mouse is wired up, run an opener chosen by
-  MIME type or extension from `config.toml` rules (falling back to `xdg-open`), with an
-  "open with..." prompt to pick another. The terminal handover a full-screen opener needs now
-  exists (`:nvim`, see above: `Handover`, `TerminalGuard::run_foreground`), so what is left is the
-  rules, the prompt, and detaching a GUI opener so it outlives the browser. Until this lands, double-click only opens
-  directories.
+- **Open-with, remainder: associations and discovery** – Open and Open with exist (the menu,
+  double-click, `[[open_with]]`); what is left is choosing the program by MIME type or extension
+  from `config.toml` rules, listing the programs actually installed by reading XDG `.desktop`
+  files and `mimeinfo.cache` (instead of a hand-written list), `enter` on a file opening it, and
+  an "Other..." entry that prompts for a command.
+- **Mouse, stage 2 — multi-select and breadcrumb clicks** – `Ctrl`-click toggles a mark and
+  `Shift`-click marks a range, the way a desktop file manager selects; a click on a segment of
+  the header's path jumps to that directory; a middle-click opens the entry (a folder in place,
+  a file with its default program). Needs modifier bits on the click path and a path-segment
+  hit-test in `browser_mouse`.
+- **Mouse, stage 3 — drag and drop** – drag a row (or the marked set) onto a folder to move it,
+  with `Ctrl` held to copy, using the existing `file_ops` paste and conflict flow. Needs drag
+  events routed to the browser, a highlighted drop target, and a rule for dropping on the parent
+  column, blank space and the shell box. The scrollable preview (wheel over the preview column)
+  is under *Preview extras, stage 1* above.
 - **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
   operations, with no plugin required.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
@@ -556,6 +585,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   Python, JS, etc., sandboxed by default.
 - **Optional Lua scripting tier** – lightweight `mlua`-based scripting for config/keybindings/
   simple commands, layered alongside the WASM plugin system.
+- **Menu and Inspect polish** – Inspect times are UTC because the standard library has no time
+  zone database; a `chrono`/`jiff` dependency or `TZ` handling would show local time. Inspect
+  could also total the marked set, follow a symlink to its target's details, and work on `ssh://`
+  paths once a backend exists (owner and on-disk size need a `Vfs` method). The menu could grow
+  keyboard-first access (a key to open it on the selection), per-item shortcut hints, and a
+  configurable item list.
 - **Fuzzy ranking for `/` search** – search now finds the nearest substring match anywhere below
   the directory. Still missing: subsequence matching (`aernd` finding `aerend`), ranking by match
   quality rather than depth alone, and stepping through further matches (`n`/`N`, or the arrows
@@ -610,6 +645,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    in the left column to go up, scroll the wheel over either. Clicking the browser while a
    mini-shell is focused gives the keyboard back to the browser. Set `browser_mouse = false` in
    `config.toml` if you would rather leave the mouse to the shell box.
+   Then the newest: right-click a file for its menu (hover "Open with", pick Inspect), right-click
+   a folder and Cut/Copy elsewhere then "Paste into folder", right-click empty space for the
+   directory menu, and double-click a file to open it. Put `[[open_with]]` entries in
+   `config.toml` (see `config.example.toml`) to fill the "Open with" submenu.
    Press `.` to show or hide dot-files. Try `:mkdir -p a/b`, `:touch x.txt` and `:ls -l` — the
    new entries appear at once, and so does a file you create from a mini-shell or another
    terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
@@ -618,6 +657,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    and the marks; and `:nvim ROADMAP.md` (`:!cmd` for a program not in `interactive_commands`).
 2. `cargo test --workspace` (all tests) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: preview extras, stage 1 (a scrollable preview, hex view and archive listing).
+4. Next cycle: preview extras, stage 1 (a scrollable preview, hex view and archive listing), or
+   the mouse's stage 2 (multi-select and breadcrumb clicks).
    Richer status line and bookmarks/marks (directory bookmarks — distinct from the file marks
    added earlier) remain the other 🔥 candidates.

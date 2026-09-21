@@ -783,6 +783,7 @@ mod tests {
             browser_mouse: true,
             show_hidden: false,
             interactive_commands: Vec::new(),
+            open_with: Vec::new(),
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             ui: theming::Ui::default(),

@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: a right-click context menu. Right-clicking a file or folder selects it and opens a menu
+  at the pointer with Open, Open with ▸, Cut, Copy, Paste into folder (folders only), Rename,
+  Delete, Mark/Unmark, Copy path and Inspect; right-clicking empty space offers New file or
+  folder, Paste, Show/Hide hidden files, Refresh, Copy path and Inspect this folder. Rows follow
+  the pointer, a submenu opens beside its row, the menu is pulled back inside the screen, and
+  `↑`/`↓`/`j`/`k`, `→`/`l`, `←`/`h`, `Enter` and `Esc` drive it from the keyboard. Every item
+  calls the same method as its key, so Cut, Copy and Delete still act on the marked entries when
+  the clicked one is marked. New modules `context_menu` (contents, geometry, hit-testing; no
+  terminal) and `overlay_view` (drawing).
+- `tui`: an Inspect panel (`inspect`) showing name, location, type, size and on-disk size,
+  permissions, owner and group, link count, and modified/accessed/created times in UTC. For a
+  folder it counts files, subfolders and total size on the blocking pool, shows `counting…` until
+  it lands, stops at 500,000 entries, and cancels when the panel closes. `Esc`, `Enter` or a
+  click closes it.
+- `tui`: Open and Open with. Open runs the desktop's default program (`xdg-open`, or `open` on
+  macOS); Open with lists the `[[open_with]]` entries from `config.toml`, or `$VISUAL`/`$EDITOR`
+  when there are none. A program named in `interactive_commands` takes over the terminal like a
+  `:` command; any other is started detached. A missing program is reported instead of failing
+  silently, and the file's path is shell-quoted whatever it is called (`open`).
+- `tui`: Copy path sends the path to the terminal's clipboard with OSC 52 (`osc52`).
+- `tui`: `App::begin_paste_into` pastes into a chosen folder, and `App::begin_inspect` and
+  `App::open_with` back the menu.
+- `theming`: `[[open_with]]` tables in `config.toml` (`name`, `command`, with `{}` standing for the
+  path), exposed as `Config::open_with`. See `config.example.toml`.
+- `shell_overlay`: `spawn_detached`, which starts a command under `sh -c` in its own process group
+  with no terminal attached and reaps it in the background.
 - `tui`: a `:` command can take over the whole terminal, so `:nvim ROADMAP.md` opens the editor.
   A command whose program name is in `interactive_commands` (editors, pagers, `htop`, `mpv`,
   `ssh`, `tmux`, `fzf` by default), or any command prefixed with `!` (`:!python3`), suspends the
@@ -317,6 +343,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with exit code 2 instead of being taken as the start directory.
 
 ### Changed
+- `tui`: double-clicking a file in the middle column opens it with the desktop's default program;
+  it used to do nothing. Double-clicking a directory still opens the directory.
 - `tui`: `/` search now looks below the current directory as well as in it. The nearest match
   wins, so a name in the directory you are in is still found first; otherwise the search walks
   subdirectories one level at a time on the blocking pool (hidden entries only when shown, at

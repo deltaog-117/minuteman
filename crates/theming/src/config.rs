@@ -24,6 +24,15 @@ use crate::keymap::{KeyMap, RawKeyMap};
 use crate::theme::{RawTheme, Theme};
 use crate::ui::{RawUi, Ui};
 
+/// One entry of the context menu's "Open with" submenu: a label and the command line that opens
+/// a file. `command` is run under `sh -c`; a `{}` in it stands for the file's quoted path, and
+/// without one the path is appended.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OpenWith {
+    pub name: String,
+    pub command: String,
+}
+
 /// `config.toml`. Its `[theme]` and `[ui]` predate `appearance.toml` and are still honored, but
 /// anything `appearance.toml` sets wins.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -38,6 +47,8 @@ struct RawConfig {
     show_hidden: Option<bool>,
     /// `None` when absent, so "unset" means the built-in list while an explicit `[]` means none.
     interactive_commands: Option<Vec<String>>,
+    /// The `[[open_with]]` tables, in the order the submenu lists them.
+    open_with: Vec<OpenWith>,
     keys: RawKeyMap,
     theme: RawTheme,
     ui: RawUi,
@@ -83,6 +94,9 @@ pub struct Config {
     /// Program names a `:` command hands the whole terminal to (`:nvim notes.md`), instead of
     /// running with its output captured. `:!cmd` does the same for any one command.
     pub interactive_commands: Vec<String>,
+    /// What the context menu's "Open with" lists. Empty means the menu offers `$VISUAL` or
+    /// `$EDITOR` alone.
+    pub open_with: Vec<OpenWith>,
     pub keys: KeyMap,
     pub theme: Theme,
     pub ui: Ui,
@@ -117,6 +131,7 @@ impl Config {
             interactive_commands: config
                 .interactive_commands
                 .unwrap_or_else(default_interactive_commands),
+            open_with: config.open_with,
             keys: config.keys.into(),
             theme: config.theme.overlay(appearance.theme).into(),
             ui: config.ui.overlay(appearance.ui).into(),
@@ -311,5 +326,20 @@ mod tests {
         assert_eq!(config.theme, Theme::default());
         assert_eq!(config.styles.dir, Mods::parse(&["bold"]));
         assert_eq!(config.font, Font::default());
+    }
+
+    #[test]
+    fn open_with_entries_keep_their_order_and_default_to_none() {
+        let config = Config::from_sources(
+            Some(
+                "[[open_with]]\nname = \"Neovim\"\ncommand = \"nvim\"\n\
+                 [[open_with]]\nname = \"VLC\"\ncommand = \"vlc {}\"\n",
+            ),
+            None,
+        );
+        let names: Vec<&str> = config.open_with.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, ["Neovim", "VLC"]);
+        assert_eq!(config.open_with[1].command, "vlc {}");
+        assert!(Config::from_sources(None, None).open_with.is_empty());
     }
 }

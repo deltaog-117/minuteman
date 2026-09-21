@@ -39,6 +39,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-20 | Launch Command | Executable built as `mman` via the `[[bin]]` name; project, crates and config folder keep the Minuteman name | ✅ Confirmed |
 | 2026-09-20 | Hidden Files, `:` Commands, Live Refresh | Filter where a listing is stored (COA A); built-ins plus `sh -c` fall-through (COA C); poll by re-listing and comparing, no new dependency | ✅ Confirmed |
 | 2026-09-20 | `:` Terminal Handover, `c` Cancel-All, Arrow Keys, Nearest-First Search | Suspend and hand over the real terminal (COA A, name list plus `!`); cancel means everything (COA B); arrows in the default bindings (COA A); breadth-first walk on the blocking pool (COA A) | ✅ Confirmed |
+| 2026-09-21 | Right-Click Menu, Inspect Panel, Open With | Menu and modal panel inside `tui` with pure geometry, config-driven Open with, detached launch (COA B); `.desktop` discovery, multi-select clicks and drag and drop deferred | ✅ Confirmed |
 
 ---
 
@@ -2441,6 +2442,109 @@ the flags were popped before the alternate screen was left and pushed after it w
 Two harness findings: `pyte` prints a DCS string as text, which `nvim` sends at startup, so the
 harness strips those as it already strips APC; and `nvim` keeps its file name on the second-to-last
 row, not the last. Not verified in a real kitty or with a physical keyboard.
+
+---
+
+### Right-Click Menu, Inspect Panel and Open With: A Conventional File Manager's Mouse
+
+**Date:** 2026-09-21
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+The mouse already selected rows, opened directories on a double-click and scrolled, but there was
+no way to act on a file with it: no menu, no way to open a file at all (double-click on a file did
+nothing), and nowhere to see more than the status bar's one line about an entry. The request was a
+right-click menu with copy, paste, cut, delete, open with and the other essentials, plus an
+inspect view with detailed information about a file or folder. Three courses of action were put
+first.
+
+#### Options Considered
+
+**A**, a flat one-level menu in `tui` that reuses the existing actions, with Inspect filling the
+preview column and Open with typed at a prompt. **B**, a menu with a submenu and a modal Inspect
+panel, as new modules inside `tui`, with Open with driven by `[[open_with]]` in `config.toml`.
+**C**, B built as separate crates, with Open with discovered from XDG `.desktop` files, and drag
+and drop, multi-select clicks, breadcrumb clicks and a scrollable preview added. **B** was chosen.
+A does not give what a desktop file manager gives, and its Inspect has no room; C mixes four
+unrelated features into one change, one of which (parsing `.desktop` files) is a new surface of
+its own. C's extras are queued on the roadmap as separate items.
+
+#### The menu is a pure model
+
+`context_menu` decides what a menu lists for what was clicked, where it sits on a given screen,
+and how a pointer or a key moves through it, and never touches a terminal, an `App` or a
+filesystem. `overlay_view` draws from `ContextMenu::layout` and the mouse handler hit-tests
+against the same function, so a click cannot land on a different row than the one drawn, which is
+the property `browser_mouse::BrowserLayout` was made for. What a chosen item does is a
+`MenuCommand`, carried out by `run_menu_command` in `main.rs` by calling the `App` or
+`BrowserState` method the item's key already calls; there is no second implementation of Delete
+or Paste to keep in step. The menu is modal: while it is open it takes every mouse event and key,
+so the click that dismisses it can never also select the row under it.
+
+Right-clicking selects first, as a left click would, so the menu is always about something lit.
+Right-clicking inside a marked set keeps the marks; anywhere else replaces them with the one
+entry, as in any file manager, and Cut, Copy and Delete say how many entries they will touch
+(`Delete (3 marked)`) because the marks, not the clicked row, are what they act on. Right-clicking
+the left column does what a left click there does (go up, select), then opens the menu on that
+entry. A right-click away from an open menu moves it; one on the menu does nothing. `Paste into
+folder` needed `App::begin_paste_into`, with `begin_paste` now calling it with the browsed
+directory.
+
+#### Inspect
+
+`Inspection` is one `lstat`, so a symlink is inspected as a link and a broken one says so. A
+folder's contents (files, subfolders, bytes) need a walk that can take seconds, so `InspectView`
+runs it on the blocking pool as `search_job` does, shows `counting…`, stops at 500,000 entries
+("at least"), does not follow symlinks (a loop cannot hang it) and sets its cancel flag when the
+panel closes. Owner, group, link count and on-disk size come from `std::fs`, not `Vfs`, which has
+no such fields; the panel is therefore local-only for those rows, and that is on the roadmap
+rather than hidden. Times are UTC, formatted by a small `civil_from_days` (Hinnant's algorithm)
+because the standard library has no time zone database and a wrong local time seemed worse than a
+labelled UTC one; checked against known epochs and leap days, with a property that a later time
+never sorts before an earlier one.
+
+#### Open and Open with
+
+There was no "open a file" at all, so this added it. Open runs `xdg-open` (or `open`). Open with
+lists `[[open_with]]` entries, falling back to `$VISUAL`/`$EDITOR` so the submenu is never empty
+by default. A command is run under `sh -c` with the path shell-quoted (`{}` places it, otherwise
+it is appended); the quoting is the one part that decides what a file name can make the shell do,
+so it has a property test that pipes random names through a real `sh` and expects the same bytes
+back. A program in `interactive_commands` reuses the terminal handover the `:` prompt built; any
+other is started detached (`shell_overlay::spawn_detached`: no terminal, own process group, reaped
+by a thread) because a viewer must outlive the browser and must not leave Minuteman `BUSY`. A
+detached program cannot print "not found", so the command's first word is looked up on `PATH`
+first and the status line says so. Double-clicking a file now calls Open; the file to open is read
+before the click is applied, because applying a double-click on a folder moves the cursor into it.
+Copy path uses OSC 52 rather than a clipboard tool, so it works over `ssh` and inside `tmux`, and
+says "sent", not "copied", since not every terminal honours it.
+
+#### Trade-offs and what was left
+
+Open with is a hand-written list, not discovery; an "Other..." prompt, MIME rules, local time,
+marked-set totals in Inspect, multi-select clicks, breadcrumb clicks and drag and drop are on the
+roadmap. While an operation runs, the menu still opens, but Rename, Delete and New refuse, since
+the keys are all ignored then and those would start a prompt over it.
+
+#### Verification
+
+`cargo test --workspace` passes (`tui` 236, `browser` 30, `shell_overlay` 16, `theming` 39) and
+`cargo clippy --workspace --all-targets -- -D warnings` is clean. Property tests: any file name
+survives the shell quoting unchanged; a menu and its submenu stay on screen whatever the pointer
+and screen size; every drawn row hit-tests to its own entry; and no sequence of moves, clicks and
+keys leaves a missing or disabled row highlighted. On a PTY against the real binary with SGR
+mouse sequences: the file, folder and empty-space menus opened; hovering "Open with" opened the
+submenu; a click on its item ran a program on the file; Inspect showed a file and a folder
+(`Directory`, `0 files, 0 folders, 0B`); Delete reached its `(y/N)` prompt and `n` left the file;
+Cut then Paste into folder moved a file on disk; a double-click on a folder entered it without
+opening anything, and on a file ran `xdg-open`. Two harness findings: the first mouse event after
+start-up was lost every time (a throwaway motion event before the real ones avoids it; the cause
+was not tracked down, and a left click was not tried as the first event to see whether it is
+older than this change), and the harness reads text
+out of a diff-drawn screen, so it can only ask whether a label appeared, not where. Not verified
+in a real desktop session beyond `xdg-open` being invoked, and not with a physical mouse.
 
 ---
 

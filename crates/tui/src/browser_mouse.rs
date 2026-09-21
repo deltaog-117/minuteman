@@ -234,8 +234,8 @@ pub fn apply_click(
 ) -> Result<(), VfsError> {
     match (hit, click) {
         (Hit::CurrentRow(index), Click::Single) => browser.select_index(index),
-        // `enter` does nothing on a file, which is what "directories only" needs until there is
-        // somewhere to send a file to be opened.
+        // `enter` does nothing on a file; the caller opens a double-clicked file itself, since
+        // that needs the `App`.
         (Hit::CurrentRow(index), Click::Double) => {
             browser.select_index(index);
             browser.enter(vfs)?;

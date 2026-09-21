@@ -136,6 +136,38 @@ named `init` must be passed as `./init`.
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
 | `space`     | leader — commands for the mini-shell panes (below); inert with no shell open |
 
+### Mouse
+
+The three file columns answer the mouse like a conventional file manager (set
+`browser_mouse = false` in `config.toml` to leave the mouse to the mini-shell box alone).
+
+| Gesture | Action |
+|---------|--------|
+| click a row in the middle column | select it |
+| double-click a directory | open it |
+| double-click a file | open it with the desktop's default program (`xdg-open`) |
+| click a row in the left column | go up and select that entry |
+| wheel over the left or middle column | move the selection |
+| right-click a file or folder | open its context menu |
+| right-click empty space | open the menu for the current directory |
+
+The context menu lists Open, Open with ▸, Cut, Copy, Paste into folder (on a folder), Rename,
+Delete, Mark, Copy path and Inspect; on empty space it offers New, Paste, Show/Hide hidden files,
+Refresh, Copy path and Inspect. Hover or click to choose; `↑`/`↓` (or `j`/`k`) move, `→`/`l`
+opens a submenu, `←`/`h` closes it, `Enter` chooses and `Esc` closes. Cut, Copy and Delete act
+on every marked entry when the clicked one is marked, and only on the clicked entry otherwise.
+
+**Inspect** opens a panel with the name, location, type, size (exact and on disk), permissions,
+owner and group, link count and the modified, accessed and created times (UTC). For a folder it
+also counts the files, subfolders and total size below it, in the background. `Esc`, `Enter` or a
+click closes it. Owner, on-disk size and link count come from the local filesystem only.
+
+**Open with** lists the `[[open_with]]` entries from `config.toml` (see below), or your
+`$VISUAL` / `$EDITOR` when there are none. A program named in `interactive_commands` takes over the
+terminal, as `:nvim` does; any other is started detached, so a viewer outlives the browser.
+**Copy path** asks the terminal to put the path on the system clipboard (OSC 52), which most modern
+terminals honour, including over `ssh` and inside `tmux`.
+
 ### Mini-shell keys
 
 `s` opens a shell in the current directory. There are two modes:
@@ -216,6 +248,16 @@ file, a missing file, even one that fails to parse never stops Minuteman from st
 # Programs a `:` command gives the whole terminal to (`:nvim notes.md`); `:!cmd` does it for any.
 interactive_commands = ["nvim", "vim", "vi", "nano", "emacs", "micro", "hx", "less", "more",
                         "man", "htop", "btop", "top", "mpv", "ssh", "tmux", "fzf"]
+
+# The right-click menu's "Open with" list. `{}` stands for the file's path; without one the path
+# is added on the end.
+[[open_with]]
+name = "Neovim"
+command = "nvim"
+
+[[open_with]]
+name = "VLC"
+command = "vlc {}"
 
 [keys]
 move_down = ["j", "down"]

@@ -13,10 +13,11 @@
 # mini-shell, set this to false; Esc and the `space` leader still switch modes.
 alt_tap = true
 
-# Mouse in the file browser: a click selects a row in the middle column, a double-click on a
-# directory opens it, a click in the left column goes up and selects that entry, and the wheel
-# moves the selection. Clicking the browser also hands the keyboard back from a mini-shell. Set
-# this to false to leave the mouse to the mini-shell box only.
+# Mouse in the file browser: a click selects a row in the middle column, a double-click opens a
+# directory (or a file, with the desktop's default program), a click in the left column goes up
+# and selects that entry, the wheel moves the selection, and a right-click opens a menu (Open,
+# Open with, Cut, Copy, Paste, Rename, Delete, Inspect, ...). Clicking the browser also hands the
+# keyboard back from a mini-shell. Set this to false to leave the mouse to the mini-shell box only.
 browser_mouse = true
 
 # Whether dot-prefixed files and directories are listed when Minuteman starts. The `hidden` key
@@ -31,6 +32,19 @@ interactive_commands = [
     "nvim", "vim", "vi", "nano", "emacs", "micro", "hx", "less", "more", "man", "htop", "btop",
     "top", "mpv", "ssh", "tmux", "fzf",
 ]
+
+# What the right-click menu's "Open with" submenu lists, in this order. `command` runs under
+# `sh -c`; a `{}` stands for the file's path (already quoted), and without one the path is added
+# on the end. A program named in `interactive_commands` above (an editor, a pager) takes over the
+# terminal; anything else is started on its own and left running. With none of these tables the
+# submenu offers your $VISUAL or $EDITOR alone.
+# [[open_with]]
+# name = "Neovim"
+# command = "nvim"
+#
+# [[open_with]]
+# name = "VLC"
+# command = "vlc {}"
 
 [keys]
 # The arrow keys browse like hjkl: up/down move the selection, right opens the selected

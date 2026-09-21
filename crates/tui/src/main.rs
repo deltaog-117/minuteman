@@ -19,10 +19,15 @@ mod app;
 mod browser_mouse;
 mod cli;
 mod command;
+mod context_menu;
 mod glyphs;
 mod hud;
 mod image_preview;
+mod inspect;
 mod live_refresh;
+mod open;
+mod osc52;
+mod overlay_view;
 mod popup_shell;
 mod search_job;
 mod shell_init;
@@ -40,18 +45,24 @@ use alt_keys::AltCommand;
 use anyhow::Result;
 use app::App;
 use browser::BrowserState;
-use browser_mouse::{BrowserLayout, ClickTracker, Hit, Listing, Pane, Wheel};
+use browser_mouse::{BrowserLayout, Click, ClickTracker, Hit, Listing, Pane, Wheel};
+use context_menu::{
+    Context as MenuContext, ContextMenu, MenuCommand, Nav, Outcome as MenuOutcome,
+    Target as MenuTarget,
+};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     KeyEventState, KeyboardEnhancementFlags, ModifierKeyCode, MouseButton, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
+use crossterm::style::Print;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     supports_keyboard_enhancement,
 };
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
+use inspect::InspectView;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
@@ -309,6 +320,9 @@ struct Overlay<'a> {
     mode: hud::Mode,
     shell: Option<ShellView<'a>>,
     current_list: &'a mut ListState,
+    /// The right-click menu and the Inspect panel, drawn last so they sit over everything.
+    menu: Option<&'a ContextMenu>,
+    inspect: Option<&'a InspectView>,
 }
 
 struct ShellView<'a> {
@@ -681,10 +695,18 @@ fn run(
     let mut current_list = ListState::default();
     // Tells a double-click on a row from two single clicks (see `browser_mouse`).
     let mut clicks = ClickTracker::default();
+    // The right-click menu while one is open. It owns the mouse and the keyboard until it
+    // closes, so nothing else has to know it exists.
+    let mut menu: Option<ContextMenu> = None;
+    // The Inspect panel while one is open; modal in the same way.
+    let mut inspect: Option<InspectView> = None;
 
     loop {
         app.poll_bulk(browser, vfs)?;
         app.poll_search(browser, vfs);
+        if let Some(view) = inspect.as_mut() {
+            view.poll();
+        }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
         // browser steps aside until it exits. Checked here, once per turn of the loop, because
         // the app that recognised the command doesn't own the terminal.
@@ -764,6 +786,8 @@ fn run(
                         size: shell_size,
                     }),
                     current_list: &mut current_list,
+                    menu: menu.as_ref(),
+                    inspect: inspect.as_ref(),
                 },
             )
         })?;
@@ -796,6 +820,69 @@ fn run(
                 // the shell box, not mid-drag (a drag that leaves the box must still finish it),
                 // and not under a prompt, which owns the selection until it is answered.
                 let frame_area: Rect = terminal.size()?.into();
+
+                // The Inspect panel and the menu are modal: they take every mouse event until
+                // they close, so a click meant to dismiss one never also selects the row under it.
+                if inspect.is_some() {
+                    if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        inspect = None;
+                    }
+                    continue;
+                }
+                let pointer = Position::new(mouse.column, mouse.row);
+                let menu_reaction = menu.as_mut().map(|open| match mouse.kind {
+                    MouseEventKind::Moved => {
+                        open.hover_at(frame_area, pointer);
+                        MenuMouse::Keep
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        match open.click_at(frame_area, pointer) {
+                            MenuOutcome::Run(command) => MenuMouse::Run(command),
+                            MenuOutcome::Stay => MenuMouse::Keep,
+                            MenuOutcome::Dismiss => MenuMouse::Close,
+                        }
+                    }
+                    // A right-click away from the menu moves it to the new spot; on the menu it
+                    // does nothing.
+                    MouseEventKind::Down(MouseButton::Right) => {
+                        if open.hit(frame_area, pointer) == context_menu::Hit::Outside {
+                            MenuMouse::Reopen
+                        } else {
+                            MenuMouse::Keep
+                        }
+                    }
+                    MouseEventKind::Down(_)
+                    | MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight => MenuMouse::Close,
+                    MouseEventKind::Up(_) | MouseEventKind::Drag(_) => MenuMouse::Keep,
+                });
+                match menu_reaction {
+                    None => {}
+                    Some(MenuMouse::Keep) => continue,
+                    Some(MenuMouse::Close) => {
+                        menu = None;
+                        continue;
+                    }
+                    Some(MenuMouse::Run(command)) => {
+                        let target = menu.take().map(|open| open.target());
+                        if let Some(target) = target {
+                            run_menu_command(
+                                command,
+                                target,
+                                browser,
+                                app,
+                                vfs,
+                                config,
+                                &mut inspect,
+                            )?;
+                        }
+                        continue;
+                    }
+                    Some(MenuMouse::Reopen) => menu = None,
+                }
+
                 let over_shell = shells.is_some()
                     && shell_area(frame_area, shell_offset, shell_size)
                         .contains(Position::new(mouse.column, mouse.row));
@@ -822,11 +909,81 @@ fn run(
                             shell_chord = None;
                             if matches!(hit, Hit::ParentRow(_) | Hit::CurrentRow(_)) {
                                 let click = clicks.register(hit, Instant::now());
+                                // Read before the click is applied: opening a directory moves
+                                // the cursor into it, and the file to open is the one clicked.
+                                let file_to_open = match (hit, click) {
+                                    (Hit::CurrentRow(index), Click::Double) => browser
+                                        .current_entries()
+                                        .get(index)
+                                        .filter(|entry| !entry.is_dir)
+                                        .map(|entry| entry.path.clone()),
+                                    _ => None,
+                                };
                                 if let Err(e) = browser_mouse::apply_click(browser, vfs, hit, click)
                                 {
                                     app.status = Some(format!("cannot open: {e}"));
                                 }
+                                if let Some(path) = file_to_open {
+                                    app.open_default(browser, &path);
+                                }
                             }
+                            continue;
+                        }
+                        MouseEventKind::Down(MouseButton::Right) if hit != Hit::Elsewhere => {
+                            shell_focused = false;
+                            pending_leader = false;
+                            shell_chord = None;
+                            // A right-click selects what it lands on first, the way a left click
+                            // would, so the menu is always about something the user can see lit.
+                            let on_entry = match hit {
+                                Hit::CurrentRow(index) => {
+                                    let clicked = browser
+                                        .current_entries()
+                                        .get(index)
+                                        .map(|entry| entry.path.clone());
+                                    // Right-clicking inside a marked set keeps it; anywhere else
+                                    // it is replaced by the one entry, as in any file manager.
+                                    if clicked.is_some_and(|path| !browser.is_marked(&path)) {
+                                        browser.clear_marks();
+                                    }
+                                    browser.select_index(index);
+                                    true
+                                }
+                                Hit::ParentRow(_) => {
+                                    if let Err(e) =
+                                        browser_mouse::apply_click(browser, vfs, hit, Click::Single)
+                                    {
+                                        app.status = Some(format!("cannot open: {e}"));
+                                    }
+                                    true
+                                }
+                                Hit::Blank(_) | Hit::Elsewhere => false,
+                            };
+                            let (target, marked) = match browser.selected_entry() {
+                                Some(entry) if on_entry => (
+                                    MenuTarget::Entry {
+                                        is_dir: entry.is_dir,
+                                    },
+                                    browser.is_marked(&entry.path),
+                                ),
+                                _ => (MenuTarget::Blank, false),
+                            };
+                            let context = MenuContext {
+                                target,
+                                marked,
+                                mark_count: browser.marked_paths().len(),
+                                clipboard: app.clipboard.is_some(),
+                                hidden_shown: browser.show_hidden(),
+                            };
+                            let names: Vec<String> = open::open_with_entries(&config.open_with)
+                                .into_iter()
+                                .map(|choice| choice.name)
+                                .collect();
+                            menu = Some(ContextMenu::new(
+                                pointer,
+                                target,
+                                context_menu::entries(&context, &names),
+                            ));
                             continue;
                         }
                         // The preview column is left alone: it is about to grow its own scrolling.
@@ -1004,6 +1161,51 @@ fn run(
                     continue;
                 }
                 let key = with_caps_lock_applied(key);
+
+                // The Inspect panel and the menu are modal: they own the keyboard until they
+                // close, ahead of the leader, the chords and the shell.
+                if inspect.is_some() {
+                    if matches!(
+                        key.code,
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | 'i')
+                    ) {
+                        inspect = None;
+                    }
+                    continue;
+                }
+                if let Some(open) = menu.as_mut() {
+                    let nav = match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => Some(Nav::Up),
+                        KeyCode::Down | KeyCode::Char('j') => Some(Nav::Down),
+                        KeyCode::Left | KeyCode::Char('h') => Some(Nav::Left),
+                        KeyCode::Right | KeyCode::Char('l') => Some(Nav::Right),
+                        KeyCode::Enter => Some(Nav::Enter),
+                        _ => None,
+                    };
+                    let outcome = match (key.code, nav) {
+                        (KeyCode::Esc | KeyCode::Char('q'), _) => MenuOutcome::Dismiss,
+                        (_, Some(nav)) => open.key(nav),
+                        (_, None) => MenuOutcome::Stay,
+                    };
+                    match outcome {
+                        MenuOutcome::Run(command) => {
+                            let target = open.target();
+                            menu = None;
+                            run_menu_command(
+                                command,
+                                target,
+                                browser,
+                                app,
+                                vfs,
+                                config,
+                                &mut inspect,
+                            )?;
+                        }
+                        MenuOutcome::Dismiss => menu = None,
+                        MenuOutcome::Stay => {}
+                    }
+                    continue;
+                }
 
                 if pending_leader {
                     pending_leader = false;
@@ -1233,6 +1435,99 @@ fn run(
     }
 }
 
+/// What one mouse event does to an open right-click menu.
+enum MenuMouse {
+    /// The menu stays as it is (it may have highlighted a row).
+    Keep,
+    Close,
+    /// Close it, then treat the event as a right-click that opens a fresh one.
+    Reopen,
+    Run(MenuCommand),
+}
+
+/// Carries out what a chosen menu item asks for, by calling the same `App` and `BrowserState`
+/// methods the keys do, so a menu click and its key can never behave differently. `target` says
+/// whether "Inspect" and "Copy path" mean the selected entry or the browsed directory.
+fn run_menu_command(
+    command: MenuCommand,
+    target: MenuTarget,
+    browser: &mut BrowserState,
+    app: &mut App,
+    vfs: &LocalVfs,
+    config: &Config,
+    inspect: &mut Option<InspectView>,
+) -> Result<()> {
+    // The keys are all ignored while an operation runs; the ones below would start another
+    // operation or a prompt over it.
+    if app.is_busy()
+        && matches!(
+            command,
+            MenuCommand::Rename | MenuCommand::Delete | MenuCommand::New
+        )
+    {
+        app.status = Some("an operation is already in progress".into());
+        return Ok(());
+    }
+    let selected = browser
+        .selected_entry()
+        .map(|entry| (entry.path.clone(), entry.is_dir));
+    // The path "Inspect" and "Copy path" are about.
+    let subject = match (target, &selected) {
+        (MenuTarget::Entry { .. }, Some((path, _))) => path.clone(),
+        _ => browser.current_dir().to_path_buf(),
+    };
+    match (command, selected) {
+        (MenuCommand::Open, Some((_, true))) => browser.enter(vfs)?,
+        (MenuCommand::Open, Some((path, false))) => app.open_default(browser, &path),
+        (MenuCommand::OpenWith(index), Some((path, _))) => {
+            if let Some(choice) = open::open_with_entries(&config.open_with).get(index) {
+                app.open_with(browser, &choice.command, &path);
+            }
+        }
+        (MenuCommand::PasteInto, Some((path, true))) => app.begin_paste_into(path),
+        (MenuCommand::Cut, _) => app.cut(browser),
+        (MenuCommand::Copy, _) => app.yank(browser),
+        (MenuCommand::Paste, _) => app.begin_paste(browser),
+        (MenuCommand::Rename, _) => app.begin_rename(browser),
+        (MenuCommand::Delete, _) => app.begin_delete(browser),
+        (MenuCommand::New, _) => app.begin_create(),
+        (MenuCommand::ToggleMark, _) => browser.toggle_mark(),
+        (MenuCommand::CopyPath, _) => {
+            execute!(
+                io::stdout(),
+                Print(osc52::set_clipboard(&subject.to_string_lossy()))
+            )?;
+            app.status = Some(format!(
+                "sent {} to the terminal's clipboard",
+                subject.display()
+            ));
+        }
+        (MenuCommand::Inspect, _) => *inspect = app.begin_inspect(&subject),
+        (MenuCommand::ToggleHidden, _) => {
+            let shown = browser.toggle_hidden(vfs)?;
+            app.status = Some(
+                if shown {
+                    "hidden files shown"
+                } else {
+                    "hidden files hidden"
+                }
+                .into(),
+            );
+        }
+        (MenuCommand::Refresh, _) => {
+            browser.reload(vfs)?;
+            browser.prune_marks(vfs);
+            app.status = Some("refreshed".into());
+        }
+        // The entry the menu was opened on is gone (deleted by another program while it was
+        // open), so there is nothing left for an entry-only item to act on.
+        (MenuCommand::Open | MenuCommand::OpenWith(_) | MenuCommand::PasteInto, _) => {
+            app.status = Some("that entry is no longer there".into())
+        }
+    }
+    Ok(())
+}
+
 /// The pane-focus direction a key means after the leader: `hjkl` or the arrows.
 fn leader_focus_dir(code: KeyCode) -> Option<NudgeDir> {
     match code {
@@ -1257,6 +1552,8 @@ fn draw(
         mode,
         shell,
         current_list: current_state,
+        menu,
+        inspect,
     } = overlay;
     // Header, the three file columns, then the status bar. The mouse handler hit-tests against
     // this same split (see `browser_mouse`), so the two can't disagree about where a row is.
@@ -1447,6 +1744,12 @@ fn draw(
     // covers the status bar and can be dragged off-center by its title bar (see `shell_area`).
     if let Some(ShellView { panes, offset, size }) = shell {
         panes.render(frame, shell_area(frame.area(), offset, size), config);
+    }
+    if let Some(menu) = menu {
+        overlay_view::render_menu(frame, menu, config);
+    }
+    if let Some(view) = inspect {
+        overlay_view::render_inspect(frame, view, config);
     }
 }
 
