@@ -361,7 +361,11 @@ enum AncestorSearch {
 /// which side of it `target` is on. Mirrors `dividers`' recursion shape but needs the extra
 /// "still looking" state (`Located`) since a matching split isn't necessarily the target's
 /// immediate parent — it's the first one found while unwinding.
-fn nearest_ancestor_split<T>(tree: &Tree<T>, target: usize, axis: SplitDirection) -> AncestorSearch {
+fn nearest_ancestor_split<T>(
+    tree: &Tree<T>,
+    target: usize,
+    axis: SplitDirection,
+) -> AncestorSearch {
     match &tree.node {
         Node::Leaf(_) => {
             if tree.id == target {
@@ -1351,7 +1355,10 @@ mod tests {
 
         let mut ids_after = Vec::new();
         leaf_ids(&panes.root, &mut ids_after);
-        assert_eq!(ids_before, ids_after, "toggling must not reorder or replace panes");
+        assert_eq!(
+            ids_before, ids_after,
+            "toggling must not reorder or replace panes"
+        );
         assert_eq!(panes.focused_id(), focused_before, "focus must not change");
 
         // The two panes now stack vertically instead of sitting side by side: their rects should

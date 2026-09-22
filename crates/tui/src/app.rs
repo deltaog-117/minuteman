@@ -73,7 +73,10 @@ pub enum ConflictSource {
         index: usize,
         dst: PathBuf,
     },
-    Rename { target: PathBuf, new_name: String },
+    Rename {
+        target: PathBuf,
+        new_name: String,
+    },
 }
 
 /// Where a `/` search started, so `Esc` (or an emptied query) can put the browser back: the
@@ -190,9 +193,14 @@ enum BulkKind {
         index: usize,
         dst: PathBuf,
     },
-    Delete { targets: Vec<PathBuf> },
+    Delete {
+        targets: Vec<PathBuf>,
+    },
     /// A `:` command line running under `sh -c`, from `started`.
-    Shell { command: String, started: Instant },
+    Shell {
+        command: String,
+        started: Instant,
+    },
 }
 
 impl BulkKind {
@@ -305,10 +313,17 @@ impl App {
         if let Some(bulk) = &self.bulk {
             return match &bulk.kind {
                 BulkKind::Delete { targets } => {
-                    format!("{}… {}", bulk.kind.progressing_label(), batch_label(targets))
+                    format!(
+                        "{}… {}",
+                        bulk.kind.progressing_label(),
+                        batch_label(targets)
+                    )
                 }
                 BulkKind::Shell { command, .. } => {
-                    format!("{}… {command} — Esc to cancel", bulk.kind.progressing_label())
+                    format!(
+                        "{}… {command} — Esc to cancel",
+                        bulk.kind.progressing_label()
+                    )
                 }
                 BulkKind::Paste { clip, index, .. } => {
                     let cancel_hint = if bulk.cancel.is_some() {
@@ -446,7 +461,13 @@ impl App {
             }
             Ok(Outcome::Completed) => {
                 browser.reload(vfs)?;
-                if let BulkKind::Paste { clip, dst_dir, index, .. } = bulk.kind {
+                if let BulkKind::Paste {
+                    clip,
+                    dst_dir,
+                    index,
+                    ..
+                } = bulk.kind
+                {
                     let Some(clip) = self.try_continue_paste(clip, dst_dir, index) else {
                         return Ok(());
                     };
@@ -459,7 +480,12 @@ impl App {
                 self.status = Some(format!("{past_label} complete"));
             }
             Ok(Outcome::Skipped) => {
-                if let BulkKind::Paste { clip, dst_dir, index, .. } = bulk.kind
+                if let BulkKind::Paste {
+                    clip,
+                    dst_dir,
+                    index,
+                    ..
+                } = bulk.kind
                     && self.try_continue_paste(clip, dst_dir, index).is_none()
                 {
                     return Ok(());
@@ -468,7 +494,12 @@ impl App {
             }
             Err(FileOpsError::Cancelled) => self.status = Some(format!("{past_label} cancelled")),
             Err(FileOpsError::Vfs(VfsError::AlreadyExists(_))) => match bulk.kind {
-                BulkKind::Paste { clip, dst_dir, index, dst } => {
+                BulkKind::Paste {
+                    clip,
+                    dst_dir,
+                    index,
+                    dst,
+                } => {
                     self.prompt = Some(Prompt::Conflict(ConflictSource::Paste {
                         clip,
                         dst_dir,
@@ -914,10 +945,22 @@ impl App {
                 Ok(()) => self.status = Some(format!("cd {path}")),
                 Err(e) => self.status = Some(format!("cd failed: {e}")),
             },
-            Ok(Some(Command::Mkdir { parents: true, names })) => {
-                self.run_builtin(vfs, browser, "mkdir", &names, file_ops::create_directory_all)?;
+            Ok(Some(Command::Mkdir {
+                parents: true,
+                names,
+            })) => {
+                self.run_builtin(
+                    vfs,
+                    browser,
+                    "mkdir",
+                    &names,
+                    file_ops::create_directory_all,
+                )?;
             }
-            Ok(Some(Command::Mkdir { parents: false, names })) => {
+            Ok(Some(Command::Mkdir {
+                parents: false,
+                names,
+            })) => {
                 self.run_builtin(vfs, browser, "mkdir", &names, file_ops::create_directory)?;
             }
             Ok(Some(Command::Touch { names })) => {
@@ -1224,7 +1267,10 @@ fn shell_status(command: &str, outcome: &CommandOutcome) -> String {
         .collect::<Vec<_>>()
         .join(" | ");
     if lines.len() > STATUS_OUTPUT_LINES {
-        shown.push_str(&format!(" (+{} more lines)", lines.len() - STATUS_OUTPUT_LINES));
+        shown.push_str(&format!(
+            " (+{} more lines)",
+            lines.len() - STATUS_OUTPUT_LINES
+        ));
     } else if output.truncated {
         shown.push_str(" (output truncated)");
     }
