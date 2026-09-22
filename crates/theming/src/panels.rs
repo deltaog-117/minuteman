@@ -18,7 +18,7 @@
 //! table of `config.toml`. Like `[ui]`'s `glyphs`, an unrecognised `columns` value falls back to
 //! the default rather than failing to start.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// How many of the miller columns are drawn. `TwoPane` drops the left (parent-directory) column
 /// and gives its width to `current`/`preview` instead of just blanking it, so it reads as the
@@ -76,13 +76,43 @@ impl Default for PanelsConfig {
     }
 }
 
+impl PanelsConfig {
+    /// Layers `raw` on top of `self`, field by field — for live, in-session edits (the settings
+    /// popup, persisted to `local.toml`) rather than the `config.toml`/`appearance.toml` parse.
+    /// A field left `None` in `raw` keeps `self`'s value; an unrecognised `columns` keeps it too,
+    /// rather than falling back to the type's own default the way a fresh parse would.
+    pub fn overlay_raw(&self, raw: &RawPanels) -> PanelsConfig {
+        PanelsConfig {
+            columns: raw
+                .columns
+                .as_deref()
+                .and_then(ColumnLayout::parse)
+                .unwrap_or(self.columns),
+            show_hud: raw.show_hud.unwrap_or(self.show_hud),
+            show_command_bar: raw.show_command_bar.unwrap_or(self.show_command_bar),
+        }
+    }
+}
+
 /// Deserialized `[panels]` config; every field optional, like the rest of the config.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawPanels {
     pub columns: Option<String>,
     pub show_hud: Option<bool>,
     pub show_command_bar: Option<bool>,
+}
+
+impl RawPanels {
+    /// `top` wins wherever it sets a field; otherwise `self` shows through — the same rule
+    /// `RawTheme::overlay`/`RawUi::overlay` use for layering `appearance.toml` over `config.toml`.
+    pub fn overlay(self, top: RawPanels) -> RawPanels {
+        RawPanels {
+            columns: top.columns.or(self.columns),
+            show_hud: top.show_hud.or(self.show_hud),
+            show_command_bar: top.show_command_bar.or(self.show_command_bar),
+        }
+    }
 }
 
 impl From<RawPanels> for PanelsConfig {
@@ -141,6 +171,43 @@ mod tests {
         };
         let config: PanelsConfig = raw.into();
         assert_eq!(config.columns, ColumnLayout::ThreePane);
+    }
+
+    #[test]
+    fn overlay_raw_layers_onto_an_existing_config_not_the_type_default() {
+        let base = PanelsConfig {
+            columns: ColumnLayout::TwoPane,
+            show_hud: false,
+            show_command_bar: true,
+        };
+        let layered = base.overlay_raw(&RawPanels {
+            show_hud: Some(true),
+            ..Default::default()
+        });
+        assert!(layered.show_hud);
+        // Untouched fields keep the base's value, not `PanelsConfig::default()`'s.
+        assert_eq!(layered.columns, ColumnLayout::TwoPane);
+        assert!(layered.show_command_bar);
+
+        assert_eq!(base.overlay_raw(&RawPanels::default()), base);
+    }
+
+    #[test]
+    fn raw_overlay_lets_top_win_field_by_field() {
+        let bottom = RawPanels {
+            columns: Some("two".into()),
+            show_hud: Some(false),
+            show_command_bar: None,
+        };
+        let top = RawPanels {
+            columns: None,
+            show_hud: Some(true),
+            show_command_bar: Some(false),
+        };
+        let merged = bottom.overlay(top);
+        assert_eq!(merged.columns.as_deref(), Some("two"), "top left it unset");
+        assert_eq!(merged.show_hud, Some(true), "top wins where it sets one");
+        assert_eq!(merged.show_command_bar, Some(false));
     }
 
     proptest! {

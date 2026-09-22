@@ -274,7 +274,7 @@ mod tests {
     }
 
     fn screen(width: u16, height: u16, preview: &mut TextPreview) -> Vec<String> {
-        let config = Config::from_sources(None, None);
+        let config = Config::from_sources(None, None, None);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| render(frame, frame.area(), preview, &config))

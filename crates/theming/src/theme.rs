@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A resolved color palette — every field is always populated (via `named`/`Default`, then any
 /// config overrides), so `tui` never has to guess at a fallback.
@@ -325,7 +325,7 @@ impl Default for Theme {
 /// defaulting to the neon one); any individually specified field overrides that palette's
 /// value for just that field. Every field is optional so a partial table only overrides what it
 /// mentions, the same fallback shape `RawKeyMap` uses for keybindings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawTheme {
     pub name: Option<String>,

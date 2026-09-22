@@ -124,13 +124,14 @@ disk_usage = ["u"]
 # Toggles a mark on the current entry, Ranger-style — press once per file to queue it for a
 # later bulk action instead of acting on it immediately.
 select = ["v"]
-# Opens the appearance popup: Accent, Focused border, Selection, Directory, Status bar and Danger
-# are edited as free text (enter to type, enter again to confirm, Esc to cancel); Border style,
-# Separator and Glyphs cycle through their fixed choices; Reset to defaults clears every change
-# this popup has made this session, back to whatever theme/glyphs were already in effect. j/k
-# moves, h/l/enter/a click acts on the row under it, Esc or q closes it. Also in the right-click
-# menu on empty space. Session-only, like the settings popup — nothing is written back to a
-# config file yet.
+# Opens the appearance popup: Theme picks the base palette (neon, classic, dracula, catppuccin or
+# nord); Accent, Focused border, Selection, Directory, Status bar and Danger are edited as free
+# text (enter to type, enter again to confirm, Esc to cancel); Border style, Separator and Glyphs
+# cycle through their fixed choices; Reset to defaults clears every change this popup has made
+# this session, back to whatever theme/glyphs were already in effect. j/k moves, h/l/enter/a click
+# acts on the row under it, Esc or q closes it. Also in the right-click menu on empty space. Every
+# change here (and every one the settings popup makes) is saved at once to
+# ~/.config/minuteman/local.toml, so it survives a restart — see the note on that file below.
 appearance = ["a"]
 # The one leader key for every mini-shell command, and for the settings popup. With a shell open
 # and not being typed into (tap Alt or click the browser to stop typing), leader followed by:
@@ -146,3 +147,9 @@ leader = ["space"]
 # ~/.config/minuteman/appearance.toml — run `minuteman init-appearance` to print a fully
 # commented starting point. A [theme] or [ui] table left in this file still works, but anything
 # appearance.toml sets wins.
+#
+# A third file, ~/.config/minuteman/local.toml, holds whatever the settings and appearance popups
+# have saved — it is written by Minuteman itself, never by you, so it has no example or comments
+# of its own; edit config.toml/appearance.toml instead and use the popups for anything you'd
+# rather set live. Whatever it holds wins over both of the files above, until you change it again
+# from inside a popup or delete the file.

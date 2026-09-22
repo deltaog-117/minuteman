@@ -31,9 +31,18 @@ use crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
 use theming::{GlyphSet, RawTheme, Theme};
 
+/// The built-in palettes the "Theme" row cycles through, in order. `catppuccin-latte` isn't
+/// here — it's only reached via `Theme::auto` on a light terminal, or by naming it explicitly in
+/// `appearance.toml`; this cycle sticks to dark-background palettes, like `neon`, `dracula` and
+/// `nord` already do. Used to be the settings popup's own row; it moved here to sit with the
+/// rest of the look it picks a base for.
+pub const THEME_NAMES: [&str; 5] = ["neon", "classic", "dracula", "catppuccin", "nord"];
+
 /// One row of the popup, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
+    /// Picks the base palette everything else layers on top of.
+    Theme,
     Accent,
     BorderFocused,
     Selection,
@@ -47,7 +56,8 @@ pub enum Row {
     Reset,
 }
 
-const ROWS: [Row; 10] = [
+const ROWS: [Row; 11] = [
+    Row::Theme,
     Row::Accent,
     Row::BorderFocused,
     Row::Selection,
@@ -73,6 +83,7 @@ pub enum RowKind {
 impl Row {
     pub fn label(self) -> &'static str {
         match self {
+            Row::Theme => "Theme",
             Row::Accent => "Accent",
             Row::BorderFocused => "Focused border",
             Row::Selection => "Selection",
@@ -88,6 +99,7 @@ impl Row {
 
     pub fn kind(self) -> Option<RowKind> {
         match self {
+            Row::Theme => Some(RowKind::Cycle(&THEME_NAMES)),
             Row::BorderType => Some(RowKind::Cycle(&["rounded", "plain", "double", "thick"])),
             Row::Separator => Some(RowKind::Cycle(&["flat", "arrow", "auto"])),
             Row::Glyphs => Some(RowKind::Cycle(&["unicode", "nerd", "ascii"])),
@@ -108,11 +120,16 @@ impl Row {
 pub struct AppearanceView<'a> {
     pub theme: &'a Theme,
     pub glyphs: GlyphSet,
+    /// The Theme row's own value — not derivable from `theme`'s fields alone, since several
+    /// named palettes can share a field's value and a palette's colors can themselves be
+    /// individually overridden. `main` tracks the picked name directly (`local_theme.name`).
+    pub theme_name: &'static str,
 }
 
 impl AppearanceView<'_> {
     pub fn value(&self, row: Row) -> String {
         match row {
+            Row::Theme => self.theme_name.to_string(),
             Row::Accent => self.theme.accent_fg.clone(),
             Row::BorderFocused => self.theme.border_focused_fg.clone(),
             Row::Selection => self.theme.selection_bg.clone(),
@@ -146,16 +163,18 @@ pub fn preview(theme: &Theme, row: Row, value: &str) -> Theme {
         Row::Directory => theme.dir_fg = value.to_string(),
         Row::StatusBar => theme.bar_bg = value.to_string(),
         Row::Danger => theme.danger_fg = value.to_string(),
-        Row::BorderType | Row::Separator | Row::Glyphs | Row::Reset => {}
+        Row::Theme | Row::BorderType | Row::Separator | Row::Glyphs | Row::Reset => {}
     }
     theme
 }
 
 /// Commits `value` into `overrides` for `row`'s field — a confirmed text edit or a cycled value
-/// both end up here. `Row::Glyphs` isn't part of `RawTheme`, so `main` sets `live_glyphs`
-/// directly instead of calling this for it; `Row::Reset` carries no value.
+/// both end up here, including a `Theme` row pick (`RawTheme.name`). `Row::Glyphs` isn't part of
+/// `RawTheme`, so `main` sets `local_ui` directly instead of calling this for it; `Row::Reset`
+/// carries no value.
 pub fn commit(overrides: &mut RawTheme, row: Row, value: String) {
     match row {
+        Row::Theme => overrides.name = Some(value),
         Row::Accent => overrides.accent_fg = Some(value),
         Row::BorderFocused => overrides.border_focused_fg = Some(value),
         Row::Selection => overrides.selection_bg = Some(value),
@@ -176,6 +195,25 @@ pub fn next_in(options: &[&str], current: &str) -> String {
         None => 0,
     };
     options[next].to_string()
+}
+
+/// The Theme row's display value: `local_name` (the appearance popup's own pick, if it ever made
+/// one this session or a saved one was loaded) when it names one of `THEME_NAMES` exactly; failing
+/// that, whichever named palette `theme`'s resolved fields exactly match — so an unmodified
+/// `appearance.toml` pin or the adaptive default (see `Theme::auto`) still shows its real name
+/// rather than always reading "neon". Falls back to the first name in the list only when neither
+/// applies (e.g. a pin plus an inline field override in `appearance.toml`) — cosmetic only; the
+/// colors actually shown are unaffected either way.
+pub fn theme_name(local_name: Option<&str>, theme: &Theme) -> &'static str {
+    local_name
+        .and_then(|name| THEME_NAMES.iter().find(|&&t| t == name).copied())
+        .or_else(|| {
+            THEME_NAMES
+                .iter()
+                .find(|&&t| Theme::named(t) == *theme)
+                .copied()
+        })
+        .unwrap_or(THEME_NAMES[0])
 }
 
 /// What a keystroke or a click asks the caller to do.
@@ -356,8 +394,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_color_row_asks_to_edit_it() {
+    fn enter_on_the_theme_row_cycles_it_but_on_a_color_row_asks_to_edit_it() {
         let mut popup = AppearancePopup::new();
+        assert_eq!(popup.key(KeyCode::Enter), Outcome::Cycle(Row::Theme));
+        popup.key(KeyCode::Char('j')); // Accent
         assert_eq!(popup.key(KeyCode::Enter), Outcome::WantEdit(Row::Accent));
         assert_eq!(popup.editing_row(), None, "not editing until begin_edit");
     }
@@ -365,6 +405,7 @@ mod tests {
     #[test]
     fn h_and_l_cycle_a_cycle_row_but_do_nothing_on_a_color_row() {
         let mut popup = AppearancePopup::new();
+        popup.key(KeyCode::Char('j')); // Accent, a color row
         assert_eq!(
             popup.key(KeyCode::Char('l')),
             Outcome::Stay,
@@ -373,7 +414,7 @@ mod tests {
         for _ in 0..6 {
             popup.key(KeyCode::Char('j'));
         }
-        assert_eq!(popup.cursor(), 6); // BorderType
+        assert_eq!(popup.cursor(), 7); // BorderType
         assert_eq!(
             popup.key(KeyCode::Char('l')),
             Outcome::Cycle(Row::BorderType)
@@ -387,6 +428,7 @@ mod tests {
     #[test]
     fn editing_types_backspaces_commits_and_cancels() {
         let mut popup = AppearancePopup::new();
+        popup.key(KeyCode::Char('j')); // Accent
         popup.begin_edit("#ff2bd6".into());
         assert_eq!(popup.editing_row(), Some(Row::Accent));
         assert_eq!(popup.editing_buffer(), Some("#ff2bd6"));
@@ -424,18 +466,19 @@ mod tests {
     fn the_reset_row_is_an_action_not_a_color_or_a_cycle() {
         assert!(Row::Reset.kind().is_none());
         let mut popup = AppearancePopup::new();
-        for _ in 0..9 {
+        for _ in 0..10 {
             popup.key(KeyCode::Char('j'));
         }
-        assert_eq!(popup.cursor(), 9); // Reset
+        assert_eq!(popup.cursor(), 10); // Reset
         assert_eq!(popup.key(KeyCode::Enter), Outcome::Reset);
     }
 
     #[test]
     fn click_row_moves_the_cursor_and_acts_like_enter_there() {
         let mut popup = AppearancePopup::new();
-        assert_eq!(popup.click_row(6), Outcome::Cycle(Row::BorderType));
-        assert_eq!(popup.cursor(), 6);
+        assert_eq!(popup.click_row(0), Outcome::Cycle(Row::Theme));
+        assert_eq!(popup.click_row(7), Outcome::Cycle(Row::BorderType));
+        assert_eq!(popup.cursor(), 7);
         assert_eq!(
             popup.click_row(20),
             Outcome::Stay,
@@ -446,10 +489,11 @@ mod tests {
     #[test]
     fn clicking_another_row_abandons_an_in_progress_edit() {
         let mut popup = AppearancePopup::new();
+        popup.key(KeyCode::Char('j')); // Accent
         popup.begin_edit("#ff2bd6".into());
-        popup.click_row(1);
+        popup.click_row(2);
         assert_eq!(popup.editing_row(), None);
-        assert_eq!(popup.cursor(), 1);
+        assert_eq!(popup.cursor(), 2);
     }
 
     #[test]
@@ -461,12 +505,38 @@ mod tests {
     }
 
     #[test]
+    fn theme_name_prefers_an_exact_local_pick_then_a_resolved_match_then_the_first_name() {
+        let dracula = Theme::named("dracula");
+        assert_eq!(
+            theme_name(Some("nord"), &dracula),
+            "nord",
+            "local pick wins"
+        );
+        assert_eq!(
+            theme_name(None, &dracula),
+            "dracula",
+            "no local pick, but the resolved theme matches dracula exactly"
+        );
+        let customized = Theme {
+            accent_fg: "#abcdef".into(),
+            ..dracula
+        };
+        assert_eq!(
+            theme_name(None, &customized),
+            THEME_NAMES[0],
+            "no local pick and no exact match falls back to the first name"
+        );
+    }
+
+    #[test]
     fn view_reads_the_right_field_per_row() {
         let theme = Theme::named("dracula");
         let view = AppearanceView {
             theme: &theme,
             glyphs: GlyphSet::Nerd,
+            theme_name: "dracula",
         };
+        assert_eq!(view.value(Row::Theme), "dracula");
         assert_eq!(view.value(Row::Accent), theme.accent_fg);
         assert_eq!(view.value(Row::BorderFocused), theme.border_focused_fg);
         assert_eq!(view.value(Row::Selection), theme.selection_bg);
@@ -498,20 +568,26 @@ mod tests {
 
         commit(&mut overrides, Row::Separator, "arrow".into());
         assert_eq!(overrides.separator.as_deref(), Some("arrow"));
+
+        commit(&mut overrides, Row::Theme, "nord".into());
+        assert_eq!(overrides.name.as_deref(), Some("nord"));
     }
 
     #[test]
     fn hit_finds_the_row_under_the_blank_line_and_outside_is_outside() {
-        let area = Rect::new(10, 5, 40, 14); // border + blank + 10 rows + blank + hint = 14
+        let area = Rect::new(10, 5, 40, 16); // border + blank + 11 rows + blank + hint + border
         let inner = area.inner(Margin::new(1, 1));
         assert_eq!(hit(area, Position::new(5, 5)), Hit::Outside);
         assert_eq!(hit(area, Position::new(inner.x, inner.y)), Hit::Inert);
         assert_eq!(hit(area, Position::new(inner.x, inner.y + 1)), Hit::Row(0));
-        assert_eq!(hit(area, Position::new(inner.x, inner.y + 10)), Hit::Row(9));
+        assert_eq!(
+            hit(area, Position::new(inner.x, inner.y + 11)),
+            Hit::Row(10)
+        );
     }
 
     proptest::proptest! {
-        /// Whatever sequence of moves the cursor sees, it always names one of the ten rows.
+        /// Whatever sequence of moves the cursor sees, it always names one of the eleven rows.
         #[test]
         fn the_cursor_always_stays_in_bounds(moves in proptest::collection::vec(0u8..2, 0..200)) {
             let mut popup = AppearancePopup::new();

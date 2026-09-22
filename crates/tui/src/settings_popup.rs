@@ -19,23 +19,18 @@
 //! that draws it and `main` is the only place that applies what it asks for.
 //!
 //! The popup itself never touches `Config`; it only reports which row was cycled and leaves
-//! applying that (and deciding what it means for the running session) to the caller. This is
-//! session-only, in-memory state — it is never written back to `config.toml`/`appearance.toml`.
+//! applying that (and deciding what it means for the running session) to the caller. Panel
+//! layout is what's left here — the Theme row moved to `appearance_popup`, alongside the colors,
+//! border style, separator and glyphs it belongs with. Session state, cycled live, but no longer
+//! session-*only*: `main` saves every change to `local.toml` (see `Config::save_local`).
 
 use crossterm::event::KeyCode;
 use theming::ColumnLayout;
-
-/// The built-in palettes the "Theme" row cycles through, in order. `catppuccin-latte` isn't
-/// here — it's only reached via `Theme::auto` on a light terminal, or by naming it explicitly in
-/// `appearance.toml`; this cycle sticks to dark-background palettes, like `neon`, `dracula` and
-/// `nord` already do.
-pub const THEME_NAMES: [&str; 5] = ["neon", "classic", "dracula", "catppuccin", "nord"];
 
 /// The current value of every row, for `overlay_view::render_settings` to draw. Built fresh each
 /// frame from `main`'s live session state, not stored on the popup itself.
 pub struct SettingsView {
     pub columns: ColumnLayout,
-    pub theme_name: &'static str,
     pub show_hud: bool,
     pub show_command_bar: bool,
 }
@@ -48,7 +43,6 @@ impl SettingsView {
                 ColumnLayout::ThreePane => "three-pane".to_string(),
                 ColumnLayout::TwoPane => "two-pane".to_string(),
             },
-            Row::Theme => self.theme_name.to_string(),
             Row::Hud => on_off(self.show_hud),
             Row::CommandBar => on_off(self.show_command_bar),
         }
@@ -63,18 +57,16 @@ fn on_off(value: bool) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
     Columns,
-    Theme,
     Hud,
     CommandBar,
 }
 
-const ROWS: [Row; 4] = [Row::Columns, Row::Theme, Row::Hud, Row::CommandBar];
+const ROWS: [Row; 3] = [Row::Columns, Row::Hud, Row::CommandBar];
 
 impl Row {
     pub fn label(self) -> &'static str {
         match self {
             Row::Columns => "Columns",
-            Row::Theme => "Theme",
             Row::Hud => "HUD",
             Row::CommandBar => "Command bar",
         }
@@ -163,7 +155,7 @@ mod tests {
         assert_eq!(popup.key(KeyCode::Char('h')), Outcome::Cycle(Row::Columns));
         assert_eq!(popup.key(KeyCode::Enter), Outcome::Cycle(Row::Columns));
         popup.key(KeyCode::Char('j'));
-        assert_eq!(popup.key(KeyCode::Char('l')), Outcome::Cycle(Row::Theme));
+        assert_eq!(popup.key(KeyCode::Char('l')), Outcome::Cycle(Row::Hud));
     }
 
     #[test]
@@ -181,7 +173,7 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Whatever sequence of moves the cursor sees, it always names one of the four rows.
+        /// Whatever sequence of moves the cursor sees, it always names one of the three rows.
         #[test]
         fn the_cursor_always_stays_in_bounds(moves in proptest::collection::vec(0u8..2, 0..200)) {
             let mut popup = SettingsPopup::new();

@@ -234,7 +234,7 @@ prefix in the current pane.
 
 ## ⚙️ Configuration
 
-Two files in `~/.config/minuteman/`, each optional and each falling back per field — a partial
+Three files in `~/.config/minuteman/`, each optional and each falling back per field — a partial
 file, a missing file, even one that fails to parse never stops Minuteman from starting:
 
 - **`config.toml`** — keybindings. Copy [`config.example.toml`](config.example.toml) as a starting
@@ -242,6 +242,9 @@ file, a missing file, even one that fails to parse never stops Minuteman from st
 - **`appearance.toml`** — the whole look: colors, glyphs, text styles and the font. Print a fully
   commented starting point with `mman init-appearance > ~/.config/minuteman/appearance.toml`
   (it's [`appearance.example.toml`](appearance.example.toml)).
+- **`local.toml`** — written by Minuteman itself, not by you: whatever the settings popup
+  (`space` then `t`) and the appearance popup (`a`) save live wins over both files above, until
+  changed again from inside a popup. No example file for it — there's nothing to hand-edit.
 
 ```toml
 # config.toml
@@ -284,7 +287,7 @@ leader = ["space"]
 `appearance.toml` has four tables. Everything left out keeps its default.
 
 ```toml
-[theme]   # colors: a built-in palette ("neon", "classic", "dracula") plus per-field overrides
+[theme]   # colors: a built-in palette (see below) plus per-field overrides
 name = "neon"
 border_focused_fg = "#00f0ff"   # the active pane; see appearance.example.toml for every field
 dir_fg = "#00d9ff"
@@ -308,6 +311,13 @@ size = 12.0
 sets `COLORTERM=truecolor` and mapped to the nearest 256-color otherwise; an unrecognised color
 resets to the terminal's default.
 
+**Built-in palettes:** `neon` (the cyberpunk default), `classic` (the original plain 16-color
+look), `dracula`, `catppuccin` (Mocha) and `nord`; `catppuccin-latte` (Catppuccin's light flavor)
+is reachable by name too, though it's meant for `Theme::auto`'s light-terminal case rather than
+picking by hand. Leaving `[theme]` out of both `config.toml` and `appearance.toml` entirely is
+its own thing, not a palette: Minuteman then asks the terminal for its own background color and
+picks Catppuccin Mocha or Latte to match it, falling back to `neon` if the terminal never answers.
+
 **Text styles.** Each `[style]` element takes a list of `"bold"`, `"italic"`, `"dim"`,
 `"underline"`, `"reverse"` and `"strikethrough"`. A list *replaces* that element's default, so
 `dir = []` turns directory bold off and `dir = ["bold", "italic"]` adds italic. The elements are
@@ -317,7 +327,10 @@ the seven entry kinds (`dir`, `source`, `config`, `doc`, `archive`, `media`, `ot
 `message`; the example file says what each covers.
 
 **A `[theme]` or `[ui]` left in `config.toml`** (where they used to live) still works, but
-anything `appearance.toml` sets wins, field by field.
+anything `appearance.toml` sets wins, field by field — and anything saved from the appearance
+popup (`a`; Theme, plus six colors, border style, separator and glyphs, with a row to reset back
+to whatever was in effect before) wins over both, until changed again from inside it. See
+`local.toml` above.
 
 ### Fonts and glyphs
 

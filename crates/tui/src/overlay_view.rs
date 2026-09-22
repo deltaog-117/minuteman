@@ -350,7 +350,7 @@ mod tests {
     use crate::context_menu::{Context, Target, entries};
 
     fn config() -> Config {
-        Config::from_sources(None, None)
+        Config::from_sources(None, None, None)
     }
 
     fn screen_text(terminal: &Terminal<TestBackend>) -> String {

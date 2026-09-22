@@ -14,10 +14,11 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::io;
 use std::path::PathBuf;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::appearance::{Font, RawFont, RawStyles, Styles};
 use crate::keymap::{KeyMap, RawKeyMap};
@@ -83,6 +84,20 @@ pub(crate) struct RawAppearance {
     pub(crate) font: RawFont,
 }
 
+/// `local.toml`: what the settings and appearance popups persist. Unlike `config.toml`/
+/// `appearance.toml`, nothing but Minuteman itself ever writes this file, so it is always sparse
+/// — only the fields some popup actually changed are ever present — and a plain `toml::to_string`
+/// re-serialize (which would lose comments in a hand-edited file) is exactly the right tool for
+/// it. Layered highest of the three, so a saved pick always wins over the hand-edited files until
+/// it is changed again from inside the app.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RawLocal {
+    pub theme: RawTheme,
+    pub ui: RawUi,
+    pub panels: RawPanels,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Whether tapping `Alt` on its own switches between the mini-shell and the file browser.
@@ -106,41 +121,62 @@ pub struct Config {
     pub open_with: Vec<OpenWith>,
     pub keys: KeyMap,
     pub theme: Theme,
-    /// Whether `[theme]` (a `name`, or even a single overridden field) was actually set in either
-    /// config file. `false` is what tells `main` it's safe to replace `theme` with a live,
-    /// terminal-background-adapted pick (`Theme::auto`) instead of the static default it already
-    /// carries as a fallback — any explicit customization, however small, is left alone.
+    /// Whether `[theme]` (a `name`, or even a single overridden field) was actually set in any of
+    /// the three config files. `false` is what tells `main` it's safe to replace `theme` with a
+    /// live, terminal-background-adapted pick (`Theme::auto`) instead of the static default it
+    /// already carries as a fallback — any explicit customization, however small (including one
+    /// ever saved from the appearance popup), is left alone.
     pub theme_is_customized: bool,
+    /// `local.toml`'s own `[theme]` table, unmerged with `config.toml`/`appearance.toml` — `main`
+    /// seeds the appearance popup's live overrides from this, not from `theme`, so a save only
+    /// ever writes back what a popup actually changed and never masks a later hand-edit to
+    /// `appearance.toml`.
+    pub local_theme: RawTheme,
     pub ui: Ui,
+    /// `local.toml`'s own `[ui]` table — see `local_theme`.
+    pub local_ui: RawUi,
     /// Bold, italic, ... per interface element.
     pub styles: Styles,
     /// The font `init-terminal` prints; not something the TUI itself can apply.
     pub font: Font,
     /// How many file columns are drawn and whether the header/status-bar chrome is shown. The
-    /// settings popup (`Space` then `t`) edits this live, in memory, for the running session.
+    /// settings popup (`Space` then `t`) edits this live, in memory, for the running session, and
+    /// saves it to `local.toml`.
     pub panels: PanelsConfig,
+    /// `local.toml`'s own `[panels]` table — see `local_theme`.
+    pub local_panels: RawPanels,
 }
 
 impl Config {
-    /// Loads `config.toml` and `appearance.toml` from `~/.config/minuteman/` (XDG), falling back
-    /// to built-in defaults for whatever is absent or fails to parse. A malformed file must never
-    /// prevent the app from starting.
+    /// Loads `config.toml`, `appearance.toml` and `local.toml` from `~/.config/minuteman/` (XDG),
+    /// falling back to built-in defaults for whatever is absent or fails to parse. A malformed
+    /// file must never prevent the app from starting.
     pub fn load() -> Self {
         let read = |path: Option<PathBuf>| path.and_then(|p| std::fs::read_to_string(p).ok());
         Self::from_sources(
             read(Self::config_path()).as_deref(),
             read(Self::appearance_path()).as_deref(),
+            read(Self::local_path()).as_deref(),
         )
     }
 
-    /// Builds a config from the text of the two files (each `None` when absent). Split out from
+    /// Builds a config from the text of the three files (each `None` when absent). Split out from
     /// `load` so the layering can be tested without touching the filesystem.
-    pub fn from_sources(config: Option<&str>, appearance: Option<&str>) -> Self {
+    pub fn from_sources(
+        config: Option<&str>,
+        appearance: Option<&str>,
+        local: Option<&str>,
+    ) -> Self {
         let config: RawConfig = parse("config.toml", config);
         let appearance: RawAppearance = parse("appearance.toml", appearance);
+        let local: RawLocal = parse("local.toml", local);
 
-        let theme = config.theme.overlay(appearance.theme);
+        let theme = config
+            .theme
+            .overlay(appearance.theme)
+            .overlay(local.theme.clone());
         let theme_is_customized = theme != RawTheme::default();
+        let panels: PanelsConfig = config.panels.overlay(local.panels.clone()).into();
 
         Self {
             alt_tap: config.alt_tap.unwrap_or(true),
@@ -154,11 +190,31 @@ impl Config {
             keys: config.keys.into(),
             theme: theme.into(),
             theme_is_customized,
-            ui: config.ui.overlay(appearance.ui).into(),
+            local_theme: local.theme,
+            ui: config
+                .ui
+                .overlay(appearance.ui)
+                .overlay(local.ui.clone())
+                .into(),
+            local_ui: local.ui,
             styles: appearance.style.into(),
             font: appearance.font.into(),
-            panels: config.panels.into(),
+            panels,
+            local_panels: local.panels,
         }
+    }
+
+    /// Serializes `local` (the settings/appearance popups' combined live overrides) to
+    /// `local.toml`, creating `~/.config/minuteman/` if it doesn't exist yet. The caller decides
+    /// what to do with a failure (e.g. a read-only filesystem) — it must never be fatal, since a
+    /// save is always in addition to the session already having applied the change in memory.
+    pub fn save_local(local: &RawLocal) -> io::Result<()> {
+        let dir = Self::config_dir()
+            .ok_or_else(|| io::Error::other("could not determine the config directory"))?;
+        std::fs::create_dir_all(&dir)?;
+        let text = toml::to_string(local)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        std::fs::write(dir.join("local.toml"), text)
     }
 
     fn config_path() -> Option<PathBuf> {
@@ -167,6 +223,10 @@ impl Config {
 
     fn appearance_path() -> Option<PathBuf> {
         Self::config_dir().map(|dir| dir.join("appearance.toml"))
+    }
+
+    fn local_path() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("local.toml"))
     }
 
     fn config_dir() -> Option<PathBuf> {
@@ -227,54 +287,54 @@ mod tests {
 
     #[test]
     fn interactive_commands_default_to_the_built_in_list_and_can_be_replaced() {
-        let defaults = Config::from_sources(None, None).interactive_commands;
+        let defaults = Config::from_sources(None, None, None).interactive_commands;
         assert!(defaults.iter().any(|name| name == "nvim"));
         assert_eq!(
-            Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).interactive_commands,
+            Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None, None).interactive_commands,
             defaults
         );
-        let custom = Config::from_sources(Some("interactive_commands = [\"kak\"]\n"), None);
+        let custom = Config::from_sources(Some("interactive_commands = [\"kak\"]\n"), None, None);
         assert_eq!(custom.interactive_commands, vec!["kak".to_string()]);
-        let none = Config::from_sources(Some("interactive_commands = []\n"), None);
+        let none = Config::from_sources(Some("interactive_commands = []\n"), None, None);
         assert!(none.interactive_commands.is_empty());
     }
 
     #[test]
     fn alt_tap_defaults_on_and_can_be_switched_off() {
-        assert!(Config::from_sources(None, None).alt_tap);
-        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).alt_tap);
-        assert!(!Config::from_sources(Some("alt_tap = false\n"), None).alt_tap);
-        assert!(Config::from_sources(Some("alt_tap = true\n"), None).alt_tap);
+        assert!(Config::from_sources(None, None, None).alt_tap);
+        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None, None).alt_tap);
+        assert!(!Config::from_sources(Some("alt_tap = false\n"), None, None).alt_tap);
+        assert!(Config::from_sources(Some("alt_tap = true\n"), None, None).alt_tap);
     }
 
     #[test]
     fn show_hidden_defaults_off_and_can_be_switched_on() {
-        assert!(!Config::from_sources(None, None).show_hidden);
-        assert!(!Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).show_hidden);
-        assert!(Config::from_sources(Some("show_hidden = true\n"), None).show_hidden);
-        assert!(!Config::from_sources(Some("show_hidden = false\n"), None).show_hidden);
+        assert!(!Config::from_sources(None, None, None).show_hidden);
+        assert!(!Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None, None).show_hidden);
+        assert!(Config::from_sources(Some("show_hidden = true\n"), None, None).show_hidden);
+        assert!(!Config::from_sources(Some("show_hidden = false\n"), None, None).show_hidden);
     }
 
     #[test]
     fn git_status_defaults_on_and_can_be_switched_off() {
-        assert!(Config::from_sources(None, None).git_status);
-        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).git_status);
-        assert!(!Config::from_sources(Some("git_status = false\n"), None).git_status);
+        assert!(Config::from_sources(None, None, None).git_status);
+        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None, None).git_status);
+        assert!(!Config::from_sources(Some("git_status = false\n"), None, None).git_status);
     }
 
     #[test]
     fn browser_mouse_defaults_on_and_can_be_switched_off() {
-        assert!(Config::from_sources(None, None).browser_mouse);
-        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).browser_mouse);
-        assert!(!Config::from_sources(Some("browser_mouse = false\n"), None).browser_mouse);
-        assert!(Config::from_sources(Some("browser_mouse = true\n"), None).browser_mouse);
+        assert!(Config::from_sources(None, None, None).browser_mouse);
+        assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None, None).browser_mouse);
+        assert!(!Config::from_sources(Some("browser_mouse = false\n"), None, None).browser_mouse);
+        assert!(Config::from_sources(Some("browser_mouse = true\n"), None, None).browser_mouse);
     }
 
     /// The same drift guard for `appearance.example.toml`, covering all four of its tables.
     #[test]
     fn shipped_appearance_example_parses_and_matches_defaults() {
         let text = include_str!("../../../appearance.example.toml");
-        let config = Config::from_sources(None, Some(text));
+        let config = Config::from_sources(None, Some(text), None);
         assert_eq!(config.theme, Theme::default());
         // The example spells out `name = "neon"` plus every field, so it counts as an explicit
         // pin — it must never get silently swapped for an auto-detected palette (see
@@ -307,6 +367,7 @@ mod tests {
                 "[theme]\nname = \"classic\"\n[ui]\nglyphs = \"nerd\"\n\
                  [style]\ndoc = [\"italic\"]\n[font]\nfamily = \"Iosevka\"\nsize = 13.0\n",
             ),
+            None,
         );
         assert_eq!(config.theme.selection_bg, "blue");
         assert_eq!(config.ui.glyphs, GlyphSet::Nerd);
@@ -319,7 +380,7 @@ mod tests {
 
     #[test]
     fn a_theme_left_in_config_toml_still_works() {
-        let config = Config::from_sources(Some("[theme]\nname = \"dracula\"\n"), None);
+        let config = Config::from_sources(Some("[theme]\nname = \"dracula\"\n"), None, None);
         // Dracula's magenta selection, not neon's violet.
         assert_eq!(config.theme.selection_bg, "magenta");
         assert_ne!(config.theme, Theme::default());
@@ -331,13 +392,80 @@ mod tests {
     /// palette on top of it.
     #[test]
     fn theme_is_customized_is_false_only_when_the_theme_table_is_entirely_absent() {
-        assert!(!Config::from_sources(None, None).theme_is_customized);
-        assert!(!Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).theme_is_customized);
+        assert!(!Config::from_sources(None, None, None).theme_is_customized);
         assert!(
-            Config::from_sources(Some("[theme]\nborder_fg = \"green\"\n"), None)
+            !Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None, None).theme_is_customized
+        );
+        assert!(
+            Config::from_sources(Some("[theme]\nborder_fg = \"green\"\n"), None, None)
                 .theme_is_customized
         );
-        assert!(Config::from_sources(None, Some("[theme]\nname = \"nord\"\n")).theme_is_customized);
+        assert!(
+            Config::from_sources(None, Some("[theme]\nname = \"nord\"\n"), None)
+                .theme_is_customized
+        );
+        assert!(
+            Config::from_sources(None, None, Some("[theme]\nname = \"nord\"\n"))
+                .theme_is_customized,
+            "a theme saved from the appearance popup counts as customized too"
+        );
+    }
+
+    /// `local.toml` (what the popups save) is layered highest — above both hand-edited files —
+    /// and `Config` also exposes its own `[theme]`/`[ui]`/`[panels]` tables unmerged, so `main`
+    /// can seed a popup's live overrides without re-saving what came from a lower layer.
+    #[test]
+    fn local_toml_wins_over_both_hand_edited_files_but_is_also_exposed_unmerged() {
+        let config = Config::from_sources(
+            Some("[theme]\nname = \"dracula\"\n[panels]\ncolumns = \"two\"\n"),
+            Some("[theme]\nborder_fg = \"red\"\n[ui]\nglyphs = \"ascii\"\n"),
+            Some(
+                "[theme]\nname = \"nord\"\naccent_fg = \"#123456\"\n[ui]\nglyphs = \"nerd\"\n\
+                  [panels]\nshow_hud = false\n",
+            ),
+        );
+        // Nord's border, not dracula's or a leftover appearance.toml override.
+        assert_eq!(config.theme.border_focused_fg, "#88c0d0");
+        assert_eq!(config.theme.accent_fg, "#123456");
+        assert_eq!(config.ui.glyphs, GlyphSet::Nerd);
+        assert_eq!(config.panels.columns, crate::panels::ColumnLayout::TwoPane);
+        assert!(!config.panels.show_hud);
+
+        // The raw local layer alone, not merged with config.toml's `columns = "two"`.
+        assert_eq!(config.local_theme.name.as_deref(), Some("nord"));
+        assert_eq!(config.local_theme.accent_fg.as_deref(), Some("#123456"));
+        assert_eq!(config.local_ui.glyphs.as_deref(), Some("nerd"));
+        assert_eq!(config.local_panels.columns, None);
+        assert_eq!(config.local_panels.show_hud, Some(false));
+    }
+
+    /// `local.toml` is program-owned and rewritten wholesale on every save, so it only ever needs
+    /// to carry what a popup actually touched — `toml`'s serializer already skips a `None` field
+    /// entirely (no `skip_serializing_if` needed), which is what keeps that guarantee true.
+    #[test]
+    fn raw_local_serializes_only_the_fields_that_are_set() {
+        let local = RawLocal {
+            theme: RawTheme {
+                name: Some("nord".into()),
+                accent_fg: Some("#123456".into()),
+                ..Default::default()
+            },
+            ui: RawUi::default(),
+            panels: RawPanels::default(),
+        };
+        let text = toml::to_string(&local).unwrap();
+        assert!(text.contains("name = \"nord\""));
+        assert!(text.contains("accent_fg = \"#123456\""));
+        assert!(!text.contains("border_fg"), "unset fields are omitted");
+        assert!(
+            !text.contains("glyphs") && !text.contains("columns") && !text.contains("show_hud"),
+            "a table nothing was ever set on stays present but empty (`[ui]`/`[panels]` with no \
+             keys) — harmless, since an empty table can never override a lower layer"
+        );
+
+        // Round-trips back to exactly the same value through `RawLocal`'s own `Deserialize`.
+        let parsed: RawLocal = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, local);
     }
 
     #[test]
@@ -345,6 +473,7 @@ mod tests {
         let config = Config::from_sources(
             Some("[theme]\nname = \"dracula\"\nborder_fg = \"red\"\n[ui]\nglyphs = \"ascii\"\n"),
             Some("[theme]\nborder_fg = \"green\"\n"),
+            None,
         );
         assert_eq!(
             config.theme.border_fg, "green",
@@ -360,6 +489,7 @@ mod tests {
         let config = Config::from_sources(
             Some("[keys]\nmove_down = [\"n\"]\n"),
             Some("this is [not valid toml"),
+            None,
         );
         assert_eq!(config.theme, Theme::default());
         assert!(!config.theme_is_customized);
@@ -374,7 +504,7 @@ mod tests {
 
     #[test]
     fn no_files_at_all_is_the_built_in_look() {
-        let config = Config::from_sources(None, None);
+        let config = Config::from_sources(None, None, None);
         assert_eq!(config.theme, Theme::default());
         assert!(
             !config.theme_is_customized,
@@ -386,19 +516,19 @@ mod tests {
 
     #[test]
     fn panels_default_to_three_pane_with_hud_and_command_bar_shown() {
-        let config = Config::from_sources(None, None);
+        let config = Config::from_sources(None, None, None);
         assert_eq!(config.panels, PanelsConfig::default());
     }
 
     #[test]
     fn a_partial_panels_table_falls_back_per_missing_field() {
-        let config = Config::from_sources(Some("[panels]\ncolumns = \"two\"\n"), None);
+        let config = Config::from_sources(Some("[panels]\ncolumns = \"two\"\n"), None, None);
         assert_eq!(config.panels.columns, crate::panels::ColumnLayout::TwoPane);
         // show_hud/show_command_bar were not specified, so they keep their defaults.
         assert!(config.panels.show_hud);
         assert!(config.panels.show_command_bar);
 
-        let config = Config::from_sources(Some("[panels]\nshow_hud = false\n"), None);
+        let config = Config::from_sources(Some("[panels]\nshow_hud = false\n"), None, None);
         assert_eq!(
             config.panels.columns,
             crate::panels::ColumnLayout::ThreePane
@@ -415,10 +545,11 @@ mod tests {
                  [[open_with]]\nname = \"VLC\"\ncommand = \"vlc {}\"\n",
             ),
             None,
+            None,
         );
         let names: Vec<&str> = config.open_with.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, ["Neovim", "VLC"]);
         assert_eq!(config.open_with[1].command, "vlc {}");
-        assert!(Config::from_sources(None, None).open_with.is_empty());
+        assert!(Config::from_sources(None, None, None).open_with.is_empty());
     }
 }

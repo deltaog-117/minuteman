@@ -82,13 +82,14 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui_image::StatefulImage;
-use settings_popup::{
-    Outcome as SettingsOutcome, Row as SettingsRow, SettingsPopup, SettingsView, THEME_NAMES,
-};
+use settings_popup::{Outcome as SettingsOutcome, Row as SettingsRow, SettingsPopup, SettingsView};
 use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
-use theming::{Action, Config, GlyphSet, PanelsConfig, RawTheme, Theme, Ui};
+use theming::{
+    Action, ColumnLayout, Config, GlyphSet, PanelsConfig, RawLocal, RawPanels, RawTheme, RawUi,
+    Theme, Ui,
+};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -343,22 +344,11 @@ struct Overlay<'a> {
     usage: Option<&'a DiskUsageView>,
     settings: Option<&'a SettingsPopup>,
     appearance: Option<&'a AppearancePopup>,
-    /// This session's live panel layout, seeded from `config.panels` and cycled by the settings
-    /// popup — see `live_panels` in `run`.
-    live_panels: PanelsConfig,
-    /// `Some` once the popup has cycled the theme at least once this session; `None` means
-    /// `config.theme` is still in effect unmodified.
-    live_theme: Option<&'a Theme>,
-    /// The name the settings popup's "Theme" row shows and cycles from — independent of
-    /// `live_theme`, which stays `None` (and so doesn't affect rendering) until the row is
-    /// actually cycled once.
-    theme_name: &'static str,
-    /// Field-level color/border/separator overrides the appearance popup has committed this
-    /// session — see `live_appearance` in `run`.
-    live_appearance: &'a RawTheme,
-    /// The appearance popup's own glyph-set pick, if it cycled one; `None` means
-    /// `config.ui.glyphs` is still in effect.
-    live_glyphs: Option<GlyphSet>,
+    /// `local.toml`'s three tables, live for the running session — see `run`'s `local_theme`/
+    /// `local_ui`/`local_panels` and `effective_theme`/`effective_ui`/`effective_panels`.
+    local_theme: &'a RawTheme,
+    local_ui: &'a RawUi,
+    local_panels: &'a RawPanels,
 }
 
 /// The panels a menu command can open, passed together so `run_menu_command` does not grow an
@@ -689,68 +679,109 @@ fn main() -> Result<()> {
 }
 
 /// The theme in effect for the running session, before any in-progress (uncommitted) appearance
-/// edit is previewed on top: the settings popup's palette pick if it cycled one, else
-/// `config.theme`, with the appearance popup's committed field overrides layered on.
-fn effective_theme(
-    config: &Config,
-    live_theme: Option<&Theme>,
-    live_appearance: &RawTheme,
-) -> Theme {
-    live_theme
-        .cloned()
-        .unwrap_or_else(|| config.theme.clone())
-        .overlay_raw(live_appearance)
+/// edit is previewed on top: `local_theme.name`, if the appearance popup ever picked one, wins as
+/// the base palette over `config.theme`; either way, `local_theme`'s other fields (colors, border
+/// style, separator) layer on top of that base.
+fn effective_theme(config: &Config, local_theme: &RawTheme) -> Theme {
+    let base = local_theme
+        .name
+        .as_deref()
+        .map(Theme::named)
+        .unwrap_or_else(|| config.theme.clone());
+    base.overlay_raw(local_theme)
+}
+
+/// The glyph set in effect: the appearance popup's own pick if it cycled one, else
+/// `config.ui.glyphs`.
+fn effective_ui(config: &Config, local_ui: &RawUi) -> Ui {
+    Ui {
+        glyphs: local_ui
+            .glyphs
+            .as_deref()
+            .and_then(GlyphSet::parse)
+            .unwrap_or(config.ui.glyphs),
+    }
+}
+
+/// The panel layout in effect: the settings popup's own picks layered onto `config.panels`.
+fn effective_panels(config: &Config, local_panels: &RawPanels) -> PanelsConfig {
+    config.panels.overlay_raw(local_panels)
+}
+
+/// Writes the settings and appearance popups' combined live overrides to `local.toml`, so they
+/// survive to the next launch — called after every commit from either popup. A failure (e.g. a
+/// read-only filesystem) is reported in the status line rather than treated as fatal: the change
+/// is already applied for the rest of this session regardless of whether it could be saved.
+fn persist_local(
+    local_theme: &RawTheme,
+    local_ui: &RawUi,
+    local_panels: &RawPanels,
+    app: &mut App,
+) {
+    let local = RawLocal {
+        theme: local_theme.clone(),
+        ui: local_ui.clone(),
+        panels: local_panels.clone(),
+    };
+    if let Err(e) = Config::save_local(&local) {
+        app.status = Some(format!("could not save to local.toml: {e}"));
+    }
 }
 
 /// Applies one outcome from the appearance popup (`AppearancePopup::key`/`click_row`) to the
-/// running session's live state — shared by its keyboard and mouse paths in `run`, so a click and
-/// the key that reaches the same row behave identically.
+/// running session's live state, and saves it — shared by its keyboard and mouse paths in `run`,
+/// so a click and the key that reaches the same row behave identically. `local_panels` is only
+/// read here (it's the settings popup's own field of `local.toml`), so every save still carries
+/// whatever panel layout was last saved even though this outcome didn't touch it.
 fn apply_appearance_outcome(
     outcome: AppearanceOutcome,
     appearance: &mut Option<AppearancePopup>,
-    live_appearance: &mut RawTheme,
-    live_glyphs: &mut Option<GlyphSet>,
+    local_theme: &mut RawTheme,
+    local_ui: &mut RawUi,
+    local_panels: &RawPanels,
     config: &Config,
-    live_theme: Option<&Theme>,
+    app: &mut App,
 ) {
+    let current_value = |row: AppearanceRow, local_theme: &RawTheme, local_ui: &RawUi| {
+        let theme = effective_theme(config, local_theme);
+        let ui = effective_ui(config, local_ui);
+        let theme_name = appearance_popup::theme_name(local_theme.name.as_deref(), &theme);
+        AppearanceView {
+            theme: &theme,
+            glyphs: ui.glyphs,
+            theme_name,
+        }
+        .value(row)
+    };
     match outcome {
         AppearanceOutcome::Stay => {}
         AppearanceOutcome::Close => *appearance = None,
         AppearanceOutcome::WantEdit(row) => {
-            let theme = effective_theme(config, live_theme, live_appearance);
-            let glyphs = live_glyphs.unwrap_or(config.ui.glyphs);
-            let current = AppearanceView {
-                theme: &theme,
-                glyphs,
-            }
-            .value(row);
+            let current = current_value(row, local_theme, local_ui);
             if let Some(popup) = appearance.as_mut() {
                 popup.begin_edit(current);
             }
         }
         AppearanceOutcome::Cycle(row) => {
             if let Some(AppearanceRowKind::Cycle(options)) = row.kind() {
-                let theme = effective_theme(config, live_theme, live_appearance);
-                let glyphs = live_glyphs.unwrap_or(config.ui.glyphs);
-                let current = AppearanceView {
-                    theme: &theme,
-                    glyphs,
-                }
-                .value(row);
+                let current = current_value(row, local_theme, local_ui);
                 let next = appearance_popup::next_in(options, &current);
                 if row == AppearanceRow::Glyphs {
-                    *live_glyphs = GlyphSet::parse(&next);
+                    local_ui.glyphs = Some(next);
                 } else {
-                    appearance_popup::commit(live_appearance, row, next);
+                    appearance_popup::commit(local_theme, row, next);
                 }
+                persist_local(local_theme, local_ui, local_panels, app);
             }
         }
         AppearanceOutcome::Commit(row, value) => {
-            appearance_popup::commit(live_appearance, row, value);
+            appearance_popup::commit(local_theme, row, value);
+            persist_local(local_theme, local_ui, local_panels, app);
         }
         AppearanceOutcome::Reset => {
-            *live_appearance = RawTheme::default();
-            *live_glyphs = None;
+            *local_theme = RawTheme::default();
+            *local_ui = RawUi::default();
+            persist_local(local_theme, local_ui, local_panels, app);
         }
     }
 }
@@ -839,22 +870,15 @@ fn run(
     // The appearance popup (`a`, or "Appearance…" on blank space's right-click menu) while one is
     // open; modal too.
     let mut appearance: Option<AppearancePopup> = None;
-    // Field-level color/border/separator overrides the appearance popup has committed this
-    // session, layered onto whatever theme is otherwise in effect (`config.theme`, or a palette
-    // `live_theme` picked) — see `effective_theme`. Cleared by the popup's "Reset to defaults".
-    let mut live_appearance = RawTheme::default();
-    // The appearance popup's own glyph-set pick, if it cycled one; `None` means `config.ui.glyphs`
-    // is still in effect. Cleared by "Reset to defaults", same as `live_appearance`.
-    let mut live_glyphs: Option<GlyphSet> = None;
-    // Panel layout for the running session, seeded from `config.toml` and cycled live by the
-    // settings popup. Never written back to disk — see `config.example.toml`'s `[panels]`.
-    let mut live_panels = config.panels;
-    // Index into `THEME_NAMES` the "Theme" row is on. Doesn't take effect until the row is
-    // actually cycled (see `live_theme`) — opening the popup alone changes nothing.
-    let mut live_theme_index = 0;
-    // `Some` once the popup has cycled the theme at least once this session; `config.theme` (with
-    // whatever `appearance.toml` set, unlike the three named palettes alone) is used until then.
-    let mut live_theme: Option<Theme> = None;
+    // `local.toml`'s three tables, seeded from what `Config::load` already parsed from it (so a
+    // save this session correctly carries forward whatever an earlier session saved) and mutated
+    // live by the two popups; `effective_theme`/`effective_ui`/`effective_panels` layer each onto
+    // `config`'s own resolution, and `persist_local` writes them back out after every commit.
+    // `theme`/`ui`/`panels` are read this same way; only their `local_*` alter egos are ever
+    // written to, which is what keeps `local.toml` sparse — see `Config::local_theme`'s doc.
+    let mut local_theme = config.local_theme.clone();
+    let mut local_ui = config.local_ui.clone();
+    let mut local_panels = config.local_panels.clone();
 
     loop {
         app.poll_bulk(browser, vfs)?;
@@ -950,11 +974,9 @@ fn run(
                     usage: usage.as_ref(),
                     settings: settings.as_ref(),
                     appearance: appearance.as_ref(),
-                    live_panels,
-                    live_theme: live_theme.as_ref(),
-                    theme_name: THEME_NAMES[live_theme_index],
-                    live_appearance: &live_appearance,
-                    live_glyphs,
+                    local_theme: &local_theme,
+                    local_ui: &local_ui,
+                    local_panels: &local_panels,
                 },
             )
         })?;
@@ -1048,10 +1070,11 @@ fn run(
                         apply_appearance_outcome(
                             outcome,
                             &mut appearance,
-                            &mut live_appearance,
-                            &mut live_glyphs,
+                            &mut local_theme,
+                            &mut local_ui,
+                            &local_panels,
                             config,
-                            live_theme.as_ref(),
+                            app,
                         );
                     }
                     continue;
@@ -1122,12 +1145,9 @@ fn run(
                     || dragging_shell_width.is_some()
                     || alt_resizing.is_some();
                 if config.browser_mouse && !over_shell && !dragging && app.prompt.is_none() {
+                    let panels = effective_panels(config, &local_panels);
                     let hit = browser_mouse::hit_test(
-                        &BrowserLayout::split(
-                            frame_area,
-                            live_panels.columns,
-                            live_panels.show_hud,
-                        ),
+                        &BrowserLayout::split(frame_area, panels.columns, panels.show_hud),
                         Position::new(mouse.column, mouse.row),
                         Listing::unscrolled(browser.parent_entries().len()),
                         Listing {
@@ -1516,30 +1536,33 @@ fn run(
                         SettingsOutcome::Stay => {}
                         SettingsOutcome::Close => settings = None,
                         SettingsOutcome::Cycle(row) => {
+                            let panels = effective_panels(config, &local_panels);
                             match row {
                                 SettingsRow::Columns => {
-                                    live_panels.columns = live_panels.columns.cycled();
+                                    local_panels.columns = Some(
+                                        match panels.columns.cycled() {
+                                            ColumnLayout::ThreePane => "three",
+                                            ColumnLayout::TwoPane => "two",
+                                        }
+                                        .into(),
+                                    );
                                 }
-                                SettingsRow::Theme => {
-                                    live_theme_index = (live_theme_index + 1) % THEME_NAMES.len();
-                                    live_theme = Some(Theme::named(THEME_NAMES[live_theme_index]));
+                                SettingsRow::Hud => {
+                                    local_panels.show_hud = Some(!panels.show_hud);
                                 }
-                                SettingsRow::Hud => live_panels.show_hud = !live_panels.show_hud,
                                 SettingsRow::CommandBar => {
-                                    live_panels.show_command_bar = !live_panels.show_command_bar;
+                                    local_panels.show_command_bar = Some(!panels.show_command_bar);
                                 }
                             }
+                            persist_local(&local_theme, &local_ui, &local_panels, app);
+                            let panels = effective_panels(config, &local_panels);
                             let view = SettingsView {
-                                columns: live_panels.columns,
-                                theme_name: THEME_NAMES[live_theme_index],
-                                show_hud: live_panels.show_hud,
-                                show_command_bar: live_panels.show_command_bar,
+                                columns: panels.columns,
+                                show_hud: panels.show_hud,
+                                show_command_bar: panels.show_command_bar,
                             };
-                            app.status = Some(format!(
-                                "{}: {} — this session only, not saved",
-                                row.label(),
-                                view.value(row)
-                            ));
+                            app.status =
+                                Some(format!("{}: {} — saved", row.label(), view.value(row)));
                         }
                     }
                     continue;
@@ -1550,10 +1573,11 @@ fn run(
                     apply_appearance_outcome(
                         outcome,
                         &mut appearance,
-                        &mut live_appearance,
-                        &mut live_glyphs,
+                        &mut local_theme,
+                        &mut local_ui,
+                        &local_panels,
                         config,
-                        live_theme.as_ref(),
+                        app,
                     );
                     continue;
                 }
@@ -1930,20 +1954,18 @@ fn draw(
         usage,
         settings,
         appearance,
-        live_panels,
-        live_theme,
-        theme_name,
-        live_appearance,
-        live_glyphs,
+        local_theme,
+        local_ui,
+        local_panels,
     } = overlay;
-    // The settings and appearance popups' changes are session-only (see `run`'s `live_panels`/
-    // `live_theme`/`live_appearance`/`live_glyphs`), so every render this frame must read them
-    // rather than `config.panels`/`config.theme`/`config.ui` directly. Cloning once here — rather
-    // than threading four more parameters through every `hud`/`overlay_view`/`style` function
-    // that already takes `config` — keeps the rest of `draw` (and every function it calls)
-    // unchanged; a `Config` is small next to the `Vec<ListItem>`s this function already rebuilds
-    // every frame regardless.
-    let mut theme = effective_theme(config, live_theme, live_appearance);
+    // The settings and appearance popups' changes are saved to `local.toml` (see `run`'s
+    // `local_theme`/`local_ui`/`local_panels`), but applying them still has to happen every
+    // render, the same as when they were session-only, since `config` itself is never mutated
+    // after startup. Cloning once here — rather than threading three more parameters through
+    // every `hud`/`overlay_view`/`style` function that already takes `config` — keeps the rest of
+    // `draw` (and every function it calls) unchanged; a `Config` is small next to the
+    // `Vec<ListItem>`s this function already rebuilds every frame regardless.
+    let mut theme = effective_theme(config, local_theme);
     // A color row's in-progress (uncommitted) edit previews live, on top of everything else —
     // see `appearance_popup::preview`.
     if let Some(popup) = appearance
@@ -1952,11 +1974,9 @@ fn draw(
         theme = appearance_popup::preview(&theme, row, buffer);
     }
     let effective_config = Config {
-        panels: live_panels,
+        panels: effective_panels(config, local_panels),
         theme,
-        ui: Ui {
-            glyphs: live_glyphs.unwrap_or(config.ui.glyphs),
-        },
+        ui: effective_ui(config, local_ui),
         ..config.clone()
     };
     let config = &effective_config;
@@ -2173,7 +2193,6 @@ fn draw(
             popup,
             &SettingsView {
                 columns: config.panels.columns,
-                theme_name,
                 show_hud: config.panels.show_hud,
                 show_command_bar: config.panels.show_command_bar,
             },
@@ -2182,14 +2201,16 @@ fn draw(
     }
     if let Some(popup) = appearance {
         // `config` is already the effective one composed above, so its `theme`/`ui.glyphs`
-        // already carry `live_appearance`/`live_glyphs` (and any in-progress edit's live
-        // preview) — nothing more to layer here.
+        // already carry `local_theme`/`local_ui` (and any in-progress edit's live preview) —
+        // nothing more to layer here.
+        let theme_name = appearance_popup::theme_name(local_theme.name.as_deref(), &config.theme);
         overlay_view::render_appearance(
             frame,
             popup,
             &AppearanceView {
                 theme: &config.theme,
                 glyphs: config.ui.glyphs,
+                theme_name,
             },
             config,
         );

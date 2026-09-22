@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `theming`: two new built-in palettes, `catppuccin` (Mocha) and `nord`, plus `catppuccin-latte`
-  (Catppuccin's light flavor, reachable by name but not in the settings popup's cycle). The
-  settings popup's Theme row now cycles `neon`/`classic`/`dracula`/`catppuccin`/`nord`.
+  (Catppuccin's light flavor, reachable by name but not in the appearance popup's Theme cycle).
+  The Theme row (`neon`/`classic`/`dracula`/`catppuccin`/`nord`) later moved from the settings
+  popup to the appearance popup — see below.
 - `tui`/`theming`: the default look now adapts to the terminal's own background instead of always
   being the neon palette. When `[theme]` is left out of both config files entirely, Minuteman asks
   the terminal for its background color (OSC 11, bundled into the existing graphics-capability
@@ -19,14 +20,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field — opts back out and pins the look exactly as configured; `Config::theme_is_customized`
   carries that distinction. See `appearance.example.toml`.
 - `tui`: an appearance popup, `a` (new `[keys] appearance`, `Action::Appearance`) or
-  "Appearance…" on blank space's right-click menu. Six colors (Accent, Focused border, Selection,
-  Directory, Status bar, Danger) are edited as free text — a name or hex, live-previewed as you
-  type, `Enter` to confirm, `Esc` to cancel; Border style, Separator and Glyphs cycle through
-  their fixed choices; Reset to defaults clears every change this popup made this session. Unlike
-  the settings popup, it is genuinely mouse-driven: a click on a row acts on it exactly like
-  `Enter` would, via new `appearance_popup::hit`/`click_row`. New `theming::Theme::overlay_raw`
-  layers these live edits onto whichever theme is otherwise active (`RawTheme`'s own `From` impl
-  is now built on it too). Session-only, like the settings popup.
+  "Appearance…" on blank space's right-click menu. Theme cycles the base palette; six colors
+  (Accent, Focused border, Selection, Directory, Status bar, Danger) are edited as free text — a
+  name or hex, live-previewed as you type, `Enter` to confirm, `Esc` to cancel; Border style,
+  Separator and Glyphs cycle through their fixed choices; Reset to defaults clears every change
+  this popup made this session. Unlike the settings popup, it is genuinely mouse-driven: a click
+  on a row acts on it exactly like `Enter` would, via new `appearance_popup::hit`/`click_row`. New
+  `theming::Theme::overlay_raw` layers these live edits onto whichever theme is otherwise active
+  (`RawTheme`'s own `From` impl is now built on it too).
+- `theming`/`tui`: the settings and appearance popups' changes are saved. Every commit from
+  either — a settings-popup toggle, a color/border/separator/glyph/Theme edit, Reset to defaults —
+  is written at once to a new, program-owned `~/.config/minuteman/local.toml`, layered above both
+  `config.toml` and `appearance.toml` (so it wins over them, without either ever being touched or
+  risking their comments) and read back on the next launch. It stays sparse — only ever the
+  fields a popup actually changed — via new `Serialize` impls on `RawTheme`/`RawUi`/`RawPanels`
+  and new `RawPanels::overlay`/`PanelsConfig::overlay_raw`, so a later hand-edit to
+  `appearance.toml` is never masked by a stale save. New `Config::save_local`,
+  `Config::local_theme`/`local_ui`/`local_panels` (the unmerged `local.toml` layer, for seeding a
+  popup's live state), and `RawLocal`.
+- `tui`: the settings popup's Theme row moved to the appearance popup (now its first row) — it
+  belongs with the rest of the look it picks a base for, and having it in two popups risked them
+  drifting on what "the theme" currently is. The settings popup now cycles Columns, HUD and
+  Command bar only.
 
 - `theming`: a `[panels]` table in `config.toml` — `columns` (`"three"`, the default parent |
   current | preview, or `"two"` to remove the parent column and give its width to

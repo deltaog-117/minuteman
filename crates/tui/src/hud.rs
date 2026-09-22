@@ -874,10 +874,13 @@ mod tests {
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             theme_is_customized: false,
+            local_theme: theming::RawTheme::default(),
             ui: theming::Ui::default(),
+            local_ui: theming::RawUi::default(),
             styles: theming::Styles::default(),
             font: theming::Font::default(),
             panels: theming::PanelsConfig::default(),
+            local_panels: theming::RawPanels::default(),
         }
     }
 

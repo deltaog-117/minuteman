@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Which set of symbols the interface draws with. The font is the terminal's, not the app's, so
 /// this is how the UI matches what the user's font can actually show.
@@ -50,7 +50,7 @@ pub struct Ui {
 }
 
 /// Deserialized `[ui]` config; every field optional, like the rest of the config.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawUi {
     pub glyphs: Option<String>,

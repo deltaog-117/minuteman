@@ -428,7 +428,7 @@ mod tests {
     // ---- drawing ----------------------------------------------------------------------------
 
     fn config() -> Config {
-        Config::from_sources(None, None)
+        Config::from_sources(None, None, None)
     }
 
     fn fill(rt: &tokio::runtime::Runtime, root: &std::path::Path) -> DiskUsageView {

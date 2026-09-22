@@ -662,6 +662,32 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   colors) and a full category-submenu editor covering every field (B: sound direction, but too
   much for one cycle — see *Full appearance editor* under Medium Priority). Session-only, same
   caveat as the settings popup.
+- ✅ **Persist the settings and appearance popups to `local.toml`, and move Theme into the
+  appearance popup (COA B)** – every commit from either popup (a settings-popup toggle, a
+  color/border/separator/glyph edit, a Theme pick, Reset to defaults) is now saved at once to a
+  new, program-owned `~/.config/minuteman/local.toml`, layered highest of three files
+  (`config.toml` < `appearance.toml` < `local.toml`) so it survives a restart without ever
+  touching — or risking the comments in — the two hand-edited files. Chosen as COA B, a third
+  file nothing but Minuteman writes, over an in-place `toml_edit` rewrite of the hand-edited files
+  themselves (A: the eventual "real" answer, but the first time this program has ever written a
+  config file at all is a bad place to also introduce a new dependency and edit files a bug could
+  corrupt) or appending a marked, stripped-and-rewritten block to those files (C: TOML forbids a
+  duplicate `[theme]` table, so this needs fragile string surgery to avoid corrupting a hand-edit
+  near the marker). `local.toml` stays sparse — only ever the fields a popup actually touched,
+  this session or a saved one from before — via new `RawTheme`/`RawUi`/`RawPanels` `Serialize`
+  impls (the `toml` crate already skips a `None` field, no `skip_serializing_if` needed) and new
+  `RawPanels::overlay`/`PanelsConfig::overlay_raw` (mirroring `Theme`'s), so a later hand-edit to
+  `appearance.toml` is never silently masked by a stale saved value. `Config` exposes `local.toml`'s
+  three tables unmerged (`local_theme`/`local_ui`/`local_panels`) alongside the fully resolved
+  `theme`/`ui`/`panels`, so `main` can seed a popup's live state and re-save the union rather than
+  overwriting a previous session's save with just this session's delta. The settings popup's
+  Theme row moved into the appearance popup (now its first row, before the six colors) — it
+  belongs with the rest of the look it picks a base for, and having it in two popups invited them
+  to drift on what "the theme" currently is; a new `appearance_popup::theme_name` reads the
+  Theme row's own display value back from either an explicit pick or, absent one, whichever named
+  palette the resolved theme's colors exactly match (fixing a pre-existing quirk where the row
+  used to always start labeled "neon" regardless of what was actually active, e.g. an
+  `appearance.toml` pin or the adaptive auto-detected default).
 
 ---
 
@@ -700,20 +726,16 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   is under *Preview extras, stage 1* above.
 - **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
   operations, with no plugin required.
-- **Persist the settings and appearance popups' changes to disk** – `space t`'s panel/theme
-  changes and `a`'s color/border/separator/glyph changes (see Completed) are both session-only
-  right now. Needs a comment-preserving write into `config.toml`'s `[panels]` table and
-  `appearance.toml`'s `[theme]`/`[ui]` tables, since both files are meant to stay hand-editable and
-  a naive `toml::to_string` re-serialize would drop the user's comments.
 - **Full appearance editor: every field, with categories (COA B from the appearance-popup
-  cycle)** – the appearance popup (see Completed) covers six highlight colors plus border style,
-  separator and glyphs; the rest of `Theme`'s ~19 fields, every `[style]` element's bold/italic/…
-  flags, and the font table are still config-file-only. The fuller design considered at the time:
-  a category submenu (Theme colors / Border & separator / Glyphs / Styles / Font) reusing
-  `ContextMenu`'s hover/click/submenu machinery, with the same free-text entry the popup already
-  has for a leaf field. Deferred rather than built in the same cycle because free-text editing of
-  ~40 fields behind a two-level submenu is a project of its own, not a bounded addition to one
-  already-large feature.
+  cycle)** – the appearance popup (see Completed) covers a Theme pick plus six highlight colors,
+  border style, separator and glyphs; the rest of `Theme`'s ~19 fields, every `[style]` element's
+  bold/italic/… flags, and the font table are still config-file-only (though now that saves are
+  wired up to `local.toml`, whatever this editor eventually adds gets persistence for free). The
+  fuller design considered at the time: a category submenu (Theme colors / Border & separator /
+  Glyphs / Styles / Font) reusing `ContextMenu`'s hover/click/submenu machinery, with the same
+  free-text entry the popup already has for a leaf field. Deferred rather than built in the same
+  cycle because free-text editing of ~40 fields behind a two-level submenu is a project of its
+  own, not a bounded addition to one already-large feature.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
   file_ops, preview, and trash, so backends can be swapped without touching feature code.
 
@@ -816,18 +838,18 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    new entries appear at once, and so does a file you create from a mini-shell or another
    terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
    Then the newest: `a` (or "Appearance…" on blank space's right-click menu) for the appearance
-   popup — `j`/`k` moves, `enter` or a click acts on the row under the cursor: Accent, Focused
-   border, Selection, Directory, Status bar and Danger are typed as a name or hex (`enter` to
-   type, `enter` again to confirm, `Esc` to cancel, with a live preview as you type); Border
-   style, Separator and Glyphs cycle with `h`/`l`/`enter`/a click; Reset to defaults clears every
-   change back to what was in effect when the popup opened. `Esc`/`q` closes it. Changes apply at
-   once but are not saved.
+   popup — `j`/`k` moves, `enter` or a click acts on the row under the cursor: Theme cycles the
+   base palette (neon, classic, dracula, catppuccin, nord); Accent, Focused border, Selection,
+   Directory, Status bar and Danger are typed as a name or hex (`enter` to type, `enter` again to
+   confirm, `Esc` to cancel, with a live preview as you type); Border style, Separator and Glyphs
+   cycle with `h`/`l`/`enter`/a click; Reset to defaults clears every change back to what was in
+   effect when the popup opened. `Esc`/`q` closes it. Every change here, and every one the
+   settings popup makes, is saved at once to `~/.config/minuteman/local.toml` and survives a
+   restart.
    Before that: `space t` with no shell pane open, for the settings popup (`j`/`k` moves,
-   `h`/`l`/`enter` cycles Columns, Theme, HUD and Command bar, `Esc`/`q` closes it) — try
-   switching to two-pane, cycling the theme, and hiding the HUD or the command bar (open a `:`
-   prompt while it's hidden and it comes back for the prompt). Changes apply at once but are not
-   saved; set `[panels]` in `config.toml` (see `config.example.toml`) to keep a layout across
-   restarts.
+   `h`/`l`/`enter` cycles Columns, HUD and Command bar, `Esc`/`q` closes it) — try switching to
+   two-pane and hiding the HUD or the command bar (open a `:` prompt while it's hidden and it
+   comes back for the prompt).
    Before that: `u` for the disk usage view (`enter` a folder, `h` back, `a` apparent size,
    `q` closes it), and the same from a folder's right-click menu.
    Before that: `J`/`K` (or the wheel over the right column) scroll the preview of a long text

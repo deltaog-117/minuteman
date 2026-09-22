@@ -45,6 +45,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-21 | Disk Usage View | Modal `du`-style view scanning one folder at a time off-thread, on-disk size by default, hard links once, same filesystem only, symlinks not followed (COA A); a size column (B) and a cached tree with delete (C) rejected | ✅ Confirmed |
 | 2026-09-22 | Adaptive Default Theme | OSC 11 terminal-background query via `ratatui-image`'s existing probe, resolved to Catppuccin Mocha/Latte (COA A); reading the OS/DE's light/dark setting (B) and a `$COLORFGBG` heuristic (C) rejected | ✅ Confirmed |
 | 2026-09-22 | Appearance Popup Scope and Mouse Model | Curated 6 colors + 3 cycle fields, real text entry, `ContextMenu`-style click/hit-testing (COA C); growing the settings popup's cycle-only rows (A) and a full category-submenu editor for every field (B, deferred to the roadmap) rejected | ✅ Confirmed |
+| 2026-09-22 | Persisting the Settings/Appearance Popups | A third, program-owned `local.toml` layered above `config.toml`/`appearance.toml` (COA B); an in-place `toml_edit` rewrite of the hand-edited files (A, deferred) and a stripped-and-reappended generated block (C) rejected; Theme row moved from the settings popup into the appearance popup | ✅ Confirmed |
 
 ---
 
@@ -3208,6 +3209,111 @@ sandbox, so the popup's on-screen rendering, its live-preview caret, and the act
 click-to-row mapping at real screen coordinates were checked by reading the code and the unit
 tests (which exercise the same `hit`/`panel_area` geometry `overlay_view::render_appearance` and
 `main`'s mouse handler use), not by running the compiled binary interactively.
+
+---
+
+### Persisting the Settings and Appearance Popups: a Third, Program-Owned `local.toml` (COA B)
+
+**Date:** 2026-09-22
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+Asked directly, after finishing the appearance popup: "does it save the changes I make using
+it?" It didn't — like the settings popup, it was session-only. The request was to persist both
+popups' changes, and, separately, to make Catppuccin and Nord (already built-in palettes)
+pickable *from the appearance popup itself* rather than only from the settings popup's Theme
+row, which the previous cycle had left untouched.
+
+#### Options Considered
+
+**A**, an in-place edit: parse `config.toml`/`appearance.toml` with `toml_edit` (a lossless,
+comment-preserving TOML document type) and surgically set just the changed keys, writing the
+document back out. Matches the literal ask most closely — "my edit is now in my file" — and is
+what `ROADMAP.md` had already flagged as the eventual target. But this program has never written
+to a user's dotfiles before; pairing that first write with a new dependency and the general
+complexity of a lossless-edit library felt like the wrong place to spend the "first time we ever
+touch the user's files" budget. **B**, a third file, `local.toml`, that only the popups ever read
+or write — `config.toml`/`appearance.toml` stay exactly as hand-authored, always. **C**, append a
+generated `[theme]`/`[panels]`/`[ui]` block to the end of the existing files, stripping a
+previous generated block by a marker comment before re-appending. Rejected outright once actually
+worked through: TOML forbids a duplicate `[theme]` table in one file, so this needs the same
+string-surgery risk as A (stripping the user's *own* conflicting values, not just the generated
+block) for none of A's benefit.
+
+Chosen and suggested: **B**, on request, with A kept on the roadmap rather than dropped — B is a
+reasonable permanent answer on its own, not just a stepping stone, since "nothing but Minuteman
+touches this file" is a stronger guarantee than "an edit library was careful."
+
+#### Keeping `local.toml` from masking a later hand-edit
+
+The one real design risk with B: if `local.toml` ends up carrying a full snapshot of the
+resolved theme (everything `config.theme` had, not just what a popup changed), it would silently
+win over the *literal same fields* if the user later hand-edited `appearance.toml` — reintroducing,
+one layer removed, the exact problem B exists to avoid. The fix is the same discipline
+`RawTheme`/`RawUi`/`RawPanels` already use for `config.toml`/`appearance.toml`'s own layering:
+`local.toml`'s in-session accumulator (`local_theme`/`local_ui`/`local_panels` in `main::run`) is
+seeded once, at startup, from whatever `local.toml` already held — not from the fully resolved
+`config.theme` — and every popup commit sets exactly one field on it, never the whole structure.
+`RawPanels` needed the same treatment `RawTheme` already had: a new `overlay` (for layering
+`config.toml` under `local.toml`) and `PanelsConfig::overlay_raw` (for applying the sparse
+override onto a resolved `PanelsConfig`, mirroring `Theme::overlay_raw` from last cycle).
+Confirmed empirically, not assumed: a scratch `toml::to_string` call showed the crate already
+skips a `None` field entirely with no `skip_serializing_if` needed, which is what makes an
+`Option`-heavy `Raw*` struct serialize sparsely for free. `Config` now exposes `local.toml`'s
+three tables both unmerged (`local_theme`/`local_ui`/`local_panels`, for seeding `main`'s
+accumulators) and merged into `theme`/`ui`/`panels` as before (for everything that just wants the
+resolved values) — the same "raw next to resolved" shape `theme_is_customized` set a precedent
+for last cycle.
+
+`theme_is_customized` (from the adaptive-default cycle) now also layers in `local.toml`: a theme
+picked and saved from the popup correctly counts as "customized" on the next launch, so it isn't
+silently swapped back out by the OSC 11 auto-detect the moment the popup that set it is closed.
+
+#### Moving the Theme row
+
+Cycling a base palette (including the newly-requested Catppuccin/Nord access) from *inside* the
+appearance popup, rather than leaving it on the settings popup, was the more coherent split once
+both popups existed side by side: the appearance popup already owns "what does the theme look
+like," and a Theme pick is the base the popup's six field-level color overrides layer onto
+anyway — splitting "pick the palette" and "tweak it" across two separate popups only invited them
+to disagree about what's currently active. `RawTheme.name` already existed as a field (used by
+`config.toml`/`appearance.toml`'s own parsing) but had gone unused by the popup's `commit`
+function until now; routing the Theme row through it turned out to need no special-casing beyond
+what `Glyphs` already needed for `RawUi`. The one new piece was `appearance_popup::theme_name`:
+since a resolved `Theme`'s fields can't always be reverse-mapped to "which named palette is this"
+(several palettes could coincidentally share a field's value, though none currently do), it
+prefers an explicit `local_theme.name` and falls back to finding a named palette whose *entire*
+resolved output matches exactly — which incidentally fixes a pre-existing display quirk from the
+settings-popup version of this row, which always started labeled "neon" regardless of what
+`config.theme` actually was (an `appearance.toml` pin, or the previous cycle's adaptive default).
+
+#### Trade-offs and what was left
+
+A save reports a write failure (e.g. a read-only filesystem) in the status line rather than
+treating it as fatal — the edit is already live for the rest of the session either way, saving is
+strictly in addition to that. `local.toml` gets no `local.example.toml` and no `minuteman
+init-local` — unlike the other two files, nothing about it is meant to be hand-authored, so an
+example file would only invite editing it directly, which works but isn't the intended path (use
+the popups; edit `config.toml`/`appearance.toml` for anything meant to be a permanent baseline).
+
+#### Verification
+
+`scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy --workspace
+--all-targets -- -D warnings` clean, `cargo test --workspace` green (`tui` 346, `theming` 57).
+New coverage: `local.toml` winning over both hand-edited files while still being exposed unmerged
+on `Config`, `RawLocal` round-tripping through its own `Deserialize` and serializing only the
+fields actually set, `PanelsConfig::overlay_raw`/`RawPanels::overlay` (mirroring `Theme`'s own
+tests), the appearance popup's Theme row cycling through `THEME_NAMES` and `RawTheme.name` via
+the now-uniform `commit`, and `appearance_popup::theme_name`'s three-way fallback (explicit pick,
+resolved-value match, first name). All of the appearance popup's row-index-dependent tests were
+re-derived for the new eleven-row layout (Theme now at index 0). Not verified against a real
+`~/.config/minuteman/` round trip in an actual second launch — this sandbox has no interactive
+session to run the compiled binary in twice and confirm a saved pick is still there; the file
+I/O in `Config::save_local`/`Config::load` itself is exercised only by `from_sources`'s pure
+logic on in-memory strings, the same boundary this project's tests have always drawn around
+filesystem access.
 
 ---
 
