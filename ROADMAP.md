@@ -608,6 +608,26 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `enter` opened a folder and `h` came back with the cursor on it, `enter` on a file did nothing, a
   click selected a row, `r` rescanned, `q` closed the view without quitting, and the folder's
   right-click menu offered Disk usage and opened it.
+- ✅ **Configurable panels and a live settings popup** – a new `[panels]` table in `config.toml`
+  picks the miller-column layout (`columns = "three"`, the default parent | current | preview, or
+  `"two"`, current | preview with the parent column removed and its width given to the rest) and
+  whether the header row (`show_hud`) and the status bar's idle chrome (`show_command_bar`) are
+  drawn; an unrecognised `columns` value falls back to `"three"`, like every other config field.
+  `space` then `t` with no shell pane open (previously a no-op — `t` only means anything
+  mid-leader-chord when a shell pane exists, to flip its orientation) opens a settings popup that
+  cycles all of these plus the theme (`neon`/`classic`/`dracula`) live, for the running session;
+  new `tui::settings_popup` is pure state, mirroring `context_menu`, and
+  `overlay_view::render_settings` draws it. `BrowserLayout::split` now takes the column layout and
+  the HUD flag: two-pane gives the parent column a zero-width `Rect` so it is skipped rather than
+  drawn empty, and hiding the HUD reclaims its row's height; the status row is never reclaimed the
+  same way and always renders in full during a prompt, a non-idle mode or a transient message, so
+  hiding the command bar only ever suppresses its passive display. Chosen as COA C — a Rust-native,
+  config-driven panel registry compiled in — over a declarative-only popup with no add/remove
+  capability (A) and pulling the WASM/Extism plugin host (see Low Priority) forward into this
+  cycle (B); C is a stepping stone toward B, not a replacement for it. Popup changes are
+  session-only: there is no precedent anywhere in this codebase for writing TOML back out, and
+  doing it losslessly (both config files are heavily commented) is a real feature of its own — see
+  *persist the settings popup's changes to disk* under Medium Priority.
 
 ---
 
@@ -646,6 +666,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   is under *Preview extras, stage 1* above.
 - **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
   operations, with no plugin required.
+- **Persist the settings popup's changes to disk** – `space t`'s panel and theme changes (see
+  Completed) are session-only right now. Needs a comment-preserving write into `config.toml`'s
+  `[panels]` table and `appearance.toml`'s `[theme]` name, since both files are meant to stay
+  hand-editable and a naive `toml::to_string` re-serialize would drop the user's comments.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
   file_ops, preview, and trash, so backends can be swapped without touching feature code.
 
@@ -745,7 +769,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Press `.` to show or hide dot-files. Try `:mkdir -p a/b`, `:touch x.txt` and `:ls -l` — the
    new entries appear at once, and so does a file you create from a mini-shell or another
    terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
-   Then the newest: `u` for the disk usage view (`enter` a folder, `h` back, `a` apparent size,
+   Then the newest: `space t` with no shell pane open, for the settings popup (`j`/`k` moves,
+   `h`/`l`/`enter` cycles Columns, Theme, HUD and Command bar, `Esc`/`q` closes it) — try
+   switching to two-pane, cycling the theme, and hiding the HUD or the command bar (open a `:`
+   prompt while it's hidden and it comes back for the prompt). Changes apply at once but are not
+   saved; set `[panels]` in `config.toml` (see `config.example.toml`) to keep a layout across
+   restarts.
+   Before that: `u` for the disk usage view (`enter` a folder, `h` back, `a` apparent size,
    `q` closes it), and the same from a folder's right-click menu.
    Before that: `J`/`K` (or the wheel over the right column) scroll the preview of a long text
    file; select a binary for its hex dump, and a `.zip`, `.tar` or `.tar.gz` for its listing.
@@ -754,9 +784,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Before that, four earlier ones: `/` plus the start of a name a few directories down (`Esc` returns,
    `Enter` stays); the arrow keys; `v` two files, `m`, go to another directory, `c` drops the cut
    and the marks; and `:nvim ROADMAP.md` (`:!cmd` for a program not in `interactive_commands`).
-2. `cargo test --workspace` (all tests) to verify everything still passes.
+2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
+   DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: preview extras, stage 2 (syntax highlighting), or the mouse's stage 2
-   (multi-select and breadcrumb clicks), or built-in trash and undo.
+4. Next cycle: preview extras, stage 2 (syntax highlighting), the mouse's stage 2 (multi-select
+   and breadcrumb clicks), built-in trash and undo, or persisting the settings popup's changes to
+   disk (see Medium Priority).
    Bookmarks (directory bookmarks — distinct from the file marks added earlier) and the preview
    extras' later stages remain the other 🔥 candidates.

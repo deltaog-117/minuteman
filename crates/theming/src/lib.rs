@@ -21,11 +21,13 @@
 pub mod appearance;
 pub mod config;
 pub mod keymap;
+pub mod panels;
 pub mod theme;
 pub mod ui;
 
 pub use appearance::{Font, Mods, Styles};
 pub use config::{Config, OpenWith};
 pub use keymap::{Action, KeyMap};
+pub use panels::{ColumnLayout, PanelsConfig};
 pub use theme::Theme;
 pub use ui::{GlyphSet, Ui};

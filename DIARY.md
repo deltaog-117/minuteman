@@ -2898,6 +2898,126 @@ device).
 
 ---
 
+### Configurable Panels and a Live Settings Popup: `[panels]` Config Plus `Space T`, Session-Only for Now (COA C)
+
+**Date:** 2026-09-22
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+The request was to make Minuteman's appearance customizable "through code files, and an
+interactive pop-up menu" summoned by a key chord, letting the number of panels, the theme and
+other pieces be chosen — including, as an example, removing the command bar and replacing it with
+something else. That last part is a plugin-shaped ask, and `ROADMAP.md` already commits to a
+future WASM/Extism plugin host as the project's long-term answer to "add or remove any feature",
+so the three courses of action were framed against that existing plan rather than a blank slate.
+
+#### Options Considered
+
+**A**, declarative-only: extend `appearance.toml`/`config.toml` with panel-layout fields and give
+the popup nothing to do but edit and write that TOML back out. Fast and requires no new
+architecture, but "remove or replace a feature" only ever means toggling among variants already
+compiled in — it caps out below what was asked. **B**, pull the roadmap's planned WASM/Extism
+plugin host forward into this cycle: a versioned host API with panel/layout/widget hooks, so the
+popup drives a live plugin registry that can genuinely swap in a third-party, multi-language
+command bar. This is the project's actual long-term destination, but it is a roadmap-scale project
+of its own — the host API, sandboxing and versioning would all have to be settled in one cycle
+rather than incrementally. **C**, a Rust-native `Panel`-shaped config compiled in: wrap the
+already-fairly-modular built-in panels (the miller columns, the header, the status bar) behind a
+config-driven registry (`[panels]` in `config.toml`), with the popup editing that registry live.
+Not runtime-pluggable and not multi-language — a new panel still means new Rust code and a
+recompile — but it is buildable now without contradicting or duplicating B, and its shape doubles
+as a draft of what B's host API will eventually need to expose. **C** was chosen: B is the right
+destination but too large to improvise inside one cycle, and A caps out below the ask.
+
+#### The panels config and the column layout
+
+A new `theming::panels` module adds `ColumnLayout` (`ThreePane`, the existing parent | current |
+preview 20/40/40 split, or `TwoPane`, current | preview at 50/50 with the parent column removed)
+and `PanelsConfig` (`columns`, `show_hud`, `show_command_bar`), read from a `[panels]` table the
+same way every other `config.toml` table is: a `RawPanels` of `Option`s under `#[serde(default)]`,
+resolved field-by-field so a partial table or a typo'd `columns` value falls back rather than
+failing to start, exactly like `RawUi`'s `glyphs`. `BrowserLayout::split` (the one function both
+`draw` and the mouse hit-test build their rectangles from, so the two can never disagree about
+where a click lands) now takes the column layout and the HUD flag. Two-pane gives the parent
+column a zero-width `Rect` at the same position rather than a `Percentage(20)` slice — `draw`
+skips rendering it and `Rect::contains` can never resolve a click into it, so the column reads as
+removed, not just left blank. Hiding the HUD reclaims its row's height (`Constraint::Length(0)`
+instead of `1`) the same way. The status row is deliberately never reclaimed this way: a rename,
+delete-confirm or `:` prompt renders there, so `show_command_bar` only suppresses the row's *idle*
+chrome (the mode pill, the selected file's details, the key hints) — the row stays reserved, and a
+prompt, a non-`Normal` mode or a transient message always forces it back, checked with one
+`show_status_bar` condition at the single production call site in `draw`. This was a hard
+constraint going into the cycle, not a style choice: silently dropping the confirmation UI for
+delete or rename would be a real correctness bug, not a cosmetic one.
+
+#### The settings popup: freeing up `space t`
+
+The request said `Alt+T`, but `Alt+t` was already `SnapTop` in the shell-box `Alt` layer, so the
+trigger became `space` then `t` instead — chosen deliberately over freeing up `Alt+t` because the
+leader layer already had an unused slot for exactly this shape of command. `pending_leader`'s
+handling was `if shells.is_some() { ... } ...` with no `else`: when leader is pressed with no
+shell pane open, the block already does nothing at all with the next key — `t`, in particular,
+only means "flip the split's orientation" when a shell pane exists to flip. That confirmed-empty
+`else` arm is where the popup now opens, so nothing that worked before changes meaning. Like
+`context_menu`, `tui::settings_popup` is pure state — a cursor over four rows (Columns, Theme,
+HUD, Command bar) and a `key(KeyCode) -> Outcome` that never touches a `Frame` or a `Config` — so
+`overlay_view::render_settings` is the only place it's drawn and `main::run` is the only place its
+`Outcome::Cycle` is applied. Applying it means mutating session-local `live_panels`/`live_theme`
+state and building a per-frame `effective_config` (the real `Config`, cloned, with `panels` and
+`theme` overridden) inside `draw`, rather than threading two more parameters through every
+`hud`/`overlay_view`/`style` function that already takes a `Config` — cheap next to the
+`Vec<ListItem>`s `draw` already rebuilds every frame, and it means every existing renderer picks
+up a live change with no signature changes elsewhere. `Theme::named` (the palette lookup by name,
+already total and fallback-safe) went from private to `pub` so the popup's Theme row could reach
+it directly. The popup does not seed its theme cycle from whatever `appearance.toml` currently
+has — the resolved `Theme` type carries colors, not the name it came from — so cycling always
+starts at `"neon"` regardless of the configured palette; the on-screen status message ("... —
+this session only, not saved") is there partly to make that, and the lack of persistence, visible
+rather than surprising.
+
+#### Trade-offs and what was left
+
+Nothing here is written back to `config.toml`/`appearance.toml`: there was no precedent anywhere
+in this codebase for writing TOML back out, and doing it without destroying the user's comments —
+both files are heavily, deliberately commented — is a real feature of its own, not a quick
+addition. It's on the roadmap (Medium Priority) rather than built now. The popup toggles and
+resizes what already exists; it does not let a panel be *replaced* with a different
+implementation (a second command-bar variant, for instance) — that is explicitly B's job, not
+C's, and building a throwaway "alternate command bar" just to prove the point would have been
+scope creep against the actual ask. `scripts/check` did not exist before this cycle — the Verify
+rule requires proposing one rather than inventing it, so `cargo fmt --all -- --check`, `cargo
+clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` were proposed and
+approved, then written to `scripts/check`. Running it immediately failed on `cargo fmt --all --
+--check`: `app.rs` (8 spots), `shell_layout.rs` (2) and `main.rs` (7) already disagreed with
+`rustfmt` on clean `main`, confirmed by stashing this cycle's diff and checking. This cycle's own
+edits added 9 more (`config.rs`, `hud.rs`, `overlay_view.rs`, and 2 more in `main.rs`). Fixing the
+new ones by running `rustfmt` directly on the touched files had a side effect worth recording:
+passed a crate root (`main.rs`), `rustfmt` reformats the whole module tree it declares, not just
+that file, so `app.rs` and `shell_layout.rs` — neither touched by this feature — were swept in and
+silently fixed too. Asked directly, since that's a repo-wide change outside this feature's
+surgical scope: keep it, as a separate leading `chore: rustfmt normalization` commit ahead of the
+feature commit, so `scripts/check` is fully green going forward instead of red on unrelated,
+pre-existing drift forever.
+
+#### Verification
+
+`cargo clippy --workspace --all-targets -- -D warnings` is clean and `cargo fmt --all -- --check`
+now passes across the whole workspace. `cargo test --workspace` passes: `tui` 328 (2 pre-existing
+ignored timing tests, unrelated to this cycle) and `theming` 48, including new property tests
+(`proptest`, already a dev-dependency in `tui`/`browser`/`preview`, added to `theming` too) for
+`[panels]` parsing never panicking and always resolving absent fields to their documented default
+regardless of what subset of keys is present, the settings popup's cursor always staying in
+bounds under an arbitrary sequence of moves, and `BrowserLayout::split`'s regions never
+overlapping in either column layout with the HUD shown or hidden. A dedicated test pins
+`ThreePane` plus `show_hud = true` to the exact rectangles the old hardcoded 20/40/40 split
+produced, so this cycle could not silently change the default layout. Not verified in a real
+terminal or PTY session — the popup's mouse dismissal path and its on-screen rendering were
+checked by reading the code and the unit tests, not by running the compiled binary interactively.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

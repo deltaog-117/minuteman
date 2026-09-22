@@ -58,7 +58,8 @@ pub struct Theme {
 impl Theme {
     /// Looks up a built-in palette by name (case-insensitive). An unrecognised name falls back
     /// to the default — like a malformed config, a typo'd theme name must never block startup.
-    fn named(name: &str) -> Self {
+    /// `pub` so the settings popup can cycle between palettes live, in memory.
+    pub fn named(name: &str) -> Self {
         match name.to_lowercase().as_str() {
             "classic" => Self::classic(),
             "dracula" => Self::dracula(),

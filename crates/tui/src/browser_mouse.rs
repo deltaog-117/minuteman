@@ -28,6 +28,7 @@ use browser::BrowserState;
 use crossterm::event::MouseEventKind;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Position, Rect};
 use shared::{Vfs, VfsError};
+use theming::ColumnLayout;
 
 /// Two clicks on the same row this close together are a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -47,28 +48,48 @@ pub struct BrowserLayout {
 }
 
 impl BrowserLayout {
-    pub fn split(area: Rect) -> Self {
+    /// `columns` picks 20/40/40 (parent | current | preview) or, with the parent column removed,
+    /// an even 50/50 split that gives its width to `current`/`preview` instead of leaving it
+    /// blank. `show_hud` reclaims the header row's height (rather than just leaving it empty)
+    /// when it's hidden; the status row never shrinks the same way, since prompts always need it.
+    pub fn split(area: Rect, columns: ColumnLayout, show_hud: bool) -> Self {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
+                Constraint::Length(u16::from(show_hud)),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
             .split(area);
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(40),
-                Constraint::Percentage(40),
-            ])
-            .split(rows[1]);
+        let mid = rows[1];
+        let (parent, current, preview) = match columns {
+            ColumnLayout::ThreePane => {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(20),
+                        Constraint::Percentage(40),
+                        Constraint::Percentage(40),
+                    ])
+                    .split(mid);
+                (cols[0], cols[1], cols[2])
+            }
+            ColumnLayout::TwoPane => {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(mid);
+                // Zero-width, so `Rect::contains` never resolves a click into it and `draw` skips
+                // rendering it — the column is removed, not just left empty.
+                let removed = Rect::new(cols[0].x, cols[0].y, 0, cols[0].height);
+                (removed, cols[0], cols[1])
+            }
+        };
         Self {
             header: rows[0],
-            parent: columns[0],
-            current: columns[1],
-            preview: columns[2],
+            parent,
+            current,
+            preview,
             status: rows[2],
         }
     }
@@ -285,7 +306,7 @@ mod tests {
     }
 
     fn layout() -> BrowserLayout {
-        BrowserLayout::split(Rect::new(0, 0, 100, 30))
+        BrowserLayout::split(Rect::new(0, 0, 100, 30), ColumnLayout::ThreePane, true)
     }
 
     #[test]
@@ -296,6 +317,26 @@ mod tests {
         assert_eq!(l.parent, Rect::new(0, 1, 20, 28));
         assert_eq!(l.current, Rect::new(20, 1, 40, 28));
         assert_eq!(l.preview, Rect::new(60, 1, 40, 28));
+    }
+
+    #[test]
+    fn two_pane_removes_the_parent_column_and_splits_the_rest_50_50() {
+        let l = BrowserLayout::split(Rect::new(0, 0, 100, 30), ColumnLayout::TwoPane, true);
+        assert_eq!(l.header, Rect::new(0, 0, 100, 1));
+        assert_eq!(l.status, Rect::new(0, 29, 100, 1));
+        assert!(l.parent.is_empty(), "parent column should be removed");
+        assert_eq!(l.current, Rect::new(0, 1, 50, 28));
+        assert_eq!(l.preview, Rect::new(50, 1, 50, 28));
+    }
+
+    #[test]
+    fn hiding_the_hud_reclaims_the_header_row_instead_of_leaving_it_blank() {
+        let l = BrowserLayout::split(Rect::new(0, 0, 100, 30), ColumnLayout::ThreePane, false);
+        assert_eq!(l.header, Rect::new(0, 0, 100, 0));
+        assert_eq!(l.parent, Rect::new(0, 0, 20, 29));
+        // The status row is never reclaimed this way, even with the HUD hidden — prompts always
+        // need it.
+        assert_eq!(l.status, Rect::new(0, 29, 100, 1));
     }
 
     #[test]
@@ -533,12 +574,21 @@ mod tests {
         (0u16..60, 0u16..30, 0u16..300, 0u16..100).prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
     }
 
+    fn any_columns() -> impl Strategy<Value = ColumnLayout> {
+        prop_oneof![Just(ColumnLayout::ThreePane), Just(ColumnLayout::TwoPane),]
+    }
+
     proptest! {
         /// The three columns and the two bars tile part of the area without overlapping, so a
-        /// pointer is never over two regions at once.
+        /// pointer is never over two regions at once, in either column layout and with the HUD
+        /// shown or hidden.
         #[test]
-        fn layout_regions_stay_inside_the_area_and_never_overlap(area in any_rect()) {
-            let l = BrowserLayout::split(area);
+        fn layout_regions_stay_inside_the_area_and_never_overlap(
+            area in any_rect(),
+            columns in any_columns(),
+            show_hud in any::<bool>(),
+        ) {
+            let l = BrowserLayout::split(area, columns, show_hud);
             let regions = [l.header, l.parent, l.current, l.preview, l.status];
             for region in regions.into_iter().filter(|r| !r.is_empty()) {
                 prop_assert_eq!(region.intersection(area), region);
@@ -555,13 +605,15 @@ mod tests {
         #[test]
         fn a_row_hit_names_the_entry_drawn_under_the_pointer(
             area in any_rect(),
+            columns in any_columns(),
+            show_hud in any::<bool>(),
             x in 0u16..400,
             y in 0u16..150,
             parent_len in 0usize..300,
             current_len in 0usize..300,
             offset in 0usize..300,
         ) {
-            let l = BrowserLayout::split(area);
+            let l = BrowserLayout::split(area, columns, show_hud);
             let pos = at(x, y);
             let parent = Listing::unscrolled(parent_len);
             let current = Listing { len: current_len, offset };
@@ -584,10 +636,12 @@ mod tests {
         #[test]
         fn every_visible_row_is_clickable(
             area in any_rect(),
+            columns in any_columns(),
+            show_hud in any::<bool>(),
             current_len in 1usize..300,
             offset in 0usize..300,
         ) {
-            let l = BrowserLayout::split(area);
+            let l = BrowserLayout::split(area, columns, show_hud);
             let rows = list_area(l.current);
             for row in 0..rows.height {
                 let index = offset + usize::from(row);

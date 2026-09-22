@@ -35,6 +35,7 @@ mod overlay_view;
 mod popup_shell;
 mod preview_view;
 mod search_job;
+mod settings_popup;
 mod shell_init;
 mod shell_layout;
 mod style;
@@ -56,8 +57,8 @@ use context_menu::{
     Target as MenuTarget,
 };
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    KeyEventState, KeyboardEnhancementFlags, ModifierKeyCode, MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyEventState,
+    KeyModifiers, KeyboardEnhancementFlags, ModifierKeyCode, MouseButton, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -76,10 +77,13 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui_image::StatefulImage;
+use settings_popup::{
+    Outcome as SettingsOutcome, Row as SettingsRow, SettingsPopup, SettingsView, THEME_NAMES,
+};
 use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
-use theming::{Action, Config, GlyphSet};
+use theming::{Action, Config, GlyphSet, PanelsConfig, Theme};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -326,11 +330,23 @@ struct Overlay<'a> {
     mode: hud::Mode,
     shell: Option<ShellView<'a>>,
     current_list: &'a mut ListState,
-    /// The right-click menu and the Inspect panel, drawn last so they sit over everything.
+    /// The right-click menu, the Inspect panel and the settings popup, drawn last so they sit
+    /// over everything.
     menu: Option<&'a ContextMenu>,
     inspect: Option<&'a InspectView>,
     /// The disk usage view, which covers the whole screen when open.
     usage: Option<&'a DiskUsageView>,
+    settings: Option<&'a SettingsPopup>,
+    /// This session's live panel layout, seeded from `config.panels` and cycled by the settings
+    /// popup — see `live_panels` in `run`.
+    live_panels: PanelsConfig,
+    /// `Some` once the popup has cycled the theme at least once this session; `None` means
+    /// `config.theme` is still in effect unmodified.
+    live_theme: Option<&'a Theme>,
+    /// The name the settings popup's "Theme" row shows and cycles from — independent of
+    /// `live_theme`, which stays `None` (and so doesn't affect rendering) until the row is
+    /// actually cycled once.
+    theme_name: &'static str,
 }
 
 /// The two read-only panels a menu command can open, passed together so `run_menu_command` does
@@ -723,6 +739,17 @@ fn run(
     let mut inspect: Option<InspectView> = None;
     // The disk usage view while one is open; modal, and drawn over the whole screen.
     let mut usage: Option<DiskUsageView> = None;
+    // The settings popup (`Space` then `t` with no shell pane open) while one is open; modal too.
+    let mut settings: Option<SettingsPopup> = None;
+    // Panel layout for the running session, seeded from `config.toml` and cycled live by the
+    // settings popup. Never written back to disk — see `config.example.toml`'s `[panels]`.
+    let mut live_panels = config.panels;
+    // Index into `THEME_NAMES` the "Theme" row is on. Doesn't take effect until the row is
+    // actually cycled (see `live_theme`) — opening the popup alone changes nothing.
+    let mut live_theme_index = 0;
+    // `Some` once the popup has cycled the theme at least once this session; `config.theme` (with
+    // whatever `appearance.toml` set, unlike the three named palettes alone) is used until then.
+    let mut live_theme: Option<Theme> = None;
 
     loop {
         app.poll_bulk(browser, vfs)?;
@@ -816,6 +843,10 @@ fn run(
                     menu: menu.as_ref(),
                     inspect: inspect.as_ref(),
                     usage: usage.as_ref(),
+                    settings: settings.as_ref(),
+                    live_panels,
+                    live_theme: live_theme.as_ref(),
+                    theme_name: THEME_NAMES[live_theme_index],
                 },
             )
         })?;
@@ -834,7 +865,11 @@ fn run(
         match event::read()? {
             Event::Resize(cols, rows) => {
                 if let Some(panes) = shells.as_ref() {
-                    panes.resize(shell_area(Rect::new(0, 0, cols, rows), shell_offset, shell_size))?;
+                    panes.resize(shell_area(
+                        Rect::new(0, 0, cols, rows),
+                        shell_offset,
+                        shell_size,
+                    ))?;
                 }
             }
             Event::Mouse(mouse) => {
@@ -875,6 +910,12 @@ fn run(
                 if inspect.is_some() {
                     if matches!(mouse.kind, MouseEventKind::Down(_)) {
                         inspect = None;
+                    }
+                    continue;
+                }
+                if settings.is_some() {
+                    if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        settings = None;
                     }
                     continue;
                 }
@@ -944,7 +985,11 @@ fn run(
                     || alt_resizing.is_some();
                 if config.browser_mouse && !over_shell && !dragging && app.prompt.is_none() {
                     let hit = browser_mouse::hit_test(
-                        &BrowserLayout::split(frame_area),
+                        &BrowserLayout::split(
+                            frame_area,
+                            live_panels.columns,
+                            live_panels.show_hud,
+                        ),
                         Position::new(mouse.column, mouse.row),
                         Listing::unscrolled(browser.parent_entries().len()),
                         Listing {
@@ -1153,7 +1198,11 @@ fn run(
                             // centered.
                             shell_size.0 += 2 * (mouse.column as i32 - last_col as i32);
                             dragging_shell_width = Some(mouse.column);
-                            panes.resize(shell_area(terminal.size()?.into(), shell_offset, shell_size))?;
+                            panes.resize(shell_area(
+                                terminal.size()?.into(),
+                                shell_offset,
+                                shell_size,
+                            ))?;
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
@@ -1323,6 +1372,39 @@ fn run(
                     }
                     continue;
                 }
+                if let Some(popup) = settings.as_mut() {
+                    match popup.key(key.code) {
+                        SettingsOutcome::Stay => {}
+                        SettingsOutcome::Close => settings = None,
+                        SettingsOutcome::Cycle(row) => {
+                            match row {
+                                SettingsRow::Columns => {
+                                    live_panels.columns = live_panels.columns.cycled();
+                                }
+                                SettingsRow::Theme => {
+                                    live_theme_index = (live_theme_index + 1) % THEME_NAMES.len();
+                                    live_theme = Some(Theme::named(THEME_NAMES[live_theme_index]));
+                                }
+                                SettingsRow::Hud => live_panels.show_hud = !live_panels.show_hud,
+                                SettingsRow::CommandBar => {
+                                    live_panels.show_command_bar = !live_panels.show_command_bar;
+                                }
+                            }
+                            let view = SettingsView {
+                                columns: live_panels.columns,
+                                theme_name: THEME_NAMES[live_theme_index],
+                                show_hud: live_panels.show_hud,
+                                show_command_bar: live_panels.show_command_bar,
+                            };
+                            app.status = Some(format!(
+                                "{}: {} — this session only, not saved",
+                                row.label(),
+                                view.value(row)
+                            ));
+                        }
+                    }
+                    continue;
+                }
 
                 if pending_leader {
                     pending_leader = false;
@@ -1391,6 +1473,11 @@ fn run(
                                 _ => {}
                             }
                         }
+                    } else if key.code == KeyCode::Char('t') {
+                        // With no shell pane open, `leader` followed by `t` otherwise does
+                        // nothing (there is no orientation to flip) — free for the settings
+                        // popup instead.
+                        settings = Some(SettingsPopup::new());
                     }
                     continue;
                 }
@@ -1519,7 +1606,12 @@ fn run(
                     Some(Action::ToggleHidden) => {
                         let shown = browser.toggle_hidden(vfs)?;
                         app.status = Some(
-                            if shown { "hidden files shown" } else { "hidden files hidden" }.into(),
+                            if shown {
+                                "hidden files shown"
+                            } else {
+                                "hidden files hidden"
+                            }
+                            .into(),
                         );
                     }
                     // Starts the resize/move chord for shell panes (see `pending_leader` and
@@ -1680,10 +1772,27 @@ fn draw(
         menu,
         inspect,
         usage,
+        settings,
+        live_panels,
+        live_theme,
+        theme_name,
     } = overlay;
+    // The settings popup's changes are session-only (see `run`'s `live_panels`/`live_theme`), so
+    // every render this frame must read them rather than `config.panels`/`config.theme` directly.
+    // Cloning once here — rather than threading two more parameters through every `hud`/
+    // `overlay_view`/`style` function that already takes `config` — keeps the rest of `draw`
+    // (and every function it calls) unchanged; a `Config` is small next to the `Vec<ListItem>`s
+    // this function already rebuilds every frame regardless.
+    let effective_config = Config {
+        panels: live_panels,
+        theme: live_theme.cloned().unwrap_or_else(|| config.theme.clone()),
+        ..config.clone()
+    };
+    let config = &effective_config;
+
     // Header, the three file columns, then the status bar. The mouse handler hit-tests against
     // this same split (see `browser_mouse`), so the two can't disagree about where a row is.
-    let layout = BrowserLayout::split(frame.area());
+    let layout = BrowserLayout::split(frame.area(), config.panels.columns, config.panels.show_hud);
     let (header_row, status_row) = (layout.header, layout.status);
     let columns = [layout.parent, layout.current, layout.preview];
 
@@ -1698,16 +1807,20 @@ fn draw(
     // accent stripe and file-type colors survive the highlight).
     let selection_style = Style::default().bg(color_from_name(&config.theme.selection_bg));
 
-    // Parent pane — context only, no selection highlight.
-    let parent_items: Vec<ListItem> = browser
-        .parent_entries()
-        .iter()
-        .map(|e| entry_item(e, config, Row::PLAIN, None))
-        .collect();
-    frame.render_widget(
-        List::new(parent_items).block(style::themed_block(config, "..", false)),
-        columns[0],
-    );
+    // Parent pane — context only, no selection highlight. Skipped entirely in two-pane layout,
+    // where `columns[0]` is the zero-width `Rect` `BrowserLayout::split` gives the removed
+    // column, rather than rendering an empty list into it.
+    if columns[0].width > 0 {
+        let parent_items: Vec<ListItem> = browser
+            .parent_entries()
+            .iter()
+            .map(|e| entry_item(e, config, Row::PLAIN, None))
+            .collect();
+        frame.render_widget(
+            List::new(parent_items).block(style::themed_block(config, "..", false)),
+            columns[0],
+        );
+    }
 
     // Current pane — the active column, with the selection highlighted and marked entries
     // prefixed (Ranger-style) so a pending multi-select is visible before acting on it.
@@ -1808,54 +1921,70 @@ fn draw(
         );
     }
 
-    hud::render_header(
-        frame,
-        header_row,
-        &hud::HeaderView {
-            path: browser.current_dir(),
-            home: std::env::var_os("HOME").map(PathBuf::from),
-            marks: browser.marked_paths().len(),
-            marks_total: app.marked_total(),
-            clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
-            progress: app.progress(),
-        },
-        config,
-    );
+    if config.panels.show_hud {
+        hud::render_header(
+            frame,
+            header_row,
+            &hud::HeaderView {
+                path: browser.current_dir(),
+                home: std::env::var_os("HOME").map(PathBuf::from),
+                marks: browser.marked_paths().len(),
+                marks_total: app.marked_total(),
+                clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
+                progress: app.progress(),
+            },
+            config,
+        );
+    }
 
     let mut message = app.status_line();
     if app.prompt.as_ref().is_some_and(|p| p.is_text_input()) {
         // A visible cursor: prompts only ever append to their buffer.
         message.push_str(glyphs::of(config).cursor);
     }
-    hud::render_status_bar(
-        frame,
-        status_row,
-        &hud::StatusView {
-            mode,
-            shell_open: shell.is_some(),
-            entry: browser.selected_entry(),
-            dir_items: dir_preview.as_ref().map(Vec::len),
-            position: (
-                if has_selection {
-                    browser.selected_index() + 1
-                } else {
-                    0
-                },
-                browser.current_entries().len(),
-            ),
-            message: &message,
-            git: app.git_repo(),
-            git_entry: app
-                .git_repo()
-                .zip(browser.selected_entry())
-                .and_then(|(repo, entry)| repo.state_of(&entry.path)),
-        },
-        config,
-    );
+    // Hiding the command bar only suppresses its idle chrome (the mode pill, the selected file's
+    // details, the key hints) — a prompt, a busy/leader/resize/move mode or a transient message
+    // still renders the bar in full, exactly as when the setting is on. The row itself always
+    // stays reserved (see `BrowserLayout::split`), so this only ever leaves it blank, never
+    // reclaims it.
+    let show_status_bar =
+        config.panels.show_command_bar || mode != hud::Mode::Normal || !message.trim().is_empty();
+    if show_status_bar {
+        hud::render_status_bar(
+            frame,
+            status_row,
+            &hud::StatusView {
+                mode,
+                shell_open: shell.is_some(),
+                entry: browser.selected_entry(),
+                dir_items: dir_preview.as_ref().map(Vec::len),
+                position: (
+                    if has_selection {
+                        browser.selected_index() + 1
+                    } else {
+                        0
+                    },
+                    browser.current_entries().len(),
+                ),
+                message: &message,
+                git: app.git_repo(),
+                git_entry: app
+                    .git_repo()
+                    .zip(browser.selected_entry())
+                    .and_then(|(repo, entry)| repo.state_of(&entry.path)),
+            },
+            config,
+        );
+    }
 
     // Drawn last, over the browser columns above — the tiled shell panes, in a box that never
     // covers the status bar and can be dragged off-center by its title bar (see `shell_area`).
-    if let Some(ShellView { panes, offset, size }) = shell {
+    if let Some(ShellView {
+        panes,
+        offset,
+        size,
+    }) = shell
+    {
         panes.render(frame, shell_area(frame.area(), offset, size), config);
     }
     if let Some(view) = usage {
@@ -1866,6 +1995,19 @@ fn draw(
     }
     if let Some(view) = inspect {
         overlay_view::render_inspect(frame, view, config);
+    }
+    if let Some(popup) = settings {
+        overlay_view::render_settings(
+            frame,
+            popup,
+            &SettingsView {
+                columns: config.panels.columns,
+                theme_name,
+                show_hud: config.panels.show_hud,
+                show_command_bar: config.panels.show_command_bar,
+            },
+            config,
+        );
     }
 }
 
@@ -2041,9 +2183,15 @@ mod tests {
             k
         };
         let caps = KeyEventState::CAPS_LOCK;
-        assert_eq!(with_caps_lock_applied(key('q', caps)).code, KeyCode::Char('Q'));
+        assert_eq!(
+            with_caps_lock_applied(key('q', caps)).code,
+            KeyCode::Char('Q')
+        );
         // Caps Lock with Shift held is lowercase again, as in every other terminal.
-        assert_eq!(with_caps_lock_applied(key('Q', caps)).code, KeyCode::Char('q'));
+        assert_eq!(
+            with_caps_lock_applied(key('Q', caps)).code,
+            KeyCode::Char('q')
+        );
         for k in [
             key('q', KeyEventState::NONE),
             key('1', caps),
@@ -2066,7 +2214,10 @@ mod tests {
         let moved = shell_area(Rect::new(0, 0, 100, 40), (5, 3), (0, 0));
         assert_eq!(moved.x, centered.x + 5);
         assert_eq!(moved.y, centered.y + 3);
-        assert_eq!((moved.width, moved.height), (centered.width, centered.height));
+        assert_eq!(
+            (moved.width, moved.height),
+            (centered.width, centered.height)
+        );
     }
 
     #[test]

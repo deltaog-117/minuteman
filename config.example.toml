@@ -52,6 +52,25 @@ interactive_commands = [
 # name = "VLC"
 # command = "vlc {}"
 
+[panels]
+# How many of the miller columns are drawn: "three" (the default — parent | current | preview)
+# or "two" (current | preview, each wider, with the parent column removed rather than left
+# blank). An unrecognised value falls back to "three".
+columns = "three"
+
+# Whether the header row (breadcrumb, marks/clipboard pills) is drawn. Hiding it gives its row
+# back to the file columns, the same as switching to "two" above frees the parent column's width.
+show_hud = true
+
+# Whether the status bar's idle chrome — the mode pill, the selected file's details, the key
+# hints — is drawn while nothing else is happening. The row itself always stays, and a rename/
+# delete prompt, a `:` command or a transient message (like "pane orientation toggled") is never
+# hidden by this — only the passive display in between.
+show_command_bar = true
+
+# All three can also be changed live, for the running session only, from the settings popup —
+# press `space` then `t` with no shell pane open. It does not write back to this file.
+
 [keys]
 # The arrow keys browse like hjkl: up/down move the selection, right opens the selected
 # directory and left goes up. Naming a key here replaces the whole list for that action, so
@@ -105,12 +124,14 @@ disk_usage = ["u"]
 # Toggles a mark on the current entry, Ranger-style — press once per file to queue it for a
 # later bulk action instead of acting on it immediately.
 select = ["v"]
-# The one leader key for every mini-shell command. With a shell open and not being typed into
-# (tap Alt or click the browser to stop typing), leader followed by: leader again = type in the shell;
-# h/j/k/l or the arrows = focus the pane in that direction; "|" = split side by side; "-" = split
-# stacked; x = close the focused pane; r/m = resize/move mode (hjkl to nudge, esc to leave);
-# t = flip the split's orientation. Does nothing when no shell is open. While typing in a shell,
-# every key — this one included — goes to the shell.
+# The one leader key for every mini-shell command, and for the settings popup. With a shell open
+# and not being typed into (tap Alt or click the browser to stop typing), leader followed by:
+# leader again = type in the shell; h/j/k/l or the arrows = focus the pane in that direction;
+# "|" = split side by side; "-" = split stacked; x = close the focused pane; r/m = resize/move
+# mode (hjkl to nudge, esc to leave); t = flip the split's orientation. With no shell open, leader
+# then t instead opens the settings popup (see [panels] above) — j/k moves its cursor, h/l or
+# enter changes the row under it, and Esc or q closes it. While typing in a shell, every key —
+# this one included — goes to the shell.
 leader = ["space"]
 
 # Colors, text styles (bold, italic, ...), glyphs and fonts live in their own file,

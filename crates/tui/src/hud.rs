@@ -876,6 +876,7 @@ mod tests {
             ui: theming::Ui::default(),
             styles: theming::Styles::default(),
             font: theming::Font::default(),
+            panels: theming::PanelsConfig::default(),
         }
     }
 

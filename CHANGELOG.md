@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `theming`: a `[panels]` table in `config.toml` — `columns` (`"three"`, the default parent |
+  current | preview, or `"two"` to remove the parent column and give its width to
+  `current`/`preview`), `show_hud` (the header row) and `show_command_bar` (the status bar's idle
+  chrome only; a prompt, a busy/leader/resize/move mode or a transient message always still shows
+  it). An unrecognised `columns` value falls back to `"three"`. See `config.example.toml`.
+- `tui`: a settings popup, `space` then `t` with no shell pane open (previously a no-op there).
+  `j`/`k` moves the cursor, `h`/`l`/`enter` cycles the row under it — Columns, Theme
+  (`neon`/`classic`/`dracula`), HUD, Command bar — and `Esc`/`q` closes it. Changes apply at once
+  but are session-only: nothing is written back to `config.toml`/`appearance.toml` yet.
+- `scripts/check`: format check, clippy and the whole workspace's tests, in one command.
 - `tui`: a disk usage view. `u` (new `[keys] disk_usage`, `Action::DiskUsage`), or "Disk usage" in
   the right-click menu of a folder or of empty space, covers the screen with what is taking the
   space in the browsed folder, biggest first: each entry with its size, its share of the folder

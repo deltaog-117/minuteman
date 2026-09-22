@@ -29,6 +29,7 @@ use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
 use crate::glyphs;
 use crate::hud::{fit_width, pad_to, text_width};
 use crate::inspect::InspectView;
+use crate::settings_popup::{SettingsPopup, SettingsView};
 use crate::style;
 
 /// The panel's widest and narrowest width in cells; the value column takes what the labels leave.
@@ -211,6 +212,55 @@ pub fn render_inspect(frame: &mut Frame<'_>, view: &InspectView, config: &Config
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Esc, Enter or a click closes",
+        Style::default().fg(style::color(&theme.border_fg)),
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Draws the settings popup: one row per setting, the cursor's row highlighted the same way a
+/// selected file is. Session-only — nothing here is written back to a config file.
+pub fn render_settings(
+    frame: &mut Frame<'_>,
+    popup: &SettingsPopup,
+    view: &SettingsView,
+    config: &Config,
+) {
+    let theme = &config.theme;
+    let rows = popup.rows();
+    let area = panel_area(frame.area(), rows.len());
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, "settings", true);
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    frame.render_widget(block, area);
+
+    let value_width = usize::from(inner.width).saturating_sub(LABEL_COLUMN);
+    let label_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+
+    let mut lines = vec![Line::raw("")];
+    lines.extend(rows.iter().enumerate().map(|(i, row)| {
+        let base = if i == popup.cursor() {
+            selected_style
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::styled(pad_to(row.label(), LABEL_COLUMN), label_style.patch(base)),
+            Span::styled(
+                fit_width(&view.value(*row), value_width),
+                value_style.patch(base),
+            ),
+        ])
+    }));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "j/k moves, h/l/enter changes, Esc closes — session only, not saved",
         Style::default().fg(style::color(&theme.border_fg)),
     ));
     frame.render_widget(Paragraph::new(lines), inner);

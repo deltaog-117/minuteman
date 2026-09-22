@@ -21,6 +21,7 @@ use serde::de::DeserializeOwned;
 
 use crate::appearance::{Font, RawFont, RawStyles, Styles};
 use crate::keymap::{KeyMap, RawKeyMap};
+use crate::panels::{PanelsConfig, RawPanels};
 use crate::theme::{RawTheme, Theme};
 use crate::ui::{RawUi, Ui};
 
@@ -54,6 +55,7 @@ struct RawConfig {
     keys: RawKeyMap,
     theme: RawTheme,
     ui: RawUi,
+    panels: RawPanels,
 }
 
 /// Programs that draw on the whole terminal or read the keyboard, so a `:` command that names
@@ -109,6 +111,9 @@ pub struct Config {
     pub styles: Styles,
     /// The font `init-terminal` prints; not something the TUI itself can apply.
     pub font: Font,
+    /// How many file columns are drawn and whether the header/status-bar chrome is shown. The
+    /// settings popup (`Space` then `t`) edits this live, in memory, for the running session.
+    pub panels: PanelsConfig,
 }
 
 impl Config {
@@ -143,6 +148,7 @@ impl Config {
             ui: config.ui.overlay(appearance.ui).into(),
             styles: appearance.style.into(),
             font: appearance.font.into(),
+            panels: config.panels.into(),
         }
     }
 
@@ -177,6 +183,7 @@ fn parse<T: DeserializeOwned + Default>(file: &str, text: Option<&str>) -> T {
 mod tests {
     use super::*;
     use crate::appearance::Mods;
+    use crate::panels::PanelsConfig;
     use crate::ui::GlyphSet;
 
     #[test]
@@ -205,6 +212,8 @@ mod tests {
         let keys: KeyMap = raw.keys.into();
         let default_keys: KeyMap = RawKeyMap::default().into();
         assert_eq!(keys, default_keys);
+        let panels: PanelsConfig = raw.panels.into();
+        assert_eq!(panels, PanelsConfig::default());
     }
 
     #[test]
@@ -340,6 +349,29 @@ mod tests {
         assert_eq!(config.theme, Theme::default());
         assert_eq!(config.styles.dir, Mods::parse(&["bold"]));
         assert_eq!(config.font, Font::default());
+    }
+
+    #[test]
+    fn panels_default_to_three_pane_with_hud_and_command_bar_shown() {
+        let config = Config::from_sources(None, None);
+        assert_eq!(config.panels, PanelsConfig::default());
+    }
+
+    #[test]
+    fn a_partial_panels_table_falls_back_per_missing_field() {
+        let config = Config::from_sources(Some("[panels]\ncolumns = \"two\"\n"), None);
+        assert_eq!(config.panels.columns, crate::panels::ColumnLayout::TwoPane);
+        // show_hud/show_command_bar were not specified, so they keep their defaults.
+        assert!(config.panels.show_hud);
+        assert!(config.panels.show_command_bar);
+
+        let config = Config::from_sources(Some("[panels]\nshow_hud = false\n"), None);
+        assert_eq!(
+            config.panels.columns,
+            crate::panels::ColumnLayout::ThreePane
+        );
+        assert!(!config.panels.show_hud);
+        assert!(config.panels.show_command_bar);
     }
 
     #[test]
