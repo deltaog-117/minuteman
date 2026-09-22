@@ -25,8 +25,11 @@
 use crossterm::event::KeyCode;
 use theming::ColumnLayout;
 
-/// The built-in palettes the "Theme" row cycles through, in order.
-pub const THEME_NAMES: [&str; 3] = ["neon", "classic", "dracula"];
+/// The built-in palettes the "Theme" row cycles through, in order. `catppuccin-latte` isn't
+/// here — it's only reached via `Theme::auto` on a light terminal, or by naming it explicitly in
+/// `appearance.toml`; this cycle sticks to dark-background palettes, like `neon`, `dracula` and
+/// `nord` already do.
+pub const THEME_NAMES: [&str; 5] = ["neon", "classic", "dracula", "catppuccin", "nord"];
 
 /// The current value of every row, for `overlay_view::render_settings` to draw. Built fresh each
 /// frame from `main`'s live session state, not stored on the popup itself.

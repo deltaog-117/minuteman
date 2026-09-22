@@ -873,6 +873,7 @@ mod tests {
             open_with: Vec::new(),
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
+            theme_is_customized: false,
             ui: theming::Ui::default(),
             styles: theming::Styles::default(),
             font: theming::Font::default(),

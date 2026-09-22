@@ -106,6 +106,11 @@ pub struct Config {
     pub open_with: Vec<OpenWith>,
     pub keys: KeyMap,
     pub theme: Theme,
+    /// Whether `[theme]` (a `name`, or even a single overridden field) was actually set in either
+    /// config file. `false` is what tells `main` it's safe to replace `theme` with a live,
+    /// terminal-background-adapted pick (`Theme::auto`) instead of the static default it already
+    /// carries as a fallback — any explicit customization, however small, is left alone.
+    pub theme_is_customized: bool,
     pub ui: Ui,
     /// Bold, italic, ... per interface element.
     pub styles: Styles,
@@ -134,6 +139,9 @@ impl Config {
         let config: RawConfig = parse("config.toml", config);
         let appearance: RawAppearance = parse("appearance.toml", appearance);
 
+        let theme = config.theme.overlay(appearance.theme);
+        let theme_is_customized = theme != RawTheme::default();
+
         Self {
             alt_tap: config.alt_tap.unwrap_or(true),
             browser_mouse: config.browser_mouse.unwrap_or(true),
@@ -144,7 +152,8 @@ impl Config {
                 .unwrap_or_else(default_interactive_commands),
             open_with: config.open_with,
             keys: config.keys.into(),
-            theme: config.theme.overlay(appearance.theme).into(),
+            theme: theme.into(),
+            theme_is_customized,
             ui: config.ui.overlay(appearance.ui).into(),
             styles: appearance.style.into(),
             font: appearance.font.into(),
@@ -267,6 +276,10 @@ mod tests {
         let text = include_str!("../../../appearance.example.toml");
         let config = Config::from_sources(None, Some(text));
         assert_eq!(config.theme, Theme::default());
+        // The example spells out `name = "neon"` plus every field, so it counts as an explicit
+        // pin — it must never get silently swapped for an auto-detected palette (see
+        // `theme_is_customized_is_false_only_when_the_theme_table_is_entirely_absent`).
+        assert!(config.theme_is_customized);
         assert_eq!(config.ui, Ui::default());
         assert_eq!(config.styles, Styles::default());
         assert_eq!(config.font, Font::default());
@@ -310,6 +323,21 @@ mod tests {
         // Dracula's magenta selection, not neon's violet.
         assert_eq!(config.theme.selection_bg, "magenta");
         assert_ne!(config.theme, Theme::default());
+        assert!(config.theme_is_customized);
+    }
+
+    /// Even a single overridden field (no `name` at all) must count as customized — otherwise
+    /// `main` would blow away that one field by wholesale-replacing `theme` with an auto-detected
+    /// palette on top of it.
+    #[test]
+    fn theme_is_customized_is_false_only_when_the_theme_table_is_entirely_absent() {
+        assert!(!Config::from_sources(None, None).theme_is_customized);
+        assert!(!Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None).theme_is_customized);
+        assert!(
+            Config::from_sources(Some("[theme]\nborder_fg = \"green\"\n"), None)
+                .theme_is_customized
+        );
+        assert!(Config::from_sources(None, Some("[theme]\nname = \"nord\"\n")).theme_is_customized);
     }
 
     #[test]
@@ -334,6 +362,7 @@ mod tests {
             Some("this is [not valid toml"),
         );
         assert_eq!(config.theme, Theme::default());
+        assert!(!config.theme_is_customized);
         assert_eq!(config.styles, Styles::default());
         let down: KeyMap = RawKeyMap {
             move_down: vec!["n".into()],
@@ -347,6 +376,10 @@ mod tests {
     fn no_files_at_all_is_the_built_in_look() {
         let config = Config::from_sources(None, None);
         assert_eq!(config.theme, Theme::default());
+        assert!(
+            !config.theme_is_customized,
+            "nothing set [theme] at all, so main is free to auto-detect"
+        );
         assert_eq!(config.styles.dir, Mods::parse(&["bold"]));
         assert_eq!(config.font, Font::default());
     }

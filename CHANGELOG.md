@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `theming`: two new built-in palettes, `catppuccin` (Mocha) and `nord`, plus `catppuccin-latte`
+  (Catppuccin's light flavor, reachable by name but not in the settings popup's cycle). The
+  settings popup's Theme row now cycles `neon`/`classic`/`dracula`/`catppuccin`/`nord`.
+- `tui`/`theming`: the default look now adapts to the terminal's own background instead of always
+  being the neon palette. When `[theme]` is left out of both config files entirely, Minuteman asks
+  the terminal for its background color (OSC 11, bundled into the existing graphics-capability
+  probe in `ImagePreview::new`) and picks Catppuccin Mocha or Latte to match it, falling back to
+  `neon` if the terminal never answers. Setting anything under `[theme]` — a `name`, or even one
+  field — opts back out and pins the look exactly as configured; `Config::theme_is_customized`
+  carries that distinction. See `appearance.example.toml`.
+
 - `theming`: a `[panels]` table in `config.toml` — `columns` (`"three"`, the default parent |
   current | preview, or `"two"` to remove the parent column and give its width to
   `current`/`preview`), `show_hud` (the header row) and `show_command_bar` (the status bar's idle

@@ -43,6 +43,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-21 | Richer Status Line: Marked Size and Git | Marked total in the header pill via the Inspect walk; git segment from `git status --porcelain=v2` run off-thread with `--no-optional-locks` (COA A); `gix` and a marked-size-only cut rejected | ✅ Confirmed |
 | 2026-09-21 | Preview Extras, Stage 1 | Scrolling preview (`J`/`K`, wheel), hex view of the first 64 KiB, in-process zip/tar/tar.gz listing with every read bounded (COA A); shelling out to `bsdtar` and hand-parsing rejected | ✅ Confirmed |
 | 2026-09-21 | Disk Usage View | Modal `du`-style view scanning one folder at a time off-thread, on-disk size by default, hard links once, same filesystem only, symlinks not followed (COA A); a size column (B) and a cached tree with delete (C) rejected | ✅ Confirmed |
+| 2026-09-22 | Adaptive Default Theme | OSC 11 terminal-background query via `ratatui-image`'s existing probe, resolved to Catppuccin Mocha/Latte (COA A); reading the OS/DE's light/dark setting (B) and a `$COLORFGBG` heuristic (C) rejected | ✅ Confirmed |
 
 ---
 
@@ -3015,6 +3016,93 @@ overlapping in either column layout with the HUD shown or hidden. A dedicated te
 produced, so this cycle could not silently change the default layout. Not verified in a real
 terminal or PTY session — the popup's mouse dismissal path and its on-screen rendering were
 checked by reading the code and the unit tests, not by running the compiled binary interactively.
+
+---
+
+### Adaptive Default Theme: an OSC 11 Background Query, Reusing `ratatui-image`'s Own Probe (COA A)
+
+**Date:** 2026-09-22
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+The request was to make the default theme "adapt to the vibe of the overall user's desktop"
+instead of always being the neon-cyberpunk palette, keep neon available as an explicit pick, and
+add Catppuccin and Nord as two more built-in palettes.
+
+#### Options Considered
+
+**A**, an OSC 11 escape-sequence query: ask the terminal emulator itself for its background color
+at startup, classify it dark/light, and pick a palette to match. Terminal-agnostic and reflects
+whatever the user actually themed their terminal to — which, for a program that only ever renders
+inside that terminal, is the more relevant "vibe" than the desktop's own setting. **B**, read the
+OS/desktop environment's light/dark setting directly (`org.freedesktop.appearance` over D-Bus on
+Linux, `AppleInterfaceStyle` on macOS, the registry on Windows): reflects the literal desktop
+setting, but needs a new dependency and a different code path per platform, gives up entirely over
+SSH to a headless host, and can disagree with a terminal deliberately themed differently from the
+desktop (a common thing to do). **C**, a `$COLORFGBG`-only heuristic: no new dependency, but many
+modern terminals (kitty, alacritty, wezterm) don't set that variable at all, so it degrades to a
+guess far more often than A.
+
+Suggested and chosen: **A**. The decisive fact, found while surveying `crates/tui/src/main.rs`'s
+existing startup probes, is that `ratatui-image` (already a dependency, used for
+`Picker::from_query_stdio()`'s graphics-protocol detection) already implements exactly this OSC 11
+round trip internally, gated behind `QueryStdioOptions.terminal_background_color_osc` and surfaced
+as `Capability::Background(r, g, b)` in `Picker::capabilities()`. No hand-rolled raw-stdio reading
+(spawn a thread, race it against a timeout, parse a partial escape sequence) was needed — the
+existing, already-tested probe in `ImagePreview::new` just had one option flipped on, and its
+result read back out through a new `detected_background()` getter alongside the picker itself.
+
+#### Deciding what "nothing configured" means
+
+The one design question with real blast radius was: since `appearance.example.toml` has always
+shipped with `name = "neon"` spelled out, how does auto-detection avoid silently overriding every
+user who ever ran `minuteman init-appearance` and kept the example verbatim? Comparing the
+*resolved* `Theme` against `Theme::default()` was rejected — `name = "neon"` resolves to the exact
+same `Theme` value as an absent `name` (both fall through `Theme::named`'s catch-all), so that
+comparison can't tell an explicit pin from silence. The fix was to compare the *merged, unresolved*
+`RawTheme` (config.toml's `[theme]` overlaid with appearance.toml's) against `RawTheme::default()`
+instead, exposed as a new `Config::theme_is_customized: bool`. `RawTheme` gained `PartialEq, Eq`
+for this. The shipped example sets every field, so it is unambiguously "customized" and keeps
+`neon` exactly as before; only a config with no `[theme]` table in either file at all — the
+genuinely fresh-install case — resolves through `Theme::auto`. A user who overrides just one field
+(no `name`) also counts as customized, deliberately: mixing an auto-detected base with field-level
+overrides would need theme resolution deferred until after the terminal probe runs (today it
+happens synchronously inside `Config::from_sources`, with no I/O), which was out of scope for what
+was asked.
+
+`Theme::auto(is_dark: Option<bool>)` is a pure function in the `theming` crate (dark → Catppuccin
+Mocha, light → Catppuccin Latte, `None` — the terminal never answered — → the original neon
+default); `Theme::is_dark(r, g, b)` classifies by ITU-R BT.601 luminance. Neither crate does
+terminal I/O — that stays in `tui`, matching the existing split (`style.rs`'s truecolor detection,
+`osc52.rs`'s clipboard escape codes) — so `main` is the only place that calls `Theme::auto` with a
+live probe result.
+
+#### Trade-offs and what was left
+
+Catppuccin Latte (the light flavor) is reachable by name in `appearance.toml` but deliberately left
+out of the settings popup's `THEME_NAMES` cycle, which sticks to dark-background palettes like
+`neon`/`dracula`/`nord` already did — cycling into a light palette mid-session, on a terminal the
+popup has no way to re-probe, seemed more likely to surprise than help. Auto-detection only ever
+picks between two Catppuccin flavors, not a wider blend of the detected color into every field —
+a literal "generate a palette from these exact RGB values" approach was considered and rejected as
+open-ended color-design work with no clear stopping point, for a first cut of "adapts to the
+desktop" this size.
+
+#### Verification
+
+`scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy --workspace
+--all-targets -- -D warnings` clean, `cargo test --workspace` green (`tui` 328, `theming` 52,
+including new tests for `catppuccin`/`catppuccin-latte`/`nord` being reachable by name,
+`Theme::auto`'s three branches, `Theme::is_dark`'s luminance classification, and
+`Config::theme_is_customized` being `false` only when `[theme]` is absent from both files — a
+single overridden field, a bare `name`, or the shipped `appearance.example.toml` all correctly
+count as customized). Not verified against a real terminal's actual OSC 11 reply — this sandbox has
+no interactive TTY to test that round trip against a live terminal emulator, so the query path
+itself rests on `ratatui-image`'s own test coverage and the same timeout/fallback shape its
+existing graphics-probe call already relied on; only the pure classification/resolution logic
+downstream of a detected color was exercised directly.
 
 ---
 

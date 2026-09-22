@@ -26,7 +26,8 @@
 
 use std::path::{Path, PathBuf};
 
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::cap_parser::QueryStdioOptions;
+use ratatui_image::picker::{Capability, Picker};
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -57,6 +58,10 @@ enum DecodeOutcome {
 
 pub struct ImagePreview {
     picker: Picker,
+    /// The terminal's own background color, from the same stdio round-trip `Picker` already runs
+    /// at startup (an OSC 11 query bundled in alongside the graphics-capability probe). `None`
+    /// when the terminal never answered. `theme::auto` (see `main`) is the only reader.
+    detected_background: Option<(u8, u8, u8)>,
     protocol: ThreadProtocol,
     current: Option<PathBuf>,
     status: PreviewStatus,
@@ -71,17 +76,27 @@ pub struct ImagePreview {
 }
 
 impl ImagePreview {
-    /// Queries the terminal for graphics-protocol support (Kitty/iTerm2/Sixel), falling back to
-    /// halfblocks if the terminal never answers or a real error occurs — a typo'd or unusual
-    /// terminal must never block startup, the same rule `Config::load` and `Theme::named`
-    /// already follow for their own fallbacks.
+    /// Queries the terminal for graphics-protocol support (Kitty/iTerm2/Sixel) and its background
+    /// color (OSC 11, for `theme::auto`), falling back to halfblocks and no detected background
+    /// if the terminal never answers or a real error occurs — a typo'd or unusual terminal must
+    /// never block startup, the same rule `Config::load` and `Theme::named` already follow for
+    /// their own fallbacks.
     pub fn new(handle: tokio::runtime::Handle) -> Self {
-        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        let picker = Picker::from_query_stdio_with_options(QueryStdioOptions {
+            terminal_background_color_osc: true,
+            ..QueryStdioOptions::default()
+        })
+        .unwrap_or_else(|_| Picker::halfblocks());
+        let detected_background = picker.capabilities().iter().find_map(|cap| match cap {
+            Capability::Background(r, g, b) => Some((*r, *g, *b)),
+            _ => None,
+        });
         let (resize_request_tx, resize_request_rx) = unbounded_channel();
         let (resize_response_tx, resize_response_rx) = unbounded_channel();
         let (decode_tx, decode_rx) = unbounded_channel();
         Self {
             picker,
+            detected_background,
             protocol: ThreadProtocol::new(resize_request_tx, None),
             current: None,
             status: PreviewStatus::Empty,
@@ -97,6 +112,12 @@ impl ImagePreview {
 
     pub fn status(&self) -> PreviewStatus {
         self.status
+    }
+
+    /// The terminal's background color as reported by the OSC 11 query `new` already ran, or
+    /// `None` if it never answered.
+    pub fn detected_background(&self) -> Option<(u8, u8, u8)> {
+        self.detected_background
     }
 
     pub fn protocol_mut(&mut self) -> &mut ThreadProtocol {

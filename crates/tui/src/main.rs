@@ -568,6 +568,12 @@ impl Previews {
         }
     }
 
+    /// The terminal's background color, from the image pipeline's own startup probe (see
+    /// `ImagePreview::new`). `None` if the terminal never answered the OSC 11 query.
+    fn detected_background(&self) -> Option<(u8, u8, u8)> {
+        self.image.detected_background()
+    }
+
     /// `selected` is the entry under the cursor. An image goes to the image pipeline; any other
     /// file (text, an archive, a binary) to the one that reads it for the scrolling pane; a folder
     /// to neither, since the pane lists its children instead.
@@ -619,7 +625,7 @@ fn main() -> Result<()> {
     };
     let start_dir = start_dir.canonicalize().unwrap_or(start_dir);
 
-    let config = Config::load();
+    let mut config = Config::load();
     let vfs = LocalVfs;
     let mut browser = BrowserState::with_show_hidden(&vfs, start_dir, config.show_hidden)?;
 
@@ -639,6 +645,15 @@ fn main() -> Result<()> {
     let mut previews = Previews::new(runtime.handle().clone());
     if keyboard_protocol {
         guard.enhance_keyboard()?;
+    }
+    // Nothing in `[theme]` was set, so pick a look from the terminal's own background instead of
+    // always falling back to the static neon default — an explicit `name` or even one overridden
+    // field always wins over this (see `Config::theme_is_customized`).
+    if !config.theme_is_customized {
+        let is_dark = previews
+            .detected_background()
+            .map(|(r, g, b)| Theme::is_dark(r, g, b));
+        config.theme = Theme::auto(is_dark);
     }
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;

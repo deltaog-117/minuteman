@@ -628,6 +628,21 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   session-only: there is no precedent anywhere in this codebase for writing TOML back out, and
   doing it losslessly (both config files are heavily commented) is a real feature of its own — see
   *persist the settings popup's changes to disk* under Medium Priority.
+- ✅ **Adaptive default theme, plus Catppuccin and Nord** – the built-in default is no longer
+  always the neon palette: with `[theme]` left out of both config files, Minuteman queries the
+  terminal's background color over OSC 11 (bundled into `ImagePreview::new`'s existing
+  graphics-capability probe, via `ratatui-image`'s `terminal_background_color_osc` option — no
+  hand-rolled stdio parsing needed) and picks Catppuccin Mocha or Latte to match it, falling back
+  to the original neon-cyberpunk look if the terminal never answers. Any explicit `[theme]` —
+  a `name`, or even a single overridden field — always wins over this; the new
+  `Config::theme_is_customized` flag (from comparing the merged `RawTheme` against its `Default`)
+  is what tells `main` it's safe to auto-detect. Two new built-in palettes, `catppuccin` (Mocha)
+  and `nord`, join `neon`/`classic`/`dracula` in the settings popup's Theme cycle;
+  `catppuccin-latte` is reachable by name in `appearance.toml` but stays out of that cycle, which
+  sticks to dark-background palettes. Chosen as COA A (an OSC 11 background query) over reading
+  the OS/desktop-environment's own light/dark setting (B — platform-specific, needs a new
+  dependency on Linux, and doesn't reflect a terminal deliberately themed differently from the
+  desktop) or a `$COLORFGBG`-only heuristic (C — many modern terminals don't set it).
 
 ---
 
@@ -746,9 +761,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the new neon theme and HUD (header, size/age columns, scrollbar, powerline
-   status bar) are the default (`COLORTERM=truecolor` for full color;
-   `name = "classic"` for the old look). Press `s` to open a shell and type in it (`Tab` completes, spaces work).
+1. `cargo run -p tui` — the HUD (header, size/age columns, scrollbar, powerline status bar) and an
+   adaptive theme are the default (`COLORTERM=truecolor` for full color; the theme now follows
+   your terminal's own background — Catppuccin Mocha or Latte — unless `[theme]` is set in
+   `appearance.toml`, e.g. `name = "neon"` for the original cyberpunk look or `name = "classic"`
+   for the old plain one). Press `s` to open a shell and type in it (`Tab` completes, spaces work).
    `Alt` (tap) stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
    `space space` goes back to typing, `space x` closes a pane. `space t` flips a split, and
    `space r`/`space m` plus `hjkl` resize/move (`Esc` leaves either mode).

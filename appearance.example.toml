@@ -11,9 +11,17 @@
 # [theme] — colors
 # ---------------------------------------------------------------------------------------------
 [theme]
-# Selects a built-in base palette: "neon" (the default — cyberpunk cyan/magenta, true color),
-# "classic" (the original plain 16-color look), or "dracula". An unrecognised name falls back to
-# "neon". Any field below overrides just that field on top of the chosen palette.
+# Selects a built-in base palette: "neon" (cyberpunk cyan/magenta, true color — the original
+# default), "classic" (the plain 16-color look), "dracula", "catppuccin" (Mocha), "catppuccin-latte"
+# (its light counterpart), or "nord". An unrecognised name falls back to "neon".
+#
+# Leaving the whole [theme] table out of both config files entirely — not just this line — is the
+# real default now: Minuteman asks the terminal for its background color (OSC 11) and picks
+# Catppuccin Mocha or Latte to match it, falling back to "neon" if the terminal never answers.
+# Setting anything at all here, even a single field below with no `name`, opts back out of that
+# and pins the look exactly as written.
+#
+# Any field below overrides just that field on top of the chosen palette.
 name = "neon"
 
 # Colors are a basic name — black, red, green, yellow, blue, magenta, cyan, white, gray (grey also

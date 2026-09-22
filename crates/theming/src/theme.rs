@@ -63,8 +63,33 @@ impl Theme {
         match name.to_lowercase().as_str() {
             "classic" => Self::classic(),
             "dracula" => Self::dracula(),
+            "catppuccin" => Self::catppuccin(),
+            "catppuccin-latte" => Self::catppuccin_latte(),
+            "nord" => Self::nord(),
             _ => Self::default(),
         }
+    }
+
+    /// What "nothing configured" resolves to: `is_dark` comes from a live OSC 11 query of the
+    /// terminal's own background color (see `crates/tui/src/image_preview.rs`, which bundles
+    /// that query into its existing graphics-capability probe), classified by [`Theme::is_dark`].
+    /// `None` means the terminal never answered — most terminals that don't support the query
+    /// simply stay silent, so this is not a "light" signal — and falls back to the original
+    /// neon-cyberpunk look rather than guessing. An explicit `[theme]` (a `name`, or even just one
+    /// overridden field) always wins over this; see `Config::theme_is_customized`.
+    pub fn auto(is_dark: Option<bool>) -> Self {
+        match is_dark {
+            Some(true) => Self::catppuccin(),
+            Some(false) => Self::catppuccin_latte(),
+            None => Self::default(),
+        }
+    }
+
+    /// Classifies an OSC-11-reported background color as dark (`true`) or light, by perceptual
+    /// luminance (ITU-R BT.601).
+    pub fn is_dark(r: u8, g: u8, b: u8) -> bool {
+        let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
+        luminance < 128.0
     }
 
     /// The original 16-color look, from before the neon palette became the default.
@@ -113,6 +138,80 @@ impl Theme {
             separator: "auto".into(),
         }
     }
+
+    /// Catppuccin's dark flavor (Mocha): mauve and pink accents on a deep blue-black.
+    fn catppuccin() -> Self {
+        Self {
+            selection_bg: "#45475a".into(),
+            selection_fg: "#cdd6f4".into(),
+            border_fg: "#585b70".into(),
+            border_focused_fg: "#cba6f7".into(),
+            title_fg: "#b4befe".into(),
+            accent_fg: "#f5c2e7".into(),
+            dir_fg: "#89b4fa".into(),
+            file_fg: "#cdd6f4".into(),
+            source_fg: "#a6e3a1".into(),
+            config_fg: "#f9e2af".into(),
+            doc_fg: "#cba6f7".into(),
+            archive_fg: "#fab387".into(),
+            media_fg: "#f5c2e7".into(),
+            status_fg: "#a6adc8".into(),
+            bar_bg: "#181825".into(),
+            danger_fg: "#f38ba8".into(),
+            border_type: "rounded".into(),
+            separator: "auto".into(),
+        }
+    }
+
+    /// Catppuccin's light flavor (Latte) — the same family, inverted for a light background.
+    /// Only reachable by name (`"catppuccin-latte"`) or via [`Theme::auto`] on a light terminal;
+    /// it isn't in the settings popup's cycle, which sticks to dark-background palettes.
+    fn catppuccin_latte() -> Self {
+        Self {
+            selection_bg: "#bcc0cc".into(),
+            selection_fg: "#4c4f69".into(),
+            border_fg: "#acb0be".into(),
+            border_focused_fg: "#8839ef".into(),
+            title_fg: "#7287fd".into(),
+            accent_fg: "#ea76cb".into(),
+            dir_fg: "#1e66f5".into(),
+            file_fg: "#4c4f69".into(),
+            source_fg: "#40a02b".into(),
+            config_fg: "#df8e1d".into(),
+            doc_fg: "#8839ef".into(),
+            archive_fg: "#fe640b".into(),
+            media_fg: "#ea76cb".into(),
+            status_fg: "#6c6f85".into(),
+            bar_bg: "#e6e9ef".into(),
+            danger_fg: "#d20f39".into(),
+            border_type: "rounded".into(),
+            separator: "auto".into(),
+        }
+    }
+
+    /// Nord: cool blue-gray frost tones on a deep slate background.
+    fn nord() -> Self {
+        Self {
+            selection_bg: "#434c5e".into(),
+            selection_fg: "#eceff4".into(),
+            border_fg: "#4c566a".into(),
+            border_focused_fg: "#88c0d0".into(),
+            title_fg: "#81a1c1".into(),
+            accent_fg: "#b48ead".into(),
+            dir_fg: "#88c0d0".into(),
+            file_fg: "#d8dee9".into(),
+            source_fg: "#a3be8c".into(),
+            config_fg: "#ebcb8b".into(),
+            doc_fg: "#8fbcbb".into(),
+            archive_fg: "#d08770".into(),
+            media_fg: "#b48ead".into(),
+            status_fg: "#81a1c1".into(),
+            bar_bg: "#3b4252".into(),
+            danger_fg: "#bf616a".into(),
+            border_type: "rounded".into(),
+            separator: "auto".into(),
+        }
+    }
 }
 
 /// The built-in default: a cyberpunk neon palette — cyan and magenta on the terminal's own dark
@@ -146,7 +245,7 @@ impl Default for Theme {
 /// defaulting to the neon one); any individually specified field overrides that palette's
 /// value for just that field. Every field is optional so a partial table only overrides what it
 /// mentions, the same fallback shape `RawKeyMap` uses for keybindings.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct RawTheme {
     pub name: Option<String>,
@@ -289,5 +388,46 @@ mod tests {
         };
         let theme: Theme = raw.into();
         assert_eq!(theme, Theme::default());
+    }
+
+    #[test]
+    fn catppuccin_and_nord_are_reachable_by_name() {
+        let mocha: Theme = RawTheme {
+            name: Some("catppuccin".into()),
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(mocha.selection_bg, "#45475a");
+        assert_ne!(mocha, Theme::default());
+
+        let latte: Theme = RawTheme {
+            name: Some("catppuccin-latte".into()),
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(latte.bar_bg, "#e6e9ef");
+        assert_ne!(latte, mocha);
+
+        let nord: Theme = RawTheme {
+            name: Some("nord".into()),
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(nord.border_focused_fg, "#88c0d0");
+    }
+
+    #[test]
+    fn auto_picks_catppuccin_by_detected_darkness_and_falls_back_when_unknown() {
+        assert_eq!(Theme::auto(Some(true)), Theme::catppuccin());
+        assert_eq!(Theme::auto(Some(false)), Theme::catppuccin_latte());
+        assert_eq!(Theme::auto(None), Theme::default());
+    }
+
+    #[test]
+    fn is_dark_classifies_by_luminance() {
+        assert!(Theme::is_dark(0, 0, 0));
+        assert!(Theme::is_dark(0x1e, 0x1e, 0x2e)); // Catppuccin Mocha's own background
+        assert!(!Theme::is_dark(255, 255, 255));
+        assert!(!Theme::is_dark(0xef, 0xf1, 0xf5)); // Catppuccin Latte's own background
     }
 }
