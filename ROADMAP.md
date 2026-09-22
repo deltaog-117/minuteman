@@ -643,6 +643,25 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   the OS/desktop-environment's own light/dark setting (B — platform-specific, needs a new
   dependency on Linux, and doesn't reflect a terminal deliberately themed differently from the
   desktop) or a `$COLORFGBG`-only heuristic (C — many modern terminals don't set it).
+- ✅ **Appearance popup: live color/border/separator/glyph editing, mouse and keyboard (COA C)** –
+  `a` (or "Appearance…" on blank space's right-click menu) opens a new modal popup, styled like
+  the settings popup but genuinely usable by mouse: a click on a row acts on it exactly like
+  `Enter` would (new `appearance_popup::hit`/`click_row`, mirroring `ContextMenu`'s hit-testing
+  rather than the settings/Inspect popups' click-anywhere-to-dismiss). Six colors (Accent, Focused
+  border, Selection, Directory, Status bar, Danger) are edited as free text — a name or
+  `#rrggbb`/`#rgb` hex, exactly what `appearance.toml` already accepts, with a live preview as you
+  type before `Enter` commits it; Border style, Separator and Glyphs cycle through their fixed
+  choices; Reset to defaults clears every change this popup made this session, back to whatever
+  theme/glyphs were already in effect (a settings-popup palette pick included) rather than forcing
+  the built-in neon look specifically. `Theme::overlay_raw` (also now what `RawTheme`'s own
+  `From` impl is built on, removing a duplicated field list) layers these field-level overrides
+  onto whichever theme is otherwise active. New `theming::Action::Appearance`
+  (default key `a`) and `context_menu::MenuCommand::Appearance` (blank space only). Chosen as
+  COA C — six curated colors plus the three cycle fields, real text entry, real mouse support —
+  over extending the settings popup's cycle-only rows to every field (A: not real customizing for
+  colors) and a full category-submenu editor covering every field (B: sound direction, but too
+  much for one cycle — see *Full appearance editor* under Medium Priority). Session-only, same
+  caveat as the settings popup.
 
 ---
 
@@ -681,10 +700,20 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   is under *Preview extras, stage 1* above.
 - **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
   operations, with no plugin required.
-- **Persist the settings popup's changes to disk** – `space t`'s panel and theme changes (see
-  Completed) are session-only right now. Needs a comment-preserving write into `config.toml`'s
-  `[panels]` table and `appearance.toml`'s `[theme]` name, since both files are meant to stay
-  hand-editable and a naive `toml::to_string` re-serialize would drop the user's comments.
+- **Persist the settings and appearance popups' changes to disk** – `space t`'s panel/theme
+  changes and `a`'s color/border/separator/glyph changes (see Completed) are both session-only
+  right now. Needs a comment-preserving write into `config.toml`'s `[panels]` table and
+  `appearance.toml`'s `[theme]`/`[ui]` tables, since both files are meant to stay hand-editable and
+  a naive `toml::to_string` re-serialize would drop the user's comments.
+- **Full appearance editor: every field, with categories (COA B from the appearance-popup
+  cycle)** – the appearance popup (see Completed) covers six highlight colors plus border style,
+  separator and glyphs; the rest of `Theme`'s ~19 fields, every `[style]` element's bold/italic/…
+  flags, and the font table are still config-file-only. The fuller design considered at the time:
+  a category submenu (Theme colors / Border & separator / Glyphs / Styles / Font) reusing
+  `ContextMenu`'s hover/click/submenu machinery, with the same free-text entry the popup already
+  has for a leaf field. Deferred rather than built in the same cycle because free-text editing of
+  ~40 fields behind a two-level submenu is a project of its own, not a bounded addition to one
+  already-large feature.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
   file_ops, preview, and trash, so backends can be swapped without touching feature code.
 
@@ -786,7 +815,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Press `.` to show or hide dot-files. Try `:mkdir -p a/b`, `:touch x.txt` and `:ls -l` — the
    new entries appear at once, and so does a file you create from a mini-shell or another
    terminal, with no key pressed. `:sleep 30` shows a BUSY pill and `Esc` kills it.
-   Then the newest: `space t` with no shell pane open, for the settings popup (`j`/`k` moves,
+   Then the newest: `a` (or "Appearance…" on blank space's right-click menu) for the appearance
+   popup — `j`/`k` moves, `enter` or a click acts on the row under the cursor: Accent, Focused
+   border, Selection, Directory, Status bar and Danger are typed as a name or hex (`enter` to
+   type, `enter` again to confirm, `Esc` to cancel, with a live preview as you type); Border
+   style, Separator and Glyphs cycle with `h`/`l`/`enter`/a click; Reset to defaults clears every
+   change back to what was in effect when the popup opened. `Esc`/`q` closes it. Changes apply at
+   once but are not saved.
+   Before that: `space t` with no shell pane open, for the settings popup (`j`/`k` moves,
    `h`/`l`/`enter` cycles Columns, Theme, HUD and Command bar, `Esc`/`q` closes it) — try
    switching to two-pane, cycling the theme, and hiding the HUD or the command bar (open a `:`
    prompt while it's hidden and it comes back for the prompt). Changes apply at once but are not

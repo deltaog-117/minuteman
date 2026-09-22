@@ -29,5 +29,5 @@ pub use appearance::{Font, Mods, Styles};
 pub use config::{Config, OpenWith};
 pub use keymap::{Action, KeyMap};
 pub use panels::{ColumnLayout, PanelsConfig};
-pub use theme::Theme;
+pub use theme::{RawTheme, Theme};
 pub use ui::{GlyphSet, Ui};

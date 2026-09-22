@@ -44,6 +44,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-21 | Preview Extras, Stage 1 | Scrolling preview (`J`/`K`, wheel), hex view of the first 64 KiB, in-process zip/tar/tar.gz listing with every read bounded (COA A); shelling out to `bsdtar` and hand-parsing rejected | ✅ Confirmed |
 | 2026-09-21 | Disk Usage View | Modal `du`-style view scanning one folder at a time off-thread, on-disk size by default, hard links once, same filesystem only, symlinks not followed (COA A); a size column (B) and a cached tree with delete (C) rejected | ✅ Confirmed |
 | 2026-09-22 | Adaptive Default Theme | OSC 11 terminal-background query via `ratatui-image`'s existing probe, resolved to Catppuccin Mocha/Latte (COA A); reading the OS/DE's light/dark setting (B) and a `$COLORFGBG` heuristic (C) rejected | ✅ Confirmed |
+| 2026-09-22 | Appearance Popup Scope and Mouse Model | Curated 6 colors + 3 cycle fields, real text entry, `ContextMenu`-style click/hit-testing (COA C); growing the settings popup's cycle-only rows (A) and a full category-submenu editor for every field (B, deferred to the roadmap) rejected | ✅ Confirmed |
 
 ---
 
@@ -3103,6 +3104,110 @@ no interactive TTY to test that round trip against a live terminal emulator, so 
 itself rests on `ratatui-image`'s own test coverage and the same timeout/fallback shape its
 existing graphics-probe call already relied on; only the pure classification/resolution logic
 downstream of a detected color was exercised directly.
+
+---
+
+### Appearance Popup: Curated Colors, Real Text Entry, `ContextMenu`-Style Mouse (COA C)
+
+**Date:** 2026-09-22
+**Author:** deltaog-117
+**Status:** Confirmed
+
+#### Context / Background
+
+The request was a new popup, "similar to the Inspect one — usable both with keyboard or mouse,"
+that lets the appearance be customized the way `appearance.toml` already allows, plus a way to
+reset back to defaults. Three COAs were framed before coding, against what the codebase already
+had: `appearance.toml` covers 19 theme colors, `border_type`, `separator`, `ui.glyphs`, ~20
+per-element text styles and a font table — too much to expose as one flat list — and neither
+existing popup (Inspect, Settings) is actually mouse-*driven*: both only ever treat a click as
+"dismiss," never as "act on the row under it." The real mouse+keyboard precedent in this codebase
+is `ContextMenu` (`hover_at`/`click_at`/`key` all driving the same state), not either popup.
+
+#### Options Considered
+
+**A**, grow the existing `SettingsPopup` with one row per field, still cycle-only like its Theme
+row already is, with click-to-cycle added. Smallest diff, but a color field cycling through a
+handful of presets isn't real customizing, and ~40 rows makes for a long scrolling list. **B**, a
+full "Appearance" popup with a category submenu (Theme colors / Border & separator / Glyphs /
+Styles / Font) reusing `ContextMenu`'s submenu pattern, each leaf field opening free-text entry
+for arbitrary values — full parity with `appearance.toml`, but the largest scope: a new
+two-level submenu layout, new text-entry-inside-a-popup interaction, and ~40 fields' worth of new
+UI and tests, all in one cycle. **C**, the same free-text entry as B but only for a curated
+subset — the highlight colors most people tweak first, plus the three fields that are naturally
+cycle-shaped — with the rest deferred.
+
+Chosen and suggested: **C**, on request, with B kept on the roadmap (see *Full appearance editor*
+under Medium Priority) rather than dropped. The six colors are `accent_fg`, `border_focused_fg`,
+`selection_bg`, `dir_fg`, `bar_bg` and `danger_fg` — the ones that visibly change the UI's
+character at a glance, as opposed to per-file-kind colors (`source_fg`, `config_fg`, ...) or ones
+that rarely differ from a neighbour (`title_fg`, `file_fg`, `status_fg`). `border_type`,
+`separator` and `ui.glyphs` already only ever take one of a handful of fixed strings, so they got
+the settings popup's existing cycle treatment rather than free text — there is nothing to "type"
+for them that a cycle doesn't already cover.
+
+#### Mouse model and geometry
+
+`appearance_popup::hit(area, pos) -> Hit` (`Row(usize)` / `Inert` / `Outside`) mirrors
+`context_menu::row_at` and `disk_usage_view::row_at`'s "answer from the same geometry the renderer
+draws with" shape, but sized off `overlay_view::panel_area` (the Inspect/Settings popups' own
+layout helper) rather than `ContextMenu::layout`'s anchored-at-the-pointer one, since this popup
+is centered like those two, not opened at a click point. `click_row(row_index)` then runs the
+row's action exactly as `Enter` would after moving the cursor there — a deliberate simplification
+against `ContextMenu`'s continuous hover-highlight-follows-the-mouse behavior, whose real purpose
+there is driving submenus; with no submenus here, tracking hover separately from the keyboard
+cursor would be machinery this popup has no use for.
+
+#### Live edits, layering and "the defaults"
+
+Committed color/border/separator overrides live in a `theming::RawTheme` (`live_appearance` in
+`main::run`) rather than a second full `Theme`, reusing the existing "some fields set, most
+`None`" shape `[theme]` overlays already use. New `Theme::overlay_raw(&self, &RawTheme) -> Theme`
+layers it onto *whichever* theme is currently in effect — `config.theme`, or a palette the
+settings popup's Theme row picked — rather than only onto a named base palette, which
+`RawTheme`'s existing `From` impl needed (base palette, then field overrides) but couldn't reuse
+directly. Rewriting that `From` impl as `Theme::named(...).overlay_raw(&raw)` removed a second,
+drifting copy of the same 19-field list. A color row's in-progress (uncommitted) edit previews
+live on top of everything else, via a small pure `appearance_popup::preview` — the same one-field
+substitution `overlay_raw` does per-field, just for a value that hasn't been committed to
+`RawTheme` yet.
+
+"Reset to defaults" was read as "clear what *this popup* changed this session," not "force the
+literal built-in neon palette" — it clears `live_appearance` and the popup's own `live_glyphs`
+pick, falling back to whichever theme/glyphs were already in effect (the adaptive auto-detected
+one, an explicit config pin, or a settings-popup palette switch, whichever applies). Forcing neon
+specifically would silently undo an unrelated choice (the settings popup's Theme row, or the
+adaptive default from the previous cycle) that this popup never touched and has no business
+overriding.
+
+#### Trade-offs and what was left
+
+Glyphs is the one row that touches `theming::Ui` rather than `Theme`/`RawTheme`; it gets its own
+`live_glyphs: Option<GlyphSet>` in `main::run`, parsed from the cycled string via the existing
+`GlyphSet::parse`. `Appearance…` is only offered on blank space's right-click menu, not on a file
+or folder's — it isn't about a specific entry, matching how the menu already scopes Inspect and
+Disk usage to what makes sense for the target. The remaining ~13 theme colors, every `[style]`
+element's flags and the font table stay config-file-only until the deferred full editor (COA B)
+is built.
+
+#### Verification
+
+`scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy --workspace
+--all-targets -- -D warnings` clean, `cargo test --workspace` green (`tui` 345, up from 328;
+`theming` 53, up from 52 for the new `overlay_raw` test). New coverage: cursor movement and
+wraparound, `h`/`l` cycling a cycle row but doing nothing on a color row, the full
+edit-type-backspace-commit-cancel sequence, the Reset row being an action rather than a color or
+cycle, `click_row` reaching the same outcomes as the keyboard path and abandoning an in-progress
+edit on another row, `next_in`'s wraparound and unrecognised-value fallback, `AppearanceView`
+reading the right theme field per row, `preview`/`commit` touching only the field they're asked
+to, `hit`'s row/inert/outside geometry, and two property tests (the cursor always stays in bounds;
+`hit` never names a row that doesn't exist). Also updated: `context_menu`'s blank-menu label-list
+test and its disk-usage test (no longer assuming Disk usage is the last entry, now that
+Appearance… is). Not verified against a real terminal or PTY session — no interactive TTY in this
+sandbox, so the popup's on-screen rendering, its live-preview caret, and the actual mouse
+click-to-row mapping at real screen coordinates were checked by reading the code and the unit
+tests (which exercise the same `hit`/`panel_area` geometry `overlay_view::render_appearance` and
+`main`'s mouse handler use), not by running the compiled binary interactively.
 
 ---
 

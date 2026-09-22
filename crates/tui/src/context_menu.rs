@@ -51,6 +51,8 @@ pub enum MenuCommand {
     DiskUsage,
     ToggleHidden,
     Refresh,
+    /// Opens the appearance popup (colors, border style, separator, glyphs).
+    Appearance,
 }
 
 /// What was right-clicked.
@@ -197,6 +199,7 @@ pub fn entries(context: &Context, open_with: &[String]) -> Vec<Entry> {
             Entry::item("Copy path", MenuCommand::CopyPath),
             Entry::item("Inspect this folder", MenuCommand::Inspect),
             Entry::item("Disk usage", MenuCommand::DiskUsage),
+            Entry::item("Appearance…", MenuCommand::Appearance),
         ],
     }
 }
@@ -582,7 +585,8 @@ mod tests {
                 "Refresh",
                 "Copy path",
                 "Inspect this folder",
-                "Disk usage"
+                "Disk usage",
+                "Appearance…"
             ]
         );
     }
@@ -593,7 +597,20 @@ mod tests {
         assert!(!labels(&entries(&context, &[])).contains(&"Disk usage"));
         context.target = Target::Entry { is_dir: true };
         let list = entries(&context, &[]);
-        assert_eq!(labels(&list).last(), Some(&"Disk usage"));
+        assert!(labels(&list).contains(&"Disk usage"));
+    }
+
+    #[test]
+    fn only_blank_space_offers_appearance() {
+        assert!(!labels(&entries(&file_context(), &[])).contains(&"Appearance…"));
+        let mut context = file_context();
+        context.target = Target::Entry { is_dir: true };
+        assert!(!labels(&entries(&context, &[])).contains(&"Appearance…"));
+        let blank = Context {
+            target: Target::Blank,
+            ..file_context()
+        };
+        assert_eq!(labels(&entries(&blank, &[])).last(), Some(&"Appearance…"));
     }
 
     #[test]

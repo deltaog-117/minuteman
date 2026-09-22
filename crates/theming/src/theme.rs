@@ -92,6 +92,86 @@ impl Theme {
         luminance < 128.0
     }
 
+    /// Layers `overrides` on top of `self`, field by field — for live, in-session edits (the
+    /// appearance popup, in `tui`) rather than picking a whole named base palette. A field left
+    /// `None` in `overrides` keeps `self`'s value.
+    pub fn overlay_raw(&self, overrides: &RawTheme) -> Theme {
+        Theme {
+            selection_bg: overrides
+                .selection_bg
+                .clone()
+                .unwrap_or_else(|| self.selection_bg.clone()),
+            selection_fg: overrides
+                .selection_fg
+                .clone()
+                .unwrap_or_else(|| self.selection_fg.clone()),
+            border_fg: overrides
+                .border_fg
+                .clone()
+                .unwrap_or_else(|| self.border_fg.clone()),
+            border_focused_fg: overrides
+                .border_focused_fg
+                .clone()
+                .unwrap_or_else(|| self.border_focused_fg.clone()),
+            title_fg: overrides
+                .title_fg
+                .clone()
+                .unwrap_or_else(|| self.title_fg.clone()),
+            accent_fg: overrides
+                .accent_fg
+                .clone()
+                .unwrap_or_else(|| self.accent_fg.clone()),
+            dir_fg: overrides
+                .dir_fg
+                .clone()
+                .unwrap_or_else(|| self.dir_fg.clone()),
+            file_fg: overrides
+                .file_fg
+                .clone()
+                .unwrap_or_else(|| self.file_fg.clone()),
+            source_fg: overrides
+                .source_fg
+                .clone()
+                .unwrap_or_else(|| self.source_fg.clone()),
+            config_fg: overrides
+                .config_fg
+                .clone()
+                .unwrap_or_else(|| self.config_fg.clone()),
+            doc_fg: overrides
+                .doc_fg
+                .clone()
+                .unwrap_or_else(|| self.doc_fg.clone()),
+            archive_fg: overrides
+                .archive_fg
+                .clone()
+                .unwrap_or_else(|| self.archive_fg.clone()),
+            media_fg: overrides
+                .media_fg
+                .clone()
+                .unwrap_or_else(|| self.media_fg.clone()),
+            status_fg: overrides
+                .status_fg
+                .clone()
+                .unwrap_or_else(|| self.status_fg.clone()),
+            bar_bg: overrides
+                .bar_bg
+                .clone()
+                .unwrap_or_else(|| self.bar_bg.clone()),
+            danger_fg: overrides
+                .danger_fg
+                .clone()
+                .unwrap_or_else(|| self.danger_fg.clone()),
+            border_type: overrides
+                .border_type
+                .clone()
+                .unwrap_or_else(|| self.border_type.clone()),
+            separator: overrides
+                .separator
+                .clone()
+                .unwrap_or_else(|| self.separator.clone()),
+        }
+    }
+
     /// The original 16-color look, from before the neon palette became the default.
     fn classic() -> Self {
         Self {
@@ -300,26 +380,7 @@ impl RawTheme {
 impl From<RawTheme> for Theme {
     fn from(raw: RawTheme) -> Self {
         let base = Theme::named(raw.name.as_deref().unwrap_or("default"));
-        Self {
-            selection_bg: raw.selection_bg.unwrap_or(base.selection_bg),
-            selection_fg: raw.selection_fg.unwrap_or(base.selection_fg),
-            border_fg: raw.border_fg.unwrap_or(base.border_fg),
-            border_focused_fg: raw.border_focused_fg.unwrap_or(base.border_focused_fg),
-            title_fg: raw.title_fg.unwrap_or(base.title_fg),
-            accent_fg: raw.accent_fg.unwrap_or(base.accent_fg),
-            dir_fg: raw.dir_fg.unwrap_or(base.dir_fg),
-            file_fg: raw.file_fg.unwrap_or(base.file_fg),
-            source_fg: raw.source_fg.unwrap_or(base.source_fg),
-            config_fg: raw.config_fg.unwrap_or(base.config_fg),
-            doc_fg: raw.doc_fg.unwrap_or(base.doc_fg),
-            archive_fg: raw.archive_fg.unwrap_or(base.archive_fg),
-            media_fg: raw.media_fg.unwrap_or(base.media_fg),
-            status_fg: raw.status_fg.unwrap_or(base.status_fg),
-            bar_bg: raw.bar_bg.unwrap_or(base.bar_bg),
-            danger_fg: raw.danger_fg.unwrap_or(base.danger_fg),
-            border_type: raw.border_type.unwrap_or(base.border_type),
-            separator: raw.separator.unwrap_or(base.separator),
-        }
+        base.overlay_raw(&raw)
     }
 }
 
@@ -378,6 +439,23 @@ mod tests {
         assert_eq!(theme.border_fg, "green");
         // Everything else still comes from the dracula palette.
         assert_eq!(theme.selection_bg, Theme::dracula().selection_bg);
+    }
+
+    #[test]
+    fn overlay_raw_layers_onto_an_existing_theme_not_a_named_base() {
+        let base = Theme::nord();
+        let overrides = RawTheme {
+            accent_fg: Some("#123456".into()),
+            ..Default::default()
+        };
+        let layered = base.overlay_raw(&overrides);
+        assert_eq!(layered.accent_fg, "#123456");
+        // Everything else stays exactly the base's — no named palette is consulted.
+        assert_eq!(layered.border_fg, base.border_fg);
+        assert_eq!(layered.selection_bg, base.selection_bg);
+
+        // An empty overlay changes nothing.
+        assert_eq!(base.overlay_raw(&RawTheme::default()), base);
     }
 
     #[test]

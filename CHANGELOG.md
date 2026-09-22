@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `neon` if the terminal never answers. Setting anything under `[theme]` — a `name`, or even one
   field — opts back out and pins the look exactly as configured; `Config::theme_is_customized`
   carries that distinction. See `appearance.example.toml`.
+- `tui`: an appearance popup, `a` (new `[keys] appearance`, `Action::Appearance`) or
+  "Appearance…" on blank space's right-click menu. Six colors (Accent, Focused border, Selection,
+  Directory, Status bar, Danger) are edited as free text — a name or hex, live-previewed as you
+  type, `Enter` to confirm, `Esc` to cancel; Border style, Separator and Glyphs cycle through
+  their fixed choices; Reset to defaults clears every change this popup made this session. Unlike
+  the settings popup, it is genuinely mouse-driven: a click on a row acts on it exactly like
+  `Enter` would, via new `appearance_popup::hit`/`click_row`. New `theming::Theme::overlay_raw`
+  layers these live edits onto whichever theme is otherwise active (`RawTheme`'s own `From` impl
+  is now built on it too). Session-only, like the settings popup.
 
 - `theming`: a `[panels]` table in `config.toml` — `columns` (`"three"`, the default parent |
   current | preview, or `"two"` to remove the parent column and give its width to

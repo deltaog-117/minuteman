@@ -16,6 +16,7 @@
 
 mod alt_keys;
 mod app;
+mod appearance_popup;
 mod browser_mouse;
 mod cli;
 mod command;
@@ -50,6 +51,10 @@ use std::time::{Duration, Instant, SystemTime};
 use alt_keys::AltCommand;
 use anyhow::Result;
 use app::App;
+use appearance_popup::{
+    AppearancePopup, AppearanceView, Hit as AppearanceHit, Outcome as AppearanceOutcome,
+    Row as AppearanceRow, RowKind as AppearanceRowKind,
+};
 use browser::BrowserState;
 use browser_mouse::{BrowserLayout, Click, ClickTracker, Hit, Listing, Pane, Wheel};
 use context_menu::{
@@ -83,7 +88,7 @@ use settings_popup::{
 use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
-use theming::{Action, Config, GlyphSet, PanelsConfig, Theme};
+use theming::{Action, Config, GlyphSet, PanelsConfig, RawTheme, Theme, Ui};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -337,6 +342,7 @@ struct Overlay<'a> {
     /// The disk usage view, which covers the whole screen when open.
     usage: Option<&'a DiskUsageView>,
     settings: Option<&'a SettingsPopup>,
+    appearance: Option<&'a AppearancePopup>,
     /// This session's live panel layout, seeded from `config.panels` and cycled by the settings
     /// popup — see `live_panels` in `run`.
     live_panels: PanelsConfig,
@@ -347,13 +353,20 @@ struct Overlay<'a> {
     /// `live_theme`, which stays `None` (and so doesn't affect rendering) until the row is
     /// actually cycled once.
     theme_name: &'static str,
+    /// Field-level color/border/separator overrides the appearance popup has committed this
+    /// session — see `live_appearance` in `run`.
+    live_appearance: &'a RawTheme,
+    /// The appearance popup's own glyph-set pick, if it cycled one; `None` means
+    /// `config.ui.glyphs` is still in effect.
+    live_glyphs: Option<GlyphSet>,
 }
 
-/// The two read-only panels a menu command can open, passed together so `run_menu_command` does
-/// not grow an argument for each one.
+/// The panels a menu command can open, passed together so `run_menu_command` does not grow an
+/// argument for each one.
 struct Panels<'a> {
     inspect: &'a mut Option<InspectView>,
     usage: &'a mut Option<DiskUsageView>,
+    appearance: &'a mut Option<AppearancePopup>,
 }
 
 struct ShellView<'a> {
@@ -675,6 +688,73 @@ fn main() -> Result<()> {
     result
 }
 
+/// The theme in effect for the running session, before any in-progress (uncommitted) appearance
+/// edit is previewed on top: the settings popup's palette pick if it cycled one, else
+/// `config.theme`, with the appearance popup's committed field overrides layered on.
+fn effective_theme(
+    config: &Config,
+    live_theme: Option<&Theme>,
+    live_appearance: &RawTheme,
+) -> Theme {
+    live_theme
+        .cloned()
+        .unwrap_or_else(|| config.theme.clone())
+        .overlay_raw(live_appearance)
+}
+
+/// Applies one outcome from the appearance popup (`AppearancePopup::key`/`click_row`) to the
+/// running session's live state — shared by its keyboard and mouse paths in `run`, so a click and
+/// the key that reaches the same row behave identically.
+fn apply_appearance_outcome(
+    outcome: AppearanceOutcome,
+    appearance: &mut Option<AppearancePopup>,
+    live_appearance: &mut RawTheme,
+    live_glyphs: &mut Option<GlyphSet>,
+    config: &Config,
+    live_theme: Option<&Theme>,
+) {
+    match outcome {
+        AppearanceOutcome::Stay => {}
+        AppearanceOutcome::Close => *appearance = None,
+        AppearanceOutcome::WantEdit(row) => {
+            let theme = effective_theme(config, live_theme, live_appearance);
+            let glyphs = live_glyphs.unwrap_or(config.ui.glyphs);
+            let current = AppearanceView {
+                theme: &theme,
+                glyphs,
+            }
+            .value(row);
+            if let Some(popup) = appearance.as_mut() {
+                popup.begin_edit(current);
+            }
+        }
+        AppearanceOutcome::Cycle(row) => {
+            if let Some(AppearanceRowKind::Cycle(options)) = row.kind() {
+                let theme = effective_theme(config, live_theme, live_appearance);
+                let glyphs = live_glyphs.unwrap_or(config.ui.glyphs);
+                let current = AppearanceView {
+                    theme: &theme,
+                    glyphs,
+                }
+                .value(row);
+                let next = appearance_popup::next_in(options, &current);
+                if row == AppearanceRow::Glyphs {
+                    *live_glyphs = GlyphSet::parse(&next);
+                } else {
+                    appearance_popup::commit(live_appearance, row, next);
+                }
+            }
+        }
+        AppearanceOutcome::Commit(row, value) => {
+            appearance_popup::commit(live_appearance, row, value);
+        }
+        AppearanceOutcome::Reset => {
+            *live_appearance = RawTheme::default();
+            *live_glyphs = None;
+        }
+    }
+}
+
 /// What `run` reads from `main` but never changes.
 struct Session<'a> {
     config: &'a Config,
@@ -756,6 +836,16 @@ fn run(
     let mut usage: Option<DiskUsageView> = None;
     // The settings popup (`Space` then `t` with no shell pane open) while one is open; modal too.
     let mut settings: Option<SettingsPopup> = None;
+    // The appearance popup (`a`, or "Appearance…" on blank space's right-click menu) while one is
+    // open; modal too.
+    let mut appearance: Option<AppearancePopup> = None;
+    // Field-level color/border/separator overrides the appearance popup has committed this
+    // session, layered onto whatever theme is otherwise in effect (`config.theme`, or a palette
+    // `live_theme` picked) — see `effective_theme`. Cleared by the popup's "Reset to defaults".
+    let mut live_appearance = RawTheme::default();
+    // The appearance popup's own glyph-set pick, if it cycled one; `None` means `config.ui.glyphs`
+    // is still in effect. Cleared by "Reset to defaults", same as `live_appearance`.
+    let mut live_glyphs: Option<GlyphSet> = None;
     // Panel layout for the running session, seeded from `config.toml` and cycled live by the
     // settings popup. Never written back to disk — see `config.example.toml`'s `[panels]`.
     let mut live_panels = config.panels;
@@ -859,9 +949,12 @@ fn run(
                     inspect: inspect.as_ref(),
                     usage: usage.as_ref(),
                     settings: settings.as_ref(),
+                    appearance: appearance.as_ref(),
                     live_panels,
                     live_theme: live_theme.as_ref(),
                     theme_name: THEME_NAMES[live_theme_index],
+                    live_appearance: &live_appearance,
+                    live_glyphs,
                 },
             )
         })?;
@@ -934,6 +1027,35 @@ fn run(
                     }
                     continue;
                 }
+                if appearance.is_some() {
+                    if let MouseEventKind::Down(_) = mouse.kind {
+                        let popup_area = overlay_view::panel_area(
+                            frame_area,
+                            appearance.as_ref().expect("checked above").rows().len(),
+                        );
+                        let outcome = match appearance_popup::hit(
+                            popup_area,
+                            Position::new(mouse.column, mouse.row),
+                        ) {
+                            AppearanceHit::Row(i)
+                                if mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
+                            {
+                                appearance.as_mut().expect("checked above").click_row(i)
+                            }
+                            AppearanceHit::Outside => AppearanceOutcome::Close,
+                            AppearanceHit::Row(_) | AppearanceHit::Inert => AppearanceOutcome::Stay,
+                        };
+                        apply_appearance_outcome(
+                            outcome,
+                            &mut appearance,
+                            &mut live_appearance,
+                            &mut live_glyphs,
+                            config,
+                            live_theme.as_ref(),
+                        );
+                    }
+                    continue;
+                }
                 let pointer = Position::new(mouse.column, mouse.row);
                 let menu_reaction = menu.as_mut().map(|open| match mouse.kind {
                     MouseEventKind::Moved => {
@@ -983,6 +1105,7 @@ fn run(
                                 &mut Panels {
                                     inspect: &mut inspect,
                                     usage: &mut usage,
+                                    appearance: &mut appearance,
                                 },
                             )?;
                         }
@@ -1379,6 +1502,7 @@ fn run(
                                 &mut Panels {
                                     inspect: &mut inspect,
                                     usage: &mut usage,
+                                    appearance: &mut appearance,
                                 },
                             )?;
                         }
@@ -1418,6 +1542,19 @@ fn run(
                             ));
                         }
                     }
+                    continue;
+                }
+
+                if let Some(popup) = appearance.as_mut() {
+                    let outcome = popup.key(key.code);
+                    apply_appearance_outcome(
+                        outcome,
+                        &mut appearance,
+                        &mut live_appearance,
+                        &mut live_glyphs,
+                        config,
+                        live_theme.as_ref(),
+                    );
                     continue;
                 }
 
@@ -1616,6 +1753,9 @@ fn run(
                     Some(Action::DiskUsage) => {
                         usage = Some(app.begin_disk_usage(browser.current_dir().to_path_buf()));
                     }
+                    Some(Action::Appearance) => {
+                        appearance = Some(AppearancePopup::new());
+                    }
                     Some(Action::PreviewDown) => previews.text.scroll_half_pages(1),
                     Some(Action::PreviewUp) => previews.text.scroll_half_pages(-1),
                     Some(Action::ToggleHidden) => {
@@ -1735,6 +1875,7 @@ fn run_menu_command(
         (MenuCommand::DiskUsage, _) => {
             *panels.usage = Some(app.begin_disk_usage(subject.clone()));
         }
+        (MenuCommand::Appearance, _) => *panels.appearance = Some(AppearancePopup::new()),
         (MenuCommand::ToggleHidden, _) => {
             let shown = browser.toggle_hidden(vfs)?;
             app.status = Some(
@@ -1788,19 +1929,34 @@ fn draw(
         inspect,
         usage,
         settings,
+        appearance,
         live_panels,
         live_theme,
         theme_name,
+        live_appearance,
+        live_glyphs,
     } = overlay;
-    // The settings popup's changes are session-only (see `run`'s `live_panels`/`live_theme`), so
-    // every render this frame must read them rather than `config.panels`/`config.theme` directly.
-    // Cloning once here — rather than threading two more parameters through every `hud`/
-    // `overlay_view`/`style` function that already takes `config` — keeps the rest of `draw`
-    // (and every function it calls) unchanged; a `Config` is small next to the `Vec<ListItem>`s
-    // this function already rebuilds every frame regardless.
+    // The settings and appearance popups' changes are session-only (see `run`'s `live_panels`/
+    // `live_theme`/`live_appearance`/`live_glyphs`), so every render this frame must read them
+    // rather than `config.panels`/`config.theme`/`config.ui` directly. Cloning once here — rather
+    // than threading four more parameters through every `hud`/`overlay_view`/`style` function
+    // that already takes `config` — keeps the rest of `draw` (and every function it calls)
+    // unchanged; a `Config` is small next to the `Vec<ListItem>`s this function already rebuilds
+    // every frame regardless.
+    let mut theme = effective_theme(config, live_theme, live_appearance);
+    // A color row's in-progress (uncommitted) edit previews live, on top of everything else —
+    // see `appearance_popup::preview`.
+    if let Some(popup) = appearance
+        && let (Some(row), Some(buffer)) = (popup.editing_row(), popup.editing_buffer())
+    {
+        theme = appearance_popup::preview(&theme, row, buffer);
+    }
     let effective_config = Config {
         panels: live_panels,
-        theme: live_theme.cloned().unwrap_or_else(|| config.theme.clone()),
+        theme,
+        ui: Ui {
+            glyphs: live_glyphs.unwrap_or(config.ui.glyphs),
+        },
         ..config.clone()
     };
     let config = &effective_config;
@@ -2020,6 +2176,20 @@ fn draw(
                 theme_name,
                 show_hud: config.panels.show_hud,
                 show_command_bar: config.panels.show_command_bar,
+            },
+            config,
+        );
+    }
+    if let Some(popup) = appearance {
+        // `config` is already the effective one composed above, so its `theme`/`ui.glyphs`
+        // already carry `live_appearance`/`live_glyphs` (and any in-progress edit's live
+        // preview) — nothing more to layer here.
+        overlay_view::render_appearance(
+            frame,
+            popup,
+            &AppearanceView {
+                theme: &config.theme,
+                glyphs: config.ui.glyphs,
             },
             config,
         );

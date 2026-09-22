@@ -25,6 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use theming::Config;
 
+use crate::appearance_popup::{AppearancePopup, AppearanceView, Row as AppearanceRow};
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
 use crate::glyphs;
 use crate::hud::{fit_width, pad_to, text_width};
@@ -261,6 +262,79 @@ pub fn render_settings(
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "j/k moves, h/l/enter changes, Esc closes — session only, not saved",
+        Style::default().fg(style::color(&theme.border_fg)),
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Draws the appearance popup: one row per setting, the cursor's row highlighted the same way a
+/// selected file is. The row being edited shows its in-progress buffer with a caret instead of
+/// its committed value; `Reset to defaults` is styled like a destructive action, the same as
+/// `Delete` in the right-click menu. Session-only — nothing here is written back to a config file.
+pub fn render_appearance(
+    frame: &mut Frame<'_>,
+    popup: &AppearancePopup,
+    view: &AppearanceView<'_>,
+    config: &Config,
+) {
+    let theme = &config.theme;
+    let rows = popup.rows();
+    let area = panel_area(frame.area(), rows.len());
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, "appearance", true);
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    frame.render_widget(block, area);
+
+    let value_width = usize::from(inner.width).saturating_sub(LABEL_COLUMN);
+    let label_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let danger_label_style = style::styled(
+        Style::default().fg(style::color(&theme.danger_fg)),
+        config.styles.title,
+    );
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+
+    let editing_row = popup.editing_row();
+    let caret = if glyphs::of(config).ascii_borders {
+        "_"
+    } else {
+        "▏"
+    };
+
+    let mut lines = vec![Line::raw("")];
+    lines.extend(rows.iter().enumerate().map(|(i, row)| {
+        let base = if i == popup.cursor() {
+            selected_style
+        } else {
+            Style::default()
+        };
+        let label = if *row == AppearanceRow::Reset {
+            danger_label_style
+        } else {
+            label_style
+        };
+        let value = if editing_row == Some(*row) {
+            format!("{}{caret}", popup.editing_buffer().unwrap_or_default())
+        } else {
+            view.value(*row)
+        };
+        Line::from(vec![
+            Span::styled(pad_to(row.label(), LABEL_COLUMN), label.patch(base)),
+            Span::styled(fit_width(&value, value_width), value_style.patch(base)),
+        ])
+    }));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        if editing_row.is_some() {
+            "type to edit, enter confirms, Esc cancels"
+        } else {
+            "j/k moves, enter edits/cycles, a click acts, Esc closes — session only, not saved"
+        },
         Style::default().fg(style::color(&theme.border_fg)),
     ));
     frame.render_widget(Paragraph::new(lines), inner);

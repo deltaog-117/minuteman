@@ -54,6 +54,10 @@ pub enum Action {
     /// Opens the disk usage view: what is taking the space in the browsed folder, biggest first,
     /// with folders that can be opened to look inside.
     DiskUsage,
+    /// Opens the appearance popup: colors, border style, separator and glyphs, editable live for
+    /// the running session, with a row to reset every one of them back to what was in effect
+    /// before this popup touched anything.
+    Appearance,
     /// Scrolls the preview pane down by half a screen (text, hex dump or archive listing).
     PreviewDown,
     /// Scrolls the preview pane up by half a screen.
@@ -96,6 +100,7 @@ pub struct RawKeyMap {
     pub preview_down: Vec<String>,
     pub preview_up: Vec<String>,
     pub disk_usage: Vec<String>,
+    pub appearance: Vec<String>,
     pub leader: Vec<String>,
 }
 
@@ -123,6 +128,7 @@ impl Default for RawKeyMap {
             preview_down: vec!["J".into()],
             preview_up: vec!["K".into()],
             disk_usage: vec!["u".into()],
+            appearance: vec!["a".into()],
             leader: vec!["space".into()],
         }
     }
@@ -183,6 +189,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.preview_down, Action::PreviewDown);
         bind_all(&raw.preview_up, Action::PreviewUp);
         bind_all(&raw.disk_usage, Action::DiskUsage);
+        bind_all(&raw.appearance, Action::Appearance);
         bind_all(&raw.leader, Action::Leader);
 
         Self { bindings }
@@ -255,6 +262,7 @@ mod tests {
         );
         assert_eq!(keymap.resolve(KeyCode::Char('K')), Some(Action::PreviewUp));
         assert_eq!(keymap.resolve(KeyCode::Char('u')), Some(Action::DiskUsage));
+        assert_eq!(keymap.resolve(KeyCode::Char('a')), Some(Action::Appearance));
         // `Tab`, `o`, `%` and `"` used to be shell-pane keys; they belong to the shell now.
         for freed in [
             KeyCode::Tab,
