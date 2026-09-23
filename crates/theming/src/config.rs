@@ -17,11 +17,12 @@
 use std::io;
 use std::path::PathBuf;
 
+use crossterm::event::KeyCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::appearance::{Font, RawFont, RawStyles, Styles};
-use crate::keymap::{KeyMap, RawKeyMap};
+use crate::keymap::{KeyMap, RawKeyMap, parse_key};
 use crate::panels::{PanelsConfig, RawPanels};
 use crate::theme::{RawTheme, Theme};
 use crate::ui::{RawUi, Ui};
@@ -33,6 +34,41 @@ use crate::ui::{RawUi, Ui};
 pub struct OpenWith {
     pub name: String,
     pub command: String,
+}
+
+/// One `[[plugin]]` table: an external process Minuteman spawns at startup and fires on
+/// `on_key`, speaking the `plugins` crate's line-delimited JSON-RPC protocol over its own stdio.
+/// Any language that can read a line and print one works — no compile step, no per-language host
+/// bindings.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct RawPluginSpec {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    on_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PluginSpec {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    /// The key that fires this plugin, already resolved from its config string the same way
+    /// every other keybinding is (see `keymap::parse_key`) — `None` for an absent or
+    /// unrecognised string, the same "skip rather than crash" rule every other key field follows.
+    pub on_key: Option<KeyCode>,
+}
+
+impl From<RawPluginSpec> for PluginSpec {
+    fn from(raw: RawPluginSpec) -> Self {
+        Self {
+            name: raw.name,
+            command: raw.command,
+            args: raw.args,
+            on_key: raw.on_key.as_deref().and_then(parse_key),
+        }
+    }
 }
 
 /// `config.toml`. Its `[theme]` and `[ui]` predate `appearance.toml` and are still honored, but
@@ -53,6 +89,8 @@ struct RawConfig {
     interactive_commands: Option<Vec<String>>,
     /// The `[[open_with]]` tables, in the order the submenu lists them.
     open_with: Vec<OpenWith>,
+    /// The `[[plugin]]` tables, in the order they were spawned.
+    plugin: Vec<RawPluginSpec>,
     keys: RawKeyMap,
     theme: RawTheme,
     ui: RawUi,
@@ -119,6 +157,8 @@ pub struct Config {
     /// What the context menu's "Open with" lists. Empty means the menu offers `$VISUAL` or
     /// `$EDITOR` alone.
     pub open_with: Vec<OpenWith>,
+    /// The `[[plugin]]` tables, in the order they were spawned — see `plugins::PluginManager`.
+    pub plugins: Vec<PluginSpec>,
     pub keys: KeyMap,
     pub theme: Theme,
     /// Whether `[theme]` (a `name`, or even a single overridden field) was actually set in any of
@@ -187,6 +227,7 @@ impl Config {
                 .interactive_commands
                 .unwrap_or_else(default_interactive_commands),
             open_with: config.open_with,
+            plugins: config.plugin.into_iter().map(PluginSpec::from).collect(),
             keys: config.keys.into(),
             theme: theme.into(),
             theme_is_customized,
@@ -551,5 +592,35 @@ mod tests {
         assert_eq!(names, ["Neovim", "VLC"]);
         assert_eq!(config.open_with[1].command, "vlc {}");
         assert!(Config::from_sources(None, None, None).open_with.is_empty());
+    }
+
+    #[test]
+    fn plugin_entries_keep_their_order_and_resolve_their_key_string() {
+        let config = Config::from_sources(
+            Some(
+                "[[plugin]]\nname = \"git-blame\"\ncommand = \"python3\"\n\
+                 args = [\"blame.py\"]\non_key = \"b\"\n\
+                 [[plugin]]\nname = \"no-key\"\ncommand = \"true\"\n",
+            ),
+            None,
+            None,
+        );
+        let names: Vec<&str> = config.plugins.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["git-blame", "no-key"]);
+        assert_eq!(config.plugins[0].command, "python3");
+        assert_eq!(config.plugins[0].args, vec!["blame.py".to_string()]);
+        assert_eq!(config.plugins[0].on_key, Some(KeyCode::Char('b')));
+        assert_eq!(config.plugins[1].on_key, None);
+        assert!(Config::from_sources(None, None, None).plugins.is_empty());
+    }
+
+    #[test]
+    fn an_unrecognised_plugin_key_string_resolves_to_no_binding_rather_than_failing() {
+        let config = Config::from_sources(
+            Some("[[plugin]]\nname = \"x\"\ncommand = \"true\"\non_key = \"ctrl-nonsense\"\n"),
+            None,
+            None,
+        );
+        assert_eq!(config.plugins[0].on_key, None);
     }
 }

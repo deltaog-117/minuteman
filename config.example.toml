@@ -52,6 +52,18 @@ interactive_commands = [
 # name = "VLC"
 # command = "vlc {}"
 
+# Plugins: external processes Minuteman spawns at startup and fires `on_key` at, speaking a
+# small line-delimited JSON-RPC protocol over their own stdin/stdout (see the `plugins` crate).
+# Any language that can read a line and print one works — no compile step, no per-language host
+# bindings — and a plugin reaches the same read_dir/copy/mv/delete/create_dir/create_file/touch/
+# rename operations the built-in keys use, not a bolted-on subset of them. `on_key` uses the same
+# key-string grammar as [keys] below; omit it for a plugin that only ever acts on its `init` event.
+# [[plugin]]
+# name = "git-blame"
+# command = "python3"
+# args = ["~/.config/minuteman/plugins/git_blame.py"]
+# on_key = "b"
+
 [panels]
 # How many of the miller columns are drawn: "three" (the default — parent | current | preview)
 # or "two" (current | preview, each wider, with the parent column removed rather than left

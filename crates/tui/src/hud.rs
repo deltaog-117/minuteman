@@ -871,6 +871,7 @@ mod tests {
             show_hidden: false,
             interactive_commands: Vec::new(),
             open_with: Vec::new(),
+            plugins: Vec::new(),
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             theme_is_customized: false,

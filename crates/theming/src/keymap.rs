@@ -203,7 +203,7 @@ impl From<RawKeyMap> for KeyMap {
 /// Named keys (`"enter"`, `"Space"`, ...) match case-insensitively, but a single character keeps
 /// its case: the terminal reports Shift+q as `Char('Q')`, so `"q"` and `"Q"` must stay distinct
 /// bindings (`quit` vs. `quit_to_cwd`).
-fn parse_key(s: &str) -> Option<KeyCode> {
+pub(crate) fn parse_key(s: &str) -> Option<KeyCode> {
     match s.to_lowercase().as_str() {
         "enter" | "return" => Some(KeyCode::Enter),
         "esc" | "escape" => Some(KeyCode::Esc),

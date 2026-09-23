@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugins` (new crate), `theming`, `tui`: a plugin system. A `[[plugin]]` entry in `config.toml`
+  (`name`, `command`, `args`, an optional `on_key`) spawns an external process at startup that
+  speaks a small, versioned, line-delimited JSON-RPC protocol over its own stdin/stdout — any
+  language that can read a line and print one works, with no compile step and no per-language
+  host bindings. Each plugin gets an `init` event at spawn and a `key` event when its `on_key` is
+  pressed (whichever key that is stays otherwise unbound — the built-in keymap is untouched), both
+  carrying the current directory and selection (marks, or the entry under the cursor). A plugin
+  calls back into `read_dir`, `copy`, `mv`, `delete`, `create_dir`, `create_file`, `touch` and
+  `rename` — the same `file_ops` orchestration the built-in keys use — and a `log` notification
+  surfaces as the status bar message. Deliberately unsandboxed for this first stage (a plugin runs
+  with Minuteman's own OS permissions); the WASM/Extism host already on the Low Priority roadmap
+  is the sandboxed tier meant to sit alongside this, not replace it. See `config.example.toml`.
 - `theming`: two new built-in palettes, `catppuccin` (Mocha) and `nord`, plus `catppuccin-latte`
   (Catppuccin's light flavor, reachable by name but not in the appearance popup's Theme cycle).
   The Theme row (`neon`/`classic`/`dracula`/`catppuccin`/`nord`) later moved from the settings

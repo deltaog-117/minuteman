@@ -16,6 +16,7 @@ file_ops = { path = "../file_ops" }
 shell_overlay = { path = "../shell_overlay" }
 preview = { path = "../preview" }
 theming = { path = "../theming" }
+plugins = { path = "../plugins" }
 # `unstable-rendered-line-info` gives `Paragraph::line_count`, which the scrollable preview needs
 # to know how many rows wrapped text takes.
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }

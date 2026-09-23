@@ -688,6 +688,18 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   palette the resolved theme's colors exactly match (fixing a pre-existing quirk where the row
   used to always start labeled "neon" regardless of what was actually active, e.g. an
   `appearance.toml` pin or the adaptive auto-detected default).
+- ✅ **Plugin system, stage 1 — out-of-process JSON-RPC over stdio** – a new `plugins` crate spawns
+  each `[[plugin]]` entry from `config.toml` as its own process and talks a small, versioned,
+  line-delimited JSON-RPC protocol over its stdin/stdout: an `init` event at spawn, a `key` event
+  when the plugin's own `on_key` is pressed, and requests back into `read_dir`/`copy`/`mv`/
+  `delete`/`create_dir`/`create_file`/`touch`/`rename` — the same `file_ops` orchestration the
+  built-in keys use — plus a `log` notification that surfaces as the status bar message. Any
+  language that can read a line and print one works, with no compile step and no per-language host
+  bindings. Chosen as COA B (out-of-process JSON-RPC) over a sandboxed WASM/Extism host (A, still
+  below, as the sandboxed tier to sit alongside this rather than replace it) and an embedded
+  Lua-only tier (C, rejected as too narrow — "any language" was the point). Deliberately
+  unsandboxed for now: a plugin runs with Minuteman's own OS permissions, an accepted trade until
+  a community plugin registry (see Long-Term Vision) means running code nobody local wrote.
 
 ---
 
@@ -745,11 +757,22 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 - **Native remote filesystem browsing (SSH/SFTP)** – browse and operate on `ssh://`/`sftp://`
   paths directly through the VFS abstraction, no FUSE mount required.
-- **WASM plugin host (Extism)** – expose a versioned host API (`read_dir`, `get_selection`,
-  `spawn_preview`, keybind registration, lifecycle hooks) so plugins can be written in Rust, Go,
-  Python, JS, etc., sandboxed by default.
-- **Optional Lua scripting tier** – lightweight `mlua`-based scripting for config/keybindings/
-  simple commands, layered alongside the WASM plugin system.
+- **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed** – a second, sandboxed plugin
+  tier alongside the stage-1 out-of-process JSON-RPC host (see Completed): a plugin compiled to
+  WASM gets no ambient filesystem/network/process access by default, only what a versioned host
+  API (`read_dir`, `get_selection`, `spawn_preview`, keybind registration, lifecycle hooks) grants
+  it explicitly — the tier worth having once a community plugin registry means running code
+  nobody local wrote. Rust, Go/TinyGo and other WASM-target languages first; Python/JS need a
+  heavier bundled runtime.
+- **Plugin system, follow-ups** – a plugin binding more than one key, or a `:plugin <name>`
+  manual-trigger command; a crash-restart/supervisor policy (stage 1's plugins get one log line on
+  an abnormal exit and are not restarted); a real, non-Rust reference plugin (Python or shell)
+  checked into the repo as a worked example, since stage 1's own tests intentionally hand-write
+  the wire format rather than reuse the crate's types, but nothing yet exercises an actual
+  external interpreter end to end.
+- **Optional Lua scripting tier** – lightweight `mlua`-based, in-process scripting for config/
+  keybindings/simple commands, layered alongside the two process-based plugin tiers above for
+  latency-sensitive hooks that don't need "any language."
 - **Menu and Inspect polish** – Inspect times are UTC because the standard library has no time
   zone database; a `chrono`/`jiff` dependency or `TZ` handling would show local time. Inspect
   could also total the marked set, follow a symlink to its target's details, and work on `ssh://`

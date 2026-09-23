@@ -368,7 +368,7 @@ crates/
 ├── shell_overlay/      # spawns a real, interactive $SHELL, inheriting stdio directly
 ├── preview/            # detects + decodes image files (terminal-agnostic; text preview: WIP)
 ├── trash/              # (stub, WIP) trash + undo history
-├── plugins/            # (stub, WIP) WASM (Extism) multi-language plugin host
+├── plugins/            # out-of-process, any-language plugin host (JSON-RPC over stdio); WASM tier: WIP
 └── vfs_ssh/             # (stub, WIP) native SSH/SFTP remote browsing
 ```
 

@@ -26,7 +26,7 @@ pub mod theme;
 pub mod ui;
 
 pub use appearance::{Font, Mods, Styles};
-pub use config::{Config, OpenWith, RawLocal};
+pub use config::{Config, OpenWith, PluginSpec, RawLocal};
 pub use keymap::{Action, KeyMap};
 pub use panels::{ColumnLayout, PanelsConfig, RawPanels};
 pub use theme::{RawTheme, Theme};

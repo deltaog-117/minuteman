@@ -35,8 +35,10 @@ use browser::BrowserState;
 use browser::search::{Outcome as SearchOutcome, Query};
 use crossterm::event::KeyCode;
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
+use plugins::PluginManager;
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
+use theming::PluginSpec;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::command::{self, Command};
@@ -272,6 +274,7 @@ pub struct App {
     /// The `/` prompt's search in flight, if any. Only ever `Some` while that prompt is open.
     search_job: Option<SearchJob>,
     search_state: SearchState,
+    plugins: PluginManager,
 }
 
 impl App {
@@ -289,6 +292,7 @@ impl App {
             handover: None,
             search_job: None,
             search_state: SearchState::Idle,
+            plugins: PluginManager::new(),
         }
     }
 
@@ -306,6 +310,27 @@ impl App {
     /// Sets which program names `:` hands the terminal to.
     pub fn with_interactive_commands(mut self, interactive: Vec<String>) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Starts every configured `[[plugin]]` process (see `plugins`), each firing its `init`
+    /// event immediately and its `key` event whenever its own `on_key` is pressed. A plugin that
+    /// fails to spawn (bad command, missing binary) is skipped with a warning on stderr rather
+    /// than treated as fatal — the same "one bad entry must never take the whole session down"
+    /// rule `theming::Config::load` already follows for a malformed config file.
+    pub fn with_plugins(mut self, specs: Vec<PluginSpec>, cwd: &Path) -> Self {
+        for spec in specs {
+            if let Err(e) = self.plugins.spawn(
+                &self.handle,
+                &spec.name,
+                &spec.command,
+                &spec.args,
+                spec.on_key,
+                cwd,
+            ) {
+                eprintln!("minuteman: {e}");
+            }
+        }
         self
     }
 
@@ -393,6 +418,23 @@ impl App {
     pub fn poll_hud(&mut self, browser: &BrowserState, now: Instant) {
         self.marked_size.poll(&browser.marked_paths());
         self.git.poll(browser.current_dir(), now);
+    }
+
+    /// Surfaces every plugin's pending `log` line as the status message (last one wins, the same
+    /// way every other status write already behaves). Call once per render tick.
+    pub fn poll_plugins(&mut self) {
+        for message in self.plugins.poll() {
+            self.status = Some(format!("[{}] {}", message.plugin, message.message));
+        }
+    }
+
+    /// Fires the plugin bound to `code`, if any is configured, with the current marks (or the
+    /// single selected entry — see `marked_or_selected`) and the browsed directory. Returns
+    /// whether a plugin consumed the key, so a truly unbound key stays a no-op.
+    pub fn dispatch_plugin_key(&mut self, code: KeyCode, browser: &BrowserState) -> bool {
+        let selection = Self::marked_or_selected(browser);
+        self.plugins
+            .dispatch_key(code, browser.current_dir(), &selection)
     }
 
     /// What the marks add up to, once a walk has finished.

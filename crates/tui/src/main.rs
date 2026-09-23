@@ -638,7 +638,8 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let mut app = App::new(runtime.handle().clone())
         .with_git_status(config.git_status)
-        .with_interactive_commands(config.interactive_commands.clone());
+        .with_interactive_commands(config.interactive_commands.clone())
+        .with_plugins(config.plugins.clone(), browser.current_dir());
 
     let mut guard = TerminalGuard::new()?;
     // Both probes must run after entering the alternate screen but before the event loop reads
@@ -904,6 +905,7 @@ fn run(
             previews.reload();
         }
         app.poll_hud(browser, Instant::now());
+        app.poll_plugins();
         previews.update(browser.selected_entry());
 
         if let Some(mut panes) = shells.take() {
@@ -1820,7 +1822,10 @@ fn run(
                             Err(e) => app.status = Some(format!("failed to start shell: {e}")),
                         }
                     }
-                    Some(Action::Shell) | None => {}
+                    Some(Action::Shell) => {}
+                    None => {
+                        app.dispatch_plugin_key(key.code, browser);
+                    }
                 }
             }
             _ => {}

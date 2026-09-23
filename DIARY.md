@@ -46,6 +46,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-22 | Adaptive Default Theme | OSC 11 terminal-background query via `ratatui-image`'s existing probe, resolved to Catppuccin Mocha/Latte (COA A); reading the OS/DE's light/dark setting (B) and a `$COLORFGBG` heuristic (C) rejected | ✅ Confirmed |
 | 2026-09-22 | Appearance Popup Scope and Mouse Model | Curated 6 colors + 3 cycle fields, real text entry, `ContextMenu`-style click/hit-testing (COA C); growing the settings popup's cycle-only rows (A) and a full category-submenu editor for every field (B, deferred to the roadmap) rejected | ✅ Confirmed |
 | 2026-09-22 | Persisting the Settings/Appearance Popups | A third, program-owned `local.toml` layered above `config.toml`/`appearance.toml` (COA B); an in-place `toml_edit` rewrite of the hand-edited files (A, deferred) and a stripped-and-reappended generated block (C) rejected; Theme row moved from the settings popup into the appearance popup | ✅ Confirmed |
+| 2026-09-23 | Plugin System Transport | Out-of-process, line-delimited JSON-RPC over stdio, any language, no compile step (COA B); a sandboxed WASM/Extism host (A) deferred to sit alongside it later, an in-process Lua-only tier (C) rejected as too narrow | ✅ Confirmed |
 
 ---
 
@@ -3314,6 +3315,79 @@ session to run the compiled binary in twice and confirm a saved pick is still th
 I/O in `Config::save_local`/`Config::load` itself is exercised only by `from_sources`'s pure
 logic on in-memory strings, the same boundary this project's tests have always drawn around
 filesystem access.
+
+---
+
+### Plugin System: Out-of-Process JSON-RPC over stdio, Sandboxing Deferred (COA B)
+
+**Context.** The roadmap's Low Priority section had long carried a WASM/Extism plugin host as
+the answer to "let people extend Minuteman in any language without recompiling it." Asked for
+three COAs to get there, the user picked out-of-process JSON-RPC over stdio (Neovim/LSP-style)
+over the WASM host and over an embedded Lua-only tier, specifically because it is the only one of
+the three that needs *no compile step at all* for the plugin itself — a bare Python, shell or
+Node script runs as-is. Sandboxing was discussed explicitly: WASM's appeal is that a plugin gets
+no ambient filesystem/process access by default, only what the host API hands it; the chosen
+transport has none of that (a plugin runs with Minuteman's own OS permissions), which is an
+accepted trade for now and the reason the WASM entry stays on the roadmap as a later, sandboxed
+tier to sit *alongside* this one rather than be replaced by it — relevant once a community plugin
+registry (Long-Term Vision) means running code nobody local wrote.
+
+**Protocol.** New `plugins` crate, depending only on `shared`/`file_ops` (for the operations) and
+`tokio`/`serde`/`crossterm` — not on `theming` or `browser`, so deleting it only breaks `tui`'s
+wiring, never theirs. One JSON object per line, deliberately close to JSON-RPC 2.0 rather than a
+bespoke shape, and line-delimited rather than LSP's `Content-Length` framing: a plugin author in
+any language needs nothing more than "read a line, parse JSON, print a line." Host → plugin is
+always an `event` notification (`init`, once at spawn; `key`, when the plugin's configured key is
+pressed) carrying the API version, current directory and selection. Plugin → host is either a
+`log` notification (fire-and-forget, surfaces as the status bar message) or a request — `read_dir`,
+`copy`, `mv`, `delete`, `create_dir`, `create_file`, `touch`, `rename` — reaching the exact same
+`file_ops` orchestration the built-in keys use, not a bolted-on read-only subset. Requests and
+their params are parsed manually (`RawIncoming` → `PluginRequest::parse` per method) rather than
+via a single `#[serde(tag, content)]` enum, so a malformed or unknown line from an untrusted
+external process always fails as data, with the original request `id` preserved so the host can
+still reply with an error rather than leaving the plugin hanging.
+
+**Concurrency.** Mirrors the existing `LiveRefresh`/`MarkedSize`/`GitStatus` shape exactly: a
+`tokio::runtime::Handle` passed in at construction, `unbounded_channel`s for cross-task
+communication, and a `poll()` the render loop calls once a tick — no new concurrency pattern
+introduced. Per plugin: a `write_loop` task drains an unbounded queue onto the child's stdin (so
+firing an event from the render loop never blocks), a `read_loop` task parses stdout line by
+line and runs any `file_ops` call on `spawn_blocking` before replying, and a `reap` task awaits
+the child so `kill_on_drop` has something alive to act on for the process's whole lifetime and an
+abnormal exit gets one log line (a clean exit stays silent). `Command::spawn` needs the calling
+thread's tokio reactor bound via `handle.enter()` even though `PluginManager::spawn` itself is
+synchronous — the one non-obvious wiring detail, caught by the integration test panicking with
+"no reactor running" before the fix.
+
+**Config and dispatch.** `theming::config` gained `[[plugin]]` (`name`, `command`, `args`,
+`on_key`), mirroring the existing `[[open_with]]` precedent exactly; `on_key` resolves through
+the same `keymap::parse_key` every other binding uses (now `pub(crate)` instead of private) so a
+plugin's key string means the same thing everywhere, and an unrecognised string just means no
+binding rather than a startup failure. `tui::App` gained a `plugins: PluginManager` field spawned
+the same way `git`/`marked_size` already are (a `with_plugins` builder, a bad spawn logged rather
+than fatal), and a genuinely unbound key (`config.keys.resolve` returns `None`) now routes to
+`App::dispatch_plugin_key` rather than doing nothing — additive only, the built-in keymap and
+`Action` enum are untouched.
+
+**Trade-offs and what was left.** No sandboxing (see Context). No plugin → host keybind
+registration RPC — a plugin's key comes only from its own `[[plugin]]` config entry, one key per
+plugin; a plugin binding multiple keys or a `:plugin` manual-trigger command is future scope, not
+built speculatively. No supervisor/restart on crash. The fixture plugin used for the integration
+test hand-writes JSON text rather than reusing `plugins::protocol`'s Rust types, specifically so
+the test exercises the wire format itself — the same thing a plugin in any other language would
+have to get right — not two ends of the same struct agreeing with itself.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green (`plugins` 15 unit
++ 3 integration, `theming` 59, `tui` 346). The integration suite spawns the real fixture binary as
+a genuinely separate OS process through `PluginManager`, fires a `key` event exactly the way `tui`
+will, and asserts the fixture's `read_dir`/`create_file` requests reached the real filesystem —
+not mocked at any layer. Property tests (`proptest`) cover `WireEntry`'s conversion from
+`shared::DirEntryInfo` for arbitrary names/sizes/timestamps. Not verified: an actual Python, Lua
+or shell plugin script running interactively inside the built `mman` binary — this sandbox has no
+interactive session to drive that by hand, so the "any language" claim rests on the wire-format
+unit tests (raw JSON text, not the crate's own types) plus the process-boundary integration test,
+not a literal non-Rust script exercised end to end.
 
 ---
 
