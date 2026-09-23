@@ -700,6 +700,32 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   Lua-only tier (C, rejected as too narrow — "any language" was the point). Deliberately
   unsandboxed for now: a plugin runs with Minuteman's own OS permissions, an accepted trade until
   a community plugin registry (see Long-Term Vision) means running code nobody local wrote.
+- ✅ **Appearance popup: color picker and saved custom themes** – any color row (Accent, Focused
+  border, Selection, Directory, Status bar, Danger) can now be edited as HSV sliders instead of
+  only typed hex: `Tab` mid-edit toggles between text and picker mode, `Up`/`Down` pick which of
+  H/S/V a subsequent `Left`/`Right` nudges, `Enter` commits the resulting hex, and every color row
+  shows a live two-cell swatch of its own value. A new "Save theme" row saves the live look under a
+  name — its own value reads "new theme" or "updates '⟨name⟩'" depending on whether the live look
+  still traces back to a saved theme; saving when it's drifted from that theme offers `u`pdate or
+  `n`ew, saving when it matches exactly is a no-op reported in the status line, and saving with
+  nothing active yet just asks for a name. New `theming::color` (`Hsv`, `hex_to_hsv`,
+  property-tested RGB↔HSV round-tripping) and `theming::CustomTheme`; saved themes are full color
+  snapshots (`RawTheme::from_theme`, every field set, not an overlay) in `local.toml`'s new
+  `[[custom_themes]]` array alongside a new `active_custom_theme` field, so a saved theme keeps
+  looking the same regardless of later `config.toml`/`appearance.toml` edits and survives restarts.
+  Chosen as COA A — extend the existing popup and `local.toml` — over a separate Theme Manager
+  popup plus a standalone picker overlay (B) and a swatch-grid-only version with no automatic
+  update/new detection (C); reselecting, renaming or deleting a saved theme from the popup is
+  deferred (see Medium Priority), since the Theme row's cycle still only knows the fixed built-in
+  palettes. Verified against the real compiled binary via a scripted PTY session reconstructed
+  through `pyte` (stripping the kitty-graphics APC startup query first, the same gotcha this
+  project's PTY sessions have hit before): the swatch and readout tracked a live hue/saturation
+  nudge in real time and `Enter` committed the exact resulting hex; saving a theme for the first
+  time asked for a name, and after saving, the same row's value flipped from "new theme" to
+  "updates 'verify-theme'" while `local.toml` held both the existing field-level override and a
+  correct `[[custom_themes]]` snapshot. This also surfaced a harness-only finding written up in
+  `DIARY.md`: the startup capability probes can still be mid-flight after the first frame renders,
+  so a keystroke sent right after can be swallowed — not a bug in `mman`.
 
 ---
 
@@ -748,6 +774,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   free-text entry the popup already has for a leaf field. Deferred rather than built in the same
   cycle because free-text editing of ~40 fields behind a two-level submenu is a project of its
   own, not a bounded addition to one already-large feature.
+- **Saved custom themes: reselect, rename, delete** – the color picker and "Save theme" row (see
+  Completed) can create and update named themes in `local.toml`, but the Theme row's cycle still
+  only knows the five fixed built-in palettes — there's no way yet to pick a previously saved
+  custom theme back up, rename one, or delete one, from inside the popup. Needs the Theme row's
+  `RowKind::Cycle(&'static [&'static str])` to grow into (or sit alongside) something that can
+  cycle a dynamic, session-loaded list of names, which is more than the one-line addition it
+  sounds like.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
   file_ops, preview, and trash, so backends can be swapped without touching feature code.
 

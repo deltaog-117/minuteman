@@ -53,7 +53,7 @@ use anyhow::Result;
 use app::App;
 use appearance_popup::{
     AppearancePopup, AppearanceView, Hit as AppearanceHit, Outcome as AppearanceOutcome,
-    Row as AppearanceRow, RowKind as AppearanceRowKind,
+    Row as AppearanceRow, RowKind as AppearanceRowKind, SaveChoice, SaveTarget,
 };
 use browser::BrowserState;
 use browser_mouse::{BrowserLayout, Click, ClickTracker, Hit, Listing, Pane, Wheel};
@@ -87,8 +87,8 @@ use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
 use theming::{
-    Action, ColumnLayout, Config, GlyphSet, PanelsConfig, RawLocal, RawPanels, RawTheme, RawUi,
-    Theme, Ui,
+    Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, RawLocal, RawPanels,
+    RawTheme, RawUi, Theme, Ui,
 };
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
@@ -349,6 +349,10 @@ struct Overlay<'a> {
     local_theme: &'a RawTheme,
     local_ui: &'a RawUi,
     local_panels: &'a RawPanels,
+    /// The appearance popup's saved custom themes and which one (if any) is active — see
+    /// `RawLocal::custom_themes`/`active_custom_theme`.
+    local_custom_themes: &'a [CustomTheme],
+    local_active_custom_theme: Option<&'a str>,
 }
 
 /// The panels a menu command can open, passed together so `run_menu_command` does not grow an
@@ -717,15 +721,36 @@ fn persist_local(
     local_theme: &RawTheme,
     local_ui: &RawUi,
     local_panels: &RawPanels,
+    local_custom_themes: &[CustomTheme],
+    local_active_custom_theme: &Option<String>,
     app: &mut App,
 ) {
     let local = RawLocal {
         theme: local_theme.clone(),
         ui: local_ui.clone(),
         panels: local_panels.clone(),
+        custom_themes: local_custom_themes.to_vec(),
+        active_custom_theme: local_active_custom_theme.clone(),
     };
     if let Err(e) = Config::save_local(&local) {
         app.status = Some(format!("could not save to local.toml: {e}"));
+    }
+}
+
+/// What the appearance popup's "Save theme" row should offer, given the live theme and the
+/// custom theme (if any) it's currently tracked against — `main`'s side of `Outcome::WantSaveTheme`,
+/// since the popup itself never sees `Config` or the saved themes list.
+fn classify_save(theme: &Theme, custom_themes: &[CustomTheme], active: Option<&str>) -> SaveChoice {
+    let Some(name) = active else {
+        return SaveChoice::New;
+    };
+    match custom_themes.iter().find(|t| t.name == name) {
+        Some(saved) if Theme::from(saved.theme.clone()) == *theme => {
+            SaveChoice::Unchanged(name.to_string())
+        }
+        Some(_) => SaveChoice::UpdateOrNew(name.to_string()),
+        // The active pick was reset or deleted from local.toml by hand; nothing to update.
+        None => SaveChoice::New,
     }
 }
 
@@ -734,12 +759,15 @@ fn persist_local(
 /// so a click and the key that reaches the same row behave identically. `local_panels` is only
 /// read here (it's the settings popup's own field of `local.toml`), so every save still carries
 /// whatever panel layout was last saved even though this outcome didn't touch it.
+#[allow(clippy::too_many_arguments)]
 fn apply_appearance_outcome(
     outcome: AppearanceOutcome,
     appearance: &mut Option<AppearancePopup>,
     local_theme: &mut RawTheme,
     local_ui: &mut RawUi,
     local_panels: &RawPanels,
+    local_custom_themes: &mut Vec<CustomTheme>,
+    local_active_custom_theme: &mut Option<String>,
     config: &Config,
     app: &mut App,
 ) {
@@ -751,6 +779,9 @@ fn apply_appearance_outcome(
             theme: &theme,
             glyphs: ui.glyphs,
             theme_name,
+            // Never actually read: `current_value` is only called for a color or cycle row, and
+            // `Row::SaveTheme` is neither.
+            active_custom_theme: None,
         }
         .value(row)
     };
@@ -772,17 +803,79 @@ fn apply_appearance_outcome(
                 } else {
                     appearance_popup::commit(local_theme, row, next);
                 }
-                persist_local(local_theme, local_ui, local_panels, app);
+                persist_local(
+                    local_theme,
+                    local_ui,
+                    local_panels,
+                    local_custom_themes,
+                    local_active_custom_theme,
+                    app,
+                );
             }
         }
         AppearanceOutcome::Commit(row, value) => {
             appearance_popup::commit(local_theme, row, value);
-            persist_local(local_theme, local_ui, local_panels, app);
+            persist_local(
+                local_theme,
+                local_ui,
+                local_panels,
+                local_custom_themes,
+                local_active_custom_theme,
+                app,
+            );
         }
         AppearanceOutcome::Reset => {
             *local_theme = RawTheme::default();
             *local_ui = RawUi::default();
-            persist_local(local_theme, local_ui, local_panels, app);
+            // The saved custom themes themselves are kept — only which one (if any) the live
+            // look is tracked against is cleared, since the live look is now the plain default.
+            *local_active_custom_theme = None;
+            persist_local(
+                local_theme,
+                local_ui,
+                local_panels,
+                local_custom_themes,
+                local_active_custom_theme,
+                app,
+            );
+        }
+        AppearanceOutcome::WantSaveTheme => {
+            let theme = effective_theme(config, local_theme);
+            let choice = classify_save(
+                &theme,
+                local_custom_themes,
+                local_active_custom_theme.as_deref(),
+            );
+            if let SaveChoice::Unchanged(name) = &choice {
+                app.status = Some(format!("theme '{name}' is already saved"));
+            } else if let Some(popup) = appearance.as_mut() {
+                popup.begin_save(choice);
+            }
+        }
+        AppearanceOutcome::SaveTheme(target) => {
+            let theme = effective_theme(config, local_theme);
+            let raw = RawTheme::from_theme(&theme);
+            let name = match target {
+                SaveTarget::New(name) => name,
+                SaveTarget::Update(name) => name,
+            };
+            match local_custom_themes.iter_mut().find(|t| t.name == name) {
+                Some(existing) => existing.theme = raw,
+                None => local_custom_themes.push(CustomTheme {
+                    name: name.clone(),
+                    theme: raw,
+                }),
+            }
+            *local_active_custom_theme = Some(name.clone());
+            persist_local(
+                local_theme,
+                local_ui,
+                local_panels,
+                local_custom_themes,
+                local_active_custom_theme,
+                app,
+            );
+            app.status = Some(format!("saved theme '{name}'"));
         }
     }
 }
@@ -880,6 +973,8 @@ fn run(
     let mut local_theme = config.local_theme.clone();
     let mut local_ui = config.local_ui.clone();
     let mut local_panels = config.local_panels.clone();
+    let mut local_custom_themes = config.local_custom_themes.clone();
+    let mut local_active_custom_theme = config.local_active_custom_theme.clone();
 
     loop {
         app.poll_bulk(browser, vfs)?;
@@ -979,6 +1074,8 @@ fn run(
                     local_theme: &local_theme,
                     local_ui: &local_ui,
                     local_panels: &local_panels,
+                    local_custom_themes: &local_custom_themes,
+                    local_active_custom_theme: local_active_custom_theme.as_deref(),
                 },
             )
         })?;
@@ -1075,6 +1172,8 @@ fn run(
                             &mut local_theme,
                             &mut local_ui,
                             &local_panels,
+                            &mut local_custom_themes,
+                            &mut local_active_custom_theme,
                             config,
                             app,
                         );
@@ -1556,7 +1655,14 @@ fn run(
                                     local_panels.show_command_bar = Some(!panels.show_command_bar);
                                 }
                             }
-                            persist_local(&local_theme, &local_ui, &local_panels, app);
+                            persist_local(
+                                &local_theme,
+                                &local_ui,
+                                &local_panels,
+                                &local_custom_themes,
+                                &local_active_custom_theme,
+                                app,
+                            );
                             let panels = effective_panels(config, &local_panels);
                             let view = SettingsView {
                                 columns: panels.columns,
@@ -1578,6 +1684,8 @@ fn run(
                         &mut local_theme,
                         &mut local_ui,
                         &local_panels,
+                        &mut local_custom_themes,
+                        &mut local_active_custom_theme,
                         config,
                         app,
                     );
@@ -1962,6 +2070,8 @@ fn draw(
         local_theme,
         local_ui,
         local_panels,
+        local_custom_themes: _local_custom_themes,
+        local_active_custom_theme,
     } = overlay;
     // The settings and appearance popups' changes are saved to `local.toml` (see `run`'s
     // `local_theme`/`local_ui`/`local_panels`), but applying them still has to happen every
@@ -1972,11 +2082,13 @@ fn draw(
     // `Vec<ListItem>`s this function already rebuilds every frame regardless.
     let mut theme = effective_theme(config, local_theme);
     // A color row's in-progress (uncommitted) edit previews live, on top of everything else —
-    // see `appearance_popup::preview`.
-    if let Some(popup) = appearance
-        && let (Some(row), Some(buffer)) = (popup.editing_row(), popup.editing_buffer())
-    {
-        theme = appearance_popup::preview(&theme, row, buffer);
+    // in text mode straight from the typed buffer, in picker mode from the HSV sliders' hex form.
+    if let Some(popup) = appearance {
+        if let (Some(row), Some(buffer)) = (popup.editing_row(), popup.editing_buffer()) {
+            theme = appearance_popup::preview(&theme, row, buffer);
+        } else if let (Some(row), Some((hsv, _))) = (popup.editing_row(), popup.editing_picker()) {
+            theme = appearance_popup::preview(&theme, row, &hsv.to_hex());
+        }
     }
     let effective_config = Config {
         panels: effective_panels(config, local_panels),
@@ -2216,6 +2328,7 @@ fn draw(
                 theme: &config.theme,
                 glyphs: config.ui.glyphs,
                 theme_name,
+                active_custom_theme: local_active_custom_theme,
             },
             config,
         );

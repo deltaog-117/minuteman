@@ -29,7 +29,7 @@
 
 use crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
-use theming::{GlyphSet, RawTheme, Theme};
+use theming::{GlyphSet, Hsv, RawTheme, Theme, hex_to_hsv};
 
 /// The built-in palettes the "Theme" row cycles through, in order. `catppuccin-latte` isn't
 /// here — it's only reached via `Theme::auto` on a light terminal, or by naming it explicitly in
@@ -52,11 +52,15 @@ pub enum Row {
     BorderType,
     Separator,
     Glyphs,
+    /// Saves the live look as a named custom theme — updating the one it was loaded from/last
+    /// saved as, if it still matches one, or prompting for a new name otherwise. See
+    /// `Outcome::WantSaveTheme`.
+    SaveTheme,
     /// Clears every override this popup has made this session, in one step.
     Reset,
 }
 
-const ROWS: [Row; 11] = [
+const ROWS: [Row; 12] = [
     Row::Theme,
     Row::Accent,
     Row::BorderFocused,
@@ -67,11 +71,13 @@ const ROWS: [Row; 11] = [
     Row::BorderType,
     Row::Separator,
     Row::Glyphs,
+    Row::SaveTheme,
     Row::Reset,
 ];
 
 /// What kind of value a row holds, and so how a keystroke or a click on it behaves. `Row::Reset`
-/// has neither — it is an action, not a value — so `Row::kind` returns `None` for it.
+/// and `Row::SaveTheme` have neither — they are actions, not values — so `Row::kind` returns
+/// `None` for them.
 #[derive(Debug, Clone, Copy)]
 pub enum RowKind {
     /// A free-form name or hex value, edited as text.
@@ -93,6 +99,7 @@ impl Row {
             Row::BorderType => "Border style",
             Row::Separator => "Separator",
             Row::Glyphs => "Glyphs",
+            Row::SaveTheme => "Save theme",
             Row::Reset => "Reset to defaults",
         }
     }
@@ -103,7 +110,7 @@ impl Row {
             Row::BorderType => Some(RowKind::Cycle(&["rounded", "plain", "double", "thick"])),
             Row::Separator => Some(RowKind::Cycle(&["flat", "arrow", "auto"])),
             Row::Glyphs => Some(RowKind::Cycle(&["unicode", "nerd", "ascii"])),
-            Row::Reset => None,
+            Row::SaveTheme | Row::Reset => None,
             Row::Accent
             | Row::BorderFocused
             | Row::Selection
@@ -124,6 +131,10 @@ pub struct AppearanceView<'a> {
     /// named palettes can share a field's value and a palette's colors can themselves be
     /// individually overridden. `main` tracks the picked name directly (`local_theme.name`).
     pub theme_name: &'static str,
+    /// The name of the saved custom theme the live look started from (or was last saved as),
+    /// if any — shown next to `Row::SaveTheme` so it's clear whether that row will update an
+    /// existing theme or start a new one.
+    pub active_custom_theme: Option<&'a str>,
 }
 
 impl AppearanceView<'_> {
@@ -139,6 +150,10 @@ impl AppearanceView<'_> {
             Row::BorderType => self.theme.border_type.clone(),
             Row::Separator => self.theme.separator.clone(),
             Row::Glyphs => glyph_name(self.glyphs).to_string(),
+            Row::SaveTheme => match self.active_custom_theme {
+                Some(name) => format!("updates '{name}'"),
+                None => "new theme".to_string(),
+            },
             Row::Reset => String::new(),
         }
     }
@@ -163,7 +178,12 @@ pub fn preview(theme: &Theme, row: Row, value: &str) -> Theme {
         Row::Directory => theme.dir_fg = value.to_string(),
         Row::StatusBar => theme.bar_bg = value.to_string(),
         Row::Danger => theme.danger_fg = value.to_string(),
-        Row::Theme | Row::BorderType | Row::Separator | Row::Glyphs | Row::Reset => {}
+        Row::Theme
+        | Row::BorderType
+        | Row::Separator
+        | Row::Glyphs
+        | Row::SaveTheme
+        | Row::Reset => {}
     }
     theme
 }
@@ -183,7 +203,7 @@ pub fn commit(overrides: &mut RawTheme, row: Row, value: String) {
         Row::Danger => overrides.danger_fg = Some(value),
         Row::BorderType => overrides.border_type = Some(value),
         Row::Separator => overrides.separator = Some(value),
-        Row::Glyphs | Row::Reset => {}
+        Row::Glyphs | Row::SaveTheme | Row::Reset => {}
     }
 }
 
@@ -231,6 +251,35 @@ pub enum Outcome {
     /// Clear every override this popup has made this session.
     Reset,
     Close,
+    /// `Row::SaveTheme` was activated; the caller compares the live theme against its saved
+    /// custom themes, builds a `SaveChoice`, and calls `begin_save` with it — the popup itself
+    /// never sees `Config` or `local.toml`, so it can't make that comparison on its own.
+    WantSaveTheme,
+    /// The save flow `begin_save` started was carried through to a name — either typed fresh or
+    /// confirmed as an update.
+    SaveTheme(SaveTarget),
+}
+
+/// What `Outcome::WantSaveTheme` resolves to, once the caller has compared the live theme
+/// against the custom themes it owns copies of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveChoice {
+    /// The live look isn't a saved custom theme, or has drifted from the built-in palette it
+    /// started from — nothing to offer "update" for, so the popup goes straight to naming it.
+    New,
+    /// It started from (or was last saved as) `.0`, and has drifted since — the popup asks
+    /// whether to update that theme or save a new one.
+    UpdateOrNew(String),
+    /// It matches `.0` exactly already; `begin_save` is a no-op for this, and the caller should
+    /// report that rather than opening the popup's save flow.
+    Unchanged(String),
+}
+
+/// Where a confirmed save flow should write: a brand new theme, or over one that already exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveTarget {
+    New(String),
+    Update(String),
 }
 
 /// Where a click landed, from `hit`.
@@ -261,10 +310,41 @@ pub fn hit(area: Rect, pos: Position) -> Hit {
     }
 }
 
+/// How much a `Left`/`Right` nudge moves the picker's selected channel — degrees for hue,
+/// percentage points for saturation/value. The same step for all three keeps the key feel
+/// consistent even though the ranges differ.
+const PICKER_STEP: f64 = 5.0;
+
+/// A color row's in-progress edit: either typed as text (a name or `#rrggbb`/`#rgb` hex, exactly
+/// what `appearance.toml` accepts) or adjusted as HSV sliders — `Tab` swaps between the two,
+/// converting the value across the swap so neither loses what the other typed/set.
+#[derive(Debug, Clone, PartialEq)]
+enum Edit {
+    Text(String),
+    Picker {
+        hsv: Hsv,
+        /// Which of H/S/V (0/1/2) `Up`/`Down` and `Left`/`Right` act on.
+        channel: u8,
+    },
+}
+
+/// The save flow `Outcome::WantSaveTheme` / `begin_save` drive: first an update-or-new choice
+/// (skipped when there's nothing to offer "update" for), then typing a name.
+#[derive(Debug, Clone, PartialEq)]
+enum SaveState {
+    /// Offers "update `.0`" (`u`) or "save as new" (`n`); `.0` is the theme that would be
+    /// updated.
+    Choice(String),
+    /// Typing the name a new custom theme will be saved under.
+    Name(String),
+}
+
 pub struct AppearancePopup {
     cursor: usize,
-    /// `Some(buffer)` while the row under the cursor is being typed into.
-    editing: Option<String>,
+    /// `Some(_)` while the row under the cursor is being edited, in either mode.
+    editing: Option<Edit>,
+    /// `Some(_)` while the "Save theme" flow is asking for a choice or a name.
+    save: Option<SaveState>,
 }
 
 impl AppearancePopup {
@@ -272,6 +352,7 @@ impl AppearancePopup {
         Self {
             cursor: 0,
             editing: None,
+            save: None,
         }
     }
 
@@ -283,46 +364,65 @@ impl AppearancePopup {
         self.cursor
     }
 
-    /// The row being typed into, if any.
+    /// The row being edited, if any — in either text or picker mode.
     pub fn editing_row(&self) -> Option<Row> {
         self.editing.is_some().then(|| ROWS[self.cursor])
     }
 
-    /// The in-progress buffer, if a row is being typed into.
+    /// The in-progress text buffer, if the row under the cursor is being edited as text. `None`
+    /// while it's in picker mode instead — see `editing_picker`.
     pub fn editing_buffer(&self) -> Option<&str> {
-        self.editing.as_deref()
+        match &self.editing {
+            Some(Edit::Text(buffer)) => Some(buffer),
+            _ => None,
+        }
     }
 
-    /// Starts editing the row under the cursor, pre-filled with `initial` (its current value) —
-    /// called after a `WantEdit` outcome, once the caller has looked that value up.
+    /// The in-progress HSV value and which channel is selected, if the row under the cursor is
+    /// being edited as a color picker.
+    pub fn editing_picker(&self) -> Option<(Hsv, u8)> {
+        match self.editing {
+            Some(Edit::Picker { hsv, channel }) => Some((hsv, channel)),
+            _ => None,
+        }
+    }
+
+    /// Starts editing the row under the cursor as text, pre-filled with `initial` (its current
+    /// value) — called after a `WantEdit` outcome, once the caller has looked that value up.
     pub fn begin_edit(&mut self, initial: String) {
-        self.editing = Some(initial);
+        self.editing = Some(Edit::Text(initial));
+    }
+
+    /// What the "Save theme" flow should ask, from `Outcome::WantSaveTheme` — a no-op for
+    /// `SaveChoice::Unchanged`, since there's nothing to save.
+    pub fn begin_save(&mut self, choice: SaveChoice) {
+        self.save = match choice {
+            SaveChoice::New => Some(SaveState::Name(String::new())),
+            SaveChoice::UpdateOrNew(name) => Some(SaveState::Choice(name)),
+            SaveChoice::Unchanged(_) => None,
+        };
+    }
+
+    /// What the save flow is currently showing, for `overlay_view::render_appearance` — the name
+    /// it would update, or the buffer being typed for a new one.
+    pub fn save_view(&self) -> Option<SaveView<'_>> {
+        match &self.save {
+            Some(SaveState::Choice(name)) => Some(SaveView::Choice(name)),
+            Some(SaveState::Name(buffer)) => Some(SaveView::Name(buffer)),
+            None => None,
+        }
     }
 
     /// `j`/`k`/the arrows move the cursor with wraparound; `h`/`l`/enter/left/right act on the row
-    /// under it (edit a color, cycle a fixed value, or run Reset); `Esc`/`q` closes the popup.
-    /// While a row is being edited, every other key is text input instead: it types into the
-    /// buffer, `Enter` commits it, and `Esc` cancels back to the value it had before.
+    /// under it (edit a color, cycle a fixed value, save the theme, or run Reset); `Esc`/`q`
+    /// closes the popup. While a row is being edited or the save flow is open, keys are routed to
+    /// that instead — see `key_editing`/`key_saving`.
     pub fn key(&mut self, code: KeyCode) -> Outcome {
-        if let Some(mut buffer) = self.editing.take() {
-            return match code {
-                KeyCode::Esc => Outcome::Stay,
-                KeyCode::Enter => Outcome::Commit(ROWS[self.cursor], buffer),
-                KeyCode::Backspace => {
-                    buffer.pop();
-                    self.editing = Some(buffer);
-                    Outcome::Stay
-                }
-                KeyCode::Char(c) => {
-                    buffer.push(c);
-                    self.editing = Some(buffer);
-                    Outcome::Stay
-                }
-                _ => {
-                    self.editing = Some(buffer);
-                    Outcome::Stay
-                }
-            };
+        if self.save.is_some() {
+            return self.key_saving(code);
+        }
+        if self.editing.is_some() {
+            return self.key_editing(code);
         }
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -344,25 +444,175 @@ impl AppearancePopup {
         }
     }
 
+    /// Text typing (`Edit::Text`) and slider nudging (`Edit::Picker`) both live here; `Tab`
+    /// converts the in-progress value across the two. `Enter` commits (converting a picker's HSV
+    /// to hex first); `Esc` cancels back to whatever the row held before editing began.
+    fn key_editing(&mut self, code: KeyCode) -> Outcome {
+        match self.editing.take().expect("checked by the caller") {
+            Edit::Text(mut buffer) => match code {
+                KeyCode::Esc => Outcome::Stay,
+                KeyCode::Enter => Outcome::Commit(ROWS[self.cursor], buffer),
+                KeyCode::Tab => {
+                    // An unparsable buffer (a color name, or a half-typed hex) starts the picker
+                    // at white rather than losing the row's edit entirely.
+                    let hsv = hex_to_hsv(&buffer).unwrap_or(Hsv {
+                        h: 0.0,
+                        s: 0.0,
+                        v: 100.0,
+                    });
+                    self.editing = Some(Edit::Picker { hsv, channel: 0 });
+                    Outcome::Stay
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    self.editing = Some(Edit::Text(buffer));
+                    Outcome::Stay
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    self.editing = Some(Edit::Text(buffer));
+                    Outcome::Stay
+                }
+                _ => {
+                    self.editing = Some(Edit::Text(buffer));
+                    Outcome::Stay
+                }
+            },
+            Edit::Picker { hsv, channel } => match code {
+                KeyCode::Esc => Outcome::Stay,
+                KeyCode::Enter => Outcome::Commit(ROWS[self.cursor], hsv.to_hex()),
+                KeyCode::Tab => {
+                    self.editing = Some(Edit::Text(hsv.to_hex()));
+                    Outcome::Stay
+                }
+                KeyCode::Up => {
+                    self.editing = Some(Edit::Picker {
+                        hsv,
+                        channel: (channel + 2) % 3,
+                    });
+                    Outcome::Stay
+                }
+                KeyCode::Down => {
+                    self.editing = Some(Edit::Picker {
+                        hsv,
+                        channel: (channel + 1) % 3,
+                    });
+                    Outcome::Stay
+                }
+                KeyCode::Left => {
+                    self.editing = Some(Edit::Picker {
+                        hsv: nudge(hsv, channel, -PICKER_STEP),
+                        channel,
+                    });
+                    Outcome::Stay
+                }
+                KeyCode::Right => {
+                    self.editing = Some(Edit::Picker {
+                        hsv: nudge(hsv, channel, PICKER_STEP),
+                        channel,
+                    });
+                    Outcome::Stay
+                }
+                _ => {
+                    self.editing = Some(Edit::Picker { hsv, channel });
+                    Outcome::Stay
+                }
+            },
+        }
+    }
+
+    /// The update-or-new choice and the name buffer both live here. `Esc` at either step cancels
+    /// the whole flow without saving anything.
+    fn key_saving(&mut self, code: KeyCode) -> Outcome {
+        match self.save.take().expect("checked by the caller") {
+            SaveState::Choice(name) => match code {
+                KeyCode::Char('u') => Outcome::SaveTheme(SaveTarget::Update(name)),
+                KeyCode::Char('n') => {
+                    self.save = Some(SaveState::Name(String::new()));
+                    Outcome::Stay
+                }
+                KeyCode::Esc => Outcome::Stay,
+                _ => {
+                    self.save = Some(SaveState::Choice(name));
+                    Outcome::Stay
+                }
+            },
+            SaveState::Name(mut buffer) => match code {
+                KeyCode::Esc => Outcome::Stay,
+                KeyCode::Enter if !buffer.trim().is_empty() => {
+                    Outcome::SaveTheme(SaveTarget::New(buffer.trim().to_string()))
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    self.save = Some(SaveState::Name(buffer));
+                    Outcome::Stay
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    self.save = Some(SaveState::Name(buffer));
+                    Outcome::Stay
+                }
+                _ => {
+                    self.save = Some(SaveState::Name(buffer));
+                    Outcome::Stay
+                }
+            },
+        }
+    }
+
     /// A left click on `row_index` (from `hit`), which acts on that row exactly like `Enter`
     /// would after moving the cursor there — a mouse user and a keyboard user reach the same
-    /// outcome. Abandons any in-progress edit on a different row without committing it.
+    /// outcome. Abandons any in-progress edit or save flow on a different row without committing
+    /// it.
     pub fn click_row(&mut self, row_index: usize) -> Outcome {
         if row_index >= ROWS.len() {
             return Outcome::Stay;
         }
         self.cursor = row_index;
         self.editing = None;
+        self.save = None;
         self.activate()
     }
 
     fn activate(&self) -> Outcome {
-        match ROWS[self.cursor].kind() {
-            None => Outcome::Reset,
-            Some(RowKind::Color) => Outcome::WantEdit(ROWS[self.cursor]),
-            Some(RowKind::Cycle(_)) => Outcome::Cycle(ROWS[self.cursor]),
+        match ROWS[self.cursor] {
+            Row::Reset => Outcome::Reset,
+            Row::SaveTheme => Outcome::WantSaveTheme,
+            row => match row.kind().expect("every other row has a kind") {
+                RowKind::Color => Outcome::WantEdit(row),
+                RowKind::Cycle(_) => Outcome::Cycle(row),
+            },
         }
     }
+}
+
+/// `hsv` with `channel`'s field (0 = hue, 1 = saturation, 2 = value) nudged by `delta` and
+/// wrapped/clamped back into range.
+fn nudge(hsv: Hsv, channel: u8, delta: f64) -> Hsv {
+    match channel {
+        0 => Hsv {
+            h: hsv.h + delta,
+            ..hsv
+        },
+        1 => Hsv {
+            s: hsv.s + delta,
+            ..hsv
+        },
+        _ => Hsv {
+            v: hsv.v + delta,
+            ..hsv
+        },
+    }
+    .clamped()
+}
+
+/// What the save flow is showing, for `overlay_view::render_appearance` to draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveView<'a> {
+    /// Offers "update `.0`" or "save as new".
+    Choice(&'a str),
+    /// The buffer being typed for a new theme's name.
+    Name(&'a str),
 }
 
 impl Default for AppearancePopup {
@@ -466,11 +716,22 @@ mod tests {
     fn the_reset_row_is_an_action_not_a_color_or_a_cycle() {
         assert!(Row::Reset.kind().is_none());
         let mut popup = AppearancePopup::new();
+        for _ in 0..11 {
+            popup.key(KeyCode::Char('j'));
+        }
+        assert_eq!(popup.cursor(), 11); // Reset
+        assert_eq!(popup.key(KeyCode::Enter), Outcome::Reset);
+    }
+
+    #[test]
+    fn the_save_theme_row_is_an_action_that_wants_a_save() {
+        assert!(Row::SaveTheme.kind().is_none());
+        let mut popup = AppearancePopup::new();
         for _ in 0..10 {
             popup.key(KeyCode::Char('j'));
         }
-        assert_eq!(popup.cursor(), 10); // Reset
-        assert_eq!(popup.key(KeyCode::Enter), Outcome::Reset);
+        assert_eq!(popup.cursor(), 10); // SaveTheme
+        assert_eq!(popup.key(KeyCode::Enter), Outcome::WantSaveTheme);
     }
 
     #[test]
@@ -494,6 +755,181 @@ mod tests {
         popup.click_row(2);
         assert_eq!(popup.editing_row(), None);
         assert_eq!(popup.cursor(), 2);
+    }
+
+    #[test]
+    fn tab_toggles_between_text_and_picker_preserving_the_color() {
+        let mut popup = AppearancePopup::new();
+        popup.key(KeyCode::Char('j')); // Accent
+        popup.begin_edit("#ff0000".into());
+
+        assert_eq!(popup.key(KeyCode::Tab), Outcome::Stay);
+        assert_eq!(
+            popup.editing_buffer(),
+            None,
+            "picker mode has no text buffer"
+        );
+        let (hsv, channel) = popup.editing_picker().expect("now in picker mode");
+        assert_eq!(channel, 0);
+        assert!((hsv.h - 0.0).abs() < 1.0, "red's hue");
+
+        assert_eq!(popup.key(KeyCode::Tab), Outcome::Stay);
+        assert_eq!(
+            popup.editing_buffer(),
+            Some("#ff0000"),
+            "back to text with the same color"
+        );
+        assert_eq!(popup.editing_picker(), None);
+    }
+
+    #[test]
+    fn an_unparsable_buffer_starts_the_picker_at_white_instead_of_losing_the_edit() {
+        let mut popup = AppearancePopup::new();
+        popup.key(KeyCode::Char('j')); // Accent
+        popup.begin_edit("cyan".into()); // a name, not hex — can't be inverted to HSV
+        popup.key(KeyCode::Tab);
+        let (hsv, _) = popup.editing_picker().expect("still enters picker mode");
+        assert_eq!((hsv.h, hsv.s, hsv.v), (0.0, 0.0, 100.0));
+    }
+
+    #[test]
+    fn picker_up_down_switch_channel_and_left_right_nudge_it_with_wraparound() {
+        let mut popup = AppearancePopup::new();
+        popup.key(KeyCode::Char('j')); // Accent
+        popup.begin_edit("#000000".into());
+        popup.key(KeyCode::Tab);
+        assert_eq!(popup.editing_picker().unwrap().1, 0); // hue selected
+
+        popup.key(KeyCode::Down);
+        assert_eq!(popup.editing_picker().unwrap().1, 1); // saturation
+        popup.key(KeyCode::Down);
+        assert_eq!(popup.editing_picker().unwrap().1, 2); // value
+        popup.key(KeyCode::Down);
+        assert_eq!(popup.editing_picker().unwrap().1, 0, "wraps back to hue");
+        popup.key(KeyCode::Up);
+        assert_eq!(
+            popup.editing_picker().unwrap().1,
+            2,
+            "up from hue wraps to value"
+        );
+
+        // Black's value is 0; nudging it left must clamp at 0, not go negative.
+        popup.key(KeyCode::Left);
+        assert_eq!(popup.editing_picker().unwrap().0.v, 0.0);
+        popup.key(KeyCode::Right);
+        assert_eq!(popup.editing_picker().unwrap().0.v, PICKER_STEP);
+
+        popup.key(KeyCode::Up); // back to hue
+        for _ in 0..80 {
+            popup.key(KeyCode::Left);
+        }
+        let hue = popup.editing_picker().unwrap().0.h;
+        assert!((0.0..360.0).contains(&hue), "hue wraps rather than clamps");
+    }
+
+    #[test]
+    fn enter_in_picker_mode_commits_the_hex_form() {
+        let mut popup = AppearancePopup::new();
+        popup.key(KeyCode::Char('j')); // Accent
+        popup.begin_edit("#ff0000".into());
+        popup.key(KeyCode::Tab);
+        popup.key(KeyCode::Down); // saturation
+        popup.key(KeyCode::Left); // drop it a bit
+        let outcome = popup.key(KeyCode::Enter);
+        let Outcome::Commit(Row::Accent, hex) = outcome else {
+            panic!("expected a Commit, got {outcome:?}");
+        };
+        assert_eq!(hex.len(), 7);
+        assert_ne!(hex, "#ff0000", "the saturation nudge changed the color");
+        assert_eq!(popup.editing_row(), None, "Enter consumed the edit");
+    }
+
+    #[test]
+    fn esc_in_picker_mode_cancels_without_committing() {
+        let mut popup = AppearancePopup::new();
+        popup.key(KeyCode::Char('j')); // Accent
+        popup.begin_edit("#ff0000".into());
+        popup.key(KeyCode::Tab);
+        assert_eq!(popup.key(KeyCode::Esc), Outcome::Stay);
+        assert_eq!(popup.editing_row(), None);
+        assert_eq!(popup.editing_picker(), None);
+    }
+
+    #[test]
+    fn save_theme_offers_update_or_new_and_update_reports_the_existing_name() {
+        let mut popup = AppearancePopup::new();
+        popup.begin_save(SaveChoice::UpdateOrNew("sunset".into()));
+        assert!(matches!(popup.save_view(), Some(SaveView::Choice(n)) if n == "sunset"));
+        assert_eq!(
+            popup.key(KeyCode::Char('u')),
+            Outcome::SaveTheme(SaveTarget::Update("sunset".into()))
+        );
+        assert_eq!(popup.save_view(), None, "the outcome ends the flow");
+    }
+
+    #[test]
+    fn save_theme_choosing_new_from_an_update_prompt_asks_for_a_name() {
+        let mut popup = AppearancePopup::new();
+        popup.begin_save(SaveChoice::UpdateOrNew("sunset".into()));
+        assert_eq!(popup.key(KeyCode::Char('n')), Outcome::Stay);
+        assert!(matches!(popup.save_view(), Some(SaveView::Name(n)) if n.is_empty()));
+
+        for c in "midnight".chars() {
+            popup.key(KeyCode::Char(c));
+        }
+        assert_eq!(
+            popup.key(KeyCode::Enter),
+            Outcome::SaveTheme(SaveTarget::New("midnight".into()))
+        );
+    }
+
+    #[test]
+    fn save_theme_new_choice_skips_straight_to_naming() {
+        let mut popup = AppearancePopup::new();
+        popup.begin_save(SaveChoice::New);
+        assert!(matches!(popup.save_view(), Some(SaveView::Name(n)) if n.is_empty()));
+        popup.key(KeyCode::Char('x'));
+        assert_eq!(
+            popup.key(KeyCode::Enter),
+            Outcome::SaveTheme(SaveTarget::New("x".into()))
+        );
+    }
+
+    #[test]
+    fn save_theme_unchanged_choice_never_opens_the_flow() {
+        let mut popup = AppearancePopup::new();
+        popup.begin_save(SaveChoice::Unchanged("sunset".into()));
+        assert_eq!(popup.save_view(), None);
+    }
+
+    #[test]
+    fn enter_does_not_save_an_all_whitespace_name() {
+        let mut popup = AppearancePopup::new();
+        popup.begin_save(SaveChoice::New);
+        popup.key(KeyCode::Char(' '));
+        assert_eq!(popup.key(KeyCode::Enter), Outcome::Stay);
+    }
+
+    #[test]
+    fn esc_cancels_the_save_flow_at_either_step() {
+        let mut popup = AppearancePopup::new();
+        popup.begin_save(SaveChoice::UpdateOrNew("sunset".into()));
+        assert_eq!(popup.key(KeyCode::Esc), Outcome::Stay);
+        assert_eq!(popup.save_view(), None);
+
+        popup.begin_save(SaveChoice::New);
+        popup.key(KeyCode::Char('x'));
+        assert_eq!(popup.key(KeyCode::Esc), Outcome::Stay);
+        assert_eq!(popup.save_view(), None);
+    }
+
+    #[test]
+    fn clicking_a_row_abandons_an_in_progress_save_flow() {
+        let mut popup = AppearancePopup::new();
+        popup.begin_save(SaveChoice::New);
+        popup.click_row(1);
+        assert_eq!(popup.save_view(), None);
+        assert_eq!(popup.cursor(), 1);
     }
 
     #[test]
@@ -535,6 +971,7 @@ mod tests {
             theme: &theme,
             glyphs: GlyphSet::Nerd,
             theme_name: "dracula",
+            active_custom_theme: None,
         };
         assert_eq!(view.value(Row::Theme), "dracula");
         assert_eq!(view.value(Row::Accent), theme.accent_fg);
@@ -546,6 +983,13 @@ mod tests {
         assert_eq!(view.value(Row::BorderType), theme.border_type);
         assert_eq!(view.value(Row::Separator), theme.separator);
         assert_eq!(view.value(Row::Glyphs), "nerd");
+        assert_eq!(view.value(Row::SaveTheme), "new theme");
+
+        let named = AppearanceView {
+            active_custom_theme: Some("sunset"),
+            ..view
+        };
+        assert_eq!(named.value(Row::SaveTheme), "updates 'sunset'");
     }
 
     #[test]
@@ -575,19 +1019,19 @@ mod tests {
 
     #[test]
     fn hit_finds_the_row_under_the_blank_line_and_outside_is_outside() {
-        let area = Rect::new(10, 5, 40, 16); // border + blank + 11 rows + blank + hint + border
+        let area = Rect::new(10, 5, 40, 17); // border + blank + 12 rows + blank + hint + border
         let inner = area.inner(Margin::new(1, 1));
         assert_eq!(hit(area, Position::new(5, 5)), Hit::Outside);
         assert_eq!(hit(area, Position::new(inner.x, inner.y)), Hit::Inert);
         assert_eq!(hit(area, Position::new(inner.x, inner.y + 1)), Hit::Row(0));
         assert_eq!(
-            hit(area, Position::new(inner.x, inner.y + 11)),
-            Hit::Row(10)
+            hit(area, Position::new(inner.x, inner.y + 12)),
+            Hit::Row(11)
         );
     }
 
     proptest::proptest! {
-        /// Whatever sequence of moves the cursor sees, it always names one of the eleven rows.
+        /// Whatever sequence of moves the cursor sees, it always names one of the popup's rows.
         #[test]
         fn the_cursor_always_stays_in_bounds(moves in proptest::collection::vec(0u8..2, 0..200)) {
             let mut popup = AppearancePopup::new();

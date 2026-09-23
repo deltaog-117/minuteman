@@ -882,6 +882,8 @@ mod tests {
             font: theming::Font::default(),
             panels: theming::PanelsConfig::default(),
             local_panels: theming::RawPanels::default(),
+            local_custom_themes: Vec::new(),
+            local_active_custom_theme: None,
         }
     }
 

@@ -350,6 +350,34 @@ pub struct RawTheme {
 }
 
 impl RawTheme {
+    /// A fully-specified `RawTheme` (every field `Some`, `name` left `None`) snapshotting a
+    /// resolved `Theme` — how the appearance popup's "Save theme" turns the live look into
+    /// something a [`CustomTheme`](crate::CustomTheme) can store and later reproduce exactly,
+    /// without depending on whichever built-in palette it happened to start from.
+    pub fn from_theme(theme: &Theme) -> RawTheme {
+        RawTheme {
+            name: None,
+            selection_bg: Some(theme.selection_bg.clone()),
+            selection_fg: Some(theme.selection_fg.clone()),
+            border_fg: Some(theme.border_fg.clone()),
+            border_focused_fg: Some(theme.border_focused_fg.clone()),
+            title_fg: Some(theme.title_fg.clone()),
+            accent_fg: Some(theme.accent_fg.clone()),
+            dir_fg: Some(theme.dir_fg.clone()),
+            file_fg: Some(theme.file_fg.clone()),
+            source_fg: Some(theme.source_fg.clone()),
+            config_fg: Some(theme.config_fg.clone()),
+            doc_fg: Some(theme.doc_fg.clone()),
+            archive_fg: Some(theme.archive_fg.clone()),
+            media_fg: Some(theme.media_fg.clone()),
+            status_fg: Some(theme.status_fg.clone()),
+            bar_bg: Some(theme.bar_bg.clone()),
+            danger_fg: Some(theme.danger_fg.clone()),
+            border_type: Some(theme.border_type.clone()),
+            separator: Some(theme.separator.clone()),
+        }
+    }
+
     /// `top` wins wherever it sets a field; otherwise `self` shows through. Lets `appearance.toml`
     /// override a `[theme]` still left in `config.toml`, one field at a time.
     pub fn overlay(self, top: RawTheme) -> RawTheme {
@@ -507,5 +535,23 @@ mod tests {
         assert!(Theme::is_dark(0x1e, 0x1e, 0x2e)); // Catppuccin Mocha's own background
         assert!(!Theme::is_dark(255, 255, 255));
         assert!(!Theme::is_dark(0xef, 0xf1, 0xf5)); // Catppuccin Latte's own background
+    }
+
+    #[test]
+    fn from_theme_round_trips_through_raw_regardless_of_base_palette() {
+        for theme in [
+            Theme::default(),
+            Theme::classic(),
+            Theme::dracula(),
+            Theme::nord(),
+        ] {
+            let raw = RawTheme::from_theme(&theme);
+            assert_eq!(raw.name, None, "a saved snapshot names no base palette");
+            let resolved: Theme = raw.into();
+            assert_eq!(
+                resolved, theme,
+                "every field was captured, so no base palette bleeds through"
+            );
+        }
     }
 }

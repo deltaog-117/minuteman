@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `theming`, `tui`: a color picker and saved custom themes in the appearance popup. Any color row
+  can now be edited as HSV sliders instead of typed hex — `Tab` mid-edit toggles between the two,
+  `Up`/`Down` pick H/S/V and `Left`/`Right` nudge the selected channel, and every color row shows a
+  live swatch of its own value. A new "Save theme" row saves the live look under a name; if it
+  still matches the custom theme it started from it says so and does nothing, if it's drifted it
+  asks whether to update that theme or save a new one, and if nothing's active yet it just asks for
+  a name. Saved themes are full color snapshots (`theming::RawTheme::from_theme`), stored in
+  `local.toml`'s new `[[custom_themes]]` array alongside a new `active_custom_theme` field, so they
+  survive restarts and keep looking the same regardless of later `config.toml`/`appearance.toml`
+  edits. New `theming::color` module (`Hsv`, `hex_to_hsv`) and `theming::CustomTheme`.
 - `plugins` (new crate), `theming`, `tui`: a plugin system. A `[[plugin]]` entry in `config.toml`
   (`name`, `command`, `args`, an optional `on_key`) spawns an external process at startup that
   speaks a small, versioned, line-delimited JSON-RPC protocol over its own stdin/stdout — any

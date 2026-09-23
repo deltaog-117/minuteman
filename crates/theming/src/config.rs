@@ -134,6 +134,23 @@ pub struct RawLocal {
     pub theme: RawTheme,
     pub ui: RawUi,
     pub panels: RawPanels,
+    /// Themes saved from the appearance popup's "Save theme" row, each a full color snapshot
+    /// (see [`RawTheme::from_theme`]) rather than an overlay — a saved theme must still look the
+    /// same after `theme`/`config.toml` change around it.
+    pub custom_themes: Vec<CustomTheme>,
+    /// The name of `custom_themes` entry `theme` currently matches (or started from, before it
+    /// drifted) — how the appearance popup tells "update this theme" from "this is now a
+    /// different theme" when "Save theme" is used again. `None` once `Reset` clears it, or if
+    /// `theme` was never saved as a custom theme this session.
+    pub active_custom_theme: Option<String>,
+}
+
+/// One theme a user named and saved from the appearance popup. `name` is unique within
+/// `RawLocal::custom_themes` — the popup upserts by name rather than allowing duplicates.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CustomTheme {
+    pub name: String,
+    pub theme: RawTheme,
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +202,11 @@ pub struct Config {
     pub panels: PanelsConfig,
     /// `local.toml`'s own `[panels]` table — see `local_theme`.
     pub local_panels: RawPanels,
+    /// Themes saved from the appearance popup, in the order they were saved — see
+    /// `RawLocal::custom_themes`.
+    pub local_custom_themes: Vec<CustomTheme>,
+    /// See `RawLocal::active_custom_theme`.
+    pub local_active_custom_theme: Option<String>,
 }
 
 impl Config {
@@ -242,6 +264,8 @@ impl Config {
             font: appearance.font.into(),
             panels,
             local_panels: local.panels,
+            local_custom_themes: local.custom_themes,
+            local_active_custom_theme: local.active_custom_theme,
         }
     }
 
@@ -491,8 +515,7 @@ mod tests {
                 accent_fg: Some("#123456".into()),
                 ..Default::default()
             },
-            ui: RawUi::default(),
-            panels: RawPanels::default(),
+            ..Default::default()
         };
         let text = toml::to_string(&local).unwrap();
         assert!(text.contains("name = \"nord\""));
@@ -507,6 +530,49 @@ mod tests {
         // Round-trips back to exactly the same value through `RawLocal`'s own `Deserialize`.
         let parsed: RawLocal = toml::from_str(&text).unwrap();
         assert_eq!(parsed, local);
+    }
+
+    #[test]
+    fn custom_themes_and_the_active_pick_are_read_from_local_toml_unmerged() {
+        let config = Config::from_sources(
+            None,
+            None,
+            Some(
+                "active_custom_theme = \"sunset\"\n\
+                 [[custom_themes]]\nname = \"sunset\"\n[custom_themes.theme]\naccent_fg = \"#ff8800\"\n\
+                 [[custom_themes]]\nname = \"midnight\"\n[custom_themes.theme]\naccent_fg = \"#3300aa\"\n",
+            ),
+        );
+        assert_eq!(config.local_active_custom_theme.as_deref(), Some("sunset"));
+        let names: Vec<&str> = config
+            .local_custom_themes
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["sunset", "midnight"]);
+        assert_eq!(
+            config.local_custom_themes[0].theme.accent_fg.as_deref(),
+            Some("#ff8800")
+        );
+        // Not merged into the running theme — saving a theme doesn't apply it on its own.
+        assert_ne!(config.theme.accent_fg, "#ff8800");
+    }
+
+    #[test]
+    fn a_custom_theme_saved_from_the_popup_round_trips_through_local_toml() {
+        let local = RawLocal {
+            active_custom_theme: Some("sunset".into()),
+            custom_themes: vec![CustomTheme {
+                name: "sunset".into(),
+                theme: RawTheme::from_theme(&Theme::named("dracula")),
+            }],
+            ..Default::default()
+        };
+        let text = toml::to_string(&local).unwrap();
+        let parsed: RawLocal = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, local);
+        let resolved: Theme = parsed.custom_themes[0].theme.clone().into();
+        assert_eq!(resolved, Theme::named("dracula"));
     }
 
     #[test]

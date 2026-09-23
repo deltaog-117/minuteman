@@ -47,6 +47,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-22 | Appearance Popup Scope and Mouse Model | Curated 6 colors + 3 cycle fields, real text entry, `ContextMenu`-style click/hit-testing (COA C); growing the settings popup's cycle-only rows (A) and a full category-submenu editor for every field (B, deferred to the roadmap) rejected | ✅ Confirmed |
 | 2026-09-22 | Persisting the Settings/Appearance Popups | A third, program-owned `local.toml` layered above `config.toml`/`appearance.toml` (COA B); an in-place `toml_edit` rewrite of the hand-edited files (A, deferred) and a stripped-and-reappended generated block (C) rejected; Theme row moved from the settings popup into the appearance popup | ✅ Confirmed |
 | 2026-09-23 | Plugin System Transport | Out-of-process, line-delimited JSON-RPC over stdio, any language, no compile step (COA B); a sandboxed WASM/Extism host (A) deferred to sit alongside it later, an in-process Lua-only tier (C) rejected as too narrow | ✅ Confirmed |
+| 2026-09-23 | Appearance Popup: Color Picker + Saved Themes | Extend the existing popup and `local.toml` with an HSV picker mode and named full-snapshot theme saves (COA A); a separate Theme Manager popup plus standalone picker overlay (B) and a swatch-grid-only version with no automatic update/new detection (C) rejected | ✅ Confirmed |
 
 ---
 
@@ -3388,6 +3389,83 @@ or shell plugin script running interactively inside the built `mman` binary — 
 interactive session to drive that by hand, so the "any language" claim rests on the wire-format
 unit tests (raw JSON text, not the crate's own types) plus the process-boundary integration test,
 not a literal non-Rust script exercised end to end.
+
+---
+
+### Appearance Popup: Color Picker and Saved Custom Themes (COA A)
+
+**Date:** 2026-09-23
+**Author:** deltaog-117
+**Status:** Confirmed
+
+**Context.** Asked directly to enhance the appearance popup three ways: an actual color picker
+(not just typed hex/names), the ability to save a created theme under a name, and — since editing
+a color now implicitly makes "a different theme" from whatever it started as — a way to say
+whether a save should update the theme it started from or create a new one. Given three COAs: (A)
+extend the existing popup and `local.toml`'s single theme override with an HSV picker mode plus a
+list of named, fully-specified theme snapshots; (B) split into a separate Theme Manager popup
+(list/rename/delete/duplicate) and a standalone full-screen picker overlay; (C) a minimal version
+— a swatch-grid picker instead of full HSV, an explicit "Save as…" that always creates a new
+theme, no automatic divergence detection. Chosen and suggested: **A** — the only option that
+delivers a real picker *and* the automatic update-vs-new behavior without doubling the popup
+surface area (B) or quietly dropping part of what was asked for (C).
+
+**Color math.** New `theming::color` module: pure `Hsv { h, s, v }` ↔ `#rrggbb` conversions, no
+`ratatui`/`crossterm` dependency — matching the rest of `theming`, which only ever deals in color
+*strings*, never a resolved `Color` (that stays `tui::style::parse_color`'s job; `theming::color`
+has its own small hex parser rather than reaching across the crate boundary for `tui`'s private
+one). Property-tested: any RGB byte triple round-trips through HSV within ±1 per channel (float
+rounding), and `Hsv::clamped` always leaves a value `to_hex` can convert regardless of how far a
+slider nudge pushed `h`/`s`/`v` out of range — `h` wraps (it's an angle), `s`/`v` clamp.
+
+**Picker UI.** A color row's in-progress edit (`appearance_popup`'s private `Edit` enum) now has
+two modes, `Text`/`Picker`, toggled by `Tab` mid-edit — converting the value across the toggle
+(parsing the typed hex, or formatting the HSV back to hex) so neither mode loses what the other
+set. In picker mode, `Up`/`Down` select which of H/S/V a subsequent `Left`/`Right` nudges (a fixed
+5-unit step for all three, for a consistent key feel despite hue's wider range), and `Enter`
+commits the resulting hex exactly like a confirmed text edit would. `overlay_view::render_appearance`
+grew a two-cell colored swatch next to every color row (`style::color` on whatever's live — the
+in-progress edit if there is one, the committed value otherwise), and the edited row shows either
+the typed buffer with its caret or a bracketed `[H 210°] S 80% V 100%  #1ac8ff` readout naming the
+selected channel.
+
+**Saving.** A new `Row::SaveTheme` action row, next to `Reset`. `theming::RawLocal` gained
+`custom_themes: Vec<CustomTheme>` (`{ name, theme: RawTheme }`, each a *full* color snapshot via
+new `RawTheme::from_theme` — every field `Some`, not an overlay — since a saved theme has to look
+identical regardless of what `config.toml`/`appearance.toml` do later) and
+`active_custom_theme: Option<String>` (which saved entry, if any, the live look is currently
+tracked against). The popup itself still never touches `Config` or compares themes — new
+`main::classify_save` does that on `Outcome::WantSaveTheme` and hands the popup a `SaveChoice`
+(`New` / `UpdateOrNew(name)` / `Unchanged(name)`, the last one short-circuited before the popup
+ever sees it, since there's nothing to save) to drive its own two-step flow: an `u`/`n` choice when
+there's something to offer updating, then a name prompt either way. `Reset` clears
+`active_custom_theme` only — the saved themes list itself is untouched, since resetting the *live*
+look to defaults doesn't un-save anything.
+
+**Deferred.** Reselecting, renaming or deleting a saved custom theme from the popup — the Theme
+row's cycle still only knows the five fixed built-in palettes (`RowKind::Cycle` takes a
+`&'static [&'static str]`, which a dynamic, session-loaded list of saved names doesn't fit without
+either leaking strings or a small redesign of that row's cycling). Left for a follow-up rather
+than folded in here, to keep this cycle's scope to what was actually asked for.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green (`theming` 71,
+`tui` 359). Also verified against the real compiled binary via a scripted PTY session
+(reconstructed through `pyte`, with the kitty-graphics APC startup query stripped from the raw
+stream before feeding it — the same stripping this project's PTY sessions have needed before):
+opening the popup showed the new swatch next to every color row; editing Accent, pressing `Tab`,
+then nudging hue and saturation with the arrow keys visibly changed both the on-screen readout and
+the swatch's actual rendered color, and `Enter` committed the exact resulting hex as plain text;
+"Save theme" with nothing active yet asked for a name, and after saving, that same row's own value
+flipped live from "new theme" to "updates 'verify-theme'" while the status line reported the save;
+`local.toml` afterward held both the pre-existing field-level `[theme]` override (unchanged
+mechanism) and a new `[[custom_themes]]` entry whose full color snapshot matched the edited theme
+exactly. One harness-only gotcha found and worked around, not a bug in `mman`: the startup
+DA1/kitty-keyboard/OSC-11 capability probes can still be mid-flight even after the first real
+frame has rendered, and a keystroke sent into that window can be swallowed — the same category of
+finding the Image Preview Concurrency and Command/Search Bar Mechanism entries already documented,
+just a new instance of it. The verification script now retries its first keystroke until the
+popup is actually visible on screen rather than assuming a single send always lands.
 
 ---
 

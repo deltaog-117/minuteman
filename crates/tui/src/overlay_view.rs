@@ -23,9 +23,11 @@ use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use theming::Config;
+use theming::{Config, Hsv};
 
-use crate::appearance_popup::{AppearancePopup, AppearanceView, Row as AppearanceRow};
+use crate::appearance_popup::{
+    AppearancePopup, AppearanceView, Row as AppearanceRow, RowKind as AppearanceRowKind, SaveView,
+};
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
 use crate::glyphs;
 use crate::hud::{fit_width, pad_to, text_width};
@@ -267,10 +269,36 @@ pub fn render_settings(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// A color row's live/edited value as a two-cell swatch, painted in that color — so a color row
+/// reads at a glance without decoding the hex/name text next to it.
+const SWATCH_WIDTH: usize = 3;
+
+/// `H 210° S 80% V 100%`, with the channel `Up`/`Down` currently selects bracketed, plus the hex
+/// it resolves to — what a color row shows while its picker mode is open.
+fn picker_line(hsv: Hsv, channel: u8) -> String {
+    let seg = |i: u8, label: &str, value: String| {
+        if i == channel {
+            format!("[{label} {value}]")
+        } else {
+            format!("{label} {value}")
+        }
+    };
+    format!(
+        "{} {} {}  {}",
+        seg(0, "H", format!("{:.0}°", hsv.h)),
+        seg(1, "S", format!("{:.0}%", hsv.s)),
+        seg(2, "V", format!("{:.0}%", hsv.v)),
+        hsv.to_hex()
+    )
+}
+
 /// Draws the appearance popup: one row per setting, the cursor's row highlighted the same way a
-/// selected file is. The row being edited shows its in-progress buffer with a caret instead of
-/// its committed value; `Reset to defaults` is styled like a destructive action, the same as
-/// `Delete` in the right-click menu. Session-only — nothing here is written back to a config file.
+/// selected file is. A color row carries a live swatch of its own value next to it. The row being
+/// edited shows its in-progress buffer (or, in picker mode, its HSV sliders) instead of its
+/// committed value, and the "Save theme" flow — an update-or-new choice, then a name — takes over
+/// the hint line while it's open. `Reset to defaults` is styled like a destructive action, the
+/// same as `Delete` in the right-click menu. Session-only to draw; what it's drawing may already
+/// be saved to `local.toml` by the time this runs (`main` persists on every commit).
 pub fn render_appearance(
     frame: &mut Frame<'_>,
     popup: &AppearancePopup,
@@ -298,12 +326,19 @@ pub fn render_appearance(
     let selected_style = Style::default()
         .bg(style::color(&theme.selection_bg))
         .fg(style::color(&theme.file_fg));
+    let hint_style = Style::default().fg(style::color(&theme.border_fg));
 
     let editing_row = popup.editing_row();
+    let editing_picker = popup.editing_picker();
     let caret = if glyphs::of(config).ascii_borders {
         "_"
     } else {
         "▏"
+    };
+    let swatch_glyph = if glyphs::of(config).ascii_borders {
+        "##"
+    } else {
+        "██"
     };
 
     let mut lines = vec![Line::raw("")];
@@ -318,25 +353,70 @@ pub fn render_appearance(
         } else {
             label_style
         };
-        let value = if editing_row == Some(*row) {
-            format!("{}{caret}", popup.editing_buffer().unwrap_or_default())
+        let is_color = matches!(row.kind(), Some(AppearanceRowKind::Color));
+        let being_edited = editing_row == Some(*row);
+
+        let value = if being_edited {
+            match editing_picker {
+                Some((hsv, channel)) => picker_line(hsv, channel),
+                None => format!("{}{caret}", popup.editing_buffer().unwrap_or_default()),
+            }
         } else {
             view.value(*row)
         };
-        Line::from(vec![
-            Span::styled(pad_to(row.label(), LABEL_COLUMN), label.patch(base)),
-            Span::styled(fit_width(&value, value_width), value_style.patch(base)),
-        ])
+        // The swatch tracks whatever's live — the in-progress edit if there is one, or the
+        // committed value otherwise — so nudging a slider or typing a hex repaints it immediately.
+        let swatch_hex = match (being_edited, editing_picker, popup.editing_buffer()) {
+            (true, Some((hsv, _)), _) => hsv.to_hex(),
+            (true, None, Some(buffer)) => buffer.to_string(),
+            _ => view.value(*row),
+        };
+
+        let mut spans = vec![Span::styled(
+            pad_to(row.label(), LABEL_COLUMN),
+            label.patch(base),
+        )];
+        let value_area = if is_color {
+            spans.push(Span::styled(
+                format!("{swatch_glyph} "),
+                Style::default().fg(style::color(&swatch_hex)).patch(base),
+            ));
+            value_width.saturating_sub(SWATCH_WIDTH)
+        } else {
+            value_width
+        };
+        spans.push(Span::styled(
+            fit_width(&value, value_area),
+            value_style.patch(base),
+        ));
+        Line::from(spans)
     }));
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        if editing_row.is_some() {
-            "type to edit, enter confirms, Esc cancels"
-        } else {
-            "j/k moves, enter edits/cycles, a click acts, Esc closes — session only, not saved"
-        },
-        Style::default().fg(style::color(&theme.border_fg)),
-    ));
+    lines.push(match popup.save_view() {
+        Some(SaveView::Choice(name)) => Line::styled(
+            format!("u: update '{name}'   n: save as new   Esc: cancel"),
+            hint_style,
+        ),
+        Some(SaveView::Name(buffer)) => Line::from(vec![
+            Span::styled("name: ", label_style),
+            Span::styled(
+                format!("{buffer}{caret}  enter saves, Esc cancels"),
+                value_style,
+            ),
+        ]),
+        None if editing_picker.is_some() => Line::styled(
+            "up/down picks H/S/V, left/right adjusts, tab for hex, enter confirms, Esc cancels",
+            hint_style,
+        ),
+        None if editing_row.is_some() => Line::styled(
+            "type to edit, tab for the color picker, enter confirms, Esc cancels",
+            hint_style,
+        ),
+        None => Line::styled(
+            "j/k moves, enter edits/cycles, a click acts, Esc closes — session only, not saved",
+            hint_style,
+        ),
+    });
     frame.render_widget(Paragraph::new(lines), inner);
 }
 

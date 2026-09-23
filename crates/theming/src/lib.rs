@@ -19,6 +19,7 @@
 //! `~/.config/minuteman/appearance.toml`, each with built-in defaults when absent or invalid.
 
 pub mod appearance;
+pub mod color;
 pub mod config;
 pub mod keymap;
 pub mod panels;
@@ -26,7 +27,8 @@ pub mod theme;
 pub mod ui;
 
 pub use appearance::{Font, Mods, Styles};
-pub use config::{Config, OpenWith, PluginSpec, RawLocal};
+pub use color::{Hsv, hex_to_hsv};
+pub use config::{Config, CustomTheme, OpenWith, PluginSpec, RawLocal};
 pub use keymap::{Action, KeyMap};
 pub use panels::{ColumnLayout, PanelsConfig, RawPanels};
 pub use theme::{RawTheme, Theme};
