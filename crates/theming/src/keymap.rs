@@ -35,8 +35,13 @@ pub enum Action {
     /// Mark the selection to be relocated on the next `Paste`.
     Cut,
     Paste,
-    /// Permanently delete the selection (asks for confirmation first — there is no trash yet).
+    /// Sends the selection to the desktop trash (asks for confirmation first, but `Enter` accepts
+    /// it as well as `y` since this is reversible — see `DeletePermanently` for the destructive
+    /// version).
     Delete,
+    /// Permanently deletes the selection, bypassing the trash — asks for confirmation first
+    /// (`y` only, unlike `Delete`).
+    DeletePermanently,
     Rename,
     /// Prompts for a name; a trailing `/` creates a directory, otherwise a file.
     Create,
@@ -89,6 +94,7 @@ pub struct RawKeyMap {
     pub cut: Vec<String>,
     pub paste: Vec<String>,
     pub delete: Vec<String>,
+    pub delete_permanently: Vec<String>,
     pub rename: Vec<String>,
     pub create: Vec<String>,
     pub shell: Vec<String>,
@@ -117,6 +123,7 @@ impl Default for RawKeyMap {
             cut: vec!["m".into()],
             paste: vec!["p".into()],
             delete: vec!["d".into()],
+            delete_permanently: vec!["D".into()],
             rename: vec!["r".into()],
             create: vec!["n".into()],
             shell: vec!["s".into()],
@@ -178,6 +185,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.cut, Action::Cut);
         bind_all(&raw.paste, Action::Paste);
         bind_all(&raw.delete, Action::Delete);
+        bind_all(&raw.delete_permanently, Action::DeletePermanently);
         bind_all(&raw.rename, Action::Rename);
         bind_all(&raw.create, Action::Create);
         bind_all(&raw.shell, Action::Shell);
@@ -244,6 +252,10 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('m')), Some(Action::Cut));
         assert_eq!(keymap.resolve(KeyCode::Char('p')), Some(Action::Paste));
         assert_eq!(keymap.resolve(KeyCode::Char('d')), Some(Action::Delete));
+        assert_eq!(
+            keymap.resolve(KeyCode::Char('D')),
+            Some(Action::DeletePermanently)
+        );
         assert_eq!(keymap.resolve(KeyCode::Char('r')), Some(Action::Rename));
         assert_eq!(keymap.resolve(KeyCode::Char('n')), Some(Action::Create));
         assert_eq!(keymap.resolve(KeyCode::Char('s')), Some(Action::Shell));

@@ -30,4 +30,6 @@ pub enum FileOpsError {
     NoParent(PathBuf),
     #[error("operation cancelled")]
     Cancelled,
+    #[error("could not send to trash: {0}")]
+    Trash(#[from] trash::TrashError),
 }

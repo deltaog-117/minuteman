@@ -726,6 +726,32 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   correct `[[custom_themes]]` snapshot. This also surfaced a harness-only finding written up in
   `DIARY.md`: the startup capability probes can still be mid-flight after the first frame renders,
   so a keystroke sent right after can be swallowed — not a bug in `mman`.
+- ✅ **Built-in trash — `d`/`D`, `:trash`, OS-integrated (COA B)** – `d` (and the right-click
+  "Delete") now sends the marked-or-selected entries to the real desktop trash instead of deleting
+  them outright — the same trash Nautilus, Dolphin, Explorer and Finder use — confirming with `y`
+  or `Enter` since it's reversible; `D` (Shift+d) keeps the old permanent, trash-bypassing delete,
+  confirming with `y` only. `:trash` at the `:` prompt does the same as `d`, deferring to the shell
+  when given any argument (`:trash --empty`, `:trash foo`), the same "bare form only" convention
+  `mkdir`/`touch` already use for a flag they don't recognize. New `trash::send` (in the `trash`
+  crate stub the workspace scaffolded from day one for this) wraps the `trash` crate — renamed
+  `os_trash` in its own `Cargo.toml`, since `cargo add`/`cargo add --rename` both refuse a
+  dependency sharing the local package's own name outright, though a manually written manifest
+  entry compiles and resolves from the registry fine — and `file_ops::trash` exposes it alongside
+  `copy`/`mv`/`delete`. Deliberately not `Vfs`-based like the rest of `file_ops`: the desktop trash
+  is a local-filesystem concept with no analog over a remote backend (there is no "SSH trash"), a
+  question this cycle raised directly and answered by having a future non-local `Vfs` fall back to
+  a permanent delete instead of teaching `Vfs` a trash primitive or building a project-private
+  trash folder — moot in practice today, since every real call site is still `LocalVfs`. Chosen as
+  COA B (the real OS/desktop trash) over a private minuteman-only trash folder (A) and a remote
+  per-connection trash convention (C), both raised and rejected before coding. New
+  `Prompt::ConfirmTrash` and `BulkKind::Trash` mirror `ConfirmDelete`/`BulkKind::Delete` exactly,
+  so the busy-state bulk machinery (progress, cancel-on-partial-failure, mark-pruning) needed only
+  a few match arms widened rather than new logic. Verified against the real compiled binary via a
+  scripted PTY session (answering the Device Status Report/Device Attributes startup probes per
+  this project's established fix): pressing `d` then `Enter` on a real file moved it out of its
+  directory and into the actual freedesktop trash (`$topdir/.Trash-<uid>/files/`, since the scratch
+  directory was on a different filesystem than `$HOME`), with a correct `.trashinfo` sidecar
+  recording its original path and deletion time.
 
 ---
 
@@ -762,8 +788,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   events routed to the browser, a highlighted drop target, and a rule for dropping on the parent
   column, blank space and the shell box. The scrollable preview (wheel over the preview column)
   is under *Preview extras, stage 1* above.
-- **Built-in trash + undo history** – safe delete-to-trash and an undo stack for recent file
-  operations, with no plugin required.
+- **Undo history for recent file operations** – a stack of recent copy/move/delete/trash/rename/
+  create operations that can be stepped back through. Delete-to-trash itself shipped this cycle
+  (see Completed); this is the remaining half of the old "trash + undo history" item.
 - **Full appearance editor: every field, with categories (COA B from the appearance-popup
   cycle)** – the appearance popup (see Completed) covers a Theme pick plus six highlight colors,
   border style, separator and glyphs; the rest of `Theme`'s ~19 fields, every `[style]` element's

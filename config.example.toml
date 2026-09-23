@@ -100,8 +100,14 @@ quit_to_cwd = ["Q"]
 yank = ["y"]
 cut = ["m"]
 paste = ["p"]
-# Deletes every marked entry (see `select` below) if any are marked, else the current selection.
+# Sends every marked entry (see `select` below) to the desktop trash if any are marked, else the
+# current selection — the same trash Nautilus/Dolphin/Explorer/Finder use. Confirms with "y" or
+# enter, since this is reversible. ":trash" does the same thing from the `:` prompt.
 delete = ["d"]
+# Same batching as `delete`, but permanent: bypasses the trash entirely. Single-character keys are
+# case-sensitive (see `quit_to_cwd` above), so "D" is Shift+d, distinct from "d". Confirms with "y"
+# only.
+delete_permanently = ["D"]
 rename = ["r"]
 # A trailing "/" on the typed name creates a directory instead of a file.
 create = ["n"]
@@ -113,10 +119,11 @@ shell = ["s"]
 # landed, Esc goes back to where it started.
 search = ["/"]
 # Opens the :-command prompt. ":q"/":quit" exits, ":cd <path>" jumps to a directory,
-# ":mkdir [-p] <name>..." and ":touch <name>..." create things right here, and anything else is
-# run as a shell command in the current directory (":ls -l", ":git mv a b", ":rm old.log"), with
-# its output on the status line. Quote names that contain spaces. See `interactive_commands`
-# above for running editors and other full-screen programs.
+# ":mkdir [-p] <name>..." and ":touch <name>..." create things right here, bare ":trash" sends
+# the marked/selected entries to the desktop trash, and anything else is run as a shell command in
+# the current directory (":ls -l", ":git mv a b", ":rm old.log"), with its output on the status
+# line. Quote names that contain spaces. See `interactive_commands` above for running editors and
+# other full-screen programs.
 command = [":"]
 # Cancels everything pending, in whatever directory you are: the yanked or cut clipboard, every
 # mark, and a running copy, move or command. Nothing on disk is touched by a cut until it is

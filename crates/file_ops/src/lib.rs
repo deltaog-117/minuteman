@@ -185,6 +185,14 @@ pub fn delete(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
     }
 }
 
+/// Moves `path` to the desktop trash instead of deleting it. Unlike every other function here,
+/// this does not go through `Vfs`: the desktop trash is a local-filesystem concept with no
+/// equivalent over a remote backend (e.g. a future SSH `Vfs`), so a caller browsing one should
+/// fall back to `delete` instead of calling this.
+pub fn trash(path: &Path) -> Result<(), FileOpsError> {
+    trash::send(path).map_err(Into::into)
+}
+
 pub fn create_directory(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
     vfs.create_dir(path).map_err(Into::into)
 }
@@ -447,6 +455,19 @@ mod tests {
 
         assert!(!file.exists());
         assert!(!sub.exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn trash_removes_a_file_from_its_original_location() {
+        let dir = scratch_dir("trash");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"hi").unwrap();
+
+        trash(&file).unwrap();
+
+        assert!(!file.exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

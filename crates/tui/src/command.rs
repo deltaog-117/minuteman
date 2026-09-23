@@ -15,8 +15,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Parses the `:` prompt's text into a `Command`. The handful of commands that are cheap and
-//! safe to run in-process (`cd`, `mkdir`, `touch`, `q`) are built in; they go through `Vfs` and
-//! `file_ops`, so they behave the same on any backend and report errors as plain messages.
+//! safe to run in-process (`cd`, `mkdir`, `touch`, `q`, `trash`) are built in; they go through
+//! `Vfs` and `file_ops`, so they behave the same on any backend and report errors as plain
+//! messages (`trash` is the exception — see `file_ops::trash`'s own docs).
 //! Everything else — and anything using shell syntax a built-in can't honour — is handed to
 //! `sh -c` verbatim, so `:ls -l | wc -l` or `:git mv a b` just work.
 //!
@@ -38,6 +39,9 @@ pub enum Command {
     Touch {
         names: Vec<String>,
     },
+    /// Sends every marked entry (or the current selection, if none are marked) to the desktop
+    /// trash — the same set `Action::Delete`'s `d` key acts on.
+    Trash,
     /// A command line for `sh -c`, run in the browsed directory.
     Shell(String),
     /// A command line for `sh -c` that gets the real terminal — the program draws on it and reads
@@ -72,6 +76,9 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
 
     match name {
         "q" | "quit" => Ok(Some(Command::Quit)),
+        // Only bare "trash" is the built-in — "trash --empty" or similar falls through to a real
+        // `trash` CLI on the shell, the same way an unrecognised `mkdir`/`touch` flag does.
+        "trash" if line[name.len()..].trim().is_empty() => Ok(Some(Command::Trash)),
         "cd" => {
             let path = split_words(line[name.len()..].trim())?.join(" ");
             match path.is_empty() {
@@ -270,6 +277,14 @@ mod tests {
         );
         assert_eq!(parse("mkdir"), Err("mkdir: missing name".into()));
         assert_eq!(parse("mkdir -p"), Err("mkdir: missing name".into()));
+    }
+
+    #[test]
+    fn bare_trash_is_built_in_but_anything_after_it_falls_to_the_shell() {
+        assert_eq!(parse("trash"), Ok(Some(Command::Trash)));
+        assert_eq!(parse("  trash  "), Ok(Some(Command::Trash)));
+        assert_eq!(parse("trash --empty"), Ok(shell("trash --empty")));
+        assert_eq!(parse("trash a.txt"), Ok(shell("trash a.txt")));
     }
 
     #[test]

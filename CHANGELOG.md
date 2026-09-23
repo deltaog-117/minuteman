@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `trash` (new crate wiring), `file_ops`, `theming`, `tui`: a built-in trash bin, integrated with
+  the real desktop trash (freedesktop.org trash on Linux, the same one Nautilus/Dolphin/Explorer/
+  Finder use) rather than a private minuteman-only folder. `d` now sends the marked-or-selected
+  entries to the trash — `Enter` or `y` confirms, since it's reversible — and a new `D` (Shift+d)
+  keeps the previous permanent, trash-bypassing delete (`y` only), the same convention a desktop
+  file manager's Delete vs. Shift+Delete uses. `:trash` at the `:` prompt does the same as `d`;
+  anything typed after "trash" defers to the shell instead. New `trash::send` wraps the `trash`
+  crate (renamed `os_trash` locally, since the workspace already has a same-named crate scaffolded
+  for this), and `file_ops::trash` exposes it alongside `copy`/`mv`/`delete`/`rename` — deliberately
+  not `Vfs`-based like the rest of `file_ops`, since the desktop trash has no remote-backend
+  equivalent (a non-local `Vfs` should fall back to `delete` instead, not currently reachable since
+  every call site is still `LocalVfs`). See `config.example.toml`'s `delete`/`delete_permanently`.
 - `theming`, `tui`: a color picker and saved custom themes in the appearance popup. Any color row
   can now be edited as HSV sliders instead of typed hex — `Tab` mid-edit toggles between the two,
   `Up`/`Down` pick H/S/V and `Left`/`Right` nudge the selected channel, and every color row shows a

@@ -48,6 +48,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-22 | Persisting the Settings/Appearance Popups | A third, program-owned `local.toml` layered above `config.toml`/`appearance.toml` (COA B); an in-place `toml_edit` rewrite of the hand-edited files (A, deferred) and a stripped-and-reappended generated block (C) rejected; Theme row moved from the settings popup into the appearance popup | ✅ Confirmed |
 | 2026-09-23 | Plugin System Transport | Out-of-process, line-delimited JSON-RPC over stdio, any language, no compile step (COA B); a sandboxed WASM/Extism host (A) deferred to sit alongside it later, an in-process Lua-only tier (C) rejected as too narrow | ✅ Confirmed |
 | 2026-09-23 | Appearance Popup: Color Picker + Saved Themes | Extend the existing popup and `local.toml` with an HSV picker mode and named full-snapshot theme saves (COA A); a separate Theme Manager popup plus standalone picker overlay (B) and a swatch-grid-only version with no automatic update/new detection (C) rejected | ✅ Confirmed |
+| 2026-09-23 | Built-in Trash | Delegate to the real OS/desktop trash via the `trash` crate (COA B), at the user's direction; a hand-rolled trash folder over `Vfs`/`file_ops::mv` (A) and a full restore-by-id subsystem with its own listing popup (C) rejected; a non-local `Vfs` falls back to permanent delete, since the desktop trash has no remote equivalent | ✅ Confirmed |
 
 ---
 
@@ -3466,6 +3467,75 @@ frame has rendered, and a keystroke sent into that window can be swallowed — t
 finding the Image Preview Concurrency and Command/Search Bar Mechanism entries already documented,
 just a new instance of it. The verification script now retries its first keystroke until the
 popup is actually visible on screen rather than assuming a single send always lands.
+
+---
+
+### Built-in Trash: `d`/`D`, `:trash`, OS-Integrated (COA B)
+
+**Date:** 2026-09-23
+**Author:** deltaog-117
+**Status:** Confirmed
+
+**Context.** Asked to add a built-in trash bin, reachable via `:trash` and a keybinding. Three
+COAs were raised for how the trash mechanism itself should work: (A) a hand-rolled trash directory
+under `~/.local/share/minuteman/trash`, moved into via the existing `Vfs`/`file_ops::mv`, with a
+`.trashinfo`-style sidecar recording the original path; (B) delegate to the real OS/desktop trash
+via the `trash` crate, landing in the same place Nautilus/Dolphin/Explorer/Finder do; (C) a full
+subsystem with its own restore-by-id index and a browsable `:trash` listing popup, matching the
+roadmap's older "trash + undo history" item in one pass. Chosen: **B**, at the user's explicit
+direction — the goal was integrating with the same trash other file managers and the OS already
+provide, not a private minuteman-only one.
+
+**SSH vfs.** `file_ops`'s other operations are all `Vfs`-generic so they work over any backend
+(including a future SSH vfs), but the desktop trash has no such generic form — there's no "SSH
+trash". Asked directly what should happen there: agreed a non-local `Vfs` should fall back to a
+permanent delete rather than either teaching `Vfs` a trash primitive it can't honor everywhere, or
+inventing a project-private remote trash convention. Moot in practice today — every real call site
+in `tui::app` still hands a concrete `LocalVfs` — so `file_ops::trash` takes a plain `&Path`, no
+`Vfs` parameter, with a doc comment stating the fallback a future caller needs.
+
+**Keybinding.** The original ask was `space t` for the trash keybinding, but that chord was
+already bound twice over (flips a shell pane's split orientation when one is open; opens the
+settings popup when none is) — surfaced during design, and the user picked a different scheme
+instead: bare `d` now sends the marked-or-selected entries to the desktop trash (`Enter` or `y`
+confirms it, since it's reversible), and `D` (Shift+d) keeps the previous behavior — a permanent,
+trash-bypassing delete, confirming with `y` only — the same convention a desktop file manager's
+Delete vs. Shift+Delete uses. New `theming::Action::DeletePermanently` (default key `"D"`) sits
+alongside the existing `Action::Delete`, whose own meaning changed from "permanently delete" to
+"trash".
+
+**Command-line naming collision.** The `trash` crate on crates.io shares its name with the empty
+`crates/trash` workspace member already scaffolded for this feature — `cargo add trash` (and
+`cargo add trash --rename os_trash`) both refuse outright with "cannot add trash as a dependency to
+itself", since the CLI checks the argument against workspace member names before considering a
+rename. A manually written manifest entry (`os_trash = { package = "trash", version = "5.2.9" }`)
+has no such restriction and resolves from the registry correctly — `cargo add`'s refusal is a
+CLI-only guard, not a real limitation of Cargo's dependency resolution.
+
+**Wiring.** New `trash::send` (in that scaffold crate) wraps `os_trash::delete`, converting its
+error to plain text rather than depending on `os_trash::Error`'s own trait shape. `file_ops::trash`
+exposes it alongside `copy`/`mv`/`delete`/`rename`, gaining `file_ops` a dependency on the tiny
+`trash` crate and `FileOpsError` a new `Trash` variant — the natural place for a fourth kind of
+file operation, even though this one bypasses `Vfs`. In `tui::app`, `Prompt::ConfirmTrash` and
+`BulkKind::Trash` mirror `ConfirmDelete`/`BulkKind::Delete` exactly (same batching via
+`marked_or_selected`, same spawn-on-the-blocking-pool shape), so `poll_bulk`'s completion handling
+— reload, prune marks, reload-and-prune on partial failure — needed only its `is_delete` check
+widened to include `BulkKind::Trash`, not new logic. `:trash` at the `:` prompt calls the same
+`App::begin_trash` the `d` key does; any trailing text after "trash" defers to the shell instead
+(`:trash --empty`, `:trash foo.txt`), the same "bare form only" convention `mkdir`/`touch` already
+use for a flag they don't recognize, so a real `trash` CLI on the user's `$PATH` stays reachable.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green (new: 2 in `trash`,
+1 in `file_ops`, plus `theming`/`tui` keymap and command-parsing tests for `D` and `:trash`). Also
+verified against the real compiled binary via a scripted PTY session (answering the Device Status
+Report and Device Attributes startup probes by hand — this project's established fix for a
+synthetic PTY that never answers them on its own): pressing `d` then `Enter` on a real file in a
+scratch directory removed it from that directory and produced a matching entry in the actual
+freedesktop trash — `$topdir/.Trash-<uid>/files/` plus a correct `.trashinfo` sidecar recording the
+original path and deletion time, since the scratch directory lived on a different filesystem than
+`$HOME` (confirming the crate follows the spec's per-mountpoint fallback, not just the common
+`~/.local/share/Trash` case).
 
 ---
 

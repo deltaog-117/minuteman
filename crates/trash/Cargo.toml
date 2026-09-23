@@ -6,3 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+# Renamed locally to avoid clashing with this workspace member's own name (`cargo add` refuses a
+# same-named dependency outright, even with `--rename`; a plain manifest entry has no such issue).
+os_trash = { package = "trash", version = "5.2.9" }
+thiserror = "2.0.20"

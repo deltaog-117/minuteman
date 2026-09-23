@@ -113,6 +113,11 @@ pub enum Prompt {
     ConfirmDelete {
         targets: Vec<PathBuf>,
     },
+    /// Confirms sending one or more targets to the desktop trash (same marks-win-over-cursor
+    /// batching as `ConfirmDelete`). Reversible, so `Enter` confirms it as well as `y`.
+    ConfirmTrash {
+        targets: Vec<PathBuf>,
+    },
     Conflict(ConflictSource),
     /// Incremental filename search (`/`). `origin` is where to return to on `Esc`.
     SearchInput {
@@ -132,6 +137,7 @@ impl Prompt {
             Prompt::RenameInput { .. } => "RENAME",
             Prompt::CreateInput { .. } => "CREATE",
             Prompt::ConfirmDelete { .. } => "DELETE",
+            Prompt::ConfirmTrash { .. } => "TRASH",
             Prompt::Conflict(_) => "CONFLICT",
             Prompt::SearchInput { .. } => "SEARCH",
             Prompt::CommandInput { .. } => "COMMAND",
@@ -167,6 +173,12 @@ impl Prompt {
             Prompt::ConfirmDelete { targets } => {
                 format!("delete {} marked items permanently? (y/N)", targets.len())
             }
+            Prompt::ConfirmTrash { targets } if targets.len() == 1 => {
+                format!("trash '{}'? (enter/y)", display_name(&targets[0]))
+            }
+            Prompt::ConfirmTrash { targets } => {
+                format!("trash {} marked items? (enter/y)", targets.len())
+            }
             Prompt::Conflict(ConflictSource::Paste { dst, .. }) => format!(
                 "'{}' already exists — overwrite / skip / abort? (o/s/a)",
                 display_name(dst)
@@ -198,6 +210,9 @@ enum BulkKind {
     Delete {
         targets: Vec<PathBuf>,
     },
+    Trash {
+        targets: Vec<PathBuf>,
+    },
     /// A `:` command line running under `sh -c`, from `started`.
     Shell {
         command: String,
@@ -213,6 +228,7 @@ impl BulkKind {
                 ClipboardMode::Move => "moving",
             },
             BulkKind::Delete { .. } => "deleting",
+            BulkKind::Trash { .. } => "trashing",
             BulkKind::Shell { .. } => "running",
         }
     }
@@ -224,6 +240,7 @@ impl BulkKind {
                 ClipboardMode::Move => "move",
             },
             BulkKind::Delete { .. } => "delete",
+            BulkKind::Trash { .. } => "trash",
             BulkKind::Shell { .. } => "command",
         }
     }
@@ -337,7 +354,7 @@ impl App {
     pub fn status_line(&self) -> String {
         if let Some(bulk) = &self.bulk {
             return match &bulk.kind {
-                BulkKind::Delete { targets } => {
+                BulkKind::Delete { targets } | BulkKind::Trash { targets } => {
                     format!(
                         "{}… {}",
                         bulk.kind.progressing_label(),
@@ -488,7 +505,9 @@ impl App {
         let bulk = self.bulk.take().expect("checked Some above");
         let past_label = bulk.kind.past_label();
 
-        let is_delete = matches!(bulk.kind, BulkKind::Delete { .. });
+        // Delete and Trash both remove entries from the listing outright (no conflict case,
+        // unlike Paste), so they share every branch below that Paste doesn't.
+        let is_delete = matches!(bulk.kind, BulkKind::Delete { .. } | BulkKind::Trash { .. });
         // Each item of a batch gets its own cancel flag, so a cancel that lands just as an item
         // finishes would otherwise be forgotten and the batch would carry on with the next one.
         let cancelled = bulk
@@ -549,7 +568,7 @@ impl App {
                         dst,
                     }));
                 }
-                BulkKind::Delete { .. } | BulkKind::Shell { .. } => {
+                BulkKind::Delete { .. } | BulkKind::Trash { .. } | BulkKind::Shell { .. } => {
                     self.status = Some(format!("{past_label} failed: unexpected conflict"));
                 }
             },
@@ -657,10 +676,20 @@ impl App {
         });
     }
 
-    /// Marks (via `Select`) win over the cursor: if any entries are marked, delete confirms
+    /// Marks (via `Select`) win over the cursor: if any entries are marked, trash confirms
     /// against the whole marked set; otherwise it falls back to the single entry under the
     /// cursor, matching Ranger's "act on marks if any, else the current file" convention.
-    pub fn begin_delete(&mut self, browser: &BrowserState) {
+    pub fn begin_trash(&mut self, browser: &BrowserState) {
+        let targets = Self::marked_or_selected(browser);
+        if targets.is_empty() {
+            self.status = Some("nothing selected".into());
+            return;
+        }
+        self.prompt = Some(Prompt::ConfirmTrash { targets });
+    }
+
+    /// Same batching as `begin_trash`, but for a permanent, trash-bypassing delete.
+    pub fn begin_delete_permanently(&mut self, browser: &BrowserState) {
         let targets = Self::marked_or_selected(browser);
         if targets.is_empty() {
             self.status = Some("nothing selected".into());
@@ -822,6 +851,10 @@ impl App {
             Prompt::ConfirmDelete { targets } => match code {
                 KeyCode::Char('y') => self.spawn_delete(targets),
                 _ => self.status = Some("delete cancelled".into()),
+            },
+            Prompt::ConfirmTrash { targets } => match code {
+                KeyCode::Char('y') | KeyCode::Enter => self.spawn_trash(targets),
+                _ => self.status = Some("trash cancelled".into()),
             },
             Prompt::Conflict(source) => match code {
                 KeyCode::Char('o') => {
@@ -1008,6 +1041,7 @@ impl App {
             Ok(Some(Command::Touch { names })) => {
                 self.run_builtin(vfs, browser, "touch", &names, file_ops::touch)?;
             }
+            Ok(Some(Command::Trash)) => self.begin_trash(browser),
             Ok(Some(Command::Shell(line))) => self.spawn_shell_command(browser, line),
             Ok(Some(Command::Interactive(line))) if self.is_busy() => {
                 self.status = Some(format!("an operation is already in progress: {line}"));
@@ -1227,6 +1261,43 @@ impl App {
 
         self.bulk = Some(BulkOp {
             kind: BulkKind::Delete { targets },
+            items_done: 0,
+            current: String::new(),
+            cancel: None,
+            rx,
+        });
+    }
+
+    /// Same shape as `spawn_delete`, but sends each target to the desktop trash
+    /// (`file_ops::trash`) instead of deleting it — no `Vfs` involved (see that function's docs).
+    fn spawn_trash(&mut self, targets: Vec<PathBuf>) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
+        let (tx, rx) = unbounded_channel();
+        let targets_bg = targets.clone();
+
+        self.handle.spawn_blocking(move || {
+            let mut result = Ok(Outcome::Completed);
+            for target in &targets_bg {
+                match file_ops::trash(target) {
+                    Ok(()) => {
+                        let _ = tx.send(BulkMsg::Progress {
+                            path: display_name(target),
+                        });
+                    }
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
+                }
+            }
+            let _ = tx.send(BulkMsg::Done(result));
+        });
+
+        self.bulk = Some(BulkOp {
+            kind: BulkKind::Trash { targets },
             items_done: 0,
             current: String::new(),
             cancel: None,

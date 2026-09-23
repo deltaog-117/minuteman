@@ -1877,7 +1877,8 @@ fn run(
                     Some(Action::Yank) => app.yank(browser),
                     Some(Action::Cut) => app.cut(browser),
                     Some(Action::Paste) => app.begin_paste(browser),
-                    Some(Action::Delete) => app.begin_delete(browser),
+                    Some(Action::Delete) => app.begin_trash(browser),
+                    Some(Action::DeletePermanently) => app.begin_delete_permanently(browser),
                     Some(Action::Rename) => app.begin_rename(browser),
                     Some(Action::Create) => app.begin_create(),
                     Some(Action::Search) => app.begin_search(browser),
@@ -1995,7 +1996,7 @@ fn run_menu_command(
         (MenuCommand::Copy, _) => app.yank(browser),
         (MenuCommand::Paste, _) => app.begin_paste(browser),
         (MenuCommand::Rename, _) => app.begin_rename(browser),
-        (MenuCommand::Delete, _) => app.begin_delete(browser),
+        (MenuCommand::Delete, _) => app.begin_trash(browser),
         (MenuCommand::New, _) => app.begin_create(),
         (MenuCommand::ToggleMark, _) => browser.toggle_mark(),
         (MenuCommand::CopyPath, _) => {
