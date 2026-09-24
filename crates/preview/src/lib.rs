@@ -24,6 +24,7 @@ use image::DynamicImage;
 
 pub mod archive;
 pub mod hex;
+pub mod highlight;
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp",

@@ -15,9 +15,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Parses the `:` prompt's text into a `Command`. The handful of commands that are cheap and
-//! safe to run in-process (`cd`, `mkdir`, `touch`, `q`, `trash`) are built in; they go through
-//! `Vfs` and `file_ops`, so they behave the same on any backend and report errors as plain
-//! messages (`trash` is the exception — see `file_ops::trash`'s own docs).
+//! safe to run in-process (`cd`, `mkdir`, `touch`, `q`/`q!`/`qa`/`qa!`/`quit`, `trash`) are built
+//! in; they go through `Vfs` and `file_ops`, so they behave the same on any backend and report
+//! errors as plain messages (`trash` is the exception — see `file_ops::trash`'s own docs).
 //! Everything else — and anything using shell syntax a built-in can't honour — is handed to
 //! `sh -c` verbatim, so `:ls -l | wc -l` or `:git mv a b` just work.
 //!
@@ -75,7 +75,10 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
     };
 
     match name {
-        "q" | "quit" => Ok(Some(Command::Quit)),
+        // "!"/"a" (vim's force/all) are accepted but not distinguished from a plain quit: there
+        // is no unsaved-buffer or multi-window state here for them to mean something different
+        // about, only the same one quit every spelling below performs.
+        "q" | "q!" | "qa" | "qa!" | "quit" => Ok(Some(Command::Quit)),
         // Only bare "trash" is the built-in — "trash --empty" or similar falls through to a real
         // `trash` CLI on the shell, the same way an unrecognised `mkdir`/`touch` flag does.
         "trash" if line[name.len()..].trim().is_empty() => Ok(Some(Command::Trash)),
@@ -241,8 +244,9 @@ mod tests {
 
     #[test]
     fn quit_and_cd_are_built_in() {
-        assert_eq!(parse("q"), Ok(Some(Command::Quit)));
-        assert_eq!(parse("quit"), Ok(Some(Command::Quit)));
+        for spelling in ["q", "q!", "qa", "qa!", "quit"] {
+            assert_eq!(parse(spelling), Ok(Some(Command::Quit)), "{spelling}");
+        }
         assert_eq!(parse("cd /tmp"), Ok(Some(Command::Cd("/tmp".into()))));
         assert_eq!(parse("cd my dir"), Ok(Some(Command::Cd("my dir".into()))));
         assert_eq!(

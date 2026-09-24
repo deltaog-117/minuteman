@@ -42,6 +42,18 @@ pub struct Theme {
     pub doc_fg: String,
     pub archive_fg: String,
     pub media_fg: String,
+    /// Syntax highlighting, in the text preview: `fn`/`let`/`if`/…
+    pub syntax_keyword_fg: String,
+    /// Syntax highlighting: string literals.
+    pub syntax_string_fg: String,
+    /// Syntax highlighting: comments.
+    pub syntax_comment_fg: String,
+    /// Syntax highlighting: numeric and character literals.
+    pub syntax_number_fg: String,
+    /// Syntax highlighting: a called or declared function's name.
+    pub syntax_function_fg: String,
+    /// Syntax highlighting: a type, class or struct name.
+    pub syntax_type_fg: String,
     pub status_fg: String,
     /// Background of the status bar's segments (the mode pill has its own color).
     pub bar_bg: String,
@@ -149,6 +161,30 @@ impl Theme {
                 .media_fg
                 .clone()
                 .unwrap_or_else(|| self.media_fg.clone()),
+            syntax_keyword_fg: overrides
+                .syntax_keyword_fg
+                .clone()
+                .unwrap_or_else(|| self.syntax_keyword_fg.clone()),
+            syntax_string_fg: overrides
+                .syntax_string_fg
+                .clone()
+                .unwrap_or_else(|| self.syntax_string_fg.clone()),
+            syntax_comment_fg: overrides
+                .syntax_comment_fg
+                .clone()
+                .unwrap_or_else(|| self.syntax_comment_fg.clone()),
+            syntax_number_fg: overrides
+                .syntax_number_fg
+                .clone()
+                .unwrap_or_else(|| self.syntax_number_fg.clone()),
+            syntax_function_fg: overrides
+                .syntax_function_fg
+                .clone()
+                .unwrap_or_else(|| self.syntax_function_fg.clone()),
+            syntax_type_fg: overrides
+                .syntax_type_fg
+                .clone()
+                .unwrap_or_else(|| self.syntax_type_fg.clone()),
             status_fg: overrides
                 .status_fg
                 .clone()
@@ -188,6 +224,12 @@ impl Theme {
             doc_fg: "white".into(),
             archive_fg: "white".into(),
             media_fg: "white".into(),
+            syntax_keyword_fg: "magenta".into(),
+            syntax_string_fg: "green".into(),
+            syntax_comment_fg: "cyan".into(),
+            syntax_number_fg: "red".into(),
+            syntax_function_fg: "yellow".into(),
+            syntax_type_fg: "blue".into(),
             status_fg: "gray".into(),
             bar_bg: "reset".into(),
             danger_fg: "red".into(),
@@ -211,6 +253,13 @@ impl Theme {
             doc_fg: "magenta".into(),
             archive_fg: "red".into(),
             media_fg: "magenta".into(),
+            // Dracula's own published syntax-highlighting colors.
+            syntax_keyword_fg: "#ff79c6".into(),
+            syntax_string_fg: "#f1fa8c".into(),
+            syntax_comment_fg: "#6272a4".into(),
+            syntax_number_fg: "#bd93f9".into(),
+            syntax_function_fg: "#50fa7b".into(),
+            syntax_type_fg: "#8be9fd".into(),
             status_fg: "yellow".into(),
             bar_bg: "reset".into(),
             danger_fg: "red".into(),
@@ -235,6 +284,13 @@ impl Theme {
             doc_fg: "#cba6f7".into(),
             archive_fg: "#fab387".into(),
             media_fg: "#f5c2e7".into(),
+            // Catppuccin's own published syntax-highlighting mapping (Mocha).
+            syntax_keyword_fg: "#cba6f7".into(),
+            syntax_string_fg: "#a6e3a1".into(),
+            syntax_comment_fg: "#6c7086".into(),
+            syntax_number_fg: "#fab387".into(),
+            syntax_function_fg: "#89b4fa".into(),
+            syntax_type_fg: "#f9e2af".into(),
             status_fg: "#a6adc8".into(),
             bar_bg: "#181825".into(),
             danger_fg: "#f38ba8".into(),
@@ -261,6 +317,13 @@ impl Theme {
             doc_fg: "#8839ef".into(),
             archive_fg: "#fe640b".into(),
             media_fg: "#ea76cb".into(),
+            // Catppuccin's own published syntax-highlighting mapping (Latte).
+            syntax_keyword_fg: "#8839ef".into(),
+            syntax_string_fg: "#40a02b".into(),
+            syntax_comment_fg: "#9ca0b0".into(),
+            syntax_number_fg: "#fe640b".into(),
+            syntax_function_fg: "#1e66f5".into(),
+            syntax_type_fg: "#df8e1d".into(),
             status_fg: "#6c6f85".into(),
             bar_bg: "#e6e9ef".into(),
             danger_fg: "#d20f39".into(),
@@ -285,6 +348,15 @@ impl Theme {
             doc_fg: "#8fbcbb".into(),
             archive_fg: "#d08770".into(),
             media_fg: "#b48ead".into(),
+            // Nord's own published syntax-highlighting reference: keywords/types/operators in
+            // nord9, functions in nord8, strings in nord14, numbers/constants in nord15,
+            // comments in nord3 — the same hex values already used above for other elements.
+            syntax_keyword_fg: "#81a1c1".into(),
+            syntax_string_fg: "#a3be8c".into(),
+            syntax_comment_fg: "#4c566a".into(),
+            syntax_number_fg: "#b48ead".into(),
+            syntax_function_fg: "#88c0d0".into(),
+            syntax_type_fg: "#81a1c1".into(),
             status_fg: "#81a1c1".into(),
             bar_bg: "#3b4252".into(),
             danger_fg: "#bf616a".into(),
@@ -312,6 +384,12 @@ impl Default for Theme {
             doc_fg: "#b69cff".into(),
             archive_fg: "#ff7a3d".into(),
             media_fg: "#ff5cf0".into(),
+            syntax_keyword_fg: "#ff2bd6".into(),
+            syntax_string_fg: "#39ff88".into(),
+            syntax_comment_fg: "#7a80b8".into(),
+            syntax_number_fg: "#ffd60a".into(),
+            syntax_function_fg: "#00d9ff".into(),
+            syntax_type_fg: "#b69cff".into(),
             status_fg: "#7a80b8".into(),
             bar_bg: "#1a1f3d".into(),
             danger_fg: "#ff3860".into(),
@@ -342,6 +420,12 @@ pub struct RawTheme {
     pub doc_fg: Option<String>,
     pub archive_fg: Option<String>,
     pub media_fg: Option<String>,
+    pub syntax_keyword_fg: Option<String>,
+    pub syntax_string_fg: Option<String>,
+    pub syntax_comment_fg: Option<String>,
+    pub syntax_number_fg: Option<String>,
+    pub syntax_function_fg: Option<String>,
+    pub syntax_type_fg: Option<String>,
     pub status_fg: Option<String>,
     pub bar_bg: Option<String>,
     pub danger_fg: Option<String>,
@@ -370,6 +454,12 @@ impl RawTheme {
             doc_fg: Some(theme.doc_fg.clone()),
             archive_fg: Some(theme.archive_fg.clone()),
             media_fg: Some(theme.media_fg.clone()),
+            syntax_keyword_fg: Some(theme.syntax_keyword_fg.clone()),
+            syntax_string_fg: Some(theme.syntax_string_fg.clone()),
+            syntax_comment_fg: Some(theme.syntax_comment_fg.clone()),
+            syntax_number_fg: Some(theme.syntax_number_fg.clone()),
+            syntax_function_fg: Some(theme.syntax_function_fg.clone()),
+            syntax_type_fg: Some(theme.syntax_type_fg.clone()),
             status_fg: Some(theme.status_fg.clone()),
             bar_bg: Some(theme.bar_bg.clone()),
             danger_fg: Some(theme.danger_fg.clone()),
@@ -396,6 +486,12 @@ impl RawTheme {
             doc_fg: top.doc_fg.or(self.doc_fg),
             archive_fg: top.archive_fg.or(self.archive_fg),
             media_fg: top.media_fg.or(self.media_fg),
+            syntax_keyword_fg: top.syntax_keyword_fg.or(self.syntax_keyword_fg),
+            syntax_string_fg: top.syntax_string_fg.or(self.syntax_string_fg),
+            syntax_comment_fg: top.syntax_comment_fg.or(self.syntax_comment_fg),
+            syntax_number_fg: top.syntax_number_fg.or(self.syntax_number_fg),
+            syntax_function_fg: top.syntax_function_fg.or(self.syntax_function_fg),
+            syntax_type_fg: top.syntax_type_fg.or(self.syntax_type_fg),
             status_fg: top.status_fg.or(self.status_fg),
             bar_bg: top.bar_bg.or(self.bar_bg),
             danger_fg: top.danger_fg.or(self.danger_fg),

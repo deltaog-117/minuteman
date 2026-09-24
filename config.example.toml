@@ -118,7 +118,9 @@ shell = ["s"]
 # then in every directory below it, and jumps there as you type. Enter stays where the search
 # landed, Esc goes back to where it started.
 search = ["/"]
-# Opens the :-command prompt. ":q"/":quit" exits, ":cd <path>" jumps to a directory,
+# Opens the :-command prompt. ":q"/":q!"/":qa"/":qa!"/":quit" all exit (there's no unsaved-buffer
+# or multi-window state for the vim-style "!"/"a" spellings to mean anything different),
+# ":cd <path>" jumps to a directory,
 # ":mkdir [-p] <name>..." and ":touch <name>..." create things right here, bare ":trash" sends
 # the marked/selected entries to the desktop trash, and anything else is run as a shell command in
 # the current directory (":ls -l", ":git mv a b", ":rm old.log"), with its output on the status
