@@ -26,6 +26,7 @@
 use preview::Loaded;
 use preview::archive::{Hidden, Listing};
 use preview::hex::{self, Head, OFFSET_CELLS};
+use preview::highlight::{HighlightedLine, TokenKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -140,10 +141,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, preview: &mut TextPreview, conf
         PreviewStatus::Failed => frame.render_widget(Paragraph::new("preview failed"), inner),
         PreviewStatus::Empty => {}
         PreviewStatus::Ready => {
-            let (content, rows, scroll) = preview.parts();
+            let (content, highlighted, rows, scroll) = preview.parts();
             match content {
-                Some(Loaded::Text(text)) => {
-                    draw_text(frame, area, inner, text, rows, scroll, config)
+                Some(Loaded::Text(_)) => {
+                    // `text_preview` tokenizes every `Loaded::Text` alongside loading it
+                    // (falling back to one `Plain` span a line for an unrecognized language),
+                    // so `highlighted` is always present here by construction.
+                    let highlighted = highlighted
+                        .expect("a Loaded::Text preview always carries its highlighted lines");
+                    draw_text(frame, area, inner, highlighted, rows, scroll, config)
                 }
                 Some(Loaded::Bytes(head)) => draw_hex(frame, area, inner, head, scroll, config),
                 Some(Loaded::Archive(listing)) => {
@@ -159,7 +165,7 @@ fn draw_text(
     frame: &mut Frame<'_>,
     area: Rect,
     inner: Rect,
-    text: &str,
+    highlighted: &[HighlightedLine],
     rows: &mut crate::text_preview::RowCache,
     scroll: &mut Scroll,
     config: &Config,
@@ -167,9 +173,20 @@ fn draw_text(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(style::color(&config.theme.file_fg)))
-        .wrap(Wrap { trim: false });
+    let plain = Style::default().fg(style::color(&config.theme.file_fg));
+    let lines: Vec<Line<'static>> = highlighted
+        .iter()
+        .map(|line| {
+            Line::from(
+                line.iter()
+                    .map(|(kind, piece)| {
+                        Span::styled(piece.clone(), token_style(*kind, config, plain))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let total = rows.get(inner.width, || paragraph.line_count(inner.width));
     let offset = scroll.fit(total, inner.height as usize);
     // `Paragraph::scroll` takes a `u16`; a text of over 65,535 wrapped rows is scrolled as far as
@@ -177,6 +194,21 @@ fn draw_text(
     let top = u16::try_from(offset).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((top, 0)), inner);
     draw_scrollbar(frame, area, total, offset, config);
+}
+
+/// The theme color for one syntax token kind; `Plain` reuses the preview's own text color rather
+/// than a seventh theme field, since undecorated text needs no color of its own.
+fn token_style(kind: TokenKind, config: &Config, plain: Style) -> Style {
+    let theme = &config.theme;
+    match kind {
+        TokenKind::Plain => plain,
+        TokenKind::Keyword => Style::default().fg(style::color(&theme.syntax_keyword_fg)),
+        TokenKind::String => Style::default().fg(style::color(&theme.syntax_string_fg)),
+        TokenKind::Comment => Style::default().fg(style::color(&theme.syntax_comment_fg)),
+        TokenKind::Number => Style::default().fg(style::color(&theme.syntax_number_fg)),
+        TokenKind::Function => Style::default().fg(style::color(&theme.syntax_function_fg)),
+        TokenKind::Type => Style::default().fg(style::color(&theme.syntax_type_fg)),
+    }
 }
 
 fn draw_hex(
@@ -274,17 +306,28 @@ mod tests {
     }
 
     fn screen(width: u16, height: u16, preview: &mut TextPreview) -> Vec<String> {
+        rendered(width, height, preview).0
+    }
+
+    /// [`screen`], plus each drawn cell's foreground color, for tests that check a token was
+    /// actually colored rather than just what text it holds.
+    fn rendered(
+        width: u16,
+        height: u16,
+        preview: &mut TextPreview,
+    ) -> (Vec<String>, ratatui::buffer::Buffer) {
         let config = Config::from_sources(None, None, None);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| render(frame, frame.area(), preview, &config))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
-        buffer
+        let rows = buffer
             .content()
             .chunks(width as usize)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect()
+            .collect();
+        (rows, buffer)
     }
 
     fn head(len: usize, total: u64) -> Head {
@@ -456,6 +499,47 @@ mod tests {
             out[1].contains("word") && out[2].contains("word"),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn a_recognized_language_colors_its_keyword_differently_from_plain_text() {
+        let rt = runtime();
+        let mut preview = TextPreview::showing_named(
+            rt.handle().clone(),
+            Loaded::Text("fn main() {}".to_string()),
+            "main.rs",
+        );
+        let (out, buffer) = rendered(20, 4, &mut preview);
+        assert!(out[1].contains("fn main"), "{out:?}");
+
+        let config = Config::from_sources(None, None, None);
+        let keyword_color = style::color(&config.theme.syntax_keyword_fg);
+        let plain_color = style::color(&config.theme.file_fg);
+        assert_ne!(
+            keyword_color, plain_color,
+            "the default theme's own colors must differ for this to test anything"
+        );
+
+        // `f` of `fn`, the first cell inside the border.
+        assert_eq!(buffer.cell((1, 1)).unwrap().fg, keyword_color);
+        // The space between `fn` and `main` is untagged `Plain` text, not a keyword.
+        assert_eq!(buffer.cell((3, 1)).unwrap().fg, plain_color);
+    }
+
+    #[test]
+    fn an_unrecognized_extension_still_renders_as_plain_text() {
+        let rt = runtime();
+        let mut preview = TextPreview::showing_named(
+            rt.handle().clone(),
+            Loaded::Text("fn main() {}".to_string()),
+            "notes.mystery",
+        );
+        let (out, buffer) = rendered(20, 4, &mut preview);
+        assert!(out[1].contains("fn main"), "{out:?}");
+
+        let config = Config::from_sources(None, None, None);
+        let plain_color = style::color(&config.theme.file_fg);
+        assert_eq!(buffer.cell((1, 1)).unwrap().fg, plain_color);
     }
 
     #[test]

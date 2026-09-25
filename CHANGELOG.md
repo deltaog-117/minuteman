@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `preview`, `theming`, `tui`: syntax highlighting in the text preview. New `preview::highlight`
+  tokenizes a previewed file with `syntect` (parsing only, no theme/HTML machinery) and classifies
+  each token by its raw scope name into a small, curated set (keyword/string/comment/number/
+  function/type/plain) rather than one theme field per possible scope. Every bundled theme
+  (default, Dracula, Catppuccin Mocha/Latte, Nord) gained six `syntax_*_fg` colors, using each
+  theme's own published mapping where one exists. Tokenizing runs off the render thread alongside
+  the file read itself, the same treatment already given image decoding and archive listing, so a
+  slow-to-parse file can't stall input; `preview_view::draw_text` turns the tokens into styled
+  spans, falling back to the ordinary preview text color for plain text and for any language
+  `syntect` doesn't recognize.
 - `trash` (new crate wiring), `file_ops`, `theming`, `tui`: a built-in trash bin, integrated with
   the real desktop trash (freedesktop.org trash on Linux, the same one Nautilus/Dolphin/Explorer/
   Finder use) rather than a private minuteman-only folder. `d` now sends the marked-or-selected

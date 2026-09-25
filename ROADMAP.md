@@ -752,13 +752,29 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   directory and into the actual freedesktop trash (`$topdir/.Trash-<uid>/files/`, since the scratch
   directory was on a different filesystem than `$HOME`), with a correct `.trashinfo` sidecar
   recording its original path and deletion time.
+- ✅ **Preview extras, stage 2 — syntax highlighting** – the text preview colors source and config
+  files instead of showing one flat color. New `preview::highlight` tokenizes with `syntect`
+  (parsing only — no theme/HTML machinery), classifying each token's scope into a small, curated
+  set (`Keyword`/`String`/`Comment`/`Number`/`Function`/`Type`/`Plain`) rather than one theme field
+  per possible scope. Every bundled theme (default, Dracula, Catppuccin Mocha/Latte, Nord) gained
+  six `syntax_*_fg` colors, using each theme's own published mapping where one exists. Tokenizing
+  runs off the render thread alongside the read itself (`text_preview::spawn_read`), the same
+  never-block-the-render-loop treatment already given image decoding and archive listing — a
+  slow-to-parse file can't stall input. `preview_view::draw_text` turns the tokens into styled
+  `ratatui` spans, falling back to the preview's ordinary text color for `Plain` and for any
+  language `syntect` doesn't recognize (which tokenizes as all-`Plain` already, so no separate
+  code path is needed for "unknown language"). Verified against the real compiled binary via a
+  scripted tmux session previewing this project's own `highlight.rs`: captured the raw truecolor
+  escape codes and confirmed `let`/`mut`/`for`/`if`/`continue`/`else` rendered in the active
+  theme's exact `syntax_keyword_fg`, function calls in `syntax_function_fg`, `Vec`/`Ok` in
+  `syntax_type_fg`, comments in `syntax_comment_fg`, and a string literal and a number in
+  `syntax_string_fg`/`syntax_number_fg` — six-for-six, byte-for-byte against the theme's own hex
+  values, not just that the preview rendered without panicking.
 
 ---
 
 ## 🔥 High Priority (Critical)
 
-- **Preview extras, stage 2 — syntax highlighting** – colour source and config files in the text
-  preview with `syntect`, using the theme's palette where it can.
 - **Preview extras, stage 3 — external previewers for PDF and video** – a config-driven hook
   that runs a user-chosen command (`pdftoppm`, `ffmpegthumbnailer`, ...) off the render thread
   and feeds its image or text into the existing preview pipelines, falling back quietly to the
@@ -942,11 +958,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Before that, four earlier ones: `/` plus the start of a name a few directories down (`Esc` returns,
    `Enter` stays); the arrow keys; `v` two files, `m`, go to another directory, `c` drops the cut
    and the marks; and `:nvim ROADMAP.md` (`:!cmd` for a program not in `interactive_commands`).
+   Then the newest: select a `.rs`, `.py`, `.toml` or other recognized source/config file — the
+   preview now colors keywords, strings, comments, numbers, functions and types instead of one
+   flat color, using the active theme's own `syntax_*_fg` palette; an unrecognized extension still
+   previews, just uncolored.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: preview extras, stage 2 (syntax highlighting), the mouse's stage 2 (multi-select
-   and breadcrumb clicks), built-in trash and undo, or persisting the settings popup's changes to
-   disk (see Medium Priority).
-   Bookmarks (directory bookmarks — distinct from the file marks added earlier) and the preview
-   extras' later stages remain the other 🔥 candidates.
+4. Next cycle: preview extras, stage 3 (external previewers for PDF and video), the mouse's stage
+   2 (multi-select and breadcrumb clicks), the UI overhaul's cinematic layer, or bookmarks/marks
+   (see 🔥 High Priority).

@@ -49,6 +49,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-23 | Plugin System Transport | Out-of-process, line-delimited JSON-RPC over stdio, any language, no compile step (COA B); a sandboxed WASM/Extism host (A) deferred to sit alongside it later, an in-process Lua-only tier (C) rejected as too narrow | ✅ Confirmed |
 | 2026-09-23 | Appearance Popup: Color Picker + Saved Themes | Extend the existing popup and `local.toml` with an HSV picker mode and named full-snapshot theme saves (COA A); a separate Theme Manager popup plus standalone picker overlay (B) and a swatch-grid-only version with no automatic update/new detection (C) rejected | ✅ Confirmed |
 | 2026-09-23 | Built-in Trash | Delegate to the real OS/desktop trash via the `trash` crate (COA B), at the user's direction; a hand-rolled trash folder over `Vfs`/`file_ops::mv` (A) and a full restore-by-id subsystem with its own listing popup (C) rejected; a non-local `Vfs` falls back to permanent delete, since the desktop trash has no remote equivalent | ✅ Confirmed |
+| 2026-09-25 | Preview Syntax Highlighting | A curated seven-`TokenKind` classification of `syntect` scopes (one small shared palette, not one theme color per possible scope), tokenized off the render thread alongside the file read | ✅ Confirmed |
 
 ---
 
@@ -3536,6 +3537,68 @@ freedesktop trash — `$topdir/.Trash-<uid>/files/` plus a correct `.trashinfo` 
 original path and deletion time, since the scratch directory lived on a different filesystem than
 `$HOME` (confirming the crate follows the spec's per-mountpoint fallback, not just the common
 `~/.local/share/Trash` case).
+
+---
+
+### Syntax Highlighting in the Text Preview: a Curated `TokenKind` Set, Tokenized Off the Render Thread
+
+**Date:** 2026-09-25
+**Author:** deltaog-117
+**Status:** Confirmed
+
+**Context.** The roadmap's "preview extras, stage 2" asked for coloring source and config files
+in the text preview with `syntect`, using the theme's palette where it can. A prior pass (see the
+`feat(preview)` commit just before this entry) had already added `preview::highlight` — a
+tokenizer that parses a file with `syntect`'s bundled Sublime-syntax grammars and classifies each
+scope into `TokenKind::{Keyword, String, Comment, Number, Function, Type, Plain}` — and six new
+`syntax_*_fg` fields on every bundled theme, but nothing in `tui` ever called it: the preview pane
+still rendered every text file in one flat color. This cycle wired that tokenizer into the actual
+render path.
+
+**Curated kinds, not one color per scope.** `syntect`'s grammars produce dozens of distinct scope
+names (`storage.type.rust`, `keyword.operator.arithmetic`, `entity.name.function.member`, …).
+Mapping each to its own theme field would mean a theme needing tens of new colors, most of which
+would go unused by most languages. `classify_scope` instead matches scope *prefixes* into the same
+seven kinds every language shares, so one small palette (already sized to fit the appearance
+popup's existing color-editing UI) covers Rust, Python, TOML, and everything else `syntect`
+bundles a grammar for. An unrecognized extension, or a scope prefix this project doesn't classify,
+falls back to `Plain` — the same color the preview already used before this feature existed, so a
+file with no known syntax looks exactly as it did before.
+
+**Off the render thread, alongside the read.** `text_preview::TextPreview` already reads a
+selected file's bytes on `tokio::spawn_blocking` so a slow disk can't stall input — the same
+treatment `image_preview` gives image decoding. Tokenizing a whole file is comparable work (a
+full pass over every line), so it runs inside that same blocking closure rather than on every
+render tick: `ReadOutcome` grew a `highlighted: Option<Vec<HighlightedLine>>` field, computed from
+`preview::highlight::highlight` right next to the `preview::load` call, and carried into
+`TextPreview` alongside `content` with the same generation-based staleness check the read itself
+already used. The two fields are set together in every code path (a fresh read, a reload, a
+failed/unsupported result clearing both) — which let `preview_view::draw_text` treat "the content
+is `Loaded::Text`" and "highlighted tokens exist" as one invariant rather than two independently
+nullable fields, resolved with a documented `.expect()` at the one call site instead of a second,
+never-really-reachable fallback branch.
+
+**Clippy's argument-count lint caught a real smell.** `draw_text` initially grew to eight
+parameters (frame, area, inner, the raw text, the highlighted tokens, the row cache, the scroll
+state, and the config) to support a defensive `None`-highlighted fallback that reconstructed a
+plain paragraph from the raw text. `clippy::too_many_arguments` (default threshold 7) flagged it.
+Rather than silence the lint, dropping the now-provably-dead fallback (and the `text: &str`
+parameter it existed for) fixed the count *and* removed the redundancy — the raw text was only
+ever needed to reconstruct what `highlighted` already carries.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green (two new tests in
+`preview_view`: a recognized language colors a keyword differently from plain text, and an
+unrecognized extension still renders — both by reading the actual foreground color ratatui wrote
+into the test-backend buffer's cells, not just the text). Also verified against the real compiled
+binary: opened this project's own `crates/preview/src/highlight.rs` in a scripted tmux session
+(`COLORTERM=truecolor`, captured with `tmux capture-pane -e` for the raw escape codes) under the
+auto-detected Catppuccin Mocha theme, and confirmed six-for-six that `let`/`mut`/`for`/`if`/
+`continue`/`else` rendered in `38;2;203;166;247` (the theme's own `#cba6f7`), function calls in
+`38;2;137;180;250` (`#89b4fa`), `Vec`/`Ok` in `38;2;249;226;175` (`#f9e2af`), comments in
+`38;2;108;112;134` (`#6c7086`), and a string literal and a number in `38;2;166;227;161` (`#a6e3a1`)
+and `38;2;250;179;135` (`#fab387`) respectively — an exact byte-for-byte match against the theme's
+published hex values, not merely that the preview rendered without panicking.
 
 ---
 

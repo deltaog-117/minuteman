@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 
 use preview::Loaded;
+use preview::highlight::HighlightedLine;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +85,9 @@ struct ReadOutcome {
     path: PathBuf,
     generation: u64,
     loaded: Loaded,
+    /// Tokenized alongside the read, off the render thread — `Some` exactly when `loaded` is
+    /// `Loaded::Text`, since nothing else has source lines to color.
+    highlighted: Option<Vec<HighlightedLine>>,
 }
 
 /// How many rows a text takes when wrapped to a width, remembered with that width. Measuring
@@ -115,6 +119,9 @@ pub struct TextPreview {
     status: PreviewStatus,
     /// Only ever `Text`, `Bytes` or `Archive`: a failed or unsupported read shows in `status`.
     content: Option<Loaded>,
+    /// `content`'s tokens, one vec per source line, when `content` is `Loaded::Text` — see
+    /// [`ReadOutcome::highlighted`].
+    highlighted: Option<Vec<HighlightedLine>>,
     scroll: Scroll,
     rows: RowCache,
     /// Counts reads started. Only the latest one's result is kept, so a slow read begun before
@@ -132,6 +139,7 @@ impl TextPreview {
             current: None,
             status: PreviewStatus::Empty,
             content: None,
+            highlighted: None,
             scroll: Scroll::default(),
             rows: RowCache::default(),
             generation: 0,
@@ -141,10 +149,23 @@ impl TextPreview {
         }
     }
 
-    /// A preview already showing `loaded`, for tests of the code that draws one.
+    /// A preview already showing `loaded`, for tests of the code that draws one. A text's tokens
+    /// are computed with no known file name, so it highlights as plain text — use
+    /// [`Self::showing_named`] to test an actual language's colors.
     #[cfg(test)]
     pub fn showing(handle: tokio::runtime::Handle, loaded: Loaded) -> Self {
+        Self::showing_named(handle, loaded, "")
+    }
+
+    /// [`Self::showing`], tokenizing a `Loaded::Text` as `file_name` would be highlighted for
+    /// real, so a test can check specific tokens' colors.
+    #[cfg(test)]
+    pub fn showing_named(handle: tokio::runtime::Handle, loaded: Loaded, file_name: &str) -> Self {
         let mut preview = Self::new(handle);
+        preview.highlighted = match &loaded {
+            Loaded::Text(text) => Some(preview::highlight::highlight(text, file_name)),
+            _ => None,
+        };
         preview.content = Some(loaded);
         preview.status = PreviewStatus::Ready;
         preview
@@ -177,10 +198,23 @@ impl TextPreview {
         self.scroll.by(direction * self.scroll.half_page());
     }
 
-    /// The content, the wrapped-row cache and the scroll position as separate borrows, so the
-    /// drawing code can read the content while it updates the other two.
-    pub fn parts(&mut self) -> (Option<&Loaded>, &mut RowCache, &mut Scroll) {
-        (self.content.as_ref(), &mut self.rows, &mut self.scroll)
+    /// The content, its highlighted tokens (when it is text), the wrapped-row cache and the
+    /// scroll position as separate borrows, so the drawing code can read the content while it
+    /// updates the other two.
+    pub fn parts(
+        &mut self,
+    ) -> (
+        Option<&Loaded>,
+        Option<&[HighlightedLine]>,
+        &mut RowCache,
+        &mut Scroll,
+    ) {
+        (
+            self.content.as_ref(),
+            self.highlighted.as_deref(),
+            &mut self.rows,
+            &mut self.scroll,
+        )
     }
 
     /// Re-reads the current file without clearing what is shown, for when it changed on disk
@@ -201,6 +235,7 @@ impl TextPreview {
         if target != self.current {
             self.current = target.clone();
             self.content = None;
+            self.highlighted = None;
             self.rows.clear();
             self.scroll.reset();
             match target {
@@ -216,6 +251,7 @@ impl TextPreview {
             path,
             generation,
             loaded,
+            highlighted,
         }) = self.read_rx.try_recv()
         {
             if Some(&path) != self.current.as_ref() || generation != self.generation {
@@ -225,14 +261,17 @@ impl TextPreview {
             match loaded {
                 Loaded::Failed => {
                     self.content = None;
+                    self.highlighted = None;
                     self.status = PreviewStatus::Failed;
                 }
                 Loaded::Unsupported => {
                     self.content = None;
+                    self.highlighted = None;
                     self.status = PreviewStatus::Empty;
                 }
                 shown => {
                     self.content = Some(shown);
+                    self.highlighted = highlighted;
                     self.status = PreviewStatus::Ready;
                 }
             }
@@ -245,10 +284,20 @@ impl TextPreview {
         let tx = self.read_tx.clone();
         self.handle.spawn_blocking(move || {
             let loaded = preview::load(&path);
+            // Tokenizing runs syntect's line-oriented parser over the whole file, the same
+            // amount of work as the read just above it — it belongs off the render thread too.
+            let highlighted = match &loaded {
+                Loaded::Text(text) => {
+                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    Some(preview::highlight::highlight(text, file_name))
+                }
+                _ => None,
+            };
             let _ = tx.send(ReadOutcome {
                 path,
                 generation,
                 loaded,
+                highlighted,
             });
         });
     }
@@ -380,16 +429,16 @@ mod tests {
 
         settle(&mut preview, Some(&dir.join("a.txt")));
         preview.scroll_rows(40);
-        assert_eq!(preview.parts().2.fit(200, 20), 40);
+        assert_eq!(preview.parts().3.fit(200, 20), 40);
 
         // The file changed on disk while staying selected: same place.
         preview.reload();
         settle(&mut preview, Some(&dir.join("a.txt")));
-        assert_eq!(preview.parts().2.fit(200, 20), 40);
+        assert_eq!(preview.parts().3.fit(200, 20), 40);
 
         settle(&mut preview, Some(&dir.join("b.txt")));
         assert_eq!(
-            preview.parts().2.fit(200, 20),
+            preview.parts().3.fit(200, 20),
             0,
             "a new file starts at the top"
         );
