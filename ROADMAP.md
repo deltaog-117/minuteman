@@ -797,9 +797,35 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   output (`38;2;254;0;0` in the captured escape codes, matching the source color), while a second
   extension configured with a nonexistent program's hook showed nothing but its own file name —
   both exactly as designed, not just that neither one crashed.
-- **UI overhaul, phase C — cinematic layer** – a boot splash, animated focus transitions,
-  gradient borders/titles, a pulsing selection, a typewriter reveal on the preview, and an
-  optional system/git HUD. Needs an animation tick on top of the existing 100ms poll.
+- ✅ **UI overhaul, phase C (start) — animated shell-pane focus transitions (COA A)** – a new
+  `tui::anim` module (pure `Duration` in, `f64` out — no ratatui or theme types, so its transition
+  math is tested directly rather than through a render) drives a shell pane's border fading between
+  `border_fg` and `border_focused_fg` over 180ms instead of switching instantly the moment its
+  focus changes (`shell_layout::FocusAnim`, tracked per `ShellPanes` via a `Cell`-based "did focus
+  just move" check inside `render`, since `render` only ever borrows `&self`). Falls back to an
+  instant, unanimated switch (`style::blend_rgb` returning `None`) for any theme whose border
+  colors aren't both resolved hex — a named ANSI color, or a hex color quantized to a 256-color
+  index on a non-truecolor terminal, has no shade to blend through, so guessing one was rejected in
+  favor of the plain pre-animation behavior. A shell pane's own poll was already 16ms whenever any
+  shell is open (faster than the 180ms transition needs), so this needed no poll-timeout change at
+  all. Chosen as COA A (the tick plus this one payload) over building the boot splash alone (B,
+  self-contained but doesn't establish reusable tick infrastructure) or the full cinematic-layer
+  bullet in one cycle (C, too large a blast radius for one bounded cycle — see the
+  appearance-editor deferral above for the same reasoning) — all three raised and rejected before
+  coding, at the user's direction. A pulsing selection highlight was also built and verified this
+  cycle, then removed before committing — flagged as distracting in practice — so `style::pulse`
+  and the pulse half of `tui::anim` never shipped; see DIARY.md. Verified against the real compiled
+  binary via a scripted tmux session: opened and split a shell pane and captured a frame
+  mid-transition, where both the newly-focused and newly-unfocused pane's border escape codes sat
+  at the *same* blend fraction (≈0.267) between `border_fg` and `border_focused_fg`, confirming the
+  two panes crossfade in lockstep rather than just snapping.
+- **UI overhaul, phase C (remainder) — cinematic layer** – a boot splash, gradient borders/titles,
+  a typewriter reveal on the preview, an optional system/git HUD, and a pulsing selection (tried
+  this cycle but dropped as distracting — see Completed; worth revisiting with a subtler effect, if
+  at all). The animation tick already built for the focus transition can drive whichever of these
+  turn out to need one, rather than needing a second one.
+- **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
+  frequently visited paths don't require re-navigating the miller columns each time.
 - **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
   frequently visited paths don't require re-navigating the miller columns each time.
 
@@ -980,12 +1006,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    colors keywords, strings, comments, numbers, functions and types instead of one flat color,
    using the active theme's own `syntax_*_fg` palette; an unrecognized extension still previews,
    just uncolored.
-   Then the newest: add a `[[preview_hook]]` to `config.toml` (see `config.example.toml` for a
-   real `pdftoppm`/`ffmpegthumbnailer` example) and select a file with that extension — it
-   thumbnails or extracts text through your own command instead of falling back to a hex dump; a
-   missing tool, a failing command or a timeout just shows the file's name, quietly.
+   Then: add a `[[preview_hook]]` to `config.toml` (see `config.example.toml` for a real
+   `pdftoppm`/`ffmpegthumbnailer` example) and select a file with that extension — it thumbnails
+   or extracts text through your own command instead of falling back to a hex dump; a missing
+   tool, a failing command or a timeout just shows the file's name, quietly.
+   Then the newest: press `s` to open a shell, then `Alt+n` to split it — the new pane's border
+   fades in from the dim frame color while the one that just lost focus fades back out, instead of
+   either one snapping instantly; `Alt+z`/`x`/`c`/`v` moves focus between panes with the same fade
+   each time.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: the mouse's stage 2 (multi-select and breadcrumb clicks), the UI overhaul's
-   cinematic layer, or bookmarks/marks (see 🔥 High Priority).
+   remaining cinematic-layer pieces (a boot splash, gradient borders/titles, a typewriter preview
+   reveal, an optional system/git HUD), or bookmarks/marks.

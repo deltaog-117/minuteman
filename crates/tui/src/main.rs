@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 mod alt_keys;
+mod anim;
 mod app;
 mod appearance_popup;
 mod browser_mouse;
@@ -1085,7 +1086,8 @@ fn run(
         })?;
 
         // While a shell pane is open, poll faster so its output (e.g. a redrawing `vim` or `top`)
-        // feels responsive rather than updating in 100ms steps.
+        // feels responsive rather than updating in 100ms steps — fast enough that a shell-pane
+        // focus transition (see `shell_layout::FocusAnim`) never needs its own faster tick here.
         let poll_timeout = if shells.is_some() {
             Duration::from_millis(16)
         } else {

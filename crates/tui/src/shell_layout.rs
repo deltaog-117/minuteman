@@ -39,10 +39,13 @@
 //! without touching which panes are on which side or their ratio — still not pane reordering,
 //! just how the same two panes are arranged.
 
+use std::cell::Cell;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use shell_overlay::{ExitOutcome, PopupShell};
 use theming::Config;
 
@@ -599,17 +602,50 @@ fn resize_tree(tree: &ShellTree, area: Rect) -> anyhow::Result<()> {
     }
 }
 
+/// Border-transition state for one `ShellPanes::render` call, threaded down to every leaf so each
+/// one can compute its own border color: which pane is focused now, which one lost focus most
+/// recently (only meaningful while `t < 1.0`), and how far that transition has progressed.
+#[derive(Clone, Copy)]
+struct FocusAnim {
+    focused: usize,
+    previous: usize,
+    t: f64,
+}
+
+impl FocusAnim {
+    /// `id`'s border color right now: fading in from `border_fg` if it's the newly-focused pane,
+    /// fading back out from `border_focused_fg` if it just lost focus, or `border_fg` plainly
+    /// otherwise. Falls back to an instant switch (see `style::blend_rgb`) for a theme whose
+    /// border colors aren't both resolved hex — a named ANSI color has no shade to fade through.
+    fn color_for(self, id: usize, config: &Config) -> Color {
+        let unfocused = crate::style::color(&config.theme.border_fg);
+        let target = crate::style::color(&config.theme.border_focused_fg);
+        if id == self.focused {
+            crate::style::blend_rgb(unfocused, target, self.t).unwrap_or(target)
+        } else if id == self.previous && self.t < 1.0 {
+            crate::style::blend_rgb(target, unfocused, self.t).unwrap_or(unfocused)
+        } else {
+            unfocused
+        }
+    }
+}
+
 fn render_tree(
     tree: &ShellTree,
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     config: &Config,
-    focused: usize,
+    focus: FocusAnim,
 ) {
     match &tree.node {
-        Node::Leaf(shell) => {
-            crate::popup_shell::render(frame, area, shell, config, tree.id == focused)
-        }
+        Node::Leaf(shell) => crate::popup_shell::render(
+            frame,
+            area,
+            shell,
+            config,
+            tree.id == focus.focused,
+            focus.color_for(tree.id, config),
+        ),
         Node::Split {
             direction,
             ratio,
@@ -617,8 +653,8 @@ fn render_tree(
             second,
         } => {
             let (first_area, second_area) = split_rect(area, *direction, *ratio);
-            render_tree(first, frame, first_area, config, focused);
-            render_tree(second, frame, second_area, config, focused);
+            render_tree(first, frame, first_area, config, focus);
+            render_tree(second, frame, second_area, config, focus);
         }
     }
 }
@@ -644,6 +680,14 @@ pub struct ShellPanes {
     root: ShellTree,
     next_id: usize,
     focused: usize,
+    /// The `focused` id as of the last `render` call, so it can detect a change and start timing
+    /// a transition. `Cell`, since `render` only ever borrows `&self` but still needs to remember
+    /// this across frames.
+    last_seen_focused: Cell<usize>,
+    /// The pane that lost focus at the most recent transition, held stable for that transition's
+    /// whole duration rather than overwritten every frame (see `render`).
+    previous_focused: Cell<usize>,
+    focus_changed_at: Cell<Instant>,
 }
 
 impl ShellPanes {
@@ -658,6 +702,9 @@ impl ShellPanes {
             },
             next_id: 1,
             focused: 0,
+            last_seen_focused: Cell::new(0),
+            previous_focused: Cell::new(0),
+            focus_changed_at: Cell::new(Instant::now()),
         })
     }
 
@@ -668,7 +715,17 @@ impl ShellPanes {
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect, config: &Config) {
-        render_tree(&self.root, frame, area, config, self.focused);
+        if self.last_seen_focused.get() != self.focused {
+            self.previous_focused.set(self.last_seen_focused.get());
+            self.focus_changed_at.set(Instant::now());
+            self.last_seen_focused.set(self.focused);
+        }
+        let focus = FocusAnim {
+            focused: self.focused,
+            previous: self.previous_focused.get(),
+            t: crate::anim::transition_t(self.focus_changed_at.get().elapsed()),
+        };
+        render_tree(&self.root, frame, area, config, focus);
     }
 
     /// One `Divider` per split in the tree, for hit-testing a mouse-down against.
@@ -1404,5 +1461,56 @@ mod tests {
         assert_eq!(panes.focused_id(), original_id);
 
         assert!(panes.close(original_id, area).unwrap().is_none());
+    }
+
+    /// At `t == 1.0` (a settled, non-transitioning frame) `color_for` must land exactly on the
+    /// plain unfocused/focused colors regardless of whether the theme's colors are hex (so
+    /// `blend_rgb` actually runs) or named (so it falls back) — the settled state must look
+    /// identical to the pre-animation instant switch either way.
+    #[test]
+    fn focus_anim_settles_on_the_focused_pane_and_dims_every_other_one() {
+        let config = Config::from_sources(None, None, None);
+        let focus = FocusAnim {
+            focused: 1,
+            previous: 0,
+            t: 1.0,
+        };
+        let focused_color = crate::style::color(&config.theme.border_focused_fg);
+        let unfocused_color = crate::style::color(&config.theme.border_fg);
+        assert_eq!(focus.color_for(1, &config), focused_color);
+        assert_eq!(focus.color_for(0, &config), unfocused_color);
+        assert_eq!(focus.color_for(2, &config), unfocused_color);
+    }
+
+    #[test]
+    fn splitting_starts_a_focus_transition_that_settles_after_rendering() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let panes = ShellPanes::open(&std::env::temp_dir(), area).unwrap();
+        let panes = panes
+            .split(SplitDirection::Horizontal, &std::env::temp_dir(), area)
+            .unwrap();
+        let config = Config::from_sources(None, None, None);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        // The first render after a split notices `focused` moved and starts timing the fade;
+        // `previous_focused` must now name the pane that lost focus, not still equal `focused`.
+        terminal
+            .draw(|frame| panes.render(frame, area, &config))
+            .unwrap();
+        assert_ne!(panes.previous_focused.get(), panes.focused);
+
+        // A second render, once the transition's 180ms window has clearly elapsed, must settle
+        // rather than keep re-triggering — nothing about `focused` changed between the two calls.
+        std::thread::sleep(crate::anim::FOCUS_TRANSITION);
+        terminal
+            .draw(|frame| panes.render(frame, area, &config))
+            .unwrap();
+        assert_eq!(
+            crate::anim::transition_t(panes.focus_changed_at.get().elapsed()),
+            1.0
+        );
     }
 }

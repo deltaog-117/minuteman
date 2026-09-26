@@ -3670,6 +3670,99 @@ example now reflects.)
 
 ---
 
+### UI Overhaul, Phase C (Start): an Animation Tick and Animated Shell-Pane Focus Transitions (COA A)
+
+**Date:** 2026-09-26
+**Author:** deltaog-117
+**Status:** Confirmed
+
+**Context.** The roadmap's "UI overhaul, phase C — cinematic layer" bundled six unrelated effects
+(a boot splash, animated focus transitions, gradient borders/titles, a pulsing selection, a
+typewriter preview reveal, an optional system/git HUD) behind one line: "needs an animation tick
+on top of the existing 100ms poll." Three ways to slice one cycle's worth of that were raised and
+compared before coding:
+
+| COA | Approach | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|---|
+| A | The animation-tick core plus two payloads that exercise it: a pulsing selection highlight and an animated focus-border transition | Small blast radius, proves the tick mechanism end-to-end on real widgets, both payloads are cheap pure-color computation with no new state machines | Doesn't touch the splash, preview reveal, or gradient titles this cycle | M |
+| B | The boot splash only | Fully self-contained and one-shot; no persistent tick needed | Fires once per session; doesn't lay the tick infrastructure the rest of the feature needs later | S |
+| C | Everything in the roadmap bullet in one cycle | Matches the bullet completely | Touches nearly every render path in one PR; contradicts this project's own precedent of deferring large multi-piece UI work instead of bounding each cycle (see the appearance-editor deferral); hard to verify, high regression risk | H |
+
+Chosen at the user's direction: **A** — the only option that builds the reusable tick mechanism
+the rest of the cinematic layer will need, while staying small enough to verify properly in one
+cycle.
+
+**Built, then cut before committing: the pulsing selection.** COA A's second payload — the
+selected row's background breathing gently brighter and back on a ~1.4s cosine cycle, via a
+`style::pulse` on top of a shared `anim::pulse_phase()` clock — was implemented, unit-and-property
+tested, and confirmed live on the real compiled binary (its raw background escape code visibly
+moving between two captures 0.6s apart). Before anything was committed, the user tried it and
+called it distracting, so it was removed in full: `style::pulse`, `anim::pulse_phase`/
+`started_at`/`PULSE_PERIOD`/`PULSE_STRENGTH`/`TICK`, their tests, the `selection_style` call site
+in `main.rs`, and the poll-timeout branch that shortened the idle 100ms tick to 33ms whenever a row
+was selected all went back out together, leaving only what the focus-border transition needs. What
+shipped is the animated focus transition alone; the pulsing selection is still an open roadmap item
+(worth trying again with a subtler effect, if at all, but not by default). Recorded here per this
+diary's own rule to write an entry when reversing a decision — the lesson is that a real, verified,
+compiled-and-tested effect can still be the wrong call on taste alone, and that isn't a defect in
+the verification, just a separate axis it doesn't cover.
+
+**The tick.** A new `tui::anim` module holds nothing but pure wall-clock math — a `Duration` in, an
+`f64` out, no `ratatui` or `theming` types at all — so `transition_t(elapsed)` is tested directly
+rather than through a render: a linear `0.0..=1.0` ramp over 180ms, since a focus transition only
+ever plays once per change rather than looping (unlike the pulse it replaced any need for, above).
+A shell pane's own poll was already 16ms whenever any shell is open — faster than the 180ms
+transition needs to look smooth — so the focus-border fade needed no poll-timeout change of its
+own at all; with the pulse gone, the idle poll outside a shell session stays exactly the flat 100ms
+it always was.
+
+**Color blending, and its honest limit.** `style::blend_rgb(from, to, t)` linearly interpolates two
+resolved `ratatui::Color`s, but only returns `Some` when both are `Color::Rgb` — the case a
+truecolor terminal resolves a hex theme color to. A basic ANSI color name (`"white"`, `"cyan"`,
+what the bundled `classic` and `dracula` themes use for `border_fg`/`border_focused_fg`) or a hex
+color quantized down to a 256-color index on a non-truecolor terminal has no smooth path between
+two swatches — interpolating between two arbitrary palette indices would be a guess dressed up as
+smoothness, so it returns `None` instead and `shell_layout`'s border blend falls back to whichever
+endpoint the pane is actually settled at. That fallback reproduces exactly what the code already
+did before this cycle — a theme built entirely from named border colors simply doesn't animate,
+rather than freezing on a half-lit or randomly-quantized shade.
+
+**Tracking a focus change without changing `render`'s signature.** `shell_layout::ShellPanes`
+already had a plain `focused: usize` field, mutated from half a dozen call sites (`move_focus`,
+`split`, `close`, `resize_focused`, ...). Rather than touch every one of them, `render(&self, ...)`
+itself now compares `focused` against a `last_seen_focused: Cell<usize>` on every call: a
+mismatch means focus moved since the last frame, so it stamps `previous_focused` (the pane that
+lost focus) and `focus_changed_at` (an `Instant`) before computing `anim::transition_t` for this
+frame. `Cell`, not a plain field, because `render` only ever borrows `&self` — `ShellPanes` is
+single-threaded UI state, so the interior mutability costs nothing but is exactly what lets the
+bookkeeping live inside the one function that actually needs to observe it, instead of leaking
+into every mutator. A new `FocusAnim { focused, previous, t }` is threaded down through
+`render_tree` to `popup_shell::render` (which gained a `border: Color` parameter, resolved by the
+caller) so each leaf can compute its own border color: the newly-focused pane blends from
+`border_fg` toward `border_focused_fg`, the pane that just lost focus blends the other way, and
+every other pane (in a tree of more than two panes) simply stays at the plain unfocused color —
+never both blending and losing track of who's mid-transition. `style::themed_block` itself is now
+a thin wrapper over a new `style::themed_block_with_border`, so every other caller (the modal
+popups, the always-focused current-column pane) is unaffected.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green (new: `anim`'s own
+unit and property tests for the transition math, `style`'s for `blend_rgb`'s endpoints and its
+refusal to blend named/indexed colors, and `shell_layout`'s for `FocusAnim`'s settled-state
+dispatch and for a real `ShellPanes::split` + `render` sequence actually starting and later
+settling a transition). Also verified against the real compiled binary via a scripted tmux session
+on a truecolor terminal: opened a shell (`s`), split it (`Alt+n`), and moved focus back (`Alt+z`)
+while capturing a frame roughly 50ms later — both panes' border escape codes sat at the *same*
+blend fraction (≈0.267, computed independently from each pane's own resolved
+`border_fg`/`border_focused_fg`) between their respective endpoints, confirming the two panes
+crossfade in lockstep rather than one snapping while the other lags or drifts. (Driving the split
+via the documented `Space`-leader chord needs a bare "Alt tap," which depends on the kitty keyboard
+protocol's modifier-press events — not available by construction over this scripted tmux session —
+so `Alt+n`/`Alt+z` were used instead, a real, independently-documented keybinding that exercises
+the identical `ShellPanes::split`/`render` code path.)
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

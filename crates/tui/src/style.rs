@@ -145,20 +145,34 @@ pub fn border_type(name: &str) -> BorderType {
 /// lit up against the dimmer rest.
 pub fn themed_block(config: &Config, title: &str, focused: bool) -> Block<'static> {
     let theme = &config.theme;
+    let border = if focused {
+        color(&theme.border_focused_fg)
+    } else {
+        color(&theme.border_fg)
+    };
+    themed_block_with_border(config, title, focused, border)
+}
+
+/// Like [`themed_block`], but with the border color already resolved by the caller instead of
+/// derived from `focused` — for a shell pane mid-focus-transition (see
+/// `shell_layout::render_tree`), whose border isn't simply `border_fg` or `border_focused_fg` but
+/// a blend of the two (see [`blend_rgb`]). The title still switches the instant focus does; only
+/// the border itself animates, this cycle.
+pub fn themed_block_with_border(
+    config: &Config,
+    title: &str,
+    focused: bool,
+    border: Color,
+) -> Block<'static> {
+    let theme = &config.theme;
     let styles = &config.styles;
-    let (border, title_style) = if focused {
-        (
-            color(&theme.border_focused_fg),
-            styled(
-                Style::default().fg(color(&theme.accent_fg)),
-                styles.title_focused,
-            ),
+    let title_style = if focused {
+        styled(
+            Style::default().fg(color(&theme.accent_fg)),
+            styles.title_focused,
         )
     } else {
-        (
-            color(&theme.border_fg),
-            styled(Style::default().fg(color(&theme.title_fg)), styles.title),
-        )
+        styled(Style::default().fg(color(&theme.title_fg)), styles.title)
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -169,6 +183,21 @@ pub fn themed_block(config: &Config, title: &str, focused: bool) -> Block<'stati
     } else {
         block.border_type(border_type(&theme.border_type))
     }
+}
+
+/// Linearly interpolates two resolved colors by `t` (clamped to `[0.0, 1.0]`) — only ever
+/// meaningful between two `Color::Rgb` values (a truecolor terminal resolving a hex theme color).
+/// Any other resolved variant (a basic ANSI name, or a hex color quantized down to a 256-color
+/// index) has no smooth path between two swatches, so this returns `None` rather than guess an
+/// in-between shade; the caller falls back to an instant switch between `from` and `to`.
+pub fn blend_rgb(from: Color, to: Color, t: f64) -> Option<Color> {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (from, to) else {
+        return None;
+    };
+    let t = t.clamp(0.0, 1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let lerp = |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round() as u8;
+    Some(Color::Rgb(lerp(fr, tr), lerp(fg, tg), lerp(fb, tb)))
 }
 
 /// Broad file categories, each with its own theme color so a directory listing can be read by
@@ -418,5 +447,41 @@ mod tests {
         assert_eq!(selection_fg(&theme), None);
         theme.selection_fg = "white".into();
         assert_eq!(selection_fg(&theme), Some(Color::White));
+    }
+
+    #[test]
+    fn blend_rgb_reaches_both_endpoints() {
+        let from = Color::Rgb(0, 0, 0);
+        let to = Color::Rgb(255, 100, 50);
+        assert_eq!(blend_rgb(from, to, 0.0), Some(from));
+        assert_eq!(blend_rgb(from, to, 1.0), Some(to));
+    }
+
+    #[test]
+    fn blend_rgb_refuses_to_guess_across_named_or_indexed_colors() {
+        assert_eq!(blend_rgb(Color::White, Color::Rgb(0, 0, 0), 0.5), None);
+        assert_eq!(
+            blend_rgb(Color::Indexed(16), Color::Indexed(200), 0.5),
+            None
+        );
+    }
+
+    proptest::proptest! {
+        /// Every blended channel stays within the (possibly reversed) span its two endpoints
+        /// bound — a blend can brighten or dim a channel, but never overshoot past either swatch.
+        #[test]
+        fn blend_rgb_never_overshoots_either_endpoint(
+            fr in 0u8..=255, fg in 0u8..=255, fb in 0u8..=255,
+            tr in 0u8..=255, tg in 0u8..=255, tb in 0u8..=255,
+            t in 0.0f64..=1.0,
+        ) {
+            let Some(Color::Rgb(r, g, b)) = blend_rgb(Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb), t) else {
+                unreachable!("both endpoints are Color::Rgb");
+            };
+            let in_span = |v: u8, a: u8, b: u8| v >= a.min(b) && v <= a.max(b);
+            proptest::prop_assert!(in_span(r, fr, tr));
+            proptest::prop_assert!(in_span(g, fg, tg));
+            proptest::prop_assert!(in_span(b, fb, tb));
+        }
     }
 }

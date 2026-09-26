@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tui`: the start of the UI overhaul's cinematic layer — an animation tick and an animated
+  shell-pane focus transition. A shell pane's border now fades between its dim and lit colors over
+  180ms when focus moves to or away from it, instead of switching instantly. A new `tui::anim`
+  module holds the pure transition math, and a new `style::blend_rgb` interpolates two resolved
+  colors when both are truecolor RGB — any theme built from named ANSI colors, or running without
+  a truecolor terminal, keeps the previous instant switch rather than guessing an in-between shade.
 - `theming`, `tui`: external previewers for files the built-in preview can't otherwise show (a
   PDF, a video, ...). A new `[[preview_hook]]` config table (mirroring `[[open_with]]`'s style)
   names a command per extension and a `kind` (`image` or `text`); the command runs under `sh -c`

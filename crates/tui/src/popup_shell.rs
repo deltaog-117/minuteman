@@ -97,18 +97,21 @@ fn function_key_sequence(n: u8) -> Option<Vec<u8>> {
 }
 
 /// Renders the pane's current screen buffer as a bordered widget over `area`, and positions the
-/// real terminal cursor over the child's cursor cell (when it isn't hidden). `is_focused`
-/// lights the border up in the theme's focused-pane color, so with several panes tiled at once
-/// it's visible at a glance which one keystrokes route to.
+/// real terminal cursor over the child's cursor cell (when it isn't hidden). `is_focused` lights
+/// the title up in the theme's accent color, so with several panes tiled at once it's visible at
+/// a glance which one keystrokes route to; `border` is `shell_layout`'s already-animated border
+/// color for this pane (mid-fade just after a focus change, or settled at `border_fg`/
+/// `border_focused_fg` otherwise).
 pub(crate) fn render(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     popup: &PopupShell,
     config: &Config,
     is_focused: bool,
+    border: Color,
 ) {
     frame.render_widget(Clear, area);
-    let block = crate::style::themed_block(config, "shell", is_focused);
+    let block = crate::style::themed_block_with_border(config, "shell", is_focused, border);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
