@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `theming`, `tui`: external previewers for files the built-in preview can't otherwise show (a
+  PDF, a video, ...). A new `[[preview_hook]]` config table (mirroring `[[open_with]]`'s style)
+  names a command per extension and a `kind` (`image` or `text`); the command runs under `sh -c`
+  with `{in}`/`{out}` substituted, off the render thread, killed after a timeout (default 10s) —
+  the same spawn/poll/timeout/kill shape `git_status` already uses for `git`. An `image` result
+  decodes through the same path a real image file uses and renders in the existing image
+  pipeline; a `text` result reads back bounded and renders through the existing text pipeline,
+  syntax-highlighted the same as any other text file. A missing program, a non-zero exit, a
+  timeout, or unreadable output all fall back to quietly showing just the file's name — never an
+  error, never a hex dump of a format that was never meant to be read as bytes. See
+  `config.example.toml` for a `pdftoppm`/`ffmpegthumbnailer` example.
 - `preview`, `theming`, `tui`: syntax highlighting in the text preview. New `preview::highlight`
   tokenizes a previewed file with `syntect` (parsing only, no theme/HTML machinery) and classifies
   each token by its raw scope name into a small, curated set (keyword/string/comment/number/

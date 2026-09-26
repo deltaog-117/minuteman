@@ -52,6 +52,23 @@ interactive_commands = [
 # name = "VLC"
 # command = "vlc {}"
 
+# External previewers: a command that renders a thumbnail image or extracts text for a file
+# extension the built-in preview can't otherwise show (a PDF, a video, ...). `command` runs under
+# `sh -c`; `{in}` stands for the source file's quoted path and `{out}` for a scratch path the
+# command must write its result to. `kind` is "image" (decoded and shown like a real image file)
+# or "text" (read back and shown like a text file). A missing program, a non-zero exit, a
+# timeout, or output `kind` can't make sense of all fall back to just the file's name, quietly —
+# never a hard error. `timeout_ms` defaults to 10000 (10 seconds) when left out.
+# [[preview_hook]]
+# extensions = ["pdf"]
+# command = "pdftoppm -png -singlefile {in} {out}; mv {out}.png {out}"
+# kind = "image"
+#
+# [[preview_hook]]
+# extensions = ["mp4", "mkv", "webm"]
+# command = "ffmpegthumbnailer -i {in} -o {out} -s 512"
+# kind = "image"
+
 # Plugins: external processes Minuteman spawns at startup and fires `on_key` at, speaking a
 # small line-delimited JSON-RPC protocol over their own stdin/stdout (see the `plugins` crate).
 # Any language that can read a line and print one works — no compile step, no per-language host

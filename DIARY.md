@@ -50,6 +50,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-23 | Appearance Popup: Color Picker + Saved Themes | Extend the existing popup and `local.toml` with an HSV picker mode and named full-snapshot theme saves (COA A); a separate Theme Manager popup plus standalone picker overlay (B) and a swatch-grid-only version with no automatic update/new detection (C) rejected | ✅ Confirmed |
 | 2026-09-23 | Built-in Trash | Delegate to the real OS/desktop trash via the `trash` crate (COA B), at the user's direction; a hand-rolled trash folder over `Vfs`/`file_ops::mv` (A) and a full restore-by-id subsystem with its own listing popup (C) rejected; a non-local `Vfs` falls back to permanent delete, since the desktop trash has no remote equivalent | ✅ Confirmed |
 | 2026-09-25 | Preview Syntax Highlighting | A curated seven-`TokenKind` classification of `syntect` scopes (one small shared palette, not one theme color per possible scope), tokenized off the render thread alongside the file read | ✅ Confirmed |
+| 2026-09-25 | External Preview Hooks | A new `tui::preview_hook` layer (COA A) reusing `ImagePreview`/`TextPreview`'s existing pipelines, at the user's direction — over pushing hook config/execution into the `preview` crate (B) or an image-only stage deferring text hooks (C) | ✅ Confirmed |
 
 ---
 
@@ -3599,6 +3600,73 @@ auto-detected Catppuccin Mocha theme, and confirmed six-for-six that `let`/`mut`
 `38;2;108;112;134` (`#6c7086`), and a string literal and a number in `38;2;166;227;161` (`#a6e3a1`)
 and `38;2;250;179;135` (`#fab387`) respectively — an exact byte-for-byte match against the theme's
 published hex values, not merely that the preview rendered without panicking.
+
+---
+
+### External Previewers for PDF/Video: a New Hook Layer Reusing Both Existing Pipelines (COA A)
+
+**Date:** 2026-09-25
+**Author:** deltaog-117
+**Status:** Confirmed
+
+**Context.** The roadmap's "preview extras, stage 3" asked for a config-driven hook that runs a
+user-chosen command (`pdftoppm`, `ffmpegthumbnailer`, ...) and feeds its image or text into the
+existing preview pipelines, falling back quietly to the file name when the tool is missing or
+times out. Three COAs were raised for where the hook mechanism itself should live: (A) a new
+`tui::preview_hook` layer that runs the command and hands its image/text result into
+`ImagePreview`/`TextPreview`'s existing pipelines, keeping `preview` free of config and process-
+spawning; (B) push the hook config and its execution down into the `preview` crate itself, which
+already owns "what to preview"; (C) support image-producing hooks only this cycle, folded
+directly into `ImagePreview`, deferring text hooks. Chosen at the user's direction: **A** — it is
+the only one that honors the roadmap's own "image *or* text" wording without giving `preview` a
+new dependency on `theming` and a kind of work (spawning arbitrary user commands) it has never
+needed, and `git_status.rs` already gave a proven, tested template for the exact spawn/poll/
+timeout/kill mechanics a hook needs, worth mirroring directly rather than inventing a new shape.
+
+**Config shape.** A new `[[preview_hook]]` table (`theming::PreviewHook`) mirrors `[[open_with]]`:
+`extensions` (matched case-insensitively), `command` (run under `sh -c`, with `{in}`/`{out}`
+substituted the same way `open::command_line` substitutes `{}`), `kind` (`HookKind::Image` or
+`Text`, a plain serde enum — a typo'd value falls back to the whole config file's defaults, the
+same tradeoff `[[open_with]]`/`[[plugin]]` already accept for a malformed required field), and an
+optional `timeout_ms`. `{in}`/`{out}` reuse `open::shell_quote` rather than inventing a second
+quoting scheme.
+
+**Failure routing.** The subtlest part: a hook's own failure needs to look different from a real
+image file's decode failure. `preview::is_image(path)` staying false for a PDF/video means the
+old `is_selected_image = preview::is_image(&path)` gate in `main.rs` would never let a hook-image
+file into the image-rendering branch at all — so it changed from a static, path-based check to a
+dynamic one, `previews.image.status() != Empty`, mirroring the idiom `is_selected_file` already
+used for the text pipeline. `DecodeOutcome::Failed`/`ReadOutcome`'s `Loaded::Failed` both gained a
+`via_hook` flag so a hook's failure maps to `Empty` (falls through to the ordinary filename
+placeholder, exactly like an unsupported file already does) while a real image's decode failure
+still maps to `Failed` ("preview failed", unchanged). Confirmed this doesn't change any existing
+real-image behavior: `Previews::update` always runs before the same tick's `draw`, so a real
+image's status is never still `Empty` by the time it's read for rendering.
+
+**Reused rather than duplicated.** `preview::load_image` (already used for real image files)
+decodes a hook's `Image`-kind output too, rather than `tui` depending on `image::ImageReader`
+directly — it needed one change first: `.with_guessed_format()`, since a hook's scratch file has
+no reliable extension to trust. `tui` still needed `image` as a direct dependency purely to name
+the `DynamicImage` type in `HookOutcome::Image`; it carries no format-decoder features, since
+decoding itself stays inside `preview`.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green (new:
+`preview_hook`'s own 5 tests covering a successful text hook, a successful image hook, a missing
+program, a failing exit, a timeout that's killed near-immediately rather than waited out, and an
+oversized-output rejection; 2 in `theming::config` for the new table; 2 in `text_preview` for the
+hook-covered-file and hook-failure-falls-back-to-`Empty` paths). Also verified against the real
+compiled binary via a scripted tmux session: generated a real one-page PDF (a solid red 100×100
+image via ImageMagick's PDF delegate), pointed a `[[preview_hook]]` at the real `pdftoppm` binary
+on this machine, selected it in the browser, and confirmed the preview pane showed genuine
+halfblock image output with `38;2;254;0;0` in the captured escape codes — the source image's own
+red, not a placeholder. A second file with an extension hooked to a nonexistent program showed
+nothing but its own file name, exactly the "fall back quietly" behavior the roadmap asked for,
+confirmed on the real binary rather than assumed from the code. (The first attempt at the
+`pdftoppm` example command double-appended `.png`, since `-singlefile` already appends it to
+whatever prefix it's given — caught by reproducing the exact substituted shell command by hand
+before trusting the compiled binary's result, which is what `config.example.toml`'s shipped
+example now reflects.)
 
 ---
 

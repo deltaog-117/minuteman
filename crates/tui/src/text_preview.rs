@@ -26,7 +26,10 @@ use std::path::{Path, PathBuf};
 
 use preview::Loaded;
 use preview::highlight::HighlightedLine;
+use theming::{HookKind, PreviewHook};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+use crate::preview_hook::{self, HookOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewStatus {
@@ -88,6 +91,11 @@ struct ReadOutcome {
     /// Tokenized alongside the read, off the render thread — `Some` exactly when `loaded` is
     /// `Loaded::Text`, since nothing else has source lines to color.
     highlighted: Option<Vec<HighlightedLine>>,
+    /// Whether this read went through a configured `[[preview_hook]]` rather than
+    /// `preview::load` — a hook's own failure/timeout/missing-program falls back to just the
+    /// file's name (like an unsupported file), not the "preview failed" message a real read
+    /// failure shows.
+    via_hook: bool,
 }
 
 /// How many rows a text takes when wrapped to a width, remembered with that width. Measuring
@@ -220,16 +228,17 @@ impl TextPreview {
     /// Re-reads the current file without clearing what is shown, for when it changed on disk
     /// while staying selected. A no-op when nothing previewable is selected. The scroll position
     /// is kept, so a log being appended to does not jump back to the top.
-    pub fn reload(&mut self) {
+    pub fn reload(&mut self, hooks: &[PreviewHook]) {
         if let Some(path) = self.current.clone() {
-            self.spawn_read(path);
+            let hook = text_hook_for(&path, hooks);
+            self.spawn_read(path, hook);
         }
     }
 
     /// Call once per render tick with the selected file, if it is one that belongs here (not a
-    /// folder and not an image; the caller decides). Starts reading it if it is new, and drains
-    /// any completed read from the background thread.
-    pub fn update(&mut self, selected: Option<&Path>) {
+    /// folder, and not a file `image_preview` already claims; the caller decides). Starts
+    /// reading it if it is new, and drains any completed read from the background thread.
+    pub fn update(&mut self, selected: Option<&Path>, hooks: &[PreviewHook]) {
         let target = selected.map(Path::to_path_buf);
 
         if target != self.current {
@@ -241,7 +250,8 @@ impl TextPreview {
             match target {
                 Some(path) => {
                     self.status = PreviewStatus::Loading;
-                    self.spawn_read(path);
+                    let hook = text_hook_for(&path, hooks);
+                    self.spawn_read(path, hook);
                 }
                 None => self.status = PreviewStatus::Empty,
             }
@@ -252,6 +262,7 @@ impl TextPreview {
             generation,
             loaded,
             highlighted,
+            via_hook,
         }) = self.read_rx.try_recv()
         {
             if Some(&path) != self.current.as_ref() || generation != self.generation {
@@ -259,6 +270,11 @@ impl TextPreview {
             }
             self.rows.clear();
             match loaded {
+                Loaded::Failed if via_hook => {
+                    self.content = None;
+                    self.highlighted = None;
+                    self.status = PreviewStatus::Empty;
+                }
                 Loaded::Failed => {
                     self.content = None;
                     self.highlighted = None;
@@ -278,29 +294,54 @@ impl TextPreview {
         }
     }
 
-    fn spawn_read(&mut self, path: PathBuf) {
+    fn spawn_read(&mut self, path: PathBuf, hook: Option<PreviewHook>) {
         self.generation += 1;
         let generation = self.generation;
         let tx = self.read_tx.clone();
         self.handle.spawn_blocking(move || {
-            let loaded = preview::load(&path);
-            // Tokenizing runs syntect's line-oriented parser over the whole file, the same
-            // amount of work as the read just above it — it belongs off the render thread too.
-            let highlighted = match &loaded {
-                Loaded::Text(text) => {
-                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    Some(preview::highlight::highlight(text, file_name))
+            let (loaded, highlighted, via_hook) = match hook {
+                Some(hook) => match preview_hook::run(&hook, &path) {
+                    HookOutcome::Text(text) => {
+                        let highlighted = tokenize(&text, &path);
+                        (Loaded::Text(text), Some(highlighted), true)
+                    }
+                    _ => (Loaded::Failed, None, true),
+                },
+                // Tokenizing runs syntect's line-oriented parser over the whole file, the same
+                // amount of work as the read just above it — it belongs off the render thread too.
+                None => {
+                    let loaded = preview::load(&path);
+                    let highlighted = match &loaded {
+                        Loaded::Text(text) => Some(tokenize(text, &path)),
+                        _ => None,
+                    };
+                    (loaded, highlighted, false)
                 }
-                _ => None,
             };
             let _ = tx.send(ReadOutcome {
                 path,
                 generation,
                 loaded,
                 highlighted,
+                via_hook,
             });
         });
     }
+}
+
+/// `path`'s name, tokenized for its syntax (or all `Plain` if none is known — see
+/// `preview::highlight::highlight`).
+fn tokenize(text: &str, path: &Path) -> Vec<HighlightedLine> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    preview::highlight::highlight(text, file_name)
+}
+
+/// The first configured `Text`-kind hook whose extension matches `path`, if any — the `Image`-
+/// kind ones belong to `image_preview` instead.
+fn text_hook_for(path: &Path, hooks: &[PreviewHook]) -> Option<PreviewHook> {
+    preview_hook::hook_for(hooks, path)
+        .filter(|hook| hook.kind == HookKind::Text)
+        .cloned()
 }
 
 #[cfg(test)]
@@ -371,15 +412,65 @@ mod tests {
     }
 
     fn settle(preview: &mut TextPreview, path: Option<&Path>) {
+        settle_with_hooks(preview, path, &[]);
+    }
+
+    fn settle_with_hooks(preview: &mut TextPreview, path: Option<&Path>, hooks: &[PreviewHook]) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            preview.update(path);
+            preview.update(path, hooks);
             if preview.status() != PreviewStatus::Loading {
                 return;
             }
             assert!(Instant::now() < deadline, "the read never finished");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn text_hook(command: &str) -> PreviewHook {
+        PreviewHook {
+            extensions: vec!["pdf".into()],
+            command: command.into(),
+            kind: HookKind::Text,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_hook_covered_file_is_shown_as_the_hooks_output() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dir = scratch("hook-text");
+        let source = dir.join("report.pdf");
+        std::fs::write(&source, b"%PDF-not-real-content").unwrap();
+        let hooks = vec![text_hook("printf 'extracted text' > {out}")];
+        let mut preview = TextPreview::new(runtime.handle().clone());
+
+        settle_with_hooks(&mut preview, Some(&source), &hooks);
+        assert_eq!(preview.status(), PreviewStatus::Ready);
+        assert_eq!(
+            preview.content(),
+            Some(&Loaded::Text("extracted text".into()))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failing_hook_falls_back_to_empty_not_failed() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dir = scratch("hook-fail");
+        let source = dir.join("report.pdf");
+        std::fs::write(&source, b"%PDF-not-real-content").unwrap();
+        let hooks = vec![text_hook("false")];
+        let mut preview = TextPreview::new(runtime.handle().clone());
+
+        settle_with_hooks(&mut preview, Some(&source), &hooks);
+        assert_eq!(
+            preview.status(),
+            PreviewStatus::Empty,
+            "a hook's own failure should fall back quietly, not show \"preview failed\""
+        );
+        assert!(preview.content().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -432,7 +523,7 @@ mod tests {
         assert_eq!(preview.parts().3.fit(200, 20), 40);
 
         // The file changed on disk while staying selected: same place.
-        preview.reload();
+        preview.reload(&[]);
         settle(&mut preview, Some(&dir.join("a.txt")));
         assert_eq!(preview.parts().3.fit(200, 20), 40);
 

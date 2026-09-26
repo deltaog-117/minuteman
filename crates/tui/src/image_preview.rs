@@ -30,18 +30,52 @@ use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Capability, Picker};
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
+use theming::{HookKind, PreviewHook};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+use crate::preview_hook::{self, HookOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewStatus {
-    /// Nothing selected, or the selection isn't an image.
+    /// Nothing selected, or the selection is neither an image nor covered by an `Image`-kind
+    /// preview hook — or one was, but the hook failed/timed out/is missing, which falls back to
+    /// showing just the file's name quietly rather than an error here.
     Empty,
-    /// The file is being decoded off-thread.
+    /// The file is being decoded off-thread (directly, or via a hook).
     Loading,
     /// Decoded; `protocol_mut` renders the image (possibly still resizing for the first time).
     Ready,
-    /// Decode failed — not a valid/supported image despite the extension.
+    /// A real image file failed to decode — not a valid/supported image despite the extension.
     Failed,
+}
+
+/// Where a target's image comes from: decoded directly (a real image file), or produced by
+/// running a configured `[[preview_hook]]` first (anything else the hook list covers, e.g. a
+/// PDF).
+#[derive(Clone)]
+enum Source {
+    Direct,
+    Hook(PreviewHook),
+}
+
+/// What `path` should be shown as: a real image file decodes directly; otherwise the first
+/// configured `Image`-kind hook whose extension matches it takes over. `None` means neither
+/// applies, so `ImagePreview` has nothing to do with this path.
+fn source_for(path: &Path, hooks: &[PreviewHook]) -> Option<Source> {
+    if preview::is_image(path) {
+        return Some(Source::Direct);
+    }
+    preview_hook::hook_for(hooks, path)
+        .filter(|hook| hook.kind == HookKind::Image)
+        .cloned()
+        .map(Source::Hook)
+}
+
+/// Whether `ImagePreview` claims `path` at all — a real image, or one an `Image`-kind hook
+/// covers — so a caller routing a *different* file to the text pipeline knows to leave this one
+/// out of it.
+pub fn is_target(path: &Path, hooks: &[PreviewHook]) -> bool {
+    source_for(path, hooks).is_some()
 }
 
 enum DecodeOutcome {
@@ -53,6 +87,9 @@ enum DecodeOutcome {
     Failed {
         path: PathBuf,
         generation: u64,
+        /// Whether this attempt went through a hook rather than a direct decode — see
+        /// `PreviewStatus::Empty` vs `PreviewStatus::Failed`.
+        via_hook: bool,
     },
 }
 
@@ -125,27 +162,31 @@ impl ImagePreview {
     }
 
     /// Decodes the current image again without clearing what is shown, for when it changed on
-    /// disk while staying selected. A no-op when no image is selected.
-    pub fn reload(&mut self) {
-        if let Some(path) = self.current.clone() {
-            self.spawn_decode(path);
-        }
+    /// disk while staying selected. A no-op when no image (or hook-covered file) is selected.
+    pub fn reload(&mut self, hooks: &[PreviewHook]) {
+        let Some(path) = self.current.clone() else {
+            return;
+        };
+        let Some(source) = source_for(&path, hooks) else {
+            return;
+        };
+        self.spawn_decode(path, source);
     }
 
-    /// Call once per render tick. Starts decoding `selected` if it's a new image, and drains any
-    /// completed decode/resize work from the background threads.
-    pub fn update(&mut self, selected: Option<&Path>) {
+    /// Call once per render tick. Starts decoding `selected` if it's a new image or a file an
+    /// `Image`-kind hook covers, and drains any completed decode/resize work from the background
+    /// threads.
+    pub fn update(&mut self, selected: Option<&Path>, hooks: &[PreviewHook]) {
         let target = selected
-            .filter(|path| preview::is_image(path))
-            .map(Path::to_path_buf);
+            .and_then(|path| source_for(path, hooks).map(|source| (path.to_path_buf(), source)));
 
-        if target != self.current {
-            self.current = target.clone();
+        if target.as_ref().map(|(path, _)| path) != self.current.as_ref() {
+            self.current = target.as_ref().map(|(path, _)| path.clone());
             self.protocol.empty_protocol();
             match target {
-                Some(path) => {
+                Some((path, source)) => {
                     self.status = PreviewStatus::Loading;
-                    self.spawn_decode(path);
+                    self.spawn_decode(path, source);
                 }
                 None => self.status = PreviewStatus::Empty,
             }
@@ -156,7 +197,9 @@ impl ImagePreview {
                 DecodeOutcome::Decoded {
                     path, generation, ..
                 }
-                | DecodeOutcome::Failed { path, generation } => (path, *generation),
+                | DecodeOutcome::Failed {
+                    path, generation, ..
+                } => (path, *generation),
             };
             if Some(path) != self.current.as_ref() || generation != self.generation {
                 continue; // stale — selection moved on, or a newer decode superseded this one
@@ -166,7 +209,13 @@ impl ImagePreview {
                     self.protocol.replace_protocol(*protocol);
                     self.status = PreviewStatus::Ready;
                 }
-                DecodeOutcome::Failed { .. } => self.status = PreviewStatus::Failed,
+                DecodeOutcome::Failed { via_hook, .. } => {
+                    self.status = if via_hook {
+                        PreviewStatus::Empty
+                    } else {
+                        PreviewStatus::Failed
+                    };
+                }
             }
         }
 
@@ -184,19 +233,31 @@ impl ImagePreview {
         }
     }
 
-    fn spawn_decode(&mut self, path: PathBuf) {
+    fn spawn_decode(&mut self, path: PathBuf, source: Source) {
         self.generation += 1;
         let generation = self.generation;
         let tx = self.decode_tx.clone();
         let picker = self.picker.clone();
         self.handle.spawn_blocking(move || {
-            let outcome = match preview::load_image(&path) {
+            let via_hook = matches!(source, Source::Hook(_));
+            let image = match source {
+                Source::Direct => preview::load_image(&path),
+                Source::Hook(hook) => match preview_hook::run(&hook, &path) {
+                    HookOutcome::Image(image) => Some(image),
+                    _ => None,
+                },
+            };
+            let outcome = match image {
                 Some(image) => DecodeOutcome::Decoded {
                     protocol: Box::new(picker.new_resize_protocol(image)),
                     path,
                     generation,
                 },
-                None => DecodeOutcome::Failed { path, generation },
+                None => DecodeOutcome::Failed {
+                    path,
+                    generation,
+                    via_hook,
+                },
             };
             let _ = tx.send(outcome);
         });

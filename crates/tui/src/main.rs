@@ -34,6 +34,7 @@ mod open;
 mod osc52;
 mod overlay_view;
 mod popup_shell;
+mod preview_hook;
 mod preview_view;
 mod search_job;
 mod settings_popup;
@@ -87,8 +88,8 @@ use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
 use theming::{
-    Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, RawLocal, RawPanels,
-    RawTheme, RawUi, Theme, Ui,
+    Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, PreviewHook, RawLocal,
+    RawPanels, RawTheme, RawUi, Theme, Ui,
 };
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
@@ -581,20 +582,23 @@ impl Previews {
         self.image.detected_background()
     }
 
-    /// `selected` is the entry under the cursor. An image goes to the image pipeline; any other
-    /// file (text, an archive, a binary) to the one that reads it for the scrolling pane; a folder
-    /// to neither, since the pane lists its children instead.
-    fn update(&mut self, selected: Option<&DirEntryInfo>) {
+    /// `selected` is the entry under the cursor. A real image, or one an `Image`-kind
+    /// `[[preview_hook]]` covers, goes to the image pipeline; any other file (text, an archive, a
+    /// binary, or one a `Text`-kind hook covers) to the one that reads it for the scrolling pane;
+    /// a folder to neither, since the pane lists its children instead.
+    fn update(&mut self, selected: Option<&DirEntryInfo>, hooks: &[PreviewHook]) {
         let file = selected.filter(|e| !e.is_dir).map(|e| e.path.as_path());
-        self.image.update(file);
-        self.text
-            .update(file.filter(|path| !preview::is_image(path)));
+        self.image.update(file, hooks);
+        self.text.update(
+            file.filter(|path| !image_preview::is_target(path, hooks)),
+            hooks,
+        );
     }
 
     /// Re-reads whichever preview is showing the selected file, after it changed on disk.
-    fn reload(&mut self) {
-        self.image.reload();
-        self.text.reload();
+    fn reload(&mut self, hooks: &[PreviewHook]) {
+        self.image.reload(hooks);
+        self.text.reload(hooks);
     }
 }
 
@@ -990,18 +994,18 @@ fn run(
         // the app that recognised the command doesn't own the terminal.
         if let Some(handover) = app.take_handover() {
             let result = guard.run_foreground(terminal, &handover.cwd, &handover.line)?;
-            previews.reload();
+            previews.reload(&config.preview_hooks);
             app.finish_handover(browser, vfs, &handover, &result)?;
         }
         // Picks up files made or changed by a mini-shell, a `:` command or another program; a
         // change to the selected file itself needs its preview re-read, since that is otherwise
         // keyed on the path alone.
         if app.poll_disk(browser, vfs, Instant::now()) {
-            previews.reload();
+            previews.reload(&config.preview_hooks);
         }
         app.poll_hud(browser, Instant::now());
         app.poll_plugins();
-        previews.update(browser.selected_entry());
+        previews.update(browser.selected_entry(), &config.preview_hooks);
 
         if let Some(mut panes) = shells.take() {
             let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
@@ -2176,11 +2180,13 @@ fn draw(
         config,
     );
 
-    // Preview pane — an inline image for image files, rendered text for code/text files,
-    // children of a selected directory, or the file's name as a placeholder for anything else.
-    let is_selected_image = browser
-        .selected_entry()
-        .is_some_and(|e| !e.is_dir && preview::is_image(&e.path));
+    // Preview pane — an inline image for image files (or ones an `Image`-kind preview hook
+    // thumbnailed), rendered text for code/text files (or ones a `Text`-kind hook extracted),
+    // children of a selected directory, or the file's name as a placeholder for anything else —
+    // including a hook-covered file whose hook is missing, failed or timed out, which quietly
+    // reads back as `Empty` on either pipeline rather than an error.
+    let is_selected_image = browser.selected_entry().is_some_and(|e| !e.is_dir)
+        && previews.image.status() != ImagePreviewStatus::Empty;
     // Any other file has something to show — text, an archive's listing or a hex dump — unless
     // it is not a regular file (a socket, a pipe), which reads back as `Empty`.
     let is_selected_file = browser.selected_entry().is_some_and(|e| !e.is_dir)

@@ -770,15 +770,33 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `syntax_type_fg`, comments in `syntax_comment_fg`, and a string literal and a number in
   `syntax_string_fg`/`syntax_number_fg` — six-for-six, byte-for-byte against the theme's own hex
   values, not just that the preview rendered without panicking.
-
----
-
-## 🔥 High Priority (Critical)
-
-- **Preview extras, stage 3 — external previewers for PDF and video** – a config-driven hook
-  that runs a user-chosen command (`pdftoppm`, `ffmpegthumbnailer`, ...) off the render thread
-  and feeds its image or text into the existing preview pipelines, falling back quietly to the
-  file name when the tool is missing or times out.
+- ✅ **Preview extras, stage 3 — external previewers for PDF and video (COA A)** – a new
+  `[[preview_hook]]` config table (mirroring `[[open_with]]`'s style) names a command per
+  extension and a `kind` (`image` or `text`); `tui::preview_hook::run` substitutes `{in}`/`{out}`
+  into it and spawns it under `sh -c` with the same spawn/poll/timeout/kill shape `git_status`
+  already uses for `git`, since a user-chosen tool is exactly as capable of hanging. An `image`
+  result is decoded with the same `preview::load_image` a real image file uses (now content-
+  sniffed rather than trusted from its extension, so a scratch file's arbitrary name still
+  decodes) and fed straight into `ImagePreview`'s existing `ratatui-image` pipeline; a `text`
+  result is read back bounded (the same 1 MiB cap a browsed text file gets) and fed into
+  `TextPreview` exactly like any other text file, tokenized for syntax the same way. Chosen as
+  COA A (a new hook layer in `tui`, reusing both existing rendering pipelines) over pushing hook
+  config into the `preview` crate (B, which would give it a `theming` dependency and process-
+  spawning it has never needed) and an image-only stage that deferred text hooks (C, which
+  wouldn't honor the roadmap's own "image *or* text" wording) — both raised and rejected before
+  coding. A missing program, a non-zero exit, a timeout, or unreadable output all fall back to
+  quietly showing just the file's name: `ImagePreview`/`TextPreview` now distinguish a hook's own
+  failure (→ `Empty`, the same status an unsupported file already reads back as) from a *real*
+  image file's decode failure (→ `Failed`, unchanged, still "preview failed"), and the preview
+  pane's `is_selected_image`/`is_selected_file` routing in `main.rs` switched from asking "is this
+  path an image by extension" to "does the pipeline actually have something," so a hook-covered
+  file with nothing to show falls through to the ordinary filename placeholder rather than being
+  stuck inside a branch with no room for one. Verified against the real compiled binary via a
+  scripted tmux session: a real one-page PDF (rendered from a solid-red test image via
+  ImageMagick) thumbnailed through the actual `pdftoppm` binary showed up as genuine red halfblock
+  output (`38;2;254;0;0` in the captured escape codes, matching the source color), while a second
+  extension configured with a nonexistent program's hook showed nothing but its own file name —
+  both exactly as designed, not just that neither one crashed.
 - **UI overhaul, phase C — cinematic layer** – a boot splash, animated focus transitions,
   gradient borders/titles, a pulsing selection, a typewriter reveal on the preview, and an
   optional system/git HUD. Needs an animation tick on top of the existing 100ms poll.
@@ -958,13 +976,16 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Before that, four earlier ones: `/` plus the start of a name a few directories down (`Esc` returns,
    `Enter` stays); the arrow keys; `v` two files, `m`, go to another directory, `c` drops the cut
    and the marks; and `:nvim ROADMAP.md` (`:!cmd` for a program not in `interactive_commands`).
-   Then the newest: select a `.rs`, `.py`, `.toml` or other recognized source/config file — the
-   preview now colors keywords, strings, comments, numbers, functions and types instead of one
-   flat color, using the active theme's own `syntax_*_fg` palette; an unrecognized extension still
-   previews, just uncolored.
+   Then: select a `.rs`, `.py`, `.toml` or other recognized source/config file — the preview now
+   colors keywords, strings, comments, numbers, functions and types instead of one flat color,
+   using the active theme's own `syntax_*_fg` palette; an unrecognized extension still previews,
+   just uncolored.
+   Then the newest: add a `[[preview_hook]]` to `config.toml` (see `config.example.toml` for a
+   real `pdftoppm`/`ffmpegthumbnailer` example) and select a file with that extension — it
+   thumbnails or extracts text through your own command instead of falling back to a hex dump; a
+   missing tool, a failing command or a timeout just shows the file's name, quietly.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: preview extras, stage 3 (external previewers for PDF and video), the mouse's stage
-   2 (multi-select and breadcrumb clicks), the UI overhaul's cinematic layer, or bookmarks/marks
-   (see 🔥 High Priority).
+4. Next cycle: the mouse's stage 2 (multi-select and breadcrumb clicks), the UI overhaul's
+   cinematic layer, or bookmarks/marks (see 🔥 High Priority).

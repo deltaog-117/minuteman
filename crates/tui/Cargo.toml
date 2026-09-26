@@ -25,6 +25,11 @@ anyhow = "1.0.104"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 ratatui-image = { version = "11.0.8", default-features = false, features = ["crossterm", "tokio"] }
 vt100 = "0.16.2"
+# Only for the `DynamicImage` type name in `preview_hook.rs` — decoding a hook's output reuses
+# `preview::load_image`, so no format-decoder features are needed here.
+image = { version = "0.25.10", default-features = false }
 
 [dev-dependencies]
 proptest = "1.11"
+# `png` so preview_hook's tests can write a real decodable image for a fake hook to "produce".
+image = { version = "0.25.10", features = ["png"] }

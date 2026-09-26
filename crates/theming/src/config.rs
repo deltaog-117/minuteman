@@ -36,6 +36,30 @@ pub struct OpenWith {
     pub command: String,
 }
 
+/// One `[[preview_hook]]` table: an external command that produces a thumbnail image or
+/// extracts text for a file extension the built-in previews can't otherwise show (a PDF, a
+/// video, ...) — see `tui::preview_hook`. `command` runs under `sh -c`; `{in}` stands for the
+/// source file's quoted path and `{out}` for a scratch path the command must write its result
+/// to. A missing program, a non-zero exit, a timeout, or output `kind` can't make sense of all
+/// fall back to showing just the file's name, quietly — never a hard error.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PreviewHook {
+    /// Extensions this hook applies to, without the dot, matched case-insensitively.
+    pub extensions: Vec<String>,
+    pub command: String,
+    pub kind: HookKind,
+    /// How long the command may run before being killed. `None` means the built-in default.
+    pub timeout_ms: Option<u64>,
+}
+
+/// What a `[[preview_hook]]`'s output at `{out}` should be read back as.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HookKind {
+    Image,
+    Text,
+}
+
 /// One `[[plugin]]` table: an external process Minuteman spawns at startup and fires on
 /// `on_key`, speaking the `plugins` crate's line-delimited JSON-RPC protocol over its own stdio.
 /// Any language that can read a line and print one works — no compile step, no per-language host
@@ -89,6 +113,8 @@ struct RawConfig {
     interactive_commands: Option<Vec<String>>,
     /// The `[[open_with]]` tables, in the order the submenu lists them.
     open_with: Vec<OpenWith>,
+    /// The `[[preview_hook]]` tables, matched by extension in the order they're listed.
+    preview_hook: Vec<PreviewHook>,
     /// The `[[plugin]]` tables, in the order they were spawned.
     plugin: Vec<RawPluginSpec>,
     keys: RawKeyMap,
@@ -174,6 +200,9 @@ pub struct Config {
     /// What the context menu's "Open with" lists. Empty means the menu offers `$VISUAL` or
     /// `$EDITOR` alone.
     pub open_with: Vec<OpenWith>,
+    /// The `[[preview_hook]]` tables — external commands that thumbnail or extract text for a
+    /// file extension the built-in previews can't otherwise show. See `tui::preview_hook`.
+    pub preview_hooks: Vec<PreviewHook>,
     /// The `[[plugin]]` tables, in the order they were spawned — see `plugins::PluginManager`.
     pub plugins: Vec<PluginSpec>,
     pub keys: KeyMap,
@@ -249,6 +278,7 @@ impl Config {
                 .interactive_commands
                 .unwrap_or_else(default_interactive_commands),
             open_with: config.open_with,
+            preview_hooks: config.preview_hook,
             plugins: config.plugin.into_iter().map(PluginSpec::from).collect(),
             keys: config.keys.into(),
             theme: theme.into(),
@@ -658,6 +688,32 @@ mod tests {
         assert_eq!(names, ["Neovim", "VLC"]);
         assert_eq!(config.open_with[1].command, "vlc {}");
         assert!(Config::from_sources(None, None, None).open_with.is_empty());
+    }
+
+    #[test]
+    fn preview_hook_entries_keep_their_order_kind_and_timeout() {
+        let config = Config::from_sources(
+            Some(
+                "[[preview_hook]]\nextensions = [\"pdf\"]\ncommand = \"pdftoppm {in} {out}\"\n\
+                 kind = \"image\"\n\
+                 [[preview_hook]]\nextensions = [\"mp4\", \"mkv\"]\n\
+                 command = \"ffprobe {in} > {out}\"\nkind = \"text\"\ntimeout_ms = 2000\n",
+            ),
+            None,
+            None,
+        );
+        assert_eq!(config.preview_hooks.len(), 2);
+        assert_eq!(config.preview_hooks[0].extensions, vec!["pdf"]);
+        assert_eq!(config.preview_hooks[0].kind, HookKind::Image);
+        assert_eq!(config.preview_hooks[0].timeout_ms, None);
+        assert_eq!(config.preview_hooks[1].extensions, vec!["mp4", "mkv"]);
+        assert_eq!(config.preview_hooks[1].kind, HookKind::Text);
+        assert_eq!(config.preview_hooks[1].timeout_ms, Some(2000));
+        assert!(
+            Config::from_sources(None, None, None)
+                .preview_hooks
+                .is_empty()
+        );
     }
 
     #[test]

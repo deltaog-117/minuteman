@@ -40,11 +40,18 @@ pub fn is_image(path: &Path) -> bool {
         .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
 }
 
-/// Decodes `path` as an image. Returns `None` on any I/O or decode failure — the caller falls
-/// back to the plain file-name preview rather than surfacing an error for a corrupt or
-/// unsupported image.
+/// Decodes `path` as an image. The format is sniffed from the file's own bytes rather than
+/// trusted from its extension, so a preview hook's scratch output — whatever extension it
+/// happens to have — still decodes correctly. Returns `None` on any I/O or decode failure — the
+/// caller falls back to the plain file-name preview rather than surfacing an error for a corrupt
+/// or unsupported image.
 pub fn load_image(path: &Path) -> Option<DynamicImage> {
-    image::ImageReader::open(path).ok()?.decode().ok()
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()
 }
 
 const TEXT_EXTENSIONS: &[&str] = &[
