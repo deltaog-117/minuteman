@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `theming`, `tui`: the rest of the UI overhaul's cinematic layer — a boot splash, gradient
+  borders/titles, a typewriter preview reveal, and an optional system HUD; the pulsing selection
+  raised alongside these last cycle is dropped from scope for good (built, verified, and cut on
+  taste alone before that commit — see `DIARY.md`). A brief splash (`[config] boot_splash`,
+  default on) shows the app name over the browser for under a second on startup, dismissed by the
+  first keypress or click. The focused browser pane's border and title now paint as a gradient
+  between the theme's accent and focused-border colors (`gradient_borders`, default on) via a new
+  `tui::gradient`, falling back to the existing flat look wherever the two colors can't be
+  blended. The text preview streams in from the top, line by line, the first time a file is
+  selected (`typewriter_preview`, default on; not once it's been scrolled, and not on a `reload`
+  of the same file). A new header segment (`system_hud`, default off) shows session uptime, load
+  average and memory used/total, read straight from `/proc` — no new dependency; a `sysinfo`-based
+  cross-platform version was measured (+276 KiB, 8 new transitive crates including `rayon`) and
+  set aside for if this ever needs to run somewhere without a `/proc`.
 - `tui`: the start of the UI overhaul's cinematic layer — an animation tick and an animated
   shell-pane focus transition. A shell pane's border now fades between its dim and lit colors over
   180ms when focus moves to or away from it, instead of switching instantly. A new `tui::anim`

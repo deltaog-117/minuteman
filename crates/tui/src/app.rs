@@ -49,6 +49,7 @@ use crate::live_refresh::LiveRefresh;
 use crate::marked_size::{MarkedSize, Total};
 use crate::open;
 use crate::search_job::{SearchJob, SearchState};
+use crate::system_hud::SystemHud;
 
 /// How many lines of a shell command's output the status line shows before summarizing the rest.
 const STATUS_OUTPUT_LINES: usize = 8;
@@ -284,6 +285,8 @@ pub struct App {
     marked_size: MarkedSize,
     /// The browsed directory's repository, for the status bar (see `git_status`).
     git: GitStatus,
+    /// The header's system segment (see `system_hud`), when `[config] system_hud` turns it on.
+    system: Option<SystemHud>,
     handle: tokio::runtime::Handle,
     /// Program names a `:` command hands the terminal to (see `command::parse`).
     interactive: Vec<String>,
@@ -304,6 +307,7 @@ impl App {
             live: LiveRefresh::new(handle.clone()),
             marked_size: MarkedSize::new(handle.clone()),
             git: GitStatus::new(handle.clone(), true),
+            system: None,
             handle,
             interactive: Vec::new(),
             handover: None,
@@ -321,6 +325,12 @@ impl App {
     /// Turns the status bar's git segment on or off (`git_status` in `config.toml`).
     pub fn with_git_status(mut self, enabled: bool) -> Self {
         self.git = GitStatus::new(self.handle.clone(), enabled);
+        self
+    }
+
+    /// Turns the header's system segment on (`[config] system_hud`), starting its clock now.
+    pub fn with_system_hud(mut self, enabled: bool) -> Self {
+        self.system = enabled.then(|| SystemHud::new(Instant::now()));
         self
     }
 
@@ -435,6 +445,9 @@ impl App {
     pub fn poll_hud(&mut self, browser: &BrowserState, now: Instant) {
         self.marked_size.poll(&browser.marked_paths());
         self.git.poll(browser.current_dir(), now);
+        if let Some(system) = self.system.as_mut() {
+            system.tick(now);
+        }
     }
 
     /// Surfaces every plugin's pending `log` line as the status message (last one wins, the same
@@ -462,6 +475,11 @@ impl App {
     /// The repository the browsed directory is in, when git answered.
     pub fn git_repo(&self) -> Option<&Repo> {
         self.git.repo()
+    }
+
+    /// The header's system segment text, when `[config] system_hud` is on.
+    pub fn system_summary(&self, now: Instant) -> Option<String> {
+        self.system.as_ref().map(|system| system.summary(now))
     }
 
     /// Drains any progress/completion messages from the running background operation, if any.

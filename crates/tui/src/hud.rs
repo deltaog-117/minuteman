@@ -286,6 +286,8 @@ pub struct HeaderView<'a> {
     pub marks_total: Option<Total>,
     pub clipboard: Option<(ClipboardMode, usize)>,
     pub progress: Option<Progress>,
+    /// `SystemHud::summary`'s text, when `[config] system_hud` is on.
+    pub system: Option<String>,
 }
 
 /// A `cells`-wide gauge with `filled` cells lit (`▰▰▱▱▱` in the unicode set).
@@ -345,6 +347,9 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
             text.push_str(&format!(" {} {}", g.divider, total.label()));
         }
         pills.push(pill(g.pill(g.marked, &text), &theme.accent_fg));
+    }
+    if let Some(text) = &view.system {
+        pills.push(pill(text.clone(), &theme.status_fg));
     }
     let mut right = Vec::with_capacity(pills.len() * 2);
     for (i, p) in pills.into_iter().enumerate() {
@@ -869,6 +874,10 @@ mod tests {
             browser_mouse: true,
             git_status: true,
             show_hidden: false,
+            boot_splash: true,
+            gradient_borders: true,
+            typewriter_preview: true,
+            system_hud: false,
             interactive_commands: Vec::new(),
             open_with: Vec::new(),
             preview_hooks: Vec::new(),
@@ -1238,6 +1247,7 @@ mod tests {
                         done: 1,
                         batch: None,
                     }),
+                    system: None,
                 },
                 &config,
             )
@@ -1261,12 +1271,42 @@ mod tests {
                     marks_total: None,
                     clipboard: Some((ClipboardMode::Move, 2)),
                     progress: None,
+                    system: None,
                 },
                 &config,
             )
         });
         let g = Glyphs::for_set(theming::GlyphSet::Nerd);
         assert!(text.contains(g.cut) && text.contains(g.marked), "{text:?}");
+    }
+
+    #[test]
+    fn the_system_pill_shows_only_when_the_summary_is_set() {
+        let config = test_config();
+        let render = |system: Option<String>| {
+            render_to_text(100, |f, a| {
+                render_header(
+                    f,
+                    a,
+                    &HeaderView {
+                        path: Path::new("/x"),
+                        home: None,
+                        marks: 0,
+                        marks_total: None,
+                        clipboard: None,
+                        progress: None,
+                        system: system.clone(),
+                    },
+                    &config,
+                )
+            })
+        };
+        assert!(!render(None).contains("load"));
+        let text = render(Some("up 5m  load 0.42 0.38 0.31".into()));
+        assert!(
+            text.contains("up 5m") && text.contains("load 0.42"),
+            "{text:?}"
+        );
     }
 
     #[test]
@@ -1292,6 +1332,7 @@ mod tests {
                                 done: 4,
                                 batch: Some((1, 3)),
                             }),
+                            system: Some("up 5m  load 0.42 0.38 0.31  mem 3.2G/16G".into()),
                         },
                         &config,
                     )
@@ -1441,6 +1482,7 @@ mod tests {
                         marks_total: total,
                         clipboard: None,
                         progress: None,
+                        system: None,
                     },
                     &config,
                 )

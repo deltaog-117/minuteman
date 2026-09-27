@@ -23,6 +23,7 @@
 //! `preview::load` for how that is decided). The pane it fills scrolls, and `Scroll` holds where.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use preview::Loaded;
 use preview::highlight::HighlightedLine;
@@ -132,6 +133,12 @@ pub struct TextPreview {
     highlighted: Option<Vec<HighlightedLine>>,
     scroll: Scroll,
     rows: RowCache,
+    /// When the current selection's typewriter reveal started, so `preview_view::draw_text` can
+    /// compute how many lines have appeared so far (see `anim::revealed_lines`). Set only when
+    /// the selection changes to a new file — never by `reload`, so a log being appended to while
+    /// selected doesn't replay the reveal — and read but never advanced here, since reading it
+    /// needs no `&mut self`.
+    reveal_started: Option<Instant>,
     /// Counts reads started. Only the latest one's result is kept, so a slow read begun before
     /// the file changed can't overwrite the newer read of the same path.
     generation: u64,
@@ -150,11 +157,25 @@ impl TextPreview {
             highlighted: None,
             scroll: Scroll::default(),
             rows: RowCache::default(),
+            reveal_started: None,
             generation: 0,
             read_tx,
             read_rx,
             handle,
         }
+    }
+
+    /// When the current selection's typewriter reveal started, or `None` if it never started
+    /// (nothing selected yet, or this preview was built with [`Self::showing`] for a test).
+    pub fn reveal_started(&self) -> Option<Instant> {
+        self.reveal_started
+    }
+
+    /// Arms the reveal as of `started`, for a test of `preview_view::draw_text`'s capping without
+    /// waiting on a real background read.
+    #[cfg(test)]
+    pub fn arm_reveal_for_test(&mut self, started: Instant) {
+        self.reveal_started = Some(started);
     }
 
     /// A preview already showing `loaded`, for tests of the code that draws one. A text's tokens
@@ -250,10 +271,14 @@ impl TextPreview {
             match target {
                 Some(path) => {
                     self.status = PreviewStatus::Loading;
+                    self.reveal_started = Some(Instant::now());
                     let hook = text_hook_for(&path, hooks);
                     self.spawn_read(path, hook);
                 }
-                None => self.status = PreviewStatus::Empty,
+                None => {
+                    self.status = PreviewStatus::Empty;
+                    self.reveal_started = None;
+                }
             }
         }
 

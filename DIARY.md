@@ -51,6 +51,8 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-23 | Built-in Trash | Delegate to the real OS/desktop trash via the `trash` crate (COA B), at the user's direction; a hand-rolled trash folder over `Vfs`/`file_ops::mv` (A) and a full restore-by-id subsystem with its own listing popup (C) rejected; a non-local `Vfs` falls back to permanent delete, since the desktop trash has no remote equivalent | ✅ Confirmed |
 | 2026-09-25 | Preview Syntax Highlighting | A curated seven-`TokenKind` classification of `syntect` scopes (one small shared palette, not one theme color per possible scope), tokenized off the render thread alongside the file read | ✅ Confirmed |
 | 2026-09-25 | External Preview Hooks | A new `tui::preview_hook` layer (COA A) reusing `ImagePreview`/`TextPreview`'s existing pipelines, at the user's direction — over pushing hook config/execution into the `preview` crate (B) or an image-only stage deferring text hooks (C) | ✅ Confirmed |
+| 2026-09-26 | UI Overhaul, Phase C (Start) | Animation tick plus animated shell-pane focus-border transitions (COA A); a pulsing selection was built, verified, and cut on taste alone before committing | ✅ Confirmed |
+| 2026-09-27 | UI Overhaul, Phase C (Remainder) | Boot splash, gradient borders/titles, typewriter preview reveal, system/git HUD off `/proc` with no new dependency (COA A, measured against the `sysinfo` crate's real +276 KiB/8-crate cost first); pulsing selection dropped from scope for good | ✅ Confirmed |
 
 ---
 
@@ -3760,6 +3762,100 @@ via the documented `Space`-leader chord needs a bare "Alt tap," which depends on
 protocol's modifier-press events — not available by construction over this scripted tmux session —
 so `Alt+n`/`Alt+z` were used instead, a real, independently-documented keybinding that exercises
 the identical `ShellPanes::split`/`render` code path.)
+
+---
+
+### UI Overhaul, Phase C (Remainder): Boot Splash, Gradient Borders/Titles, a Typewriter Preview Reveal, and a System HUD — Pulsing Selection Dropped for Good (COA A)
+
+**Date:** 2026-09-27
+**Author:** deltaog-117
+**Status:** Confirmed
+
+**Context.** Last cycle's "UI overhaul, phase C (start)" built the animation tick and shipped one
+payload for it (animated shell-pane focus-border transitions), deliberately deferring the rest of
+the "cinematic layer" bullet: a boot splash, gradient borders/titles, a typewriter reveal on the
+preview, a pulsing selection, and an optional system/git HUD. The pulsing selection had already
+been built, verified, and cut before that commit on taste alone (see the entry above). This cycle
+the user said to drop it for good and ship the other four in one pass.
+
+**The one real fork: how the system/git HUD gets its data.** Everything else was a rendering
+question with an obvious answer already established by this project's own precedent (see below).
+The system segment needed session uptime, load average and memory — and whether that costs a new
+dependency was worth measuring, not guessing, before writing any code:
+
+| COA | Approach | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|---|
+| A | No new dependency: `/proc/loadavg` + `/proc/meminfo`, uptime tracked in-process | Zero new deps, matches every past "shell out or read directly" precedent (`git_status`, `disk_usage`) | Linux-only; degrades to nothing (not an error) elsewhere | S |
+| B | The `sysinfo` crate, cross-platform | One clean API, works everywhere, richer data (real CPU%) | New dependency; a second concurrency idiom this project has never needed | M |
+| C | Shell out to `uptime`/`free` the way `git_status` shells to `git` | No new dependency | A second background poller alongside git's, and fragile locale-dependent output parsing | M |
+
+Chosen, at the user's direction: **A**, after actually measuring **B**'s cost rather than
+estimating it — the release `mman` binary was built once at baseline (9.33 MiB), then rebuilt with
+`sysinfo = "0.33"` declared *and actually called* (`System::new_all()` + `refresh_all()`, so the
+linker couldn't dead-strip it away), landing at 9.60 MiB: **+276 KiB, ~2.9%**, and eight new
+transitive crates (`sysinfo`, `rayon`, `rayon-core`, three `crossbeam-*`) — `rayon`'s data-parallel
+thread pool exists only to enumerate processes in parallel, work this project's own `tokio`
+blocking-pool idiom already covers everything else with. Not alarming on its own, but a real,
+avoidable cost for a segment the roadmap itself calls optional, so **A** won on the same grounds
+`git_status` and `disk_usage` already established: read the data directly, no new crate, and treat
+a platform where the source doesn't exist as "shows nothing" rather than an error. If Minuteman
+ever needs to run somewhere `/proc` doesn't exist, **B** is the one to revisit then — the module
+doc for `tui::system_hud` says so directly, so a future cycle doesn't have to rediscover this.
+
+**Gradient borders/titles.** New `tui::gradient` walks a `Rect`'s perimeter in one continuous
+order (top edge left-to-right, right edge down, bottom edge right-to-left, left edge up) and
+recolors every cell it visits with `style::blend_rgb(from, to, fraction(i, total))` — deliberately
+*every* cell, title text included, rather than trying to tell a border glyph from a title glyph:
+the effect reads as one ribbon of color sweeping the whole frame, not a flat border with an
+oddly-untouched title sitting inside it. It falls back to the existing flat look wherever
+`blend_rgb` can't blend the two colors (the same "only two resolved `Color::Rgb` values" rule the
+focus-fade transition already lives by), so a theme built from named ANSI colors is unaffected.
+Scoped to just the browser's current/focused pane — not the parent/preview panes, not shell
+panes (which already animate their border a different way, the focus-fade from last cycle; layering
+a second, competing animation on the same border was rejected on sight), and not any modal panel —
+to keep this cycle's blast radius to the one place a gradient border reads as "the active thing is
+lit up" rather than visual noise.
+
+**Typewriter reveal.** Scoped deliberately to *the very first, unscrolled view of a freshly
+selected file* rather than trying to reconcile a wrapped-row viewport position with a source-line
+index: `Paragraph`'s wrapping is opaque from outside (there's no API answering "which source line
+is wrapped-row 12"), so capping by wrapped row while scrolled would need re-deriving that mapping
+by hand for no real benefit — a file that's already been scrolled has already been seen. `total`
+(for the scrollbar and `scroll.fit`) is always measured from every source line, unconditionally;
+only the *rendered* `Paragraph` is ever a truncated rebuild from `highlighted[..revealed]`, and
+only while `revealed < highlighted.len()` — so the common steady state (nothing to reveal) costs
+nothing beyond what the pane already did every frame. `anim::REVEAL_LINES_PER_SEC` (90) was picked
+so even a tall 70-something-row pane finishes well under a second; `reload()` (the same file
+changing on disk while still selected) never restarts the reveal, the same "don't jump back to the
+top" precedent `Scroll::reset` already carved out for that path.
+
+**Boot splash.** A fixed 46×7 box, centered and clamped to the frame, with the title/subtitle
+fading in from `border_fg` to `accent_fg` over 300ms (again via `blend_rgb`, again falling back
+gracefully) and gone after 900ms on its own or the instant any key or mouse event arrives —
+checked ahead of every other handler in `run`'s event loop, the same first-claim-on-input
+precedent the disk usage/Inspect/menu modals already set. A `Resize` event dismisses it too but
+still reaches the ordinary resize handling below, so maximizing the terminal right at startup
+doesn't leave a stale splash-sized rect on screen.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green (new: `gradient`'s
+perimeter/fraction/paint tests, `anim`'s `revealed_lines` tests, `system_hud`'s `/proc` parser
+tests — property-tested against arbitrary bytes for "never panics" the same way `git_status`'s
+parser is — and `boot_splash`'s timing/area tests). Also verified against the real compiled
+release binary via four scripted PTY sessions reconstructed through `pyte` (answering the startup
+Device Status Report / Device Attributes / cell-size probes per this project's established fix,
+one throwaway `HOME` with a scratch `config.toml` per run): the boot splash showed real
+"MINUTEMAN" / "a Ranger-inspired terminal file manager" / "press any key" text over the browser on
+the very first frame and vanished the instant a key was sent; the header showed a real
+`up now  load 1.45 1.48 1.13  mem 5.0G/15G` segment with `system_hud = true`, sourced from the
+actual `/proc` on the machine running the test; a 40-line file's preview showed only `line00` at
+30ms after selection and the rest by a second later — genuinely progressive, not a placeholder; a
+single frame captured with the default theme carried 139 distinct truecolor `38;2;r;g;b` triples
+along the focused pane's border/title, against 9 with `gradient_borders = false`; and with
+`boot_splash`/`gradient_borders`/`typewriter_preview`/`system_hud` all set to `false`, the very
+first frame showed the full 40-line file at once, no uptime segment, and the same flat 9-color
+palette as the gradient-off run — confirming all four switches actually gate their effect rather
+than merely existing in `config.toml`.
 
 ---
 

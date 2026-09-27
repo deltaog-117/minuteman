@@ -30,6 +30,27 @@ git_status = true
 # below flips it while browsing.
 show_hidden = false
 
+# A brief splash screen before the browser on startup, dismissed by the first keypress or mouse
+# click, or after under a second on its own. Set this to false to skip straight to the browser.
+boot_splash = true
+
+# Paints the focused pane's border and title as a gradient (from the theme's accent color to its
+# focused-border color) instead of one flat color. Falls back to the flat look on its own on a
+# terminal or theme where the two colors can't be blended (a named color, or one quantized to the
+# 256-color palette), so this is safe to leave on everywhere.
+gradient_borders = true
+
+# The text preview streams in from the top, line by line, the first time a file is selected — not
+# on every redraw, and not once you've scrolled it. Set this to false for it to show in full at
+# once, the way every other pane already does.
+typewriter_preview = true
+
+# An extra header segment built from /proc: how long this session has been running, the system's
+# load average, and memory used/total. Off by default because it is Linux-specific (it reads
+# nothing and shows nothing elsewhere) and, unlike the git segment, has nothing to do with the
+# files you're browsing.
+system_hud = false
+
 # Programs that take over the whole terminal. A `:` command whose first word is one of these
 # (":nvim ROADMAP.md", ":less log.txt") suspends Minuteman, runs it on the real terminal, and
 # brings the browser back when it exits. Prefix any other command with "!" to do the same for

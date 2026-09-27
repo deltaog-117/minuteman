@@ -109,6 +109,15 @@ struct RawConfig {
     /// `None` when absent, so "unset" can default to hidden rather than serde's `false` meaning
     /// the same thing by accident.
     show_hidden: Option<bool>,
+    /// `None` when absent, for the same reason as `alt_tap`.
+    boot_splash: Option<bool>,
+    /// `None` when absent, for the same reason as `alt_tap`.
+    gradient_borders: Option<bool>,
+    /// `None` when absent, for the same reason as `alt_tap`.
+    typewriter_preview: Option<bool>,
+    /// `None` when absent, so "unset" can default to off — unlike the other cinematic-layer
+    /// pieces, this one reads `/proc` and is opt-in rather than on by default.
+    system_hud: Option<bool>,
     /// `None` when absent, so "unset" means the built-in list while an explicit `[]` means none.
     interactive_commands: Option<Vec<String>>,
     /// The `[[open_with]]` tables, in the order the submenu lists them.
@@ -194,6 +203,20 @@ pub struct Config {
     pub git_status: bool,
     /// Whether dot-prefixed entries start out visible; the `hidden` key flips it at runtime.
     pub show_hidden: bool,
+    /// Whether a brief, dismissible splash shows before the browser on startup.
+    pub boot_splash: bool,
+    /// Whether the focused pane's border and title are painted as a gradient instead of one flat
+    /// color. Falls back to the flat look on its own wherever the two endpoint colors can't be
+    /// blended (see `style::blend_rgb`), so this only ever adds to the flat rendering, never
+    /// replaces it with something broken.
+    pub gradient_borders: bool,
+    /// Whether the text preview streams in from the top, line by line, the first time a file is
+    /// selected (not on every redraw, and not once the pane has been scrolled).
+    pub typewriter_preview: bool,
+    /// Whether the header shows a segment built from `/proc` (session uptime, load average,
+    /// memory): unlike the other cinematic-layer pieces this reads OS-specific files, so it
+    /// defaults off and just shows nothing on a platform without a `/proc`.
+    pub system_hud: bool,
     /// Program names a `:` command hands the whole terminal to (`:nvim notes.md`), instead of
     /// running with its output captured. `:!cmd` does the same for any one command.
     pub interactive_commands: Vec<String>,
@@ -274,6 +297,10 @@ impl Config {
             browser_mouse: config.browser_mouse.unwrap_or(true),
             git_status: config.git_status.unwrap_or(true),
             show_hidden: config.show_hidden.unwrap_or(false),
+            boot_splash: config.boot_splash.unwrap_or(true),
+            gradient_borders: config.gradient_borders.unwrap_or(true),
+            typewriter_preview: config.typewriter_preview.unwrap_or(true),
+            system_hud: config.system_hud.unwrap_or(false),
             interactive_commands: config
                 .interactive_commands
                 .unwrap_or_else(default_interactive_commands),
@@ -369,6 +396,10 @@ mod tests {
         assert_eq!(raw.browser_mouse, Some(true));
         assert_eq!(raw.git_status, Some(true));
         assert_eq!(raw.show_hidden, Some(false));
+        assert_eq!(raw.boot_splash, Some(true));
+        assert_eq!(raw.gradient_borders, Some(true));
+        assert_eq!(raw.typewriter_preview, Some(true));
+        assert_eq!(raw.system_hud, Some(false));
         assert_eq!(
             raw.interactive_commands,
             Some(default_interactive_commands())
@@ -423,6 +454,35 @@ mod tests {
         assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None, None).browser_mouse);
         assert!(!Config::from_sources(Some("browser_mouse = false\n"), None, None).browser_mouse);
         assert!(Config::from_sources(Some("browser_mouse = true\n"), None, None).browser_mouse);
+    }
+
+    #[test]
+    fn boot_splash_defaults_on_and_can_be_switched_off() {
+        assert!(Config::from_sources(None, None, None).boot_splash);
+        assert!(!Config::from_sources(Some("boot_splash = false\n"), None, None).boot_splash);
+    }
+
+    #[test]
+    fn gradient_borders_defaults_on_and_can_be_switched_off() {
+        assert!(Config::from_sources(None, None, None).gradient_borders);
+        assert!(
+            !Config::from_sources(Some("gradient_borders = false\n"), None, None).gradient_borders
+        );
+    }
+
+    #[test]
+    fn typewriter_preview_defaults_on_and_can_be_switched_off() {
+        assert!(Config::from_sources(None, None, None).typewriter_preview);
+        assert!(
+            !Config::from_sources(Some("typewriter_preview = false\n"), None, None)
+                .typewriter_preview
+        );
+    }
+
+    #[test]
+    fn system_hud_defaults_off_and_can_be_switched_on() {
+        assert!(!Config::from_sources(None, None, None).system_hud);
+        assert!(Config::from_sources(Some("system_hud = true\n"), None, None).system_hud);
     }
 
     /// The same drift guard for `appearance.example.toml`, covering all four of its tables.

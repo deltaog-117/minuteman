@@ -133,6 +133,7 @@ pub fn scrollbar_position(offset: usize, total: usize, viewport: usize) -> usize
 }
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, preview: &mut TextPreview, config: &Config) {
+    let reveal_started = preview.reveal_started();
     let block = style::themed_block(config, "preview", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -149,7 +150,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, preview: &mut TextPreview, conf
                     // so `highlighted` is always present here by construction.
                     let highlighted = highlighted
                         .expect("a Loaded::Text preview always carries its highlighted lines");
-                    draw_text(frame, area, inner, highlighted, rows, scroll, config)
+                    let state = TextState {
+                        rows,
+                        scroll,
+                        reveal_started,
+                    };
+                    draw_text(frame, area, inner, highlighted, state, config)
                 }
                 Some(Loaded::Bytes(head)) => draw_hex(frame, area, inner, head, scroll, config),
                 Some(Loaded::Archive(listing)) => {
@@ -161,34 +167,66 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, preview: &mut TextPreview, conf
     }
 }
 
+/// The three pieces of per-preview state `draw_text` needs beyond what it's drawing — bundled so
+/// the function itself stays under clippy's argument-count limit.
+struct TextState<'a> {
+    rows: &'a mut crate::text_preview::RowCache,
+    scroll: &'a mut Scroll,
+    reveal_started: Option<std::time::Instant>,
+}
+
 fn draw_text(
     frame: &mut Frame<'_>,
     area: Rect,
     inner: Rect,
     highlighted: &[HighlightedLine],
-    rows: &mut crate::text_preview::RowCache,
-    scroll: &mut Scroll,
+    state: TextState<'_>,
     config: &Config,
 ) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let TextState {
+        rows,
+        scroll,
+        reveal_started,
+    } = state;
     let plain = Style::default().fg(style::color(&config.theme.file_fg));
-    let lines: Vec<Line<'static>> = highlighted
-        .iter()
-        .map(|line| {
-            Line::from(
-                line.iter()
-                    .map(|(kind, piece)| {
-                        Span::styled(piece.clone(), token_style(*kind, config, plain))
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect();
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let total = rows.get(inner.width, || paragraph.line_count(inner.width));
+    let build = |slice: &[HighlightedLine]| -> Vec<Line<'static>> {
+        slice
+            .iter()
+            .map(|line| {
+                Line::from(
+                    line.iter()
+                        .map(|(kind, piece)| {
+                            Span::styled(piece.clone(), token_style(*kind, config, plain))
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect()
+    };
+    // Built from every source line, uncapped, so the scrollbar and `total` always reflect the
+    // file's real length even while `paragraph` below only shows the first few of them.
+    let full = Paragraph::new(build(highlighted)).wrap(Wrap { trim: false });
+    let total = rows.get(inner.width, || full.line_count(inner.width));
     let offset = scroll.fit(total, inner.height as usize);
+
+    // The typewriter reveal only ever caps the very first view of a freshly selected file, from
+    // its top: once scrolled (`offset > 0`), or once enough time has passed to reveal every
+    // source line, `revealed` covers the whole thing and `paragraph` below is `full` again.
+    let revealed = if config.typewriter_preview && offset == 0 {
+        reveal_started.map_or(highlighted.len(), |started| {
+            crate::anim::revealed_lines(started.elapsed(), highlighted.len())
+        })
+    } else {
+        highlighted.len()
+    };
+    let paragraph = if revealed < highlighted.len() {
+        Paragraph::new(build(&highlighted[..revealed])).wrap(Wrap { trim: false })
+    } else {
+        full
+    };
     // `Paragraph::scroll` takes a `u16`; a text of over 65,535 wrapped rows is scrolled as far as
     // that reaches.
     let top = u16::try_from(offset).unwrap_or(u16::MAX);
@@ -316,10 +354,25 @@ mod tests {
         height: u16,
         preview: &mut TextPreview,
     ) -> (Vec<String>, ratatui::buffer::Buffer) {
-        let config = Config::from_sources(None, None, None);
+        screen_with_config(
+            width,
+            height,
+            preview,
+            &Config::from_sources(None, None, None),
+        )
+    }
+
+    /// [`rendered`], with a caller-chosen config — for a test that needs `typewriter_preview`
+    /// off, or a non-default theme.
+    fn screen_with_config(
+        width: u16,
+        height: u16,
+        preview: &mut TextPreview,
+        config: &Config,
+    ) -> (Vec<String>, ratatui::buffer::Buffer) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), preview, &config))
+            .draw(|frame| render(frame, frame.area(), preview, config))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         let rows = buffer
@@ -540,6 +593,61 @@ mod tests {
         let config = Config::from_sources(None, None, None);
         let plain_color = style::color(&config.theme.file_fg);
         assert_eq!(buffer.cell((1, 1)).unwrap().fg, plain_color);
+    }
+
+    /// Twenty short, distinguishable, non-wrapping lines — one source line to one wrapped row at
+    /// a generous width, so a test can tell "the reveal capped it" from "line19 is on screen".
+    fn numbered_lines(count: usize) -> String {
+        (0..count)
+            .map(|i| format!("line{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn typewriter_reveal_caps_a_freshly_selected_file_below_its_full_length() {
+        let rt = runtime();
+        let mut preview = TextPreview::showing_named(
+            rt.handle().clone(),
+            Loaded::Text(numbered_lines(20)),
+            "notes.mystery",
+        );
+        preview.arm_reveal_for_test(std::time::Instant::now());
+        let out = screen(20, 22, &mut preview).join("\n");
+        assert!(
+            !out.contains("line19"),
+            "the last line must not appear the instant the reveal starts: {out:?}"
+        );
+    }
+
+    #[test]
+    fn typewriter_reveal_shows_everything_once_it_has_had_time() {
+        let rt = runtime();
+        let mut preview = TextPreview::showing_named(
+            rt.handle().clone(),
+            Loaded::Text(numbered_lines(20)),
+            "notes.mystery",
+        );
+        preview.arm_reveal_for_test(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        let out = screen(20, 22, &mut preview).join("\n");
+        assert!(out.contains("line19"), "{out:?}");
+    }
+
+    #[test]
+    fn typewriter_reveal_is_skipped_when_the_config_turns_it_off() {
+        let rt = runtime();
+        let mut preview = TextPreview::showing_named(
+            rt.handle().clone(),
+            Loaded::Text(numbered_lines(20)),
+            "notes.mystery",
+        );
+        preview.arm_reveal_for_test(std::time::Instant::now());
+        let config = Config {
+            typewriter_preview: false,
+            ..Config::from_sources(None, None, None)
+        };
+        let (out, _) = screen_with_config(20, 22, &mut preview, &config);
+        assert!(out.join("\n").contains("line19"), "{out:?}");
     }
 
     #[test]

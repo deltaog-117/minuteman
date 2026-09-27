@@ -18,6 +18,7 @@ mod alt_keys;
 mod anim;
 mod app;
 mod appearance_popup;
+mod boot_splash;
 mod browser_mouse;
 mod cli;
 mod command;
@@ -26,6 +27,7 @@ mod disk_usage;
 mod disk_usage_view;
 mod git_status;
 mod glyphs;
+mod gradient;
 mod hud;
 mod image_preview;
 mod inspect;
@@ -42,6 +44,7 @@ mod settings_popup;
 mod shell_init;
 mod shell_layout;
 mod style;
+mod system_hud;
 mod terminal_init;
 mod text_preview;
 
@@ -57,6 +60,7 @@ use appearance_popup::{
     AppearancePopup, AppearanceView, Hit as AppearanceHit, Outcome as AppearanceOutcome,
     Row as AppearanceRow, RowKind as AppearanceRowKind, SaveChoice, SaveTarget,
 };
+use boot_splash::BootSplash;
 use browser::BrowserState;
 use browser_mouse::{BrowserLayout, Click, ClickTracker, Hit, Listing, Pane, Wheel};
 use context_menu::{
@@ -338,6 +342,8 @@ struct Overlay<'a> {
     mode: hud::Mode,
     shell: Option<ShellView<'a>>,
     current_list: &'a mut ListState,
+    /// The boot splash, drawn dead last so nothing else can show through it.
+    boot_splash: Option<&'a BootSplash>,
     /// The right-click menu, the Inspect panel and the settings popup, drawn last so they sit
     /// over everything.
     menu: Option<&'a ContextMenu>,
@@ -647,6 +653,7 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let mut app = App::new(runtime.handle().clone())
         .with_git_status(config.git_status)
+        .with_system_hud(config.system_hud)
         .with_interactive_commands(config.interactive_commands.clone())
         .with_plugins(config.plugins.clone(), browser.current_dir());
 
@@ -907,6 +914,12 @@ fn run(
         guard,
         cwd_file,
     } = session;
+    // The boot splash, for the brief window before the first real keystroke — see `boot_splash`.
+    // `None` from the start when `boot_splash` is turned off in config, exactly as if it had
+    // already been dismissed.
+    let mut boot_splash = config
+        .boot_splash
+        .then(|| BootSplash::start(Instant::now()));
     // The tmux-style split-pane shell tree (see `shell_layout`) — `Some` for the whole time any
     // shell pane is open. Never suspends raw mode/the alternate screen: it's just tiled into the
     // frame's own area (below the status bar) as part of the normal draw.
@@ -982,6 +995,12 @@ fn run(
     let mut local_active_custom_theme = config.local_active_custom_theme.clone();
 
     loop {
+        if boot_splash
+            .as_ref()
+            .is_some_and(|splash| splash.done(Instant::now()))
+        {
+            boot_splash = None;
+        }
         app.poll_bulk(browser, vfs)?;
         app.poll_search(browser, vfs);
         if let Some(view) = inspect.as_mut() {
@@ -1071,6 +1090,7 @@ fn run(
                         size: shell_size,
                     }),
                     current_list: &mut current_list,
+                    boot_splash: boot_splash.as_ref(),
                     menu: menu.as_ref(),
                     inspect: inspect.as_ref(),
                     usage: usage.as_ref(),
@@ -1088,7 +1108,13 @@ fn run(
         // While a shell pane is open, poll faster so its output (e.g. a redrawing `vim` or `top`)
         // feels responsive rather than updating in 100ms steps — fast enough that a shell-pane
         // focus transition (see `shell_layout::FocusAnim`) never needs its own faster tick here.
-        let poll_timeout = if shells.is_some() {
+        // The boot splash's fade and a fresh typewriter reveal need the same fast tick for the
+        // same reason, just for a bounded window each rather than the whole time a shell is open.
+        let revealing = previews
+            .text
+            .reveal_started()
+            .is_some_and(|started| started.elapsed() < anim::REVEAL_MAX_WINDOW);
+        let poll_timeout = if shells.is_some() || boot_splash.is_some() || revealing {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
@@ -1097,7 +1123,18 @@ fn run(
             continue;
         }
 
-        match event::read()? {
+        let event = event::read()?;
+        // Any key or click dismisses the boot splash outright, ahead of every other handler
+        // below — including a resize, so a terminal maximized right at startup doesn't leave a
+        // stale splash rect on screen. It never also drives the browser, the same first-keystroke
+        // convention as the disk usage/Inspect/menu modals just below.
+        if boot_splash.is_some() {
+            boot_splash = None;
+            if !matches!(event, Event::Resize(..)) {
+                continue;
+            }
+        }
+        match event {
             Event::Resize(cols, rows) => {
                 if let Some(panes) = shells.as_ref() {
                     panes.resize(shell_area(
@@ -2069,6 +2106,7 @@ fn draw(
         mode,
         shell,
         current_list: current_state,
+        boot_splash,
         menu,
         inspect,
         usage,
@@ -2174,6 +2212,14 @@ fn draw(
         columns[1],
         current_state,
     );
+    if config.gradient_borders {
+        gradient::paint(
+            frame.buffer_mut(),
+            columns[1],
+            style::color(&config.theme.accent_fg),
+            style::color(&config.theme.border_focused_fg),
+        );
+    }
     hud::render_scrollbar(
         frame,
         columns[1],
@@ -2249,6 +2295,7 @@ fn draw(
                 marks_total: app.marked_total(),
                 clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
                 progress: app.progress(),
+                system: app.system_summary(Instant::now()),
             },
             config,
         );
@@ -2341,6 +2388,9 @@ fn draw(
             },
             config,
         );
+    }
+    if let Some(splash) = boot_splash {
+        boot_splash::render(frame, frame.area(), splash, config);
     }
 }
 

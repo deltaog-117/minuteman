@@ -30,6 +30,25 @@ pub fn transition_t(elapsed: Duration) -> f64 {
     (elapsed.as_secs_f64() / FOCUS_TRANSITION.as_secs_f64()).min(1.0)
 }
 
+/// How many of the preview's source lines the typewriter reveal shows per second — fast enough
+/// that even a full pane finishes well under a second, so it reads as a snappy flourish rather
+/// than something the user has to wait out.
+pub const REVEAL_LINES_PER_SEC: f64 = 90.0;
+
+/// How long the main loop should poll fast after a reveal starts, regardless of the pane's real
+/// height — generous enough for even a very tall terminal (a 72-row pane needs ~0.8s at
+/// [`REVEAL_LINES_PER_SEC`]) without the caller having to know the pane's actual line count.
+pub const REVEAL_MAX_WINDOW: Duration = Duration::from_millis(900);
+
+/// Lines of a typewriter reveal visible after `elapsed`, capped at `total` — `total` once the
+/// reveal has run long enough, `0` at `Duration::ZERO`. Floors rather than rounds, so a line is
+/// only ever shown once its own moment has fully passed.
+pub fn revealed_lines(elapsed: Duration, total: usize) -> usize {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let count = (elapsed.as_secs_f64() * REVEAL_LINES_PER_SEC).floor() as usize;
+    count.min(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,6 +65,30 @@ mod tests {
         fn transition_never_leaves_zero_to_one(millis in 0u64..1_000_000) {
             let t = transition_t(Duration::from_millis(millis));
             proptest::prop_assert!((0.0..=1.0).contains(&t), "{t}");
+        }
+    }
+
+    #[test]
+    fn reveal_starts_at_zero_and_settles_at_total() {
+        assert_eq!(revealed_lines(Duration::ZERO, 40), 0);
+        assert_eq!(revealed_lines(Duration::from_secs(10), 40), 40);
+        assert_eq!(revealed_lines(Duration::from_secs(10), 0), 0);
+    }
+
+    #[test]
+    fn reveal_advances_roughly_at_the_configured_rate() {
+        // Half a second in, at 90 lines/sec, 45 lines should be showing — well short of a
+        // realistic pane's line count, so the cap never kicks in here.
+        assert_eq!(revealed_lines(Duration::from_millis(500), 1_000), 45);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn reveal_never_exceeds_total_and_never_decreases(millis in 0u64..60_000, total in 0usize..500) {
+            let a = revealed_lines(Duration::from_millis(millis), total);
+            let b = revealed_lines(Duration::from_millis(millis + 1), total);
+            proptest::prop_assert!(a <= total);
+            proptest::prop_assert!(b >= a);
         }
     }
 }

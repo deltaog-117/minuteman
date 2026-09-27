@@ -819,13 +819,36 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   mid-transition, where both the newly-focused and newly-unfocused pane's border escape codes sat
   at the *same* blend fraction (≈0.267) between `border_fg` and `border_focused_fg`, confirming the
   two panes crossfade in lockstep rather than just snapping.
-- **UI overhaul, phase C (remainder) — cinematic layer** – a boot splash, gradient borders/titles,
-  a typewriter reveal on the preview, an optional system/git HUD, and a pulsing selection (tried
-  this cycle but dropped as distracting — see Completed; worth revisiting with a subtler effect, if
-  at all). The animation tick already built for the focus transition can drive whichever of these
-  turn out to need one, rather than needing a second one.
-- **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
-  frequently visited paths don't require re-navigating the miller columns each time.
+- ✅ **UI overhaul, phase C (remainder) — cinematic layer, minus the pulsing selection for good** –
+  closes out the cinematic layer bullet with the four pieces last cycle deferred; the pulsing
+  selection stays dropped for good (tried and cut on taste alone last cycle — see `DIARY.md` —
+  rather than revisited). A brief boot splash (`boot_splash`, default on) shows the app name over
+  the browser for under a second, dismissed by the first key or click. The focused browser pane's
+  border and title now paint as a gradient between the theme's accent and focused-border colors
+  (`gradient_borders`, default on) via a new `tui::gradient`, which walks a rect's perimeter in one
+  continuous sweep and recolors every cell — border glyph or title text alike — with
+  `style::blend_rgb`, falling back to the existing flat look wherever the two colors can't be
+  blended; scoped to just the current pane, since shell panes already animate their own border a
+  different way (the focus-fade from last cycle) and layering a second competing animation on it
+  was rejected outright. The text preview streams in from the top, line by line, the first time a
+  file is selected (`typewriter_preview`, default on) at 90 lines/sec — fast enough that even a
+  tall pane finishes well under a second — but only for that first, unscrolled view; scrolling, or
+  the same file changing on disk while still selected (`reload`), never triggers or restarts it.
+  The header gained an optional system segment (`system_hud`, default off, since it is Linux-only
+  and unrelated to the files being browsed) showing session uptime, load average and memory
+  used/total, read straight from `/proc/loadavg`/`/proc/meminfo` — no new dependency, chosen after
+  actually measuring the alternative: linking the `sysinfo` crate (with a real call, not just
+  declaring it) grew the release binary by 276 KiB (~2.9%) and pulled in eight new transitive
+  crates including `rayon`, a second concurrency idiom this project has never otherwise needed;
+  `tui::system_hud`'s own module doc says to revisit that trade-off if Minuteman ever needs to run
+  somewhere without a `/proc`. Verified against the real compiled binary via four scripted PTY
+  sessions reconstructed through `pyte`: the splash showed real "MINUTEMAN" text and vanished the
+  instant a key was sent; the header showed a real `up now  load 1.45 1.48 1.13  mem 5.0G/15G`
+  segment sourced from the actual machine's `/proc`; a 40-line file's preview showed only its first
+  line 30ms after selection and the rest a second later; one frame carried 139 distinct truecolor
+  border/title colors with the gradient on against 9 with it off; and setting all four switches to
+  `false` reproduced the old, un-cinematic behavior exactly — full content immediately, no system
+  segment, and the same 9-color flat palette.
 - **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
   frequently visited paths don't require re-navigating the miller columns each time.
 
@@ -1010,13 +1033,18 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    `pdftoppm`/`ffmpegthumbnailer` example) and select a file with that extension — it thumbnails
    or extracts text through your own command instead of falling back to a hex dump; a missing
    tool, a failing command or a timeout just shows the file's name, quietly.
-   Then the newest: press `s` to open a shell, then `Alt+n` to split it — the new pane's border
-   fades in from the dim frame color while the one that just lost focus fades back out, instead of
-   either one snapping instantly; `Alt+z`/`x`/`c`/`v` moves focus between panes with the same fade
-   each time.
+   Then: press `s` to open a shell, then `Alt+n` to split it — the new pane's border fades in from
+   the dim frame color while the one that just lost focus fades back out, instead of either one
+   snapping instantly; `Alt+z`/`x`/`c`/`v` moves focus between panes with the same fade each time.
+   Then the newest: on launch, a brief splash names the app over the browser — press any key to
+   skip it, or just wait under a second. The current (middle) pane's border and title now sweep
+   through a gradient between two theme colors instead of one flat shade. Select a longer text
+   file and watch it stream in from the top instead of appearing all at once (scroll it, or wait —
+   either way it settles). Set `system_hud = true` in `config.toml` for a header segment showing
+   this session's uptime, load average and memory (Linux only; shows nothing elsewhere). Any of
+   the four has its own `config.toml` switch (`boot_splash`, `gradient_borders`,
+   `typewriter_preview`, `system_hud`) if you'd rather it not.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: the mouse's stage 2 (multi-select and breadcrumb clicks), the UI overhaul's
-   remaining cinematic-layer pieces (a boot splash, gradient borders/titles, a typewriter preview
-   reveal, an optional system/git HUD), or bookmarks/marks.
+4. Next cycle: the mouse's stage 2 (multi-select and breadcrumb clicks) or bookmarks/marks.
