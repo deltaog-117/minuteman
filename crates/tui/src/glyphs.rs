@@ -78,6 +78,8 @@ pub struct Glyphs {
     pub modified: &'static str,
     pub untracked: &'static str,
     pub conflicted: &'static str,
+    /// The header pill shown while Caps Lock is on (empty when the set has none).
+    pub caps_lock: &'static str,
     /// Stands in for a missing value (a directory's size, an unknown age).
     pub none: &'static str,
     pub arrow_right: &'static str,
@@ -115,6 +117,7 @@ static UNICODE: Glyphs = Glyphs {
     modified: "~",
     untracked: "?",
     conflicted: "!",
+    caps_lock: "⇪",
     none: "—",
     arrow_right: POWERLINE_RIGHT,
     arrow_left: POWERLINE_LEFT,
@@ -163,6 +166,7 @@ static ASCII: Glyphs = Glyphs {
     modified: "~",
     untracked: "?",
     conflicted: "!",
+    caps_lock: "",
     none: "-",
     arrow_right: ">",
     arrow_left: "<",
@@ -242,10 +246,11 @@ pub fn sample(set: GlyphSet) -> String {
         g.gauge_off,
     ));
     out.push_str(&format!(
-        "  pills        {}   {}   {}\n",
+        "  pills        {}   {}   {}   {}\n",
         g.pill(g.yanked, "yanked"),
         g.pill(g.cut, "cut"),
         g.pill(g.marked, "marked"),
+        g.pill(g.caps_lock, "caps lock"),
     ));
     out.push_str(&format!(
         "  arrows       {} {} {}\n",
@@ -301,6 +306,7 @@ mod tests {
             g.modified,
             g.untracked,
             g.conflicted,
+            g.caps_lock,
             g.none,
             g.arrow_right,
             g.arrow_left,

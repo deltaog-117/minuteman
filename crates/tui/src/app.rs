@@ -295,6 +295,10 @@ pub struct App {
     search_job: Option<SearchJob>,
     search_state: SearchState,
     plugins: PluginManager,
+    /// Whether the last key event carried the keyboard protocol's Caps Lock flag, for the header
+    /// pill (see `main`'s `with_caps_lock_applied`, which reads the same flag to fix up a
+    /// letter's case). Only ever known while the terminal reports it; stays `false` otherwise.
+    caps_lock: bool,
 }
 
 impl App {
@@ -314,6 +318,7 @@ impl App {
             search_job: None,
             search_state: SearchState::Idle,
             plugins: PluginManager::new(),
+            caps_lock: false,
         }
     }
 
@@ -480,6 +485,18 @@ impl App {
     /// The header's system segment text, when `[config] system_hud` is on.
     pub fn system_summary(&self, now: Instant) -> Option<String> {
         self.system.as_ref().map(|system| system.summary(now))
+    }
+
+    /// Records whether the key event just read carried the keyboard protocol's Caps Lock flag.
+    /// Call on every key event (not just the ones that reach a binding), so the header pill
+    /// stays correct even while a modal view or prompt owns the keyboard.
+    pub fn set_caps_lock(&mut self, on: bool) {
+        self.caps_lock = on;
+    }
+
+    /// Whether Caps Lock is currently on, for the header pill.
+    pub fn caps_lock(&self) -> bool {
+        self.caps_lock
     }
 
     /// Drains any progress/completion messages from the running background operation, if any.
@@ -2007,5 +2024,17 @@ mod tests {
 
         assert!(f.root.join("dest").join("a.txt").exists());
         assert_eq!(f.listed().iter().filter(|n| *n == "a.txt").count(), 1);
+    }
+
+    #[test]
+    fn caps_lock_starts_off_and_tracks_the_last_key_event() {
+        let mut f = Fixture::new("caps-lock");
+        assert!(!f.app.caps_lock());
+
+        f.app.set_caps_lock(true);
+        assert!(f.app.caps_lock());
+
+        f.app.set_caps_lock(false);
+        assert!(!f.app.caps_lock());
     }
 }

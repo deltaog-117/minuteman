@@ -286,6 +286,9 @@ pub struct HeaderView<'a> {
     pub marks_total: Option<Total>,
     pub clipboard: Option<(ClipboardMode, usize)>,
     pub progress: Option<Progress>,
+    /// Whether Caps Lock is currently on (see `App::caps_lock`) — every letter binding reads as
+    /// its flipped case while this is true, so it is worth a pill even outside a mini-shell.
+    pub caps_lock: bool,
     /// `SystemHud::summary`'s text, when `[config] system_hud` is on.
     pub system: Option<String>,
 }
@@ -325,6 +328,9 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
     };
 
     let mut pills: Vec<Span<'static>> = Vec::new();
+    if view.caps_lock {
+        pills.push(pill(g.pill(g.caps_lock, "caps lock"), &theme.danger_fg));
+    }
     if let Some(progress) = &view.progress {
         let text = format!(
             "{} {} {}",
@@ -1247,6 +1253,7 @@ mod tests {
                         done: 1,
                         batch: None,
                     }),
+                    caps_lock: false,
                     system: None,
                 },
                 &config,
@@ -1271,6 +1278,7 @@ mod tests {
                     marks_total: None,
                     clipboard: Some((ClipboardMode::Move, 2)),
                     progress: None,
+                    caps_lock: false,
                     system: None,
                 },
                 &config,
@@ -1295,6 +1303,7 @@ mod tests {
                         marks_total: None,
                         clipboard: None,
                         progress: None,
+                        caps_lock: false,
                         system: system.clone(),
                     },
                     &config,
@@ -1307,6 +1316,32 @@ mod tests {
             text.contains("up 5m") && text.contains("load 0.42"),
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn the_caps_lock_pill_shows_only_while_it_is_on() {
+        let config = test_config();
+        let render = |caps_lock: bool| {
+            render_to_text(100, |f, a| {
+                render_header(
+                    f,
+                    a,
+                    &HeaderView {
+                        path: Path::new("/x"),
+                        home: None,
+                        marks: 0,
+                        marks_total: None,
+                        clipboard: None,
+                        progress: None,
+                        caps_lock,
+                        system: None,
+                    },
+                    &config,
+                )
+            })
+        };
+        assert!(!render(false).contains("caps lock"));
+        assert!(render(true).contains("caps lock"));
     }
 
     #[test]
@@ -1332,6 +1367,7 @@ mod tests {
                                 done: 4,
                                 batch: Some((1, 3)),
                             }),
+                            caps_lock: false,
                             system: Some("up 5m  load 0.42 0.38 0.31  mem 3.2G/16G".into()),
                         },
                         &config,
@@ -1482,6 +1518,7 @@ mod tests {
                         marks_total: total,
                         clipboard: None,
                         progress: None,
+                        caps_lock: false,
                         system: None,
                     },
                     &config,

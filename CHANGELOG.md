@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `preview`: the archive round-trip proptest could generate two entries with the same name,
+  which a zip archive rejects outright and which made a tar's read-back order for the duplicate
+  an untested implementation detail rather than something the test meant to pin down; the
+  generated file list is now deduped (first occurrence wins) before building the expected
+  listing. The regression case proptest found is checked in under
+  `crates/preview/proptest-regressions/`.
+
 ### Added
+- `tui`: a "caps lock" header pill, shown for as long as Caps Lock is on and hidden the moment
+  it's off. `App` now tracks the state itself (`caps_lock`/`set_caps_lock`), updated from every
+  key event's `KeyEventState` — including under a modal view or prompt — so the pill stays
+  correct rather than only being read where `with_caps_lock_applied` already flips a letter's
+  case. Static, not blinking, matching the taste call already on record against a pulsing effect.
 - `theming`, `tui`: the rest of the UI overhaul's cinematic layer — a boot splash, gradient
   borders/titles, a typewriter preview reveal, and an optional system HUD; the pulsing selection
   raised alongside these last cycle is dropped from scope for good (built, verified, and cut on

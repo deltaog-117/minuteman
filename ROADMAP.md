@@ -849,6 +849,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   border/title colors with the gradient on against 9 with it off; and setting all four switches to
   `false` reproduced the old, un-cinematic behavior exactly — full content immediately, no system
   segment, and the same 9-color flat palette.
+- ✅ **Caps Lock header pill** – a "caps lock" pill now appears in the header (danger-colored,
+  next to the yanked/cut/marked pills) for as long as Caps Lock is on, and disappears the moment
+  it's off. `App` tracks the state itself (`caps_lock`/`set_caps_lock`) rather than reading it only
+  where `with_caps_lock_applied` already did, updated from every key event's `KeyEventState` —
+  modal views and prompts included, since those still read Caps Lock for typing even while they
+  own the keyboard — so the pill can never fall out of sync with what the next letter key does. No
+  blinking or pulsing: this project's own diary records a pulsing selection highlight built,
+  verified and then cut for being distracting, so a static, always-correct pill was chosen instead
+  of reviving that effect for a different indicator.
 - **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
   frequently visited paths don't require re-navigating the miller columns each time.
 
@@ -1036,7 +1045,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Then: press `s` to open a shell, then `Alt+n` to split it — the new pane's border fades in from
    the dim frame color while the one that just lost focus fades back out, instead of either one
    snapping instantly; `Alt+z`/`x`/`c`/`v` moves focus between panes with the same fade each time.
-   Then the newest: on launch, a brief splash names the app over the browser — press any key to
+   Then: on launch, a brief splash names the app over the browser — press any key to
    skip it, or just wait under a second. The current (middle) pane's border and title now sweep
    through a gradient between two theme colors instead of one flat shade. Select a longer text
    file and watch it stream in from the top instead of appearing all at once (scroll it, or wait —
@@ -1044,6 +1053,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    this session's uptime, load average and memory (Linux only; shows nothing elsewhere). Any of
    the four has its own `config.toml` switch (`boot_splash`, `gradient_borders`,
    `typewriter_preview`, `system_hud`) if you'd rather it not.
+   Then the newest: turn Caps Lock on — a "caps lock" pill appears in the header at once, in the
+   danger color, and disappears the moment it's off again, kept in sync on every key event (even
+   while a modal view or a prompt owns the keyboard) so it never lags behind what the next letter
+   key will actually do.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).

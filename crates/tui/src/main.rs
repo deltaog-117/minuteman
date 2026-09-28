@@ -1516,6 +1516,9 @@ fn run(
                 }
             }
             Event::Key(key) => {
+                // Kept in sync on every key event, modal views and prompts included, so the
+                // header pill never lags behind what the next keystroke will actually do.
+                app.set_caps_lock(key.state.contains(KeyEventState::CAPS_LOCK));
                 // A bare modifier key only shows up when the keyboard protocol is on. Only `Alt`
                 // means anything; releasing it with nothing pressed in between is the tap.
                 if let KeyCode::Modifier(modifier) = key.code {
@@ -2295,6 +2298,7 @@ fn draw(
                 marks_total: app.marked_total(),
                 clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
                 progress: app.progress(),
+                caps_lock: app.caps_lock(),
                 system: app.system_summary(Instant::now()),
             },
             config,

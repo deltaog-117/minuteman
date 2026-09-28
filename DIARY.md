@@ -53,6 +53,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-25 | External Preview Hooks | A new `tui::preview_hook` layer (COA A) reusing `ImagePreview`/`TextPreview`'s existing pipelines, at the user's direction — over pushing hook config/execution into the `preview` crate (B) or an image-only stage deferring text hooks (C) | ✅ Confirmed |
 | 2026-09-26 | UI Overhaul, Phase C (Start) | Animation tick plus animated shell-pane focus-border transitions (COA A); a pulsing selection was built, verified, and cut on taste alone before committing | ✅ Confirmed |
 | 2026-09-27 | UI Overhaul, Phase C (Remainder) | Boot splash, gradient borders/titles, typewriter preview reveal, system/git HUD off `/proc` with no new dependency (COA A, measured against the `sysinfo` crate's real +276 KiB/8-crate cost first); pulsing selection dropped from scope for good | ✅ Confirmed |
+| 2026-09-27 | Caps Lock Header Pill | Static header pill kept in sync from every key event's `KeyEventState` (COA A); a blinking/pulsing version, matching the plain reading of "loop it," was raised and rejected at the user's own clarification, consistent with the pulsing selection already cut for taste | ✅ Confirmed |
 
 ---
 
@@ -3856,6 +3857,65 @@ along the focused pane's border/title, against 9 with `gradient_borders = false`
 first frame showed the full 40-line file at once, no uptime segment, and the same flat 9-color
 palette as the gradient-off run — confirming all four switches actually gate their effect rather
 than merely existing in `config.toml`.
+
+---
+
+### Caps Lock Header Pill: Static, Not Blinking
+
+**Date:** 2026-09-27
+**Status:** Confirmed
+
+#### Context / Background
+
+`main.rs` already reads the keyboard protocol's `KeyEventState::CAPS_LOCK` flag to fix up a
+letter's case (`with_caps_lock_applied`, see the earlier "Caps Lock Under the Keyboard Protocol"
+entry above), but that flag was never kept anywhere — it was read and discarded once per
+keystroke. Asked to "add an icon for when caps lock is activated, loop it," the plain reading of
+"loop it" is a blinking or pulsing icon. This project's own diary record says otherwise: a pulsing
+selection highlight was built, verified, and cut in full before committing, on taste alone, and is
+recorded as "worth trying again with a subtler effect, if at all, but not by default." Rather than
+guess against that precedent, the user was asked directly what "loop it" meant here; the answer
+was that the icon should be added continuously — kept in sync every time through the main loop —
+not that it should blink, "so I can distinguish what commands I can run."
+
+#### Options Considered
+
+**Option A: A static header pill, always kept in sync (chosen)**
+- `App` gains a `caps_lock: bool` field and `set_caps_lock`/`caps_lock` methods; `main`'s event
+  loop calls `set_caps_lock(key.state.contains(KeyEventState::CAPS_LOCK))` as the very first thing
+  it does with every `Event::Key`, ahead of the `Alt`-layer and modal-view branches, so a modal
+  view or a prompt owning the keyboard never leaves the pill stale. `HeaderView` gains a
+  `caps_lock: bool` field; `render_header` shows a danger-colored "caps lock" pill, using a new
+  `Glyphs::caps_lock` glyph (`⇪` for the unicode/nerd sets, empty for ascii, matching how
+  yanked/cut/marked already handle a glyph-less set), exactly while it's true.
+- No new poll-timeout tier, no animation clock, no new dependency; the pill costs nothing beyond
+  what the header already recomputes every frame.
+
+**Option B: A blinking/pulsing pill**
+- Matches the literal words "loop it" most directly, but reintroduces exactly the kind of
+  continuous animation this project's own diary already tried and rejected as distracting for a
+  different indicator (the pulsing selection). Would also need a poll-timeout change (the idle
+  tick is 100ms; a convincing blink needs faster) for an indicator whose entire job is to be
+  noticed the instant it changes, not to visually compete for attention while it's on.
+
+Chosen at the user's direction, after asking directly rather than guessing: **A** — "loop it" meant
+wiring the check into the running event loop so the pill can never drift out of sync with what a
+letter key actually does next, not a repeating visual effect.
+
+#### Consequences
+
+`Glyphs` gained one more field (`caps_lock`), threaded through all three glyph sets and the
+`glyphs sample` output the same way every other pill's symbol already is — no special-casing.
+`App::caps_lock`/`set_caps_lock` are plain synchronous state, no `Instant`/tick machinery, so they
+carry no risk of drifting from real time the way an animated effect would. The pill sits first in
+the header's pill list, ahead of the progress/clipboard/marks pills, since Caps Lock changes what
+every subsequent letter keystroke does and is the one piece of header state worth seeing first.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green (408 passed,
+including new tests: `glyphs`'s ascii-purity and pill tests extended to cover `caps_lock`,
+`hud::tests::the_caps_lock_pill_shows_only_while_it_is_on`, and
+`app::tests::caps_lock_starts_off_and_tracks_the_last_key_event`).
 
 ---
 
