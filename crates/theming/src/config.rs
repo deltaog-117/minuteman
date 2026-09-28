@@ -164,12 +164,16 @@ pub(crate) struct RawAppearance {
 /// re-serialize (which would lose comments in a hand-edited file) is exactly the right tool for
 /// it. Layered highest of the three, so a saved pick always wins over the hand-edited files until
 /// it is changed again from inside the app.
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 #[serde(default)]
 pub struct RawLocal {
     pub theme: RawTheme,
     pub ui: RawUi,
     pub panels: RawPanels,
+    /// The appearance popup's "Text styles" category — see `Config::local_style`.
+    pub style: RawStyles,
+    /// The appearance popup's "Font" category — see `Config::local_font`.
+    pub font: RawFont,
     /// Themes saved from the appearance popup's "Save theme" row, each a full color snapshot
     /// (see [`RawTheme::from_theme`]) rather than an overlay — a saved theme must still look the
     /// same after `theme`/`config.toml` change around it.
@@ -252,8 +256,17 @@ pub struct Config {
     pub local_ui: RawUi,
     /// Bold, italic, ... per interface element.
     pub styles: Styles,
+    /// `local.toml`'s own `[style]` table — see `local_theme`. Unlike the other `local_*` fields,
+    /// nothing currently previews this live in `draw` beyond what `effective_styles` resolves
+    /// each frame from it, since a style edit (unlike a color) has no in-progress picker state to
+    /// preview ahead of a commit.
+    pub local_style: RawStyles,
     /// The font `init-terminal` prints; not something the TUI itself can apply.
     pub font: Font,
+    /// `local.toml`'s own `[font]` table — see `local_theme`. The font can't be previewed inside
+    /// the TUI either way (the terminal owns it), so this only ever matters to a later
+    /// `init-terminal` invocation, which reads it fresh from disk.
+    pub local_font: RawFont,
     /// How many file columns are drawn and whether the header/status-bar chrome is shown. The
     /// settings popup (`Space` then `t`) edits this live, in memory, for the running session, and
     /// saves it to `local.toml`.
@@ -325,8 +338,10 @@ impl Config {
                 .overlay(local.ui.clone())
                 .into(),
             local_ui: local.ui,
-            styles: appearance.style.into(),
-            font: appearance.font.into(),
+            styles: appearance.style.overlay(local.style.clone()).into(),
+            local_style: local.style,
+            font: appearance.font.overlay(local.font.clone()).into(),
+            local_font: local.font,
             panels,
             local_panels: local.panels,
             local_custom_themes: local.custom_themes,
@@ -575,6 +590,25 @@ mod tests {
                 .theme_is_customized,
             "a theme saved from the appearance popup counts as customized too"
         );
+    }
+
+    /// `local.toml`'s `[style]`/`[font]` tables layer onto `appearance.toml`'s the same way
+    /// `[theme]`/`[ui]` do, and are also exposed unmerged for the appearance popup to seed from.
+    #[test]
+    fn local_style_and_font_layer_onto_appearance_toml_and_are_exposed_unmerged() {
+        let config = Config::from_sources(
+            None,
+            Some("[style]\ndir = [\"italic\"]\n[font]\nfamily = \"Iosevka\"\nsize = 13.0\n"),
+            Some("[style]\ndir = [\"bold\"]\n[font]\nsize = 16.0\n"),
+        );
+        assert!(config.styles.dir.bold && !config.styles.dir.italic);
+        assert_eq!(
+            (config.font.family.as_str(), config.font.size),
+            ("Iosevka", 16.0)
+        );
+        assert_eq!(config.local_style.dir, Some(vec!["bold".to_string()]));
+        assert_eq!(config.local_font.family, None);
+        assert_eq!(config.local_font.size, Some(16.0));
     }
 
     /// `local.toml` (what the popups save) is layered highest — above both hand-edited files —

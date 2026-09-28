@@ -55,6 +55,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-27 | UI Overhaul, Phase C (Remainder) | Boot splash, gradient borders/titles, typewriter preview reveal, system/git HUD off `/proc` with no new dependency (COA A, measured against the `sysinfo` crate's real +276 KiB/8-crate cost first); pulsing selection dropped from scope for good | ✅ Confirmed |
 | 2026-09-27 | Caps Lock Header Pill | Static header pill kept in sync from every key event's `KeyEventState` (COA A); a blinking/pulsing version, matching the plain reading of "loop it," was raised and rejected at the user's own clarification, consistent with the pulsing selection already cut for taste | ✅ Confirmed |
 | 2026-09-28 | Bookmarks / Marks | A `main.rs`-local pending-chord (mirroring `shell_chord`) plus a new `RawLocal::bookmarks` field reusing `local.toml` (COA A), over a heavier `Prompt`-variant UI (B) or a whole new file format and picker overlay (C) | ✅ Confirmed |
+| 2026-09-28 | Full Appearance Editor | Category submenu plus a real two-axis gradient-square/hue-strip color picker (COA A), over a single long scrolling list with the same picker (B) or a category menu with H/S/V slider bars (C) | ✅ Confirmed |
 
 ---
 
@@ -3993,6 +3994,65 @@ back with `jumped to bookmark 'a'`; `` ` `` then `z` (never saved) showed `no bo
 without changing directory or crashing; the mode pill read `SET BOOKMARK`/`BOOKMARK` while each
 chord was pending; `q` quit cleanly. `local.toml` came out exactly as expected: `[bookmarks]`
 followed by `a = "/tmp/bm-test"`.
+
+---
+
+### Full Appearance Editor: Categories and a Two-Axis Color Picker (COA A)
+
+**Date:** 2026-09-28
+**Status:** Confirmed
+
+#### Context / Background
+
+The appearance popup covered a Theme pick, six highlight colors, border style, separator and
+glyphs; the rest of `Theme`'s ~22 color fields, every `[style]` element's modifier flags and the
+font table were still config-file-only. The color picker was also a channel-select-then-nudge
+widget (arrow keys over `Hsv`), not the click-into-a-square dialog a desktop color chooser gives.
+Both gaps had to close for "a full editor with a VS Code-style picker", so the options below
+bundle structure and picker fidelity.
+
+#### Options Considered
+
+**Option A: category submenu plus a true 2D picker (chosen)**
+- Five categories (Theme & colors, Border & separator, Glyphs, Text styles, Font), each a flat row
+  list with a "‹ Back" row. Every color row can toggle into a saturation/value gradient square plus
+  a hue strip, painted in truecolor cells and set by click or drag. Difficulty: high. Closest to
+  what was asked and to the design the roadmap had already scoped and deferred; the cost is the
+  most new code (a render/hit-test module and the two-level view state).
+
+**Option B: the same 2D picker, one long scrollable list**
+- Same picker fidelity with no submenu state, but about 45 rows in a single scroll are harder to
+  scan than grouped categories. Difficulty: medium-high.
+
+**Option C: category submenu, picker as three clickable H/S/V bars**
+- Cheapest, since it reuses the existing `Hsv`/nudge logic, but it is a slider dialog rather than a
+  true square, so it undershoots the request. Difficulty: small-medium.
+
+Chosen: **A**, for the reason the roadmap note had already given: the 2D square is the part of
+"like VS Code" that matters, and categories keep the field count navigable.
+
+#### Consequences
+
+`View` tracks the level and `AppearancePopup::rows()` builds the current list fresh rather than
+returning a `'static` slice, since which rows exist depends on where the cursor drilled into.
+`picker_areas` and the `hsv_from_*_click` functions are pure geometry, and the same rectangles the
+renderer paints are what a click is hit-tested against, so paint and hit-test cannot disagree.
+Style and font edits go through `RawStyles::set_by_index`, indexed by `STYLE_ELEMENTS`, so the
+popup addresses an element by a `Row::StyleElement(usize)` alone instead of a 22-armed match. The
+popup's mouse handling in `main.rs` keeps a `dragging_picker` flag, set on a mouse-down inside
+the square or strip and cleared on release. `RawLocal` lost its `Eq` derive because `RawFont`
+holds an `f64`. The font is never previewed live, since the terminal owns it, so it only feeds a
+later `minuteman init-terminal`.
+
+Known gap: the picker always paints `Color::Rgb` cells, with no fallback for terminals without
+truecolor, so on a 256-color terminal it will be approximated by the terminal or look banded.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings` and `cargo test --workspace` are all clean. `tui` runs 410 tests
+and `theming` 85. Two things were fixed to get there: rustfmt's import ordering under the 2024
+edition, and a `field_reassign_with_default` lint in a `commit` test, which now builds its
+expected `RawTheme` with struct-update syntax. The picker was not smoke-tested against the
+compiled binary in a real terminal this cycle.
 
 ---
 

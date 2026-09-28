@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `theming`, `tui`: the appearance popup is now a full editor. It opens on five categories (Theme &
+  colors, Border & separator, Glyphs, Text styles, Font) instead of one flat list, and "Theme &
+  colors" covers all 22 `Theme` color fields rather than six. A color row's `Tab` mode is now a
+  real two-axis picker, a saturation/value gradient square plus a hue strip, settable by click or
+  drag, in addition to typed hex. "Text styles" edits each `[style]` element's modifiers with a
+  live preview, and "Font" edits the family and size; both persist to `local.toml`'s new `[style]`
+  and `[font]` tables. `theming` gains `Hsv::to_rgb`, `Mods::names`, `Styles::overlay_raw`/
+  `by_index`/`with_index` and `RawStyles::set_by_index`, and `RawStyles`/`RawFont` now serialize.
 - `theming`, `tui`: Ranger-style directory bookmarks. `` ` `` then a letter or digit jumps to the
   directory saved under that register; `B` then a letter or digit saves the browsed directory
   there (`m` was already `cut`, so bookmark-set defaults to `B` instead of Ranger's own `m`). Both

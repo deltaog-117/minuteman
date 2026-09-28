@@ -869,6 +869,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `[bookmarks]` table (a `BTreeMap<char, PathBuf>`, mirroring how saved custom themes already live
   there) so they survive a restart. A miss (jumping to a register nothing was ever saved under)
   just reports that in the status line rather than erroring.
+- ✅ **Full appearance editor with a real color picker (COA A from the appearance-popup cycle)** –
+  the appearance popup is now two levels deep: a root list of five categories (Theme & colors,
+  Border & separator, Glyphs, Text styles, Font) plus "Save theme"/"Reset to defaults", and each
+  category drills into its own flat row list with a "‹ Back" row on top. "Theme & colors" now
+  covers all 22 `Theme` color fields, not just six. Any color row toggles (`Tab`) into a
+  VS Code-style picker: a saturation/value gradient square and a hue strip, painted in truecolor
+  cells and set by click or drag, alongside the existing typed hex entry. "Text styles" edits every
+  `[style]` element's modifier list (bold, italic, dim, underline, reverse, strikethrough) with a
+  live preview, and "Font" edits the family and size. Style and font edits persist to
+  `local.toml`'s new `[style]` and `[font]` tables; the font can't be applied by the TUI (the
+  terminal owns it), so it only feeds a later `minuteman init-terminal`.
 
 ---
 
@@ -892,16 +903,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Undo history for recent file operations** – a stack of recent copy/move/delete/trash/rename/
   create operations that can be stepped back through. Delete-to-trash itself shipped this cycle
   (see Completed); this is the remaining half of the old "trash + undo history" item.
-- **Full appearance editor: every field, with categories (COA B from the appearance-popup
-  cycle)** – the appearance popup (see Completed) covers a Theme pick plus six highlight colors,
-  border style, separator and glyphs; the rest of `Theme`'s ~19 fields, every `[style]` element's
-  bold/italic/… flags, and the font table are still config-file-only (though now that saves are
-  wired up to `local.toml`, whatever this editor eventually adds gets persistence for free). The
-  fuller design considered at the time: a category submenu (Theme colors / Border & separator /
-  Glyphs / Styles / Font) reusing `ContextMenu`'s hover/click/submenu machinery, with the same
-  free-text entry the popup already has for a leaf field. Deferred rather than built in the same
-  cycle because free-text editing of ~40 fields behind a two-level submenu is a project of its
-  own, not a bounded addition to one already-large feature.
 - **Saved custom themes: reselect, rename, delete** – the color picker and "Save theme" row (see
   Completed) can create and update named themes in `local.toml`, but the Theme row's cycle still
   only knows the five fixed built-in palettes — there's no way yet to pick a previously saved
@@ -1071,6 +1072,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    letter to jump straight back, or a letter nothing was ever saved under to see `no bookmark at
    'x'` instead of an error. Either chord shows `SET BOOKMARK`/`BOOKMARK` in the status bar's mode
    pill while it's waiting for that second key, with `Esc` to back out.
+   Then the newest: press `a` for the appearance popup — it
+   now opens on five categories instead of one long list. Enter "Theme & colors", move to any
+   color and press `Tab` for the picker: click or drag in the square to set saturation and value,
+   and in the strip beneath it to set the hue. "Text styles" takes a comma-separated modifier list
+   per element (`bold, italic`) and previews it as you type; every commit is saved to `local.toml`.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).

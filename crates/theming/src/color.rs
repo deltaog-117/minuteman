@@ -47,9 +47,16 @@ impl Hsv {
     /// Renders as the lowercase `#rrggbb` form every other color value in `appearance.toml` uses.
     /// Always 7 characters; never fails, since every `Hsv` (once clamped) maps to some color.
     pub fn to_hex(self) -> String {
-        let Self { h, s, v } = self.clamped();
-        let (r, g, b) = hsv_to_rgb(h, s, v);
+        let (r, g, b) = self.to_rgb();
         format!("#{r:02x}{g:02x}{b:02x}")
+    }
+
+    /// The RGB byte triple this color resolves to — what the appearance popup's gradient-square
+    /// and hue-strip pickers paint each terminal cell with (see `tui::appearance_popup`), rather
+    /// than round-tripping through a hex string just to parse it back for rendering.
+    pub fn to_rgb(self) -> (u8, u8, u8) {
+        let Self { h, s, v } = self.clamped();
+        hsv_to_rgb(h, s, v)
     }
 }
 
@@ -182,6 +189,17 @@ mod tests {
         assert_eq!(clamped.h, 330.0);
         assert_eq!(clamped.s, 100.0);
         assert_eq!(clamped.v, 0.0);
+    }
+
+    #[test]
+    fn to_rgb_agrees_with_to_hex() {
+        let hsv = Hsv {
+            h: 200.0,
+            s: 60.0,
+            v: 75.0,
+        };
+        let (r, g, b) = hsv.to_rgb();
+        assert_eq!(hsv.to_hex(), format!("#{r:02x}{g:02x}{b:02x}"));
     }
 
     #[test]

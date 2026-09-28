@@ -22,7 +22,7 @@
 //! it — so `[font]` exists to feed `minuteman init-terminal`, which prints a terminal config with
 //! it.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Text attributes for one element. A set of flags rather than a list of names so an invalid
 /// combination can't be represented and the renderer never re-parses strings.
@@ -55,6 +55,32 @@ impl Mods {
         }
         mods
     }
+
+    /// The active flags as the names `parse` accepts, in a fixed order — the inverse of `parse`,
+    /// used to seed the appearance popup's edit buffer with an element's current value (see
+    /// `tui::appearance_popup`) and to show it in the popup's value column.
+    pub fn names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.bold {
+            names.push("bold");
+        }
+        if self.italic {
+            names.push("italic");
+        }
+        if self.dim {
+            names.push("dim");
+        }
+        if self.underline {
+            names.push("underline");
+        }
+        if self.reverse {
+            names.push("reverse");
+        }
+        if self.crossed_out {
+            names.push("strikethrough");
+        }
+        names
+    }
 }
 
 /// Declares, once, everything that needs a per-element entry: the resolved `Styles` struct, its
@@ -76,9 +102,42 @@ macro_rules! element_styles {
             }
         }
 
+        impl Styles {
+            /// Layers `overrides` on top of `self`, element by element — the same live,
+            /// in-session-edit shape `Theme::overlay_raw` gives colors, for the appearance popup's
+            /// "Text styles" category. An element left `None` in `overrides` keeps `self`'s value.
+            pub fn overlay_raw(&self, overrides: &RawStyles) -> Styles {
+                Self {
+                    $($field: overrides
+                        .$field
+                        .as_deref()
+                        .map_or(self.$field, |names| Mods::parse(names)),)*
+                }
+            }
+
+            /// The element at `STYLE_ELEMENTS[index]`'s resolved flags, or `None` if `index` is
+            /// out of range. Pairs with `RawStyles::set_by_index` — both index `STYLE_ELEMENTS` in
+            /// the same order, which is what lets the appearance popup address an element by its
+            /// `Row::StyleElement(usize)` alone.
+            pub fn by_index(&self, index: usize) -> Option<Mods> {
+                [$(self.$field),*].get(index).copied()
+            }
+
+            /// `self` with the element at `index` replaced by `mods` — a no-op if `index` is out
+            /// of range. Used for the popup's live preview of an in-progress edit; a committed
+            /// edit instead goes through `RawStyles::set_by_index` so it can be persisted.
+            pub fn with_index(mut self, index: usize, mods: Mods) -> Styles {
+                let slots: [&mut Mods; STYLE_ELEMENTS.len()] = [$(&mut self.$field),*];
+                if let Some(slot) = slots.into_iter().nth(index) {
+                    *slot = mods;
+                }
+                self
+            }
+        }
+
         /// `[style]` as written in the file: each element is an optional list of modifier names.
         /// A list *replaces* that element's default (so `dir = []` turns its bold off).
-        #[derive(Debug, Clone, Default, Deserialize)]
+        #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
         #[serde(default)]
         pub struct RawStyles {
             $(pub $field: Option<Vec<String>>,)*
@@ -88,6 +147,18 @@ macro_rules! element_styles {
             /// `top` wins wherever it sets an element; otherwise `self` shows through.
             pub fn overlay(self, top: RawStyles) -> RawStyles {
                 RawStyles { $($field: top.$field.or(self.$field),)* }
+            }
+
+            /// Sets the element at `STYLE_ELEMENTS[index]` to `names` (a modifier-name list, or
+            /// `None`/an empty list to clear it back to its default) — a no-op if `index` is out
+            /// of range. How the appearance popup commits a `Row::StyleElement(usize)` edit
+            /// without a 22-armed match at the call site.
+            pub fn set_by_index(&mut self, index: usize, names: Option<Vec<String>>) {
+                let slots: [&mut Option<Vec<String>>; STYLE_ELEMENTS.len()] =
+                    [$(&mut self.$field),*];
+                if let Some(slot) = slots.into_iter().nth(index) {
+                    *slot = names;
+                }
             }
         }
 
@@ -163,7 +234,7 @@ impl Default for Font {
 }
 
 /// `[font]` as written in the file.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawFont {
     pub family: Option<String>,
@@ -274,6 +345,58 @@ mod tests {
             .collect();
         let styles: Styles = raw(&all_bold).into();
         assert!(styles.doc.bold && styles.other.bold && styles.hint_key.bold);
+    }
+
+    #[test]
+    fn mods_names_round_trips_through_parse() {
+        let mods = Mods::parse(&["bold", "underline"]);
+        assert_eq!(mods.names(), vec!["bold", "underline"]);
+        assert_eq!(Mods::parse(&mods.names()), mods);
+        assert!(Mods::default().names().is_empty());
+    }
+
+    #[test]
+    fn styles_overlay_raw_lets_an_override_win_per_element() {
+        let base = Styles::default();
+        let overrides = raw("dir = [\"italic\"]");
+        let overlaid = base.overlay_raw(&overrides);
+        assert!(overlaid.dir.italic && !overlaid.dir.bold);
+        assert_eq!(
+            overlaid.selection, base.selection,
+            "an element the override doesn't mention keeps the base's value"
+        );
+    }
+
+    #[test]
+    fn by_index_and_set_by_index_agree_on_the_same_element() {
+        let index = STYLE_ELEMENTS
+            .iter()
+            .position(|&e| e == "dir")
+            .expect("dir is a real element");
+        let styles = Styles::default();
+        assert_eq!(styles.by_index(index), Some(styles.dir));
+        assert_eq!(styles.by_index(STYLE_ELEMENTS.len()), None, "out of range");
+
+        let mut overrides = RawStyles::default();
+        overrides.set_by_index(index, Some(vec!["italic".into()]));
+        let resolved: Styles = overrides.into();
+        assert!(resolved.dir.italic && !resolved.dir.bold);
+
+        let previewed = styles.with_index(index, Mods::parse(&["italic"]));
+        assert!(previewed.dir.italic);
+        assert_eq!(
+            previewed.selection, styles.selection,
+            "with_index only ever touches the one element"
+        );
+    }
+
+    #[test]
+    fn raw_styles_serializes_and_round_trips() {
+        let mut raw = RawStyles::default();
+        raw.set_by_index(0, Some(vec!["bold".into()]));
+        let text = toml::to_string(&raw).unwrap();
+        let parsed: RawStyles = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, raw);
     }
 
     #[test]

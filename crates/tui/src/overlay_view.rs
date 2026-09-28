@@ -20,13 +20,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use theming::{Config, Hsv};
+use theming::{Config, Hsv, Theme};
 
 use crate::appearance_popup::{
-    AppearancePopup, AppearanceView, Row as AppearanceRow, RowKind as AppearanceRowKind, SaveView,
+    self, AppearancePopup, AppearanceView, PICKER_EXTRA_LINES, Row as AppearanceRow,
+    RowKind as AppearanceRowKind, SV_BOX_HEIGHT, SaveView, View as AppearanceViewLevel,
 };
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
 use crate::glyphs;
@@ -273,23 +274,85 @@ pub fn render_settings(
 /// reads at a glance without decoding the hex/name text next to it.
 const SWATCH_WIDTH: usize = 3;
 
-/// `H 210° S 80% V 100%`, with the channel `Up`/`Down` currently selects bracketed, plus the hex
-/// it resolves to — what a color row shows while its picker mode is open.
-fn picker_line(hsv: Hsv, channel: u8) -> String {
-    let seg = |i: u8, label: &str, value: String| {
-        if i == channel {
-            format!("[{label} {value}]")
-        } else {
-            format!("{label} {value}")
-        }
-    };
+/// `H 210° S 80% V 100%`, plus the hex it resolves to — the readout line below the gradient
+/// square and hue strip while a color row's picker mode is open.
+fn picker_readout(hsv: Hsv) -> String {
     format!(
-        "{} {} {}  {}",
-        seg(0, "H", format!("{:.0}°", hsv.h)),
-        seg(1, "S", format!("{:.0}%", hsv.s)),
-        seg(2, "V", format!("{:.0}%", hsv.v)),
+        "H {:.0}°  S {:.0}%  V {:.0}%   {}",
+        hsv.h,
+        hsv.s,
+        hsv.v,
         hsv.to_hex()
     )
+}
+
+/// The fg color that reads clearly against an `(r, g, b)` background: white on a dark cell, black
+/// on a light one — used for the picker's crosshair marker, which sits on a different background
+/// color every time the hue or the cursor position changes.
+fn readable_on(r: u8, g: u8, b: u8) -> Color {
+    if Theme::is_dark(r, g, b) {
+        Color::White
+    } else {
+        Color::Black
+    }
+}
+
+/// The saturation/value gradient square for `hsv`'s hue, `width` cells wide and `SV_BOX_HEIGHT`
+/// tall, each cell painted with the color it represents (a real 2D color picker, not a slider) —
+/// a "+"/"◉" marks the cell nearest the current saturation/value. `hsv_from_sv_click` is this
+/// function's inverse: the same `width`/`SV_BOX_HEIGHT` grid a click is hit-tested against, so
+/// the two can never disagree about which cell is where.
+fn sv_box_lines(hsv: Hsv, width: u16, ascii: bool) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let marker = if ascii { "+" } else { "◉" };
+    let marker_x = ((hsv.s / 100.0 * f64::from(width)) as u16).min(width - 1);
+    let marker_y =
+        (((100.0 - hsv.v) / 100.0 * f64::from(SV_BOX_HEIGHT)) as u16).min(SV_BOX_HEIGHT - 1);
+    (0..SV_BOX_HEIGHT)
+        .map(|y| {
+            let spans: Vec<Span<'static>> = (0..width)
+                .map(|x| {
+                    let s = (f64::from(x) + 0.5) / f64::from(width) * 100.0;
+                    let v = 100.0 - (f64::from(y) + 0.5) / f64::from(SV_BOX_HEIGHT) * 100.0;
+                    let (r, g, b) = Hsv { h: hsv.h, s, v }.to_rgb();
+                    let bg = Style::default().bg(Color::Rgb(r, g, b));
+                    if x == marker_x && y == marker_y {
+                        Span::styled(marker, bg.fg(readable_on(r, g, b)))
+                    } else {
+                        Span::styled(" ", bg)
+                    }
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The one-row hue strip below the gradient square: the full 0°–360° range at full saturation and
+/// value, `width` cells wide — a "^"/"▲" marks the cell nearest the current hue. Its own inverse
+/// is `hue_from_strip_click`, the same grid a click is hit-tested against.
+fn hue_strip_line(hsv: Hsv, width: u16, ascii: bool) -> Line<'static> {
+    let width = width.max(1);
+    let marker = if ascii { "^" } else { "▲" };
+    let marker_x = ((hsv.h / 360.0 * f64::from(width)) as u16).min(width - 1);
+    let spans: Vec<Span<'static>> = (0..width)
+        .map(|x| {
+            let h = (f64::from(x) + 0.5) / f64::from(width) * 360.0;
+            let (r, g, b) = Hsv {
+                h,
+                s: 100.0,
+                v: 100.0,
+            }
+            .to_rgb();
+            let bg = Style::default().bg(Color::Rgb(r, g, b));
+            if x == marker_x {
+                Span::styled(marker, bg.fg(readable_on(r, g, b)))
+            } else {
+                Span::styled(" ", bg)
+            }
+        })
+        .collect();
+    Line::from(spans)
 }
 
 /// Draws the appearance popup: one row per setting, the cursor's row highlighted the same way a
@@ -307,9 +370,21 @@ pub fn render_appearance(
 ) {
     let theme = &config.theme;
     let rows = popup.rows();
-    let area = panel_area(frame.area(), rows.len());
+    let editing_picker = popup.editing_picker();
+    let extra = if editing_picker.is_some() {
+        usize::from(PICKER_EXTRA_LINES)
+    } else {
+        0
+    };
+    let area = panel_area(frame.area(), rows.len() + extra);
     frame.render_widget(Clear, area);
-    let block = style::themed_block(config, "appearance", true);
+    let title = match popup.view() {
+        AppearanceViewLevel::Root => "appearance".to_string(),
+        AppearanceViewLevel::Category(cat) => {
+            format!("appearance: {}", cat.label().trim_end_matches(" ›"))
+        }
+    };
+    let block = style::themed_block(config, &title, true);
     let inner = block.inner(area).inner(Margin::new(1, 0));
     frame.render_widget(block, area);
 
@@ -329,17 +404,9 @@ pub fn render_appearance(
     let hint_style = Style::default().fg(style::color(&theme.border_fg));
 
     let editing_row = popup.editing_row();
-    let editing_picker = popup.editing_picker();
-    let caret = if glyphs::of(config).ascii_borders {
-        "_"
-    } else {
-        "▏"
-    };
-    let swatch_glyph = if glyphs::of(config).ascii_borders {
-        "##"
-    } else {
-        "██"
-    };
+    let ascii = glyphs::of(config).ascii_borders;
+    let caret = if ascii { "_" } else { "▏" };
+    let swatch_glyph = if ascii { "##" } else { "██" };
 
     let mut lines = vec![Line::raw("")];
     lines.extend(rows.iter().enumerate().map(|(i, row)| {
@@ -358,16 +425,17 @@ pub fn render_appearance(
 
         let value = if being_edited {
             match editing_picker {
-                Some((hsv, channel)) => picker_line(hsv, channel),
+                Some(hsv) => picker_readout(hsv),
                 None => format!("{}{caret}", popup.editing_buffer().unwrap_or_default()),
             }
         } else {
             view.value(*row)
         };
         // The swatch tracks whatever's live — the in-progress edit if there is one, or the
-        // committed value otherwise — so nudging a slider or typing a hex repaints it immediately.
+        // committed value otherwise — so nudging the picker or typing a hex repaints it
+        // immediately.
         let swatch_hex = match (being_edited, editing_picker, popup.editing_buffer()) {
-            (true, Some((hsv, _)), _) => hsv.to_hex(),
+            (true, Some(hsv), _) => hsv.to_hex(),
             (true, None, Some(buffer)) => buffer.to_string(),
             _ => view.value(*row),
         };
@@ -392,6 +460,17 @@ pub fn render_appearance(
         Line::from(spans)
     }));
     lines.push(Line::raw(""));
+    if let Some(hsv) = editing_picker {
+        let box_width = appearance_popup::SV_BOX_WIDTH.min(inner.width);
+        lines.extend(sv_box_lines(hsv, box_width, ascii));
+        lines.push(Line::raw(""));
+        lines.push(hue_strip_line(hsv, box_width, ascii));
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(picker_readout(hsv), value_style));
+    }
+    let editing_is_color = editing_row
+        .map(|row| matches!(row.kind(), Some(AppearanceRowKind::Color)))
+        .unwrap_or(false);
     lines.push(match popup.save_view() {
         Some(SaveView::Choice(name)) => Line::styled(
             format!("u: update '{name}'   n: save as new   Esc: cancel"),
@@ -405,15 +484,20 @@ pub fn render_appearance(
             ),
         ]),
         None if editing_picker.is_some() => Line::styled(
-            "up/down picks H/S/V, left/right adjusts, tab for hex, enter confirms, Esc cancels",
+            "click/drag the square or the hue bar, arrows move, [ ] adjusts hue, tab for hex, \
+             enter confirms, Esc cancels",
             hint_style,
         ),
-        None if editing_row.is_some() => Line::styled(
+        None if editing_row.is_some() && editing_is_color => Line::styled(
             "type to edit, tab for the color picker, enter confirms, Esc cancels",
             hint_style,
         ),
+        None if editing_row.is_some() => {
+            Line::styled("type to edit, enter confirms, Esc cancels", hint_style)
+        }
         None => Line::styled(
-            "j/k moves, enter edits/cycles, a click acts, Esc closes — session only, not saved",
+            "j/k moves, enter opens/edits/cycles, a click acts, Esc back/closes — session only, \
+             not saved",
             hint_style,
         ),
     });

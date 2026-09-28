@@ -94,8 +94,8 @@ use shared::{DirEntryInfo, LocalVfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
 use theming::{
-    Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, PreviewHook, RawLocal,
-    RawPanels, RawTheme, RawUi, Theme, Ui,
+    Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, PreviewHook, RawFont,
+    RawLocal, RawPanels, RawStyles, RawTheme, RawUi, Styles, Theme, Ui,
 };
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
@@ -353,11 +353,14 @@ struct Overlay<'a> {
     usage: Option<&'a DiskUsageView>,
     settings: Option<&'a SettingsPopup>,
     appearance: Option<&'a AppearancePopup>,
-    /// `local.toml`'s three tables, live for the running session — see `run`'s `local_theme`/
-    /// `local_ui`/`local_panels` and `effective_theme`/`effective_ui`/`effective_panels`.
+    /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
+    /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
+    /// `effective_panels`/`effective_styles`.
     local_theme: &'a RawTheme,
     local_ui: &'a RawUi,
     local_panels: &'a RawPanels,
+    local_style: &'a RawStyles,
+    local_font: &'a RawFont,
     /// The appearance popup's saved custom themes and which one (if any) is active — see
     /// `RawLocal::custom_themes`/`active_custom_theme`.
     local_custom_themes: &'a [CustomTheme],
@@ -749,6 +752,8 @@ fn persist_local(
     local_theme: &RawTheme,
     local_ui: &RawUi,
     local_panels: &RawPanels,
+    local_style: &RawStyles,
+    local_font: &RawFont,
     local_custom_themes: &[CustomTheme],
     local_active_custom_theme: &Option<String>,
     local_bookmarks: &BTreeMap<char, PathBuf>,
@@ -758,6 +763,8 @@ fn persist_local(
         theme: local_theme.clone(),
         ui: local_ui.clone(),
         panels: local_panels.clone(),
+        style: local_style.clone(),
+        font: local_font.clone(),
         custom_themes: local_custom_themes.to_vec(),
         active_custom_theme: local_active_custom_theme.clone(),
         bookmarks: local_bookmarks.clone(),
@@ -765,6 +772,12 @@ fn persist_local(
     if let Err(e) = Config::save_local(&local) {
         app.status = Some(format!("could not save to local.toml: {e}"));
     }
+}
+
+/// The text styles in effect: `config.styles` with the appearance popup's own live overrides
+/// (from `local_style`, "Text styles" category) layered on top.
+fn effective_styles(config: &Config, local_style: &RawStyles) -> Styles {
+    config.styles.overlay_raw(local_style)
 }
 
 /// What the appearance popup's "Save theme" row should offer, given the live theme and the
@@ -789,6 +802,20 @@ fn classify_save(theme: &Theme, custom_themes: &[CustomTheme], active: Option<&s
 /// so a click and the key that reaches the same row behave identically. `local_panels` is only
 /// read here (it's the settings popup's own field of `local.toml`), so every save still carries
 /// whatever panel layout was last saved even though this outcome didn't touch it.
+/// `config.font` with the appearance popup's own live overrides layered on top. Font has only
+/// two fields, so this doesn't need a `RawFont::overlay_raw`-style helper in `theming` the way
+/// `Theme`/`Styles` do — it's never previewed live either way, since the terminal (not Minuteman)
+/// owns the font; this only ever feeds the edit buffer's starting value.
+fn effective_font(config: &Config, local_font: &RawFont) -> theming::Font {
+    theming::Font {
+        family: local_font
+            .family
+            .clone()
+            .unwrap_or_else(|| config.font.family.clone()),
+        size: local_font.size.unwrap_or(config.font.size),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_appearance_outcome(
     outcome: AppearanceOutcome,
@@ -796,21 +823,31 @@ fn apply_appearance_outcome(
     local_theme: &mut RawTheme,
     local_ui: &mut RawUi,
     local_panels: &RawPanels,
+    local_style: &mut RawStyles,
+    local_font: &mut RawFont,
     local_custom_themes: &mut Vec<CustomTheme>,
     local_active_custom_theme: &mut Option<String>,
     local_bookmarks: &BTreeMap<char, PathBuf>,
     config: &Config,
     app: &mut App,
 ) {
-    let current_value = |row: AppearanceRow, local_theme: &RawTheme, local_ui: &RawUi| {
+    let current_value = |row: AppearanceRow,
+                         local_theme: &RawTheme,
+                         local_ui: &RawUi,
+                         local_style: &RawStyles,
+                         local_font: &RawFont| {
         let theme = effective_theme(config, local_theme);
         let ui = effective_ui(config, local_ui);
+        let styles = effective_styles(config, local_style);
+        let font = effective_font(config, local_font);
         let theme_name = appearance_popup::theme_name(local_theme.name.as_deref(), &theme);
         AppearanceView {
             theme: &theme,
             glyphs: ui.glyphs,
+            styles: &styles,
+            font: &font,
             theme_name,
-            // Never actually read: `current_value` is only called for a color or cycle row, and
+            // Never actually read: `current_value` is only called for an editable/cycle row, and
             // `Row::SaveTheme` is neither.
             active_custom_theme: None,
         }
@@ -820,14 +857,14 @@ fn apply_appearance_outcome(
         AppearanceOutcome::Stay => {}
         AppearanceOutcome::Close => *appearance = None,
         AppearanceOutcome::WantEdit(row) => {
-            let current = current_value(row, local_theme, local_ui);
+            let current = current_value(row, local_theme, local_ui, local_style, local_font);
             if let Some(popup) = appearance.as_mut() {
                 popup.begin_edit(current);
             }
         }
         AppearanceOutcome::Cycle(row) => {
             if let Some(AppearanceRowKind::Cycle(options)) = row.kind() {
-                let current = current_value(row, local_theme, local_ui);
+                let current = current_value(row, local_theme, local_ui, local_style, local_font);
                 let next = appearance_popup::next_in(options, &current);
                 if row == AppearanceRow::Glyphs {
                     local_ui.glyphs = Some(next);
@@ -838,6 +875,8 @@ fn apply_appearance_outcome(
                     local_theme,
                     local_ui,
                     local_panels,
+                    local_style,
+                    local_font,
                     local_custom_themes,
                     local_active_custom_theme,
                     local_bookmarks,
@@ -846,11 +885,26 @@ fn apply_appearance_outcome(
             }
         }
         AppearanceOutcome::Commit(row, value) => {
-            appearance_popup::commit(local_theme, row, value);
+            match row {
+                AppearanceRow::Glyphs => local_ui.glyphs = Some(value),
+                AppearanceRow::StyleElement(i) => {
+                    appearance_popup::commit_style(local_style, i, &value);
+                }
+                AppearanceRow::FontFamily => {
+                    local_font.family = (!value.trim().is_empty()).then_some(value);
+                }
+                AppearanceRow::FontSize => match value.trim().parse::<f64>() {
+                    Ok(size) => local_font.size = Some(size),
+                    Err(_) => app.status = Some(format!("'{value}' is not a valid font size")),
+                },
+                _ => appearance_popup::commit(local_theme, row, value),
+            }
             persist_local(
                 local_theme,
                 local_ui,
                 local_panels,
+                local_style,
+                local_font,
                 local_custom_themes,
                 local_active_custom_theme,
                 local_bookmarks,
@@ -860,6 +914,8 @@ fn apply_appearance_outcome(
         AppearanceOutcome::Reset => {
             *local_theme = RawTheme::default();
             *local_ui = RawUi::default();
+            *local_style = RawStyles::default();
+            *local_font = RawFont::default();
             // The saved custom themes themselves are kept — only which one (if any) the live
             // look is tracked against is cleared, since the live look is now the plain default.
             *local_active_custom_theme = None;
@@ -867,6 +923,8 @@ fn apply_appearance_outcome(
                 local_theme,
                 local_ui,
                 local_panels,
+                local_style,
+                local_font,
                 local_custom_themes,
                 local_active_custom_theme,
                 local_bookmarks,
@@ -905,6 +963,8 @@ fn apply_appearance_outcome(
                 local_theme,
                 local_ui,
                 local_panels,
+                local_style,
+                local_font,
                 local_custom_themes,
                 local_active_custom_theme,
                 local_bookmarks,
@@ -953,6 +1013,9 @@ fn run(
     // The divider (by id) currently being dragged, from a mouse-down that hit one. `None` means
     // no drag is in progress.
     let mut dragging_divider: Option<usize> = None;
+    // Whether the appearance popup's gradient square or hue strip is being dragged, from a
+    // mouse-down that hit one of them while a color row was in picker mode. Cleared on `Up`.
+    let mut dragging_picker = false;
     // The box's `(dx, dy)` offset from centered, in cells — dragging its top border (where the
     // "shell" title renders) moves the whole tiled box like a floating window's title bar,
     // distinct from dragging a divider between two panes inside it. Resets to `(0, 0)` on every
@@ -1019,6 +1082,8 @@ fn run(
     let mut local_theme = config.local_theme.clone();
     let mut local_ui = config.local_ui.clone();
     let mut local_panels = config.local_panels.clone();
+    let mut local_style = config.local_style.clone();
+    let mut local_font = config.local_font.clone();
     let mut local_custom_themes = config.local_custom_themes.clone();
     let mut local_active_custom_theme = config.local_active_custom_theme.clone();
     // The saved bookmark registers, mutated live by `Action::BookmarkSet` and persisted the same
@@ -1135,6 +1200,8 @@ fn run(
                     local_theme: &local_theme,
                     local_ui: &local_ui,
                     local_panels: &local_panels,
+                    local_style: &local_style,
+                    local_font: &local_font,
                     local_custom_themes: &local_custom_themes,
                     local_active_custom_theme: local_active_custom_theme.as_deref(),
                 },
@@ -1228,35 +1295,90 @@ fn run(
                     continue;
                 }
                 if appearance.is_some() {
-                    if let MouseEventKind::Down(_) = mouse.kind {
-                        let popup_area = overlay_view::panel_area(
-                            frame_area,
-                            appearance.as_ref().expect("checked above").rows().len(),
-                        );
-                        let outcome = match appearance_popup::hit(
-                            popup_area,
-                            Position::new(mouse.column, mouse.row),
-                        ) {
-                            AppearanceHit::Row(i)
-                                if mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
-                            {
-                                appearance.as_mut().expect("checked above").click_row(i)
+                    let popup_ref = appearance.as_ref().expect("checked above");
+                    let row_count = popup_ref.rows().len();
+                    let editing_picker = popup_ref.editing_picker();
+                    let extra = if editing_picker.is_some() {
+                        usize::from(appearance_popup::PICKER_EXTRA_LINES)
+                    } else {
+                        0
+                    };
+                    let popup_area = overlay_view::panel_area(frame_area, row_count + extra);
+                    let pos = Position::new(mouse.column, mouse.row);
+                    // While a color row is in picker mode, a click/drag inside the gradient
+                    // square or the hue strip sets the color directly; missing both areas falls
+                    // through to the ordinary row hit-test below (e.g. clicking a different row
+                    // to abandon this edit), the same as it always has.
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if editing_picker.is_some() => {
+                            let handled = appearance
+                                .as_mut()
+                                .expect("checked above")
+                                .click_picker(popup_area, pos);
+                            if handled {
+                                dragging_picker = true;
+                            } else {
+                                let outcome =
+                                    match appearance_popup::hit(popup_area, row_count, pos) {
+                                        AppearanceHit::Row(i) => {
+                                            appearance.as_mut().expect("checked above").click_row(i)
+                                        }
+                                        AppearanceHit::Outside => AppearanceOutcome::Close,
+                                        AppearanceHit::Inert => AppearanceOutcome::Stay,
+                                    };
+                                apply_appearance_outcome(
+                                    outcome,
+                                    &mut appearance,
+                                    &mut local_theme,
+                                    &mut local_ui,
+                                    &local_panels,
+                                    &mut local_style,
+                                    &mut local_font,
+                                    &mut local_custom_themes,
+                                    &mut local_active_custom_theme,
+                                    &local_bookmarks,
+                                    config,
+                                    app,
+                                );
                             }
-                            AppearanceHit::Outside => AppearanceOutcome::Close,
-                            AppearanceHit::Row(_) | AppearanceHit::Inert => AppearanceOutcome::Stay,
-                        };
-                        apply_appearance_outcome(
-                            outcome,
-                            &mut appearance,
-                            &mut local_theme,
-                            &mut local_ui,
-                            &local_panels,
-                            &mut local_custom_themes,
-                            &mut local_active_custom_theme,
-                            &local_bookmarks,
-                            config,
-                            app,
-                        );
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if dragging_picker => {
+                            appearance
+                                .as_mut()
+                                .expect("checked above")
+                                .click_picker(popup_area, pos);
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            dragging_picker = false;
+                        }
+                        MouseEventKind::Down(_) => {
+                            let outcome = match appearance_popup::hit(popup_area, row_count, pos) {
+                                AppearanceHit::Row(i)
+                                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
+                                {
+                                    appearance.as_mut().expect("checked above").click_row(i)
+                                }
+                                AppearanceHit::Outside => AppearanceOutcome::Close,
+                                AppearanceHit::Row(_) | AppearanceHit::Inert => {
+                                    AppearanceOutcome::Stay
+                                }
+                            };
+                            apply_appearance_outcome(
+                                outcome,
+                                &mut appearance,
+                                &mut local_theme,
+                                &mut local_ui,
+                                &local_panels,
+                                &mut local_style,
+                                &mut local_font,
+                                &mut local_custom_themes,
+                                &mut local_active_custom_theme,
+                                &local_bookmarks,
+                                config,
+                                app,
+                            );
+                        }
+                        _ => {}
                     }
                     continue;
                 }
@@ -1746,6 +1868,8 @@ fn run(
                                 &local_theme,
                                 &local_ui,
                                 &local_panels,
+                                &local_style,
+                                &local_font,
                                 &local_custom_themes,
                                 &local_active_custom_theme,
                                 &local_bookmarks,
@@ -1772,6 +1896,8 @@ fn run(
                         &mut local_theme,
                         &mut local_ui,
                         &local_panels,
+                        &mut local_style,
+                        &mut local_font,
                         &mut local_custom_themes,
                         &mut local_active_custom_theme,
                         &local_bookmarks,
@@ -1947,6 +2073,8 @@ fn run(
                                         &local_theme,
                                         &local_ui,
                                         &local_panels,
+                                        &local_style,
+                                        &local_font,
                                         &local_custom_themes,
                                         &local_active_custom_theme,
                                         &local_bookmarks,
@@ -2212,30 +2340,48 @@ fn draw(
         local_theme,
         local_ui,
         local_panels,
+        local_style,
+        local_font,
         local_custom_themes: _local_custom_themes,
         local_active_custom_theme,
     } = overlay;
     // The settings and appearance popups' changes are saved to `local.toml` (see `run`'s
-    // `local_theme`/`local_ui`/`local_panels`), but applying them still has to happen every
-    // render, the same as when they were session-only, since `config` itself is never mutated
-    // after startup. Cloning once here — rather than threading three more parameters through
-    // every `hud`/`overlay_view`/`style` function that already takes `config` — keeps the rest of
-    // `draw` (and every function it calls) unchanged; a `Config` is small next to the
-    // `Vec<ListItem>`s this function already rebuilds every frame regardless.
+    // `local_theme`/`local_ui`/`local_panels`/`local_style`), but applying them still has to
+    // happen every render, the same as when they were session-only, since `config` itself is
+    // never mutated after startup. Cloning once here — rather than threading four more parameters
+    // through every `hud`/`overlay_view`/`style` function that already takes `config` — keeps the
+    // rest of `draw` (and every function it calls) unchanged; a `Config` is small next to the
+    // `Vec<ListItem>`s this function already rebuilds every frame regardless. `local_font` isn't
+    // part of this: nothing in `draw` renders the font (the terminal owns it), so it only ever
+    // matters to a later `minuteman init-terminal` invocation, which reads it fresh from disk.
     let mut theme = effective_theme(config, local_theme);
-    // A color row's in-progress (uncommitted) edit previews live, on top of everything else —
-    // in text mode straight from the typed buffer, in picker mode from the HSV sliders' hex form.
+    let mut styles = effective_styles(config, local_style);
+    // A row's in-progress (uncommitted) edit previews live, on top of everything else — a color
+    // in text mode straight from the typed buffer, in picker mode from the gradient/hue picker's
+    // hex form; a "Text styles" element from its typed modifier-name buffer.
     if let Some(popup) = appearance {
-        if let (Some(row), Some(buffer)) = (popup.editing_row(), popup.editing_buffer()) {
-            theme = appearance_popup::preview(&theme, row, buffer);
-        } else if let (Some(row), Some((hsv, _))) = (popup.editing_row(), popup.editing_picker()) {
-            theme = appearance_popup::preview(&theme, row, &hsv.to_hex());
+        match (
+            popup.editing_row(),
+            popup.editing_buffer(),
+            popup.editing_picker(),
+        ) {
+            (Some(AppearanceRow::StyleElement(i)), Some(buffer), _) => {
+                styles = appearance_popup::preview_style(styles, i, buffer);
+            }
+            (Some(row), Some(buffer), _) => {
+                theme = appearance_popup::preview(&theme, row, buffer);
+            }
+            (Some(row), None, Some(hsv)) => {
+                theme = appearance_popup::preview(&theme, row, &hsv.to_hex());
+            }
+            _ => {}
         }
     }
     let effective_config = Config {
         panels: effective_panels(config, local_panels),
         theme,
         ui: effective_ui(config, local_ui),
+        styles,
         ..config.clone()
     };
     let config = &effective_config;
@@ -2471,16 +2617,20 @@ fn draw(
         );
     }
     if let Some(popup) = appearance {
-        // `config` is already the effective one composed above, so its `theme`/`ui.glyphs`
-        // already carry `local_theme`/`local_ui` (and any in-progress edit's live preview) —
-        // nothing more to layer here.
+        // `config` is already the effective one composed above, so its `theme`/`ui.glyphs`/
+        // `styles` already carry `local_theme`/`local_ui`/`local_style` (and any in-progress
+        // edit's live preview) — nothing more to layer for those. `font` is the one exception
+        // (see `draw`'s own doc above), so it's resolved here instead.
         let theme_name = appearance_popup::theme_name(local_theme.name.as_deref(), &config.theme);
+        let font = effective_font(config, local_font);
         overlay_view::render_appearance(
             frame,
             popup,
             &AppearanceView {
                 theme: &config.theme,
                 glyphs: config.ui.glyphs,
+                styles: &config.styles,
+                font: &font,
                 theme_name,
                 active_custom_theme: local_active_custom_theme,
             },
