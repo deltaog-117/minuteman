@@ -29,6 +29,7 @@ use crate::appearance_popup::{
     self, AppearancePopup, AppearanceView, ManageView, PICKER_EXTRA_LINES, Row as AppearanceRow,
     RowKind as AppearanceRowKind, SV_BOX_HEIGHT, SaveView, View as AppearanceViewLevel,
 };
+use crate::compress_popup::{CompressPopup, Row as CompressRow};
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
 use crate::glyphs;
 use crate::hud::{fit_width, pad_to, text_width};
@@ -192,6 +193,141 @@ pub fn panel_area(frame: Rect, rows: usize) -> Rect {
         width,
         height,
     )
+}
+
+/// Label column of the compress form, wide enough for "Delete originals".
+const COMPRESS_LABEL_COLUMN: usize = 18;
+
+/// The compress form's panel.
+pub fn compress_area(frame: Rect, popup: &CompressPopup) -> Rect {
+    panel_area(frame, popup.rows().len())
+}
+
+/// Where the form's rows are drawn: inside the border and one cell of margin, below a blank line.
+fn compress_inner(area: Rect) -> Rect {
+    area.inner(Margin::new(2, 1))
+}
+
+/// What a click landed on in the compress form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressHit {
+    Row(usize),
+    /// Inside the panel but not on a row.
+    Panel,
+    Outside,
+}
+
+pub fn compress_hit(
+    frame: Rect,
+    popup: &CompressPopup,
+    at: ratatui::layout::Position,
+) -> CompressHit {
+    let area = compress_area(frame, popup);
+    if !area.contains(at) {
+        return CompressHit::Outside;
+    }
+    let inner = compress_inner(area);
+    let first = inner.y.saturating_add(1);
+    let row = usize::from(at.y.saturating_sub(first));
+    if at.y >= first && row < popup.rows().len() && at.x >= inner.x && at.x < inner.right() {
+        CompressHit::Row(row)
+    } else {
+        CompressHit::Panel
+    }
+}
+
+/// Draws the compress form: one row per choice with the focused row highlighted, the name with
+/// its fixed extension and a cursor, and any error where the blank line under the rows is.
+pub fn render_compress(frame: &mut Frame<'_>, popup: &CompressPopup, config: &Config) {
+    let theme = &config.theme;
+    let area = compress_area(frame.area(), popup);
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, &popup.title(), true);
+    frame.render_widget(block, area);
+    let inner = compress_inner(area);
+
+    let label_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let dim_style = Style::default().fg(style::color(&theme.border_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+    let value_width = usize::from(inner.width).saturating_sub(COMPRESS_LABEL_COLUMN);
+
+    let mut lines = vec![Line::raw("")];
+    lines.extend(popup.rows().iter().enumerate().map(|(i, &row)| {
+        let base = if i == popup.cursor() {
+            selected_style
+        } else {
+            Style::default()
+        };
+        let inert = match row {
+            CompressRow::Name => !popup.name_applies(),
+            CompressRow::Level => !popup.level_applies(),
+            _ => false,
+        };
+        let mut spans = vec![Span::styled(
+            pad_to(row.label(), COMPRESS_LABEL_COLUMN),
+            label_style.patch(base),
+        )];
+        if row == CompressRow::Name && !inert {
+            // The extension is fixed by the Format row, so it is drawn after what is typed and
+            // never edited; a bar after the text marks where typing goes.
+            let extension = format!(".{}", popup.format().extension());
+            let room = value_width.saturating_sub(text_width(&extension) + 1);
+            spans.push(Span::styled(
+                fit_tail(popup.name(), room),
+                value_style.patch(base),
+            ));
+            if i == popup.cursor() {
+                spans.push(Span::styled("▏", value_style.patch(base)));
+            }
+            spans.push(Span::styled(extension, dim_style.patch(base)));
+        } else {
+            let style = if inert { dim_style } else { value_style };
+            spans.push(Span::styled(
+                fit_width(&popup.value(row), value_width),
+                style.patch(base),
+            ));
+        }
+        Line::from(spans)
+    }));
+    lines.push(match popup.error() {
+        Some(message) => Line::styled(
+            fit_width(message, usize::from(inner.width)),
+            Style::default().fg(style::color(&theme.danger_fg)),
+        ),
+        None => Line::raw(""),
+    });
+    lines.push(Line::styled(
+        "↑/↓ move, ←/→ or Space change, Enter compress, Esc cancel",
+        dim_style,
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The end of `text` that fits in `width` cells, with a leading `…` when the start is cut, since
+/// what is being typed is at the end.
+fn fit_tail(text: &str, width: usize) -> String {
+    if text_width(text) <= width {
+        return text.to_owned();
+    }
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 1;
+    for c in text.chars().rev() {
+        let w = text_width(&c.to_string());
+        if used + w > width {
+            break;
+        }
+        used += w;
+        kept.push(c);
+    }
+    kept.push('…');
+    kept.reverse();
+    kept.into_iter().collect()
 }
 
 /// Draws the Inspect panel for `view` in the middle of the screen.
@@ -641,12 +777,72 @@ mod tests {
 
     #[test]
     fn a_menu_drawn_at_the_screen_corner_still_fits() {
-        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
-        let menu = file_menu((39, 13));
+        // Tall enough for the whole file menu (it grew a row with "Compress…").
+        let mut terminal = Terminal::new(TestBackend::new(40, 17)).unwrap();
+        let menu = file_menu((39, 16));
         terminal
             .draw(|frame| render_menu(frame, &menu, &config()))
             .unwrap();
         assert!(screen_text(&terminal).contains("Inspect"));
+    }
+
+    fn compress_form() -> CompressPopup {
+        CompressPopup::new(
+            vec![
+                std::path::PathBuf::from("/w/a"),
+                std::path::PathBuf::from("/w/b"),
+            ],
+            std::path::PathBuf::from("/w"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_compress_form_draws_every_row_with_the_extension_after_the_name() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let form = compress_form();
+        terminal
+            .draw(|frame| render_compress(frame, &form, &config()))
+            .unwrap();
+        let text = screen_text(&terminal);
+        for label in [
+            "Name",
+            "Format",
+            "Level",
+            "One per item",
+            "Delete originals",
+        ] {
+            assert!(text.contains(label), "{label}");
+        }
+        assert!(text.contains("archive▏.zip"), "{text}");
+        assert!(text.contains("compress: 2 items"));
+    }
+
+    #[test]
+    fn a_click_on_a_compress_row_hits_that_row_and_outside_the_panel_misses() {
+        let frame = Rect::new(0, 0, 100, 30);
+        let form = compress_form();
+        let area = compress_area(frame, &form);
+        let inner = compress_inner(area);
+        for row in 0..form.rows().len() {
+            let at = Position::new(inner.x + 2, inner.y + 1 + row as u16);
+            assert_eq!(compress_hit(frame, &form, at), CompressHit::Row(row));
+        }
+        // The blank line above the first row, and the hint line, are inside but on no row.
+        assert_eq!(
+            compress_hit(frame, &form, Position::new(inner.x + 2, inner.y)),
+            CompressHit::Panel
+        );
+        assert_eq!(
+            compress_hit(frame, &form, Position::new(0, 0)),
+            CompressHit::Outside
+        );
+    }
+
+    #[test]
+    fn the_end_of_a_long_name_is_what_stays_visible() {
+        assert_eq!(fit_tail("short", 10), "short");
+        assert_eq!(fit_tail("abcdefghij", 5), "…ghij");
     }
 
     #[test]

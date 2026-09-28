@@ -34,7 +34,7 @@ use anyhow::Result;
 use browser::BrowserState;
 use browser::search::{Outcome as SearchOutcome, Query};
 use crossterm::event::KeyCode;
-use file_ops::archive::{self, ExtractLimits, Format};
+use file_ops::archive::{self, ExtractLimits, Format, Level};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use plugins::PluginManager;
 use shared::{LocalVfs, Vfs, VfsError};
@@ -43,6 +43,7 @@ use theming::PluginSpec;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::command::{self, Command};
+use crate::compress_popup::{self, CompressPopup};
 use crate::disk_usage::DiskUsageView;
 use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
@@ -254,6 +255,12 @@ impl BulkKind {
             BulkKind::Shell { .. } => "command",
         }
     }
+}
+
+/// One archive to write: `sources` packed into `out`.
+struct CompressJob {
+    sources: Vec<PathBuf>,
+    out: PathBuf,
 }
 
 enum BulkMsg {
@@ -556,7 +563,12 @@ impl App {
 
         // Delete and Trash both remove entries from the listing outright (no conflict case,
         // unlike Paste), so they share every branch below that Paste doesn't.
-        let is_delete = matches!(bulk.kind, BulkKind::Delete { .. } | BulkKind::Trash { .. });
+        // A compress can also remove entries (it may trash the originals), so it is treated the
+        // same way to keep the listing and the marks in step.
+        let is_delete = matches!(
+            bulk.kind,
+            BulkKind::Delete { .. } | BulkKind::Trash { .. } | BulkKind::Compress
+        );
         // Each item of a batch gets its own cancel flag, so a cancel that lands just as an item
         // finishes would otherwise be forgotten and the batch would carry on with the next one.
         let cancelled = bulk
@@ -1353,7 +1365,12 @@ impl App {
             return;
         }
         let out = browser.current_dir().join(name);
-        self.spawn_compress(sources, out, format);
+        self.spawn_compress(
+            vec![CompressJob { sources, out }],
+            format,
+            Level::default(),
+            false,
+        );
     }
 
     /// The channel and cancel flag every archive job reports through. The callback is what
@@ -1413,7 +1430,16 @@ impl App {
         });
     }
 
-    fn spawn_compress(&mut self, sources: Vec<PathBuf>, out: PathBuf, format: Format) {
+    /// Starts one archive job per entry of `jobs`, in order, stopping at the first failure. With
+    /// `delete_originals`, each job's sources go to the trash once its archive is complete, so a
+    /// failure never costs a file its only copy.
+    fn spawn_compress(
+        &mut self,
+        jobs: Vec<CompressJob>,
+        format: Format,
+        level: Level,
+        delete_originals: bool,
+    ) {
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
             return;
@@ -1432,13 +1458,28 @@ impl App {
                     false => ControlFlow::Continue(()),
                 }
             };
-            let result = archive::compress(
-                &sources,
-                &out,
-                format,
-                ConflictPolicy::Abort,
-                &mut on_progress,
-            );
+            let mut result = Ok(Outcome::Completed);
+            'jobs: for job in &jobs {
+                if let Err(e) = archive::compress_with_level(
+                    &job.sources,
+                    &job.out,
+                    format,
+                    level,
+                    ConflictPolicy::Abort,
+                    &mut on_progress,
+                ) {
+                    result = Err(e);
+                    break;
+                }
+                if delete_originals {
+                    for source in &job.sources {
+                        if let Err(e) = file_ops::trash(source) {
+                            result = Err(e);
+                            break 'jobs;
+                        }
+                    }
+                }
+            }
             let _ = tx.send(BulkMsg::Done(result));
         });
 
@@ -1449,6 +1490,63 @@ impl App {
             cancel: Some(cancel),
             rx,
         });
+    }
+
+    /// The compress form for the marked (or selected) entries, or `None` if there are none.
+    pub fn begin_compress_form(&mut self, browser: &BrowserState) -> Option<CompressPopup> {
+        let form = CompressPopup::new(
+            Self::marked_or_selected(browser),
+            browser.current_dir().to_path_buf(),
+        );
+        if form.is_none() {
+            self.status = Some("compress: nothing selected".into());
+        }
+        form
+    }
+
+    /// Starts the job a submitted compress form describes.
+    ///
+    /// # Errors
+    ///
+    /// A message for the form to show when the job cannot start: another operation is running, or
+    /// a file the job would create already exists (nothing is ever overwritten).
+    pub fn start_compress(&mut self, request: compress_popup::Request) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("an operation is already in progress".into());
+        }
+        let extension = request.format.extension();
+        let jobs: Vec<CompressJob> = match request.layout {
+            compress_popup::Layout::One { file_name } => vec![CompressJob {
+                sources: request.sources,
+                out: request.dir.join(file_name),
+            }],
+            compress_popup::Layout::PerItem => request
+                .sources
+                .into_iter()
+                .filter_map(|source| {
+                    // `a.txt` becomes `a.txt.zip`, so `a.txt` and `a.pdf` cannot collide.
+                    let mut name = source.file_name()?.to_os_string();
+                    name.push(format!(".{extension}"));
+                    Some(CompressJob {
+                        out: request.dir.join(name),
+                        sources: vec![source],
+                    })
+                })
+                .collect(),
+        };
+        if let Some(taken) = jobs
+            .iter()
+            .find(|job| std::fs::symlink_metadata(&job.out).is_ok())
+        {
+            return Err(format!("{} already exists", display_name(&taken.out)));
+        }
+        self.spawn_compress(
+            jobs,
+            request.format,
+            request.level,
+            request.delete_originals,
+        );
+        Ok(())
     }
 
     /// Same shape as `spawn_delete`, but sends each target to the desktop trash
@@ -1815,6 +1913,110 @@ mod tests {
             f.app.status
         );
         assert_eq!(std::fs::read(f.root.join("out.zip")).unwrap(), b"");
+    }
+
+    fn request(
+        f: &Fixture,
+        names: &[&str],
+        layout: compress_popup::Layout,
+    ) -> compress_popup::Request {
+        compress_popup::Request {
+            sources: names.iter().map(|n| f.root.join(n)).collect(),
+            dir: f.root.clone(),
+            format: Format::TarGz,
+            level: Level::Best,
+            layout,
+            delete_originals: false,
+        }
+    }
+
+    #[test]
+    fn the_compress_form_makes_one_archive_of_the_marked_items() {
+        let mut f = Fixture::new("form-one");
+        std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(f.root.join("b.txt"), b"beta").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+
+        let layout = compress_popup::Layout::One {
+            file_name: "both.tar.gz".into(),
+        };
+        f.app
+            .start_compress(request(&f, &["a.txt", "b.txt"], layout))
+            .unwrap();
+        assert!(f.app.is_busy());
+        f.wait_for_idle();
+
+        assert_eq!(f.app.status.as_deref(), Some("compress complete"));
+        let listing = preview::archive::list(&f.root.join("both.tar.gz")).unwrap();
+        let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a.txt", "b.txt"]);
+        // Nothing was deleted: the originals stay unless asked otherwise.
+        assert!(f.root.join("a.txt").exists() && f.root.join("b.txt").exists());
+    }
+
+    #[test]
+    fn the_compress_form_can_make_one_archive_per_item() {
+        let mut f = Fixture::new("form-per-item");
+        std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
+        std::fs::create_dir(f.root.join("dir")).unwrap();
+        std::fs::write(f.root.join("dir/inner"), b"x").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app
+            .start_compress(request(
+                &f,
+                &["a.txt", "dir"],
+                compress_popup::Layout::PerItem,
+            ))
+            .unwrap();
+        f.wait_for_idle();
+
+        assert_eq!(f.app.status.as_deref(), Some("compress complete"));
+        assert!(f.root.join("a.txt.tar.gz").is_file());
+        assert!(f.root.join("dir.tar.gz").is_file());
+    }
+
+    #[test]
+    fn the_compress_form_refuses_a_name_that_is_taken_without_starting_anything() {
+        let mut f = Fixture::new("form-taken");
+        std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(f.root.join("a.txt.tar.gz"), b"precious").unwrap();
+
+        let error = f
+            .app
+            .start_compress(request(&f, &["a.txt"], compress_popup::Layout::PerItem))
+            .unwrap_err();
+        assert_eq!(error, "a.txt.tar.gz already exists");
+        assert!(!f.app.is_busy());
+        assert_eq!(
+            std::fs::read(f.root.join("a.txt.tar.gz")).unwrap(),
+            b"precious"
+        );
+    }
+
+    #[test]
+    fn opening_the_compress_form_with_nothing_selected_says_so() {
+        let mut f = Fixture::new("form-empty");
+        assert!(f.app.begin_compress_form(&f.browser).is_none());
+        assert_eq!(f.app.status.as_deref(), Some("compress: nothing selected"));
+    }
+
+    #[test]
+    fn a_second_compress_cannot_start_while_one_runs() {
+        let mut f = Fixture::new("form-busy");
+        std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
+        let first = compress_popup::Layout::One {
+            file_name: "one.zip".into(),
+        };
+        let second = compress_popup::Layout::One {
+            file_name: "two.zip".into(),
+        };
+        f.app
+            .start_compress(request(&f, &["a.txt"], first))
+            .unwrap();
+        let refused = f.app.start_compress(request(&f, &["a.txt"], second));
+        assert_eq!(refused, Err("an operation is already in progress".into()));
+        f.wait_for_idle();
     }
 
     #[test]

@@ -100,6 +100,29 @@ impl Format {
     }
 }
 
+/// How hard [`compress_with_level`] works to make an archive small. Ignored for a plain `tar`,
+/// which is not compressed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Level {
+    /// The quickest, for a big tree or a slow disk.
+    Fast,
+    #[default]
+    Normal,
+    /// The smallest, at the cost of time.
+    Best,
+}
+
+impl Level {
+    /// The deflate level (1 to 9) this maps to.
+    fn deflate(self) -> u32 {
+        match self {
+            Self::Fast => 1,
+            Self::Normal => 6,
+            Self::Best => 9,
+        }
+    }
+}
+
 /// How much an extraction may create before it is stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractLimits {
@@ -551,6 +574,18 @@ pub fn compress(
     policy: ConflictPolicy,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<Outcome, FileOpsError> {
+    compress_with_level(sources, out, format, Level::default(), policy, on_progress)
+}
+
+/// [`compress`] with a chosen [`Level`].
+pub fn compress_with_level(
+    sources: &[PathBuf],
+    out: &Path,
+    format: Format,
+    level: Level,
+    policy: ConflictPolicy,
+    on_progress: &mut ProgressFn<'_>,
+) -> Result<Outcome, FileOpsError> {
     if sources.is_empty() {
         return Err(FileOpsError::NothingToArchive);
     }
@@ -574,7 +609,7 @@ pub fn compress(
     }
 
     let partial = partial_path(out)?;
-    let written = write_archive(sources, &partial, format, on_progress)
+    let written = write_archive(sources, &partial, format, level, on_progress)
         .and_then(|()| fs::rename(&partial, out).map_err(io_error(out)));
     if written.is_err() {
         let _ = fs::remove_file(&partial);
@@ -597,6 +632,7 @@ fn write_archive(
     sources: &[PathBuf],
     partial: &Path,
     format: Format,
+    level: Level,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<(), FileOpsError> {
     let file = OpenOptions::new()
@@ -607,7 +643,7 @@ fn write_archive(
     let sink = BufWriter::new(file);
     match format {
         Format::Zip => {
-            let mut packer = ZipPacker(zip::ZipWriter::new(sink));
+            let mut packer = ZipPacker(zip::ZipWriter::new(sink), level);
             walk(sources, &mut packer, on_progress)?;
             let mut sink = packer.0.finish().map_err(damaged)?;
             sink.flush().map_err(io_error(partial))
@@ -619,7 +655,8 @@ fn write_archive(
             sink.flush().map_err(io_error(partial))
         }
         Format::TarGz => {
-            let mut packer = TarPacker::new(GzEncoder::new(sink, Compression::default()));
+            let mut packer =
+                TarPacker::new(GzEncoder::new(sink, Compression::new(level.deflate())));
             walk(sources, &mut packer, on_progress)?;
             let encoder = packer.0.into_inner().map_err(io_error(partial))?;
             let mut sink = encoder.finish().map_err(io_error(partial))?;
@@ -696,13 +733,14 @@ impl<W: Write> Packer for TarPacker<W> {
     }
 }
 
-struct ZipPacker<W: Write + io::Seek>(zip::ZipWriter<W>);
+struct ZipPacker<W: Write + io::Seek>(zip::ZipWriter<W>, Level);
 
 impl<W: Write + io::Seek> Packer for ZipPacker<W> {
     fn add(&mut self, real: &Path, name: &Path, meta: &Metadata) -> Result<(), FileOpsError> {
         let stored = zip_name(name)?;
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(i64::from(self.1.deflate())))
             .unix_permissions(mode_of(meta))
             .large_file(meta.len() > u64::from(u32::MAX));
         let kind = meta.file_type();
@@ -1236,6 +1274,35 @@ mod tests {
             .filter(|n| n.ends_with(".partial"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_higher_level_makes_a_smaller_archive_that_still_round_trips() {
+        let dir = scratch("levels");
+        let text: String = (0..20_000).map(|i| format!("line {}\n", i % 97)).collect();
+        fs::write(dir.join("big.txt"), &text).unwrap();
+        for format in [Format::Zip, Format::TarGz] {
+            let size = |level: Level| {
+                let out = dir.join(format!("{level:?}.{}", format.extension()));
+                compress_with_level(
+                    &[dir.join("big.txt")],
+                    &out,
+                    format,
+                    level,
+                    ConflictPolicy::Abort,
+                    &mut go,
+                )
+                .unwrap();
+                let dest = dir.join(format!("out-{level:?}-{format:?}"));
+                unpack(&out, &dest, ConflictPolicy::Abort).unwrap();
+                assert_eq!(fs::read_to_string(dest.join("big.txt")).unwrap(), text);
+                fs::metadata(&out).unwrap().len()
+            };
+            let (fast, best) = (size(Level::Fast), size(Level::Best));
+            assert!(best <= fast, "{format:?}: best {best} > fast {fast}");
+            assert!(best < text.len() as u64 / 4, "{format:?}: {best}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -42,6 +42,8 @@ pub enum MenuCommand {
     PasteInto,
     Rename,
     Delete,
+    /// Opens the compress form for the clicked or marked entries.
+    Compress,
     /// The "new file or folder" prompt.
     New,
     ToggleMark,
@@ -169,6 +171,7 @@ pub fn entries(context: &Context, open_with: &[String]) -> Vec<Entry> {
                 Entry::Separator,
                 Entry::item("Rename", MenuCommand::Rename),
                 Entry::item(batch("Delete"), MenuCommand::Delete),
+                Entry::item(batch("Compress…"), MenuCommand::Compress),
                 Entry::Separator,
                 Entry::item(
                     if context.marked { "Unmark" } else { "Mark" },
@@ -528,6 +531,25 @@ mod tests {
     }
 
     #[test]
+    fn a_marked_batch_says_how_many_entries_compress_will_pack() {
+        let context = Context {
+            marked: true,
+            mark_count: 3,
+            ..file_context()
+        };
+        assert!(labels(&entries(&context, &[])).contains(&"Compress… (3 marked)"));
+        let blank = Context {
+            target: Target::Blank,
+            ..file_context()
+        };
+        assert!(
+            !labels(&entries(&blank, &[]))
+                .iter()
+                .any(|l| l.starts_with("Compress"))
+        );
+    }
+
+    #[test]
     fn a_file_menu_lists_the_essentials_in_a_conventional_order() {
         let list = entries(&file_context(), &[]);
         assert_eq!(
@@ -539,6 +561,7 @@ mod tests {
                 "Copy",
                 "Rename",
                 "Delete",
+                "Compress…",
                 "Mark",
                 "Copy path",
                 "Inspect"

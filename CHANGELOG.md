@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `file_ops`: a compress form on the right-click menu. "Compress…" on a file or folder (with
+  a count when several are marked) opens a form for the archive's name, format (zip, tar.gz, tar),
+  level (fast, normal, smallest), whether to make one archive per item, and whether to send the
+  originals to the trash once their archive is complete. A name that is empty, reserved or already
+  taken is reported inside the form. Typing an extension such as `.tar.gz` in the name picks the
+  format too. `file_ops::archive` gained `Level` and `compress_with_level`; `compress` is
+  unchanged. Passwords are not supported yet.
 - `file_ops`, `tui`: compress and extract archives. `:extract` unpacks every marked archive (or the
   selected one) into a directory named after it, and `:compress <name>` packs the marked entries
   (or the selection) into `<name>`, with `.zip`, `.tar` or `.tar.gz` choosing the format. Both run

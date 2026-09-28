@@ -903,6 +903,18 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   bytes actually written (32 GiB) against zip bombs, deleting a file the cap cut short. Output
   goes to a hidden sibling file and replaces the target only when complete, so a cancel leaves
   nothing behind. An existing file is an error, not a prompt.
+- ✅ **Compress form on the right-click menu** – "Compress…" on a file or folder's right-click menu
+  (with a count when several are marked) opens a modal form: the archive **name** (the extension
+  is fixed after it, and typing one such as `backup.tar.gz` also picks the format), the
+  **format** (zip, tar.gz, tar), the **level** (fast, normal, smallest; not offered for a plain
+  tar), **one archive per item** (shown only for several items; each is named `<item>.<ext>`) and
+  **delete originals** (to the trash, and only once that item's archive is complete). Focus moves
+  with the arrows or `Tab`, values change with the side arrows, `Space` or a click, `Enter`
+  starts it and `Esc` or a click outside cancels; an empty or reserved name, or one that already
+  exists, is shown inside the form rather than closing it. The pure state lives in
+  `tui::compress_popup` (a `Request` can only describe a well-formed job) and `file_ops::archive`
+  gained `Level` and `compress_with_level`. Chosen as COA A over a format submenu feeding the
+  prompt bar (B) and a chain of prompts (C).
 
 ---
 
@@ -923,8 +935,19 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   events routed to the browser, a highlighted drop target, and a rule for dropping on the parent
   column, blank space and the shell box. The scrollable preview (wheel over the preview column)
   is under *Preview extras, stage 1* above.
-- **Archives, remainder** – no key or context-menu entry yet (only `:extract` and `:compress`); an
-  existing destination is an error rather than the overwrite/skip/abort prompt a paste gets; `rar`
+- **Encrypted archives (password)** – the compress form has no password field yet, and extraction
+  cannot open an encrypted zip. Plan: zip AES-256 through the `zip` crate's `aes-crypto` feature
+  (about seven small RustCrypto-family crates), a masked password and confirm field on the form
+  (greyed for tar, which has no encryption) held in a zeroize-on-drop buffer and never logged or
+  shown in the status line, and a password prompt on extract so an archive made here can be opened
+  here. Legacy ZipCrypto is refused as trivially breakable. The form must say that zip encryption
+  does not hide file names (anyone can still list what is inside); hiding them needs 7z. Wrong
+  password and unsupported-encryption errors need their own messages.
+- **Archives, remainder** – there is no key binding for the compress form (only the right-click
+  menu, `:compress` and `:extract`), and no "Extract…" entry on the menu; the form has no
+  destination folder (archives go beside the originals) and no live warning as you type a name
+  that exists; an existing destination is an error rather than the overwrite/skip/abort prompt a
+  paste gets; `rar`
   (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2` compression are not supported, the
   codecs being opt-in cargo features if wanted; zip entries carry no modification time; a `zip`
   central directory is read whole into memory on extraction (the preview refuses oversized ones,

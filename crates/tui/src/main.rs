@@ -22,6 +22,7 @@ mod boot_splash;
 mod browser_mouse;
 mod cli;
 mod command;
+mod compress_popup;
 mod context_menu;
 mod disk_usage;
 mod disk_usage_view;
@@ -64,6 +65,7 @@ use appearance_popup::{
 use boot_splash::BootSplash;
 use browser::BrowserState;
 use browser_mouse::{BrowserLayout, Click, ClickTracker, Hit, Listing, Pane, Wheel};
+use compress_popup::CompressPopup;
 use context_menu::{
     Context as MenuContext, ContextMenu, MenuCommand, Nav, Outcome as MenuOutcome,
     Target as MenuTarget,
@@ -352,6 +354,7 @@ struct Overlay<'a> {
     /// The disk usage view, which covers the whole screen when open.
     usage: Option<&'a DiskUsageView>,
     settings: Option<&'a SettingsPopup>,
+    compress: Option<&'a CompressPopup>,
     appearance: Option<&'a AppearancePopup>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
@@ -373,6 +376,7 @@ struct Panels<'a> {
     inspect: &'a mut Option<InspectView>,
     usage: &'a mut Option<DiskUsageView>,
     appearance: &'a mut Option<AppearancePopup>,
+    compress: &'a mut Option<CompressPopup>,
 }
 
 struct ShellView<'a> {
@@ -1142,6 +1146,8 @@ fn run(
     let mut usage: Option<DiskUsageView> = None;
     // The settings popup (`Space` then `t` with no shell pane open) while one is open; modal too.
     let mut settings: Option<SettingsPopup> = None;
+    // The compress form ("Compress…" on an entry's right-click menu) while one is open; modal too.
+    let mut compress: Option<CompressPopup> = None;
     // The appearance popup (`a`, or "Appearance…" on blank space's right-click menu) while one is
     // open; modal too.
     let mut appearance: Option<AppearancePopup> = None;
@@ -1271,6 +1277,7 @@ fn run(
                     inspect: inspect.as_ref(),
                     usage: usage.as_ref(),
                     settings: settings.as_ref(),
+                    compress: compress.as_ref(),
                     appearance: appearance.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
@@ -1360,6 +1367,22 @@ fn run(
                 if inspect.is_some() {
                     if matches!(mouse.kind, MouseEventKind::Down(_)) {
                         inspect = None;
+                    }
+                    continue;
+                }
+                if let Some(popup) = compress.as_mut() {
+                    if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                        let at = Position::new(mouse.column, mouse.row);
+                        match overlay_view::compress_hit(frame_area, popup, at) {
+                            // A row is focused, and a click on one with a value to change also
+                            // changes it, the way clicking a settings row would.
+                            overlay_view::CompressHit::Row(row) => {
+                                popup.focus(row);
+                                popup.cycle(true);
+                            }
+                            overlay_view::CompressHit::Panel => {}
+                            overlay_view::CompressHit::Outside => compress = None,
+                        }
                     }
                     continue;
                 }
@@ -1507,6 +1530,7 @@ fn run(
                                     inspect: &mut inspect,
                                     usage: &mut usage,
                                     appearance: &mut appearance,
+                                    compress: &mut compress,
                                 },
                             )?;
                         }
@@ -1908,11 +1932,23 @@ fn run(
                                     inspect: &mut inspect,
                                     usage: &mut usage,
                                     appearance: &mut appearance,
+                                    compress: &mut compress,
                                 },
                             )?;
                         }
                         MenuOutcome::Dismiss => menu = None,
                         MenuOutcome::Stay => {}
+                    }
+                    continue;
+                }
+                if let Some(popup) = compress.as_mut() {
+                    match popup.key(key.code) {
+                        compress_popup::Key::Stay => {}
+                        compress_popup::Key::Close => compress = None,
+                        compress_popup::Key::Submit(request) => match app.start_compress(request) {
+                            Ok(()) => compress = None,
+                            Err(message) => popup.set_error(message),
+                        },
                     }
                     continue;
                 }
@@ -2356,6 +2392,7 @@ fn run_menu_command(
         (MenuCommand::DiskUsage, _) => {
             *panels.usage = Some(app.begin_disk_usage(subject.clone()));
         }
+        (MenuCommand::Compress, _) => *panels.compress = app.begin_compress_form(browser),
         (MenuCommand::Appearance, _) => *panels.appearance = Some(AppearancePopup::new()),
         (MenuCommand::ToggleHidden, _) => {
             let shown = browser.toggle_hidden(vfs)?;
@@ -2411,6 +2448,7 @@ fn draw(
         inspect,
         usage,
         settings,
+        compress,
         appearance,
         local_theme,
         local_ui,
@@ -2690,6 +2728,9 @@ fn draw(
             },
             config,
         );
+    }
+    if let Some(popup) = compress {
+        overlay_view::render_compress(frame, popup, config);
     }
     if let Some(popup) = appearance {
         // `config` is already the effective one composed above, so its `theme`/`ui.glyphs`/

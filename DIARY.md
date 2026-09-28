@@ -58,6 +58,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-28 | Full Appearance Editor | Category submenu plus a real two-axis gradient-square/hue-strip color picker (COA A), over a single long scrolling list with the same picker (B) or a category menu with H/S/V slider bars (C) | ✅ Confirmed |
 | 2026-09-28 | Saved Custom Themes | A "Saved themes" category listing saved themes, with apply, rename and delete (COA A), over making the Theme row cycle them (B) or a manage view opened from the Save row (C) | ✅ Confirmed |
 | 2026-09-28 | Archive Compress/Extract | In-process `zip`/`tar`/`flate2` in `file_ops::archive` with a `SafePath` newtype and extraction limits (COA A), over system tools (B) or a hybrid (C) | ✅ Confirmed |
+| 2026-09-28 | Compress Form | A modal form popup on the right-click menu with pure state and a validated `Request` (COA A), over a format submenu into the prompt bar (B) or a chain of prompts (C); password deferred | ✅ Confirmed |
 
 ---
 
@@ -4182,6 +4183,80 @@ directions, refusing an output inside a source, and two proptests (a `SafePath` 
 `:extract` through the app, the two error messages and the existing-archive refusal. Not done: a
 run against the compiled binary in a terminal, and archives from other tools (only ones made by
 this module and hand-built hostile tars were extracted).
+
+---
+
+### Compress Form: a Modal Popup with a Validated `Request` (COA A)
+
+**Date:** 2026-09-28
+**Status:** Confirmed
+
+#### Context / Background
+
+`:compress <name>` could pack files but the only way to pick a format, a level or a name was to know
+the command. The right-click menu should offer it, with the choices a person expects: name, format,
+level, whether to make one archive per item, and whether to delete the originals. A password was
+asked for too, and is deferred to its own cycle (see Consequences).
+
+#### Options Considered
+
+**Option A: a "Compress…" item that opens a form popup**
+- Every choice in one place with inline validation, and the same shape serves a later "Extract…".
+  The cost is a new popup with its own keyboard and mouse handling. Difficulty: high.
+
+**Option B: a format submenu, each choice asking for a name in the prompt bar**
+- Smallest change, reusing the prompt bar and `:compress`, but no level, no options and no
+  password. Difficulty: small.
+
+**Option C: a chain of prompts in the bottom bar**
+- No new widget, but no way back to fix an earlier answer, and masking a password in the shared
+  prompt is awkward. Difficulty: medium.
+
+Chosen: **A**, the only one that covers the choices asked for; B remains a fine first slice if the
+form proves too heavy.
+
+#### Consequences
+
+The popup follows `settings_popup`: `compress_popup` is pure state (no `Frame`, no filesystem),
+`overlay_view` draws it and `main` is the only place that acts on it. Its output is a `Request`
+whose `Layout` is either `One { file_name }` or `PerItem`, so a job with both a typed name and one
+archive per item cannot be expressed, and a submitted file name is checked to be one plain path
+component (a proptest types arbitrary characters and asserts that). The form never starts the job:
+`App::start_compress` does, and returns an error string that the form shows in place, because only
+the app can see that a name is taken or that an operation is running. Existing names are refused
+rather than overwritten, the same rule `:compress` follows. On the Name row letters are typed, so
+`j` and `k` are text there and only the arrows and `Tab` move focus; on the other rows `j`/`k`
+also move, matching the other popups. Typing a known extension in the name switches the format
+instead of producing `x.tar.gz.zip`. With one archive per item each is named `<item>.<ext>`
+(`a.txt.zip`), which cannot collide the way `a.txt` and `a.pdf` both becoming `a.zip` would.
+"Delete originals" trashes a job's sources only after that job's archive is complete, and a
+failure stops the batch, so an original never loses its only copy; the trash is the desktop one, so
+it is undoable outside the app. The form's rows are hit-tested by the same function that lays them
+out (`compress_area`/`compress_inner`), so a click and the drawing cannot disagree. Level maps to
+deflate levels 1, 6 and 9 for zip and gzip and is ignored, and greyed, for a plain tar.
+
+The password is deferred because it is a change of a different kind: zip AES needs the `zip`
+crate's `aes-crypto` feature (about seven more small crates), a masked field held in a
+zeroize-on-drop buffer, and, to be usable, a password prompt on extraction. It is on the roadmap
+with the plan, including that zip encryption does not hide file names.
+
+**Verification.** `scripts/check` passes: format, clippy with `-D warnings` and the whole
+workspace's tests are clean. `file_ops` went from 41 to 42 tests (levels: a higher level is no
+larger and still round-trips, for zip and tar.gz) and `tui` from 424 to 449. The new ones cover the
+form's keys, focus wrap, format and level cycling, name validation and the error clearing, the
+per-item and delete-originals options, a proptest that a submitted name is always one safe
+component, the menu entry and its marked count, drawing (every row, the extension after the name),
+click hit-testing, and, through the app, one archive of two items, one per item, a taken name
+refused without starting, nothing selected, and a second job refused while one runs. Two existing
+tests changed because the file menu grew a row: the expected entry order gained "Compress…", and
+the screen-corner menu test uses a 17-row screen instead of 14 so the whole, now taller, menu
+still fits. Smoke-tested against the compiled binary in an isolated `tmux` session with a
+throwaway `XDG_CONFIG_HOME`, sending SGR mouse sequences: a right-click showed "Compress…", a
+left-click on it drew the form, editing the name and cycling the format to tar.gz then `Enter`
+produced a `backup.tar.gz` that `tar` listed correctly, and the header said "compress complete".
+Not exercised by hand: delete originals (it would fill the real trash; the option and the trash
+call are only covered as far as the form's `Request`), the taken-name error in the terminal (unit
+tested through the app), a click on a form row, and a folder or a marked set as the source.
 
 ---
 
