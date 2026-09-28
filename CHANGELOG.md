@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `file_ops`, `tui`: compress and extract archives. `:extract` unpacks every marked archive (or the
+  selected one) into a directory named after it, and `:compress <name>` packs the marked entries
+  (or the selection) into `<name>`, with `.zip`, `.tar` or `.tar.gz` choosing the format. Both run
+  in the background with progress and cancel with `Esc`. Extraction refuses entries that would
+  land outside the destination (absolute paths, `..`, symlinked directories, control characters
+  in names), skips links that could point outside it, clamps permissions, and stops at 1,000,000
+  entries or 32 GiB written. A new archive is built beside its target and moved into place only
+  when complete. An existing destination is an error. `rar`, `7z`, `xz`, `zstd` and `bzip2` are
+  not supported.
 - `tui`: saved custom themes can now be reselected, renamed and deleted from the appearance
   popup, through a new "Saved themes" category. `Enter` or a click applies a theme's snapshot as
   the live look, `r` renames it (an empty name or one already in use is refused), and `d` deletes

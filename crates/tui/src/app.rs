@@ -34,6 +34,7 @@ use anyhow::Result;
 use browser::BrowserState;
 use browser::search::{Outcome as SearchOutcome, Query};
 use crossterm::event::KeyCode;
+use file_ops::archive::{self, ExtractLimits, Format};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use plugins::PluginManager;
 use shared::{LocalVfs, Vfs, VfsError};
@@ -214,6 +215,10 @@ enum BulkKind {
     Trash {
         targets: Vec<PathBuf>,
     },
+    /// Unpacking archives, each into its own directory.
+    Extract,
+    /// Packing into one archive.
+    Compress,
     /// A `:` command line running under `sh -c`, from `started`.
     Shell {
         command: String,
@@ -230,6 +235,8 @@ impl BulkKind {
             },
             BulkKind::Delete { .. } => "deleting",
             BulkKind::Trash { .. } => "trashing",
+            BulkKind::Extract => "extracting",
+            BulkKind::Compress => "compressing",
             BulkKind::Shell { .. } => "running",
         }
     }
@@ -242,6 +249,8 @@ impl BulkKind {
             },
             BulkKind::Delete { .. } => "delete",
             BulkKind::Trash { .. } => "trash",
+            BulkKind::Extract => "extract",
+            BulkKind::Compress => "compress",
             BulkKind::Shell { .. } => "command",
         }
     }
@@ -376,6 +385,11 @@ impl App {
                         batch_label(targets)
                     )
                 }
+                BulkKind::Extract | BulkKind::Compress => format!(
+                    "{}… {} — Esc to cancel",
+                    bulk.kind.progressing_label(),
+                    bulk.current
+                ),
                 BulkKind::Shell { command, .. } => {
                     format!(
                         "{}… {command} — Esc to cancel",
@@ -589,7 +603,7 @@ impl App {
                 self.status = Some(format!("{past_label} skipped"));
             }
             Err(FileOpsError::Cancelled) => self.status = Some(format!("{past_label} cancelled")),
-            Err(FileOpsError::Vfs(VfsError::AlreadyExists(_))) => match bulk.kind {
+            Err(FileOpsError::Vfs(VfsError::AlreadyExists(existing))) => match bulk.kind {
                 BulkKind::Paste {
                     clip,
                     dst_dir,
@@ -602,6 +616,14 @@ impl App {
                         index,
                         dst,
                     }));
+                }
+                // No prompt for these: overwriting could clobber a whole extracted tree, so the
+                // user is told what is in the way and can remove or rename it.
+                BulkKind::Extract | BulkKind::Compress => {
+                    self.status = Some(format!(
+                        "{past_label} failed: {} already exists",
+                        existing.display()
+                    ));
                 }
                 BulkKind::Delete { .. } | BulkKind::Trash { .. } | BulkKind::Shell { .. } => {
                     self.status = Some(format!("{past_label} failed: unexpected conflict"));
@@ -1077,6 +1099,8 @@ impl App {
                 self.run_builtin(vfs, browser, "touch", &names, file_ops::touch)?;
             }
             Ok(Some(Command::Trash)) => self.begin_trash(browser),
+            Ok(Some(Command::Extract)) => self.begin_extract(browser),
+            Ok(Some(Command::Compress { name })) => self.begin_compress(browser, &name),
             Ok(Some(Command::Shell(line))) => self.spawn_shell_command(browser, line),
             Ok(Some(Command::Interactive(line))) if self.is_busy() => {
                 self.status = Some(format!("an operation is already in progress: {line}"));
@@ -1299,6 +1323,130 @@ impl App {
             items_done: 0,
             current: String::new(),
             cancel: None,
+            rx,
+        });
+    }
+
+    /// Starts extracting the marked (or selected) archives, each into a new directory named after
+    /// it beside the archive's own listing, so a tarball full of loose files cannot litter the
+    /// browsed directory.
+    fn begin_extract(&mut self, browser: &BrowserState) {
+        let archives: Vec<PathBuf> = Self::marked_or_selected(browser)
+            .into_iter()
+            .filter(|path| Format::of(path).is_some())
+            .collect();
+        match archives.is_empty() {
+            true => self.status = Some("extract: no zip, tar or tar.gz selected".into()),
+            false => self.spawn_extract(browser.current_dir().to_path_buf(), archives),
+        }
+    }
+
+    /// Starts packing the marked (or selected) entries into `name` in the browsed directory.
+    fn begin_compress(&mut self, browser: &BrowserState, name: &str) {
+        let Some(format) = Format::of(Path::new(name)) else {
+            self.status = Some("compress: name must end in .zip, .tar or .tar.gz".into());
+            return;
+        };
+        let sources = Self::marked_or_selected(browser);
+        if sources.is_empty() {
+            self.status = Some("compress: nothing selected".into());
+            return;
+        }
+        let out = browser.current_dir().join(name);
+        self.spawn_compress(sources, out, format);
+    }
+
+    /// The channel and cancel flag every archive job reports through. The callback is what
+    /// `file_ops::archive` calls after each entry: it forwards the entry's name and asks the job
+    /// to stop once `cancel` is set.
+    fn archive_channel() -> (
+        UnboundedSender<BulkMsg>,
+        UnboundedReceiver<BulkMsg>,
+        Arc<AtomicBool>,
+    ) {
+        let (tx, rx) = unbounded_channel();
+        (tx, rx, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn spawn_extract(&mut self, dir: PathBuf, archives: Vec<PathBuf>) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
+        let (tx, rx, cancel) = Self::archive_channel();
+        let cancel_bg = Arc::clone(&cancel);
+
+        self.handle.spawn_blocking(move || {
+            let progress_tx = tx.clone();
+            let mut on_progress = move |path: &Path| -> ControlFlow<()> {
+                let _ = progress_tx.send(BulkMsg::Progress {
+                    path: display_name(path),
+                });
+                match cancel_bg.load(Ordering::Relaxed) {
+                    true => ControlFlow::Break(()),
+                    false => ControlFlow::Continue(()),
+                }
+            };
+            let mut result = Ok(Outcome::Completed);
+            for archive in &archives {
+                let stem = Format::stem_of(archive).unwrap_or_else(|| "extracted".into());
+                if let Err(e) = archive::extract(
+                    archive,
+                    &dir.join(stem),
+                    ConflictPolicy::Abort,
+                    ExtractLimits::default(),
+                    &mut on_progress,
+                ) {
+                    result = Err(e);
+                    break;
+                }
+            }
+            let _ = tx.send(BulkMsg::Done(result));
+        });
+
+        self.bulk = Some(BulkOp {
+            kind: BulkKind::Extract,
+            items_done: 0,
+            current: String::new(),
+            cancel: Some(cancel),
+            rx,
+        });
+    }
+
+    fn spawn_compress(&mut self, sources: Vec<PathBuf>, out: PathBuf, format: Format) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
+        let (tx, rx, cancel) = Self::archive_channel();
+        let cancel_bg = Arc::clone(&cancel);
+
+        self.handle.spawn_blocking(move || {
+            let progress_tx = tx.clone();
+            let mut on_progress = move |path: &Path| -> ControlFlow<()> {
+                let _ = progress_tx.send(BulkMsg::Progress {
+                    path: display_name(path),
+                });
+                match cancel_bg.load(Ordering::Relaxed) {
+                    true => ControlFlow::Break(()),
+                    false => ControlFlow::Continue(()),
+                }
+            };
+            let result = archive::compress(
+                &sources,
+                &out,
+                format,
+                ConflictPolicy::Abort,
+                &mut on_progress,
+            );
+            let _ = tx.send(BulkMsg::Done(result));
+        });
+
+        self.bulk = Some(BulkOp {
+            kind: BulkKind::Compress,
+            items_done: 0,
+            current: String::new(),
+            cancel: Some(cancel),
             rx,
         });
     }
@@ -1601,6 +1749,72 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn select_named(f: &mut Fixture, name: &str) {
+        let index = f.listed().iter().position(|n| n == name).unwrap();
+        f.browser.select_index(index);
+    }
+
+    #[test]
+    fn compress_then_extract_round_trips_a_selected_directory() {
+        let mut f = Fixture::new("archive-round-trip");
+        std::fs::create_dir_all(f.root.join("proj/inner")).unwrap();
+        std::fs::write(f.root.join("proj/inner/a.txt"), b"alpha").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "proj");
+
+        f.run("compress proj.tar.gz");
+        f.wait_for_idle();
+        assert_eq!(f.app.status.as_deref(), Some("compress complete"));
+        assert!(f.listed().contains(&"proj.tar.gz".to_string()));
+
+        select_named(&mut f, "proj.tar.gz");
+        f.run("extract");
+        f.wait_for_idle();
+        assert_eq!(f.app.status.as_deref(), Some("extract complete"));
+        assert_eq!(
+            std::fs::read(f.root.join("proj/proj/inner/a.txt")).unwrap(),
+            b"alpha"
+        );
+    }
+
+    #[test]
+    fn extract_and_compress_report_what_is_wrong_instead_of_running() {
+        let mut f = Fixture::new("archive-errors");
+        f.run("touch plain.txt");
+        select_named(&mut f, "plain.txt");
+
+        f.run("extract");
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("extract: no zip, tar or tar.gz selected")
+        );
+        f.run("compress plain.rar");
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("compress: name must end in .zip, .tar or .tar.gz")
+        );
+        assert!(!f.app.is_busy());
+    }
+
+    #[test]
+    fn compress_will_not_replace_an_existing_archive() {
+        let mut f = Fixture::new("archive-exists");
+        f.run("touch a.txt out.zip");
+        select_named(&mut f, "a.txt");
+
+        f.run("compress out.zip");
+        f.wait_for_idle();
+        assert!(
+            f.app
+                .status
+                .as_deref()
+                .is_some_and(|s| s.starts_with("compress failed:") && s.ends_with("already exists")),
+            "{:?}",
+            f.app.status
+        );
+        assert_eq!(std::fs::read(f.root.join("out.zip")).unwrap(), b"");
     }
 
     #[test]

@@ -17,6 +17,7 @@
 //! Copy/move/delete/create/rename orchestration on top of the `Vfs` trait — no direct
 //! `std::fs` calls here, so these operations work against any future `Vfs` backend.
 
+pub mod archive;
 pub mod error;
 
 pub use error::FileOpsError;

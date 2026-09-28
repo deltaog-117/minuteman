@@ -30,6 +30,18 @@ pub enum FileOpsError {
     NoParent(PathBuf),
     #[error("operation cancelled")]
     Cancelled,
+    #[error("not a supported archive (zip, tar, tar.gz): {0}")]
+    UnsupportedArchive(PathBuf),
+    #[error("archive entry {name:?} would be written outside the destination")]
+    UnsafeEntry { name: PathBuf },
+    #[error("archive is over the {what} limit of {limit}")]
+    ArchiveLimit { what: &'static str, limit: u64 },
+    #[error("archive is damaged or unreadable: {0}")]
+    Archive(String),
+    #[error("nothing to archive")]
+    NothingToArchive,
+    #[error("name cannot be stored in the archive: {0}")]
+    UnarchivableName(PathBuf),
     #[error("could not send to trash: {0}")]
     Trash(#[from] trash::TrashError),
 }

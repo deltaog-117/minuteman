@@ -888,6 +888,21 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   deletes it after a `y`/`n` confirmation. Renaming the active theme keeps tracking it, and
   deleting it leaves the live look as it is but stops tracking a saved theme. Every change is
   written to `local.toml` straight away. The Theme row keeps cycling the five built-in palettes.
+- ✅ **Compress and extract archives — `zip`, `tar`, `tar.gz`** – `:extract` unpacks every marked
+  archive (or the selected one) into a new directory named after it, so a tarball of loose files
+  cannot litter the browsed directory, and `:compress <name>` packs the marked entries (or the
+  selection) into `<name>`, its `.zip`, `.tar` or `.tar.gz` ending picking the format. Both run on
+  the blocking pool with the header's progress gauge and cancel with `Esc`, like a paste. New
+  `file_ops::archive` does the work in-process with the `zip`, `tar` and `flate2` crates already
+  used by the preview (COA A over shelling out to system tools, B, and a hybrid, C); `xz`, `zstd`
+  and `bzip2` are left out to keep the binary small. An archive is untrusted input that gets
+  written to disk, so every entry goes through a `SafePath` newtype (no absolute paths, `..` or
+  control characters), nothing is written through a symlinked directory, only downward symlinks
+  are created (hard links, devices and escaping links are skipped and counted), permissions are
+  clamped (no setuid, no group/other write), and `ExtractLimits` caps entries (1,000,000) and the
+  bytes actually written (32 GiB) against zip bombs, deleting a file the cap cut short. Output
+  goes to a hidden sibling file and replaces the target only when complete, so a cancel leaves
+  nothing behind. An existing file is an error, not a prompt.
 
 ---
 
@@ -908,6 +923,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   events routed to the browser, a highlighted drop target, and a rule for dropping on the parent
   column, blank space and the shell box. The scrollable preview (wheel over the preview column)
   is under *Preview extras, stage 1* above.
+- **Archives, remainder** – no key or context-menu entry yet (only `:extract` and `:compress`); an
+  existing destination is an error rather than the overwrite/skip/abort prompt a paste gets; `rar`
+  (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2` compression are not supported, the
+  codecs being opt-in cargo features if wanted; zip entries carry no modification time; a `zip`
+  central directory is read whole into memory on extraction (the preview refuses oversized ones,
+  extraction does not yet); extracting from inside an archive (browsing it as a directory) is not
+  done.
 - **Undo history for recent file operations** – a stack of recent copy/move/delete/trash/rename/
   create operations that can be stepped back through. Delete-to-trash itself shipped this cycle
   (see Completed); this is the remaining half of the old "trash + undo history" item.

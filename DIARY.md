@@ -57,6 +57,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-28 | Bookmarks / Marks | A `main.rs`-local pending-chord (mirroring `shell_chord`) plus a new `RawLocal::bookmarks` field reusing `local.toml` (COA A), over a heavier `Prompt`-variant UI (B) or a whole new file format and picker overlay (C) | ✅ Confirmed |
 | 2026-09-28 | Full Appearance Editor | Category submenu plus a real two-axis gradient-square/hue-strip color picker (COA A), over a single long scrolling list with the same picker (B) or a category menu with H/S/V slider bars (C) | ✅ Confirmed |
 | 2026-09-28 | Saved Custom Themes | A "Saved themes" category listing saved themes, with apply, rename and delete (COA A), over making the Theme row cycle them (B) or a manage view opened from the Save row (C) | ✅ Confirmed |
+| 2026-09-28 | Archive Compress/Extract | In-process `zip`/`tar`/`flate2` in `file_ops::archive` with a `SafePath` newtype and extraction limits (COA A), over system tools (B) or a hybrid (C) | ✅ Confirmed |
 
 ---
 
@@ -4118,6 +4119,71 @@ renaming the active theme to `dusk` kept it active and rewrote its `name`; `d` t
 cleared `active_custom_theme`, and left the live accent color as it was. The `y`/`n` prompt and
 the rename field both rendered in the hint line. Not exercised by hand: a mouse click on a saved
 theme, and the context-menu route to the popup, which use the same code paths as `Enter` and `a`.
+
+### Archive Compress/Extract: In-Process Crates and a `SafePath` Newtype (COA A)
+
+**Date:** 2026-09-28
+**Status:** Confirmed
+
+#### Context / Background
+
+The browser could list an archive's contents in the preview but not create or unpack one. The
+`preview` crate already builds `zip`, `tar` and `flate2`, so the question was how much more to take
+on: the archive formats are large, and unpacking untrusted input onto the disk is a classic source
+of vulnerabilities, chiefly writing outside the destination (zip-slip) and zip bombs.
+
+#### Options Considered
+
+**Option A: native Rust crates only (`zip`, `tar`, `flate2`), other codecs behind features**
+- No runtime dependency and the same behavior everywhere, at the price of writing the path-safety
+  code ourselves and having no `rar` or `7z`. Difficulty: medium.
+
+**Option B: shell out to `tar`, `unzip`, `zip`, `7z`, `unrar`**
+- Least code and every format, but it depends on what is installed, passes user-chosen names to a
+  program's argument parser, and makes progress and cancel awkward. Difficulty: small.
+
+**Option C: native for the common formats, an external tool for the rest**
+- Best coverage, but two code paths to test and detect. Difficulty: medium to high.
+
+Chosen: **A**. Zip and tar cover nearly all real use and their crates were already in the build;
+the rare formats can wait for a feature flag or a fallback later.
+
+#### Consequences
+
+`file_ops::archive` works on local paths with `std::fs`, not `Vfs` (like `trash`), because an
+archive is a stream. Every entry name becomes a `SafePath` before anything is created, so an unsafe
+path is unrepresentable past that point (the only constructor rejects it); a proptest checks that
+whatever an archive names an entry, joining the result never leaves the destination. The other
+rules are enforced where the write happens: a symlinked directory on the way to an entry is
+refused, a file is opened with `create_new` (which does not follow a link), and only symlinks whose
+target descends are created, since a lexical check of `..` targets is unsound once links chain
+(`a -> d/b/..` where `d/b -> ..`). Overwrite uses `remove_file`, which unlinks a symlink itself and
+refuses a directory, so an archive cannot redirect a write or delete a tree. Limits count bytes
+written rather than sizes the archive declares, and the `.tar.gz` inflate is capped by a reader
+that errors instead of ending quietly (the same trap the preview's listing has), because a tar
+reader takes a quiet end for a complete archive. Compression writes to `.<name>.<pid>.partial`
+and renames on success, so a cancel or error leaves no half archive. The TUI extracts into
+`<stem>/` rather than the browsed directory, and reports an existing destination as an error
+instead of prompting, since overwriting could clobber a whole tree. The zip crate reads a central
+directory whole on open; the preview guards that and extraction does not yet (recorded in the
+roadmap). Zip entries carry no modification time, since converting one needs a `time` or `chrono`
+feature.
+
+**Verification.** `scripts/check` passes: format, clippy with `-D warnings` and the whole
+workspace's tests are clean. `file_ops` went from 19 to 41 tests and `tui` from 419 to 424. The 22
+new archive tests cover a round trip of every format (files, nested and empty directories, a
+symlink), climbing and absolute names in both tar and zip (including a backslash separator), a
+control character in a name, escaping and chained symlinks and a hard link, writing through a
+symlinked directory, overwrite over a symlink, clamped modes, the byte limit on a gzip bomb (and
+the partial file removed) and exactly at it, the entry limit, all three conflict policies,
+overwrite never deleting a directory, damaged and unsupported archives, cancel in both
+directions, refusing an output inside a source, and two proptests (a `SafePath` never escapes;
+`tar.gz` round-trips random files). The five in `tui` cover parsing and `:compress` then
+`:extract` through the app, the two error messages and the existing-archive refusal. Not done: a
+run against the compiled binary in a terminal, and archives from other tools (only ones made by
+this module and hand-built hostile tars were extracted).
+
+---
 
 ---
 

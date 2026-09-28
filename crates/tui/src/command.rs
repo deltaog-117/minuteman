@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Parses the `:` prompt's text into a `Command`. The handful of commands that are cheap and
-//! safe to run in-process (`cd`, `mkdir`, `touch`, `q`/`q!`/`qa`/`qa!`/`quit`, `trash`) are built
+//! safe to run in-process (`cd`, `mkdir`, `touch`, `q`/`q!`/`qa`/`qa!`/`quit`, `trash`, `extract`, `compress`) are built
 //! in; they go through `Vfs` and `file_ops`, so they behave the same on any backend and report
 //! errors as plain messages (`trash` is the exception — see `file_ops::trash`'s own docs).
 //! Everything else — and anything using shell syntax a built-in can't honour — is handed to
@@ -42,6 +42,14 @@ pub enum Command {
     /// Sends every marked entry (or the current selection, if none are marked) to the desktop
     /// trash — the same set `Action::Delete`'s `d` key acts on.
     Trash,
+    /// Extracts every marked archive (or the selected one) into a directory named after it, in
+    /// the browsed directory.
+    Extract,
+    /// Packs every marked entry (or the selected one) into the named archive; its extension
+    /// (`.zip`, `.tar`, `.tar.gz`) picks the format.
+    Compress {
+        name: String,
+    },
     /// A command line for `sh -c`, run in the browsed directory.
     Shell(String),
     /// A command line for `sh -c` that gets the real terminal — the program draws on it and reads
@@ -82,6 +90,17 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
         // Only bare "trash" is the built-in — "trash --empty" or similar falls through to a real
         // `trash` CLI on the shell, the same way an unrecognised `mkdir`/`touch` flag does.
         "trash" if line[name.len()..].trim().is_empty() => Ok(Some(Command::Trash)),
+        // Like `trash`, only the bare form is the built-in, so `extract foo` still reaches a real
+        // `extract` script on the path.
+        "extract" if line[name.len()..].trim().is_empty() => Ok(Some(Command::Extract)),
+        "compress" if uses_shell_syntax(line) => Ok(Some(Command::Shell(line.into()))),
+        "compress" => match split_words(line[name.len()..].trim())?.as_slice() {
+            [archive] if !archive.starts_with('-') => Ok(Some(Command::Compress {
+                name: archive.clone(),
+            })),
+            [] => Err("compress: missing archive name".into()),
+            _ => Ok(Some(Command::Shell(line.into()))),
+        },
         "cd" => {
             let path = split_words(line[name.len()..].trim())?.join(" ");
             match path.is_empty() {
@@ -234,6 +253,36 @@ mod tests {
 
     fn known() -> Vec<String> {
         vec!["nvim".into(), "less".into()]
+    }
+
+    #[test]
+    fn bare_extract_is_the_built_in_but_extract_with_arguments_is_left_to_the_shell() {
+        assert_eq!(parse("extract"), Ok(Some(Command::Extract)));
+        assert_eq!(parse("  extract  "), Ok(Some(Command::Extract)));
+        assert_eq!(parse("extract a.zip"), Ok(shell("extract a.zip")));
+    }
+
+    #[test]
+    fn compress_takes_one_archive_name() {
+        assert_eq!(
+            parse("compress out.tar.gz"),
+            Ok(Some(Command::Compress {
+                name: "out.tar.gz".into()
+            }))
+        );
+        assert_eq!(
+            parse("compress 'my files.zip'"),
+            Ok(Some(Command::Compress {
+                name: "my files.zip".into()
+            }))
+        );
+        assert!(parse("compress").is_err());
+        assert_eq!(parse("compress -r a.zip"), Ok(shell("compress -r a.zip")));
+        assert_eq!(parse("compress a b"), Ok(shell("compress a b")));
+        assert_eq!(
+            parse("compress a.zip *.txt"),
+            Ok(shell("compress a.zip *.txt"))
+        );
     }
 
     #[test]

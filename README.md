@@ -130,7 +130,7 @@ named `init` must be passed as `./init`.
 | `n`         | create — trailing `/` makes a directory       |
 | `s`         | shell — drop into `$SHELL` in the current dir |
 | `/`         | search — jump to the nearest entry whose name contains what you type, in this directory or any below it (`Enter` stays, `Esc` goes back) |
-| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory, `:mkdir [-p] <name>...`, `:touch <name>...`; an editor or other full-screen program (`:nvim ROADMAP.md`, or any command after a `!`, as in `:!python3`) gets the whole terminal until it exits; anything else runs in `sh` in the current directory (`Esc` cancels) |
+| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory, `:mkdir [-p] <name>...`, `:touch <name>...`, `:extract` (marked or selected `.zip`/`.tar`/`.tar.gz` into a directory named after each), `:compress <name.zip|.tar|.tar.gz>` (marked or selected entries into one archive); an editor or other full-screen program (`:nvim ROADMAP.md`, or any command after a `!`, as in `:!python3`) gets the whole terminal until it exits; anything else runs in `sh` in the current directory (`Esc` cancels) |
 | `c`         | cancel everything pending — the yank/cut clipboard, every mark, and a running copy/move/command — from any directory |
 | `.`         | show or hide dot-files (hidden by default; `show_hidden = true` in `config.toml` starts them shown) |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |

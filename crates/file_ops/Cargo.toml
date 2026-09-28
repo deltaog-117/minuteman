@@ -9,3 +9,12 @@ authors.workspace = true
 shared = { path = "../shared" }
 trash = { path = "../trash" }
 thiserror = "2.0.20"
+# Zip needs its deflate codec to compress and extract (the preview crate only reads headers);
+# tar has no codec of its own, and gzip is `flate2`. xz, zstd and bzip2 are deliberately left out
+# to keep the binary small.
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1"
+
+[dev-dependencies]
+proptest = "1.11"
