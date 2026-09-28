@@ -56,6 +56,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-27 | Caps Lock Header Pill | Static header pill kept in sync from every key event's `KeyEventState` (COA A); a blinking/pulsing version, matching the plain reading of "loop it," was raised and rejected at the user's own clarification, consistent with the pulsing selection already cut for taste | ✅ Confirmed |
 | 2026-09-28 | Bookmarks / Marks | A `main.rs`-local pending-chord (mirroring `shell_chord`) plus a new `RawLocal::bookmarks` field reusing `local.toml` (COA A), over a heavier `Prompt`-variant UI (B) or a whole new file format and picker overlay (C) | ✅ Confirmed |
 | 2026-09-28 | Full Appearance Editor | Category submenu plus a real two-axis gradient-square/hue-strip color picker (COA A), over a single long scrolling list with the same picker (B) or a category menu with H/S/V slider bars (C) | ✅ Confirmed |
+| 2026-09-28 | Saved Custom Themes | A "Saved themes" category listing saved themes, with apply, rename and delete (COA A), over making the Theme row cycle them (B) or a manage view opened from the Save row (C) | ✅ Confirmed |
 
 ---
 
@@ -4053,6 +4054,70 @@ and `theming` 85. Two things were fixed to get there: rustfmt's import ordering 
 edition, and a `field_reassign_with_default` lint in a `commit` test, which now builds its
 expected `RawTheme` with struct-update syntax. The picker was not smoke-tested against the
 compiled binary in a real terminal this cycle.
+
+---
+
+### Saved Custom Themes: a "Saved themes" Category, Not a Dynamic Theme Row (COA A)
+
+**Date:** 2026-09-28
+**Status:** Confirmed
+
+#### Context / Background
+
+"Save theme" could create and update named themes in `local.toml`, but nothing could load one
+back: the Theme row only cycled the five built-in palettes, so a saved theme was write-only, and
+there was no way to rename or delete one. A saved theme is a full color snapshot
+(`RawTheme::from_theme`), so applying one is a matter of replacing the live overrides with it.
+
+#### Options Considered
+
+**Option A: a "Saved themes" category (chosen)**
+- One row per saved theme; `Enter` applies, `r` renames, `d` deletes after a confirmation. It
+  reuses the category and flat-row-list machinery the previous cycle built, and leaves
+  `RowKind::Cycle` alone. Difficulty: medium. The cost is one more root category, so applying a
+  theme is two steps from the Theme row.
+
+**Option B: make the Theme row cycle built-ins plus saved themes**
+- Closest to the old roadmap wording, but `RowKind::Cycle` holds a `&'static [&'static str]`, so
+  it needs a new kind or an owned list threaded through `AppearanceView`, and rename and delete
+  still need a separate manage view. Difficulty: high, for the least new capability.
+
+**Option C: a picker opened from the "Save theme" row**
+- Smallest change to the root layout, but it adds a third mode next to `SaveState`'s two and hides
+  load and delete behind a row called "Save". Difficulty: medium.
+
+Chosen: **A**, as the smallest extension of what was already built, and the only option that gave
+rename and delete a proper home.
+
+#### Consequences
+
+`Row` is `Copy` and its labels are `'static`, so the dynamic list is a `Row::SavedTheme(usize)`
+index, the same shape as `Row::StyleElement(usize)`, and `overlay_view` asks
+`AppearancePopup::saved_name` for the label instead of `Row::label`. The popup never sees
+`local.toml` (the same reason `WantSaveTheme` is resolved by the caller), so it holds a copy of the
+names that `main` refreshes through `sync_saved` once per loop iteration and again after every
+outcome; `sync_saved` also drops a rename or delete in flight whose target vanished and pulls the
+cursor back onto a row that exists. Rename and delete are a small `ManageState` modal, like
+`SaveState`, so the row list itself never changes shape mid-edit. Applying a theme replaces
+`local_theme` wholesale, which is exact because a snapshot sets every field; it leaves `local_ui`,
+`local_style` and `local_font` alone, since a saved theme is colors, border style and separator
+only. Deleting the active theme clears `active_custom_theme` but leaves the live look, so "Save
+theme" then offers a fresh name rather than an update. The appearance popup also got its own,
+wider label column (`APPEARANCE_LABEL_COLUMN`, 22): the shared 13-cell one cut off category labels
+and any theme name past 12 characters, and the shared constant is left alone for the other popups.
+The root layout gained a row, so two existing tests that index into it by position moved by one.
+
+**Verification.** `scripts/check` passes: format, clippy with `-D warnings` and the whole
+workspace's tests are clean. `tui` went from 410 to 419 tests, nine new ones covering the category's
+rows, apply, rename (including refusals and the unchanged name), the delete confirmation, the
+`r`/`d` no-ops off a saved theme, and `sync_saved`'s cursor and in-flight handling; `theming` is
+unchanged at 85. Smoke-tested against the compiled binary in an isolated `tmux` session with a
+throwaway `XDG_CONFIG_HOME` seeded with two saved themes: the list showed both with the active one
+marked; `Enter` applied each and `local.toml`'s `[theme]` and `active_custom_theme` followed;
+renaming the active theme to `dusk` kept it active and rewrote its `name`; `d` then `y` removed it,
+cleared `active_custom_theme`, and left the live accent color as it was. The `y`/`n` prompt and
+the rename field both rendered in the hint line. Not exercised by hand: a mouse click on a saved
+theme, and the context-menu route to the popup, which use the same code paths as `Enter` and `a`.
 
 ---
 

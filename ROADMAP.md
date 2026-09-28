@@ -880,6 +880,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   live preview, and "Font" edits the family and size. Style and font edits persist to
   `local.toml`'s new `[style]` and `[font]` tables; the font can't be applied by the TUI (the
   terminal owns it), so it only feeds a later `minuteman init-terminal`.
+- ✅ **Saved custom themes: reselect, rename, delete (COA A)** – the appearance popup has a new
+  "Saved themes" category on its root screen, listing every theme saved from "Save theme" by its
+  own name, with the one the live look started from marked `active`. `Enter` (or a click) applies
+  a theme, replacing the live colors wholesale with its snapshot; `r` renames it (the name field
+  starts as the current one, and an empty name or another saved theme's name is refused); `d`
+  deletes it after a `y`/`n` confirmation. Renaming the active theme keeps tracking it, and
+  deleting it leaves the live look as it is but stops tracking a saved theme. Every change is
+  written to `local.toml` straight away. The Theme row keeps cycling the five built-in palettes.
 
 ---
 
@@ -903,13 +911,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Undo history for recent file operations** – a stack of recent copy/move/delete/trash/rename/
   create operations that can be stepped back through. Delete-to-trash itself shipped this cycle
   (see Completed); this is the remaining half of the old "trash + undo history" item.
-- **Saved custom themes: reselect, rename, delete** – the color picker and "Save theme" row (see
-  Completed) can create and update named themes in `local.toml`, but the Theme row's cycle still
-  only knows the five fixed built-in palettes — there's no way yet to pick a previously saved
-  custom theme back up, rename one, or delete one, from inside the popup. Needs the Theme row's
-  `RowKind::Cycle(&'static [&'static str])` to grow into (or sit alongside) something that can
-  cycle a dynamic, session-loaded list of names, which is more than the one-line addition it
-  sounds like.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
   file_ops, preview, and trash, so backends can be swapped without touching feature code.
 
@@ -1077,6 +1078,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    color and press `Tab` for the picker: click or drag in the square to set saturation and value,
    and in the strip beneath it to set the hue. "Text styles" takes a comma-separated modifier list
    per element (`bold, italic`) and previews it as you type; every commit is saved to `local.toml`.
+   Then the newest: save a look with "Save theme", change some colors, then open "Saved themes" —
+   `Enter` on a name brings that look back, `r` renames it and `d` (then `y`) deletes it.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).

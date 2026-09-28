@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`: saved custom themes can now be reselected, renamed and deleted from the appearance
+  popup, through a new "Saved themes" category. `Enter` or a click applies a theme's snapshot as
+  the live look, `r` renames it (an empty name or one already in use is refused), and `d` deletes
+  it after a `y`/`n` confirmation. Renaming the active theme keeps tracking it; deleting it leaves
+  the live look alone and stops tracking a saved theme. The popup's label column is also wider, so
+  category labels and long theme names are no longer cut off.
 - `theming`, `tui`: the appearance popup is now a full editor. It opens on five categories (Theme &
   colors, Border & separator, Glyphs, Text styles, Font) instead of one flat list, and "Theme &
   colors" covers all 22 `Theme` color fields rather than six. A color row's `Tab` mode is now a

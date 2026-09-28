@@ -26,7 +26,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use theming::{Config, Hsv, Theme};
 
 use crate::appearance_popup::{
-    self, AppearancePopup, AppearanceView, PICKER_EXTRA_LINES, Row as AppearanceRow,
+    self, AppearancePopup, AppearanceView, ManageView, PICKER_EXTRA_LINES, Row as AppearanceRow,
     RowKind as AppearanceRowKind, SV_BOX_HEIGHT, SaveView, View as AppearanceViewLevel,
 };
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
@@ -40,6 +40,10 @@ use crate::style;
 const PANEL_MAX_WIDTH: u16 = 76;
 /// Width of the label column ("Permissions" is the longest label) plus a gap.
 const LABEL_COLUMN: usize = 13;
+/// The appearance popup's own, wider label column: its category labels (`Border & separator ›`),
+/// long element names (`Syntax: function`) and saved themes' own names would all be cut off at
+/// `LABEL_COLUMN`.
+const APPEARANCE_LABEL_COLUMN: usize = 22;
 
 /// A bordered frame with no title, in the same border style as the panes.
 fn frame_block(config: &Config) -> Block<'static> {
@@ -388,7 +392,7 @@ pub fn render_appearance(
     let inner = block.inner(area).inner(Margin::new(1, 0));
     frame.render_widget(block, area);
 
-    let value_width = usize::from(inner.width).saturating_sub(LABEL_COLUMN);
+    let value_width = usize::from(inner.width).saturating_sub(APPEARANCE_LABEL_COLUMN);
     let label_style = style::styled(
         Style::default().fg(style::color(&theme.accent_fg)),
         config.styles.title,
@@ -423,11 +427,26 @@ pub fn render_appearance(
         let is_color = matches!(row.kind(), Some(AppearanceRowKind::Color));
         let being_edited = editing_row == Some(*row);
 
+        // A saved theme's row is labelled with its own name (which `Row::label` can't return, being
+        // `'static`) and marked when it is the one the live look started from.
+        let (row_label, saved_marker) = match *row {
+            AppearanceRow::SavedTheme(index) => (
+                popup.saved_name(index).unwrap_or_default(),
+                if popup.saved_name(index) == view.active_custom_theme {
+                    "active"
+                } else {
+                    ""
+                },
+            ),
+            other => (other.label(), ""),
+        };
         let value = if being_edited {
             match editing_picker {
                 Some(hsv) => picker_readout(hsv),
                 None => format!("{}{caret}", popup.editing_buffer().unwrap_or_default()),
             }
+        } else if matches!(row, AppearanceRow::SavedTheme(_)) {
+            saved_marker.to_string()
         } else {
             view.value(*row)
         };
@@ -441,7 +460,7 @@ pub fn render_appearance(
         };
 
         let mut spans = vec![Span::styled(
-            pad_to(row.label(), LABEL_COLUMN),
+            pad_to(row_label, APPEARANCE_LABEL_COLUMN),
             label.patch(base),
         )];
         let value_area = if is_color {
@@ -471,7 +490,26 @@ pub fn render_appearance(
     let editing_is_color = editing_row
         .map(|row| matches!(row.kind(), Some(AppearanceRowKind::Color)))
         .unwrap_or(false);
+    let managing_hint = match popup.manage_view() {
+        Some(ManageView::Rename(buffer)) => Some(Line::from(vec![
+            Span::styled("rename to: ", label_style),
+            Span::styled(
+                format!("{buffer}{caret}  enter saves, Esc cancels"),
+                value_style,
+            ),
+        ])),
+        Some(ManageView::ConfirmDelete(name)) => Some(Line::styled(
+            format!("delete '{name}'?  y: delete   n/Esc: keep"),
+            hint_style,
+        )),
+        None => None,
+    };
+    let in_saved_themes = matches!(
+        popup.view(),
+        AppearanceViewLevel::Category(appearance_popup::Category::SavedThemes)
+    );
     lines.push(match popup.save_view() {
+        _ if managing_hint.is_some() => managing_hint.expect("checked by the guard"),
         Some(SaveView::Choice(name)) => Line::styled(
             format!("u: update '{name}'   n: save as new   Esc: cancel"),
             hint_style,
@@ -495,6 +533,14 @@ pub fn render_appearance(
         None if editing_row.is_some() => {
             Line::styled("type to edit, enter confirms, Esc cancels", hint_style)
         }
+        None if in_saved_themes && popup.rows().len() == 1 => Line::styled(
+            "nothing saved yet — use \"Save theme\" on the main screen, Esc goes back",
+            hint_style,
+        ),
+        None if in_saved_themes => Line::styled(
+            "enter applies, r renames, d deletes, Esc goes back",
+            hint_style,
+        ),
         None => Line::styled(
             "j/k moves, enter opens/edits/cycles, a click acts, Esc back/closes — session only, \
              not saved",

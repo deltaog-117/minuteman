@@ -797,11 +797,6 @@ fn classify_save(theme: &Theme, custom_themes: &[CustomTheme], active: Option<&s
     }
 }
 
-/// Applies one outcome from the appearance popup (`AppearancePopup::key`/`click_row`) to the
-/// running session's live state, and saves it — shared by its keyboard and mouse paths in `run`,
-/// so a click and the key that reaches the same row behave identically. `local_panels` is only
-/// read here (it's the settings popup's own field of `local.toml`), so every save still carries
-/// whatever panel layout was last saved even though this outcome didn't touch it.
 /// `config.font` with the appearance popup's own live overrides layered on top. Font has only
 /// two fields, so this doesn't need a `RawFont::overlay_raw`-style helper in `theming` the way
 /// `Theme`/`Styles` do — it's never previewed live either way, since the terminal (not Minuteman)
@@ -816,6 +811,11 @@ fn effective_font(config: &Config, local_font: &RawFont) -> theming::Font {
     }
 }
 
+/// Applies one outcome from the appearance popup (`AppearancePopup::key`/`click_row`) to the
+/// running session's live state, and saves it — shared by its keyboard and mouse paths in `run`,
+/// so a click and the key that reaches the same row behave identically. `local_panels` is only
+/// read here (it's the settings popup's own field of `local.toml`), so every save still carries
+/// whatever panel layout was last saved even though this outcome didn't touch it.
 #[allow(clippy::too_many_arguments)]
 fn apply_appearance_outcome(
     outcome: AppearanceOutcome,
@@ -972,6 +972,78 @@ fn apply_appearance_outcome(
             );
             app.status = Some(format!("saved theme '{name}'"));
         }
+        AppearanceOutcome::ApplyTheme(index) => {
+            // A saved theme is a full snapshot (`RawTheme::from_theme`), so replacing the live
+            // overrides wholesale reproduces it exactly whatever was layered before.
+            if let Some(saved) = local_custom_themes.get(index) {
+                let name = saved.name.clone();
+                *local_theme = saved.theme.clone();
+                *local_active_custom_theme = Some(name.clone());
+                persist_local(
+                    local_theme,
+                    local_ui,
+                    local_panels,
+                    local_style,
+                    local_font,
+                    local_custom_themes,
+                    local_active_custom_theme,
+                    local_bookmarks,
+                    app,
+                );
+                app.status = Some(format!("applied theme '{name}'"));
+            }
+        }
+        AppearanceOutcome::RenameTheme(index, new_name) => {
+            let taken = local_custom_themes
+                .iter()
+                .enumerate()
+                .any(|(i, t)| i != index && t.name == new_name);
+            if taken {
+                app.status = Some(format!("a theme named '{new_name}' already exists"));
+            } else if let Some(saved) = local_custom_themes.get_mut(index) {
+                let old_name = std::mem::replace(&mut saved.name, new_name.clone());
+                // Keep tracking the same theme if it was the active one.
+                if local_active_custom_theme.as_deref() == Some(old_name.as_str()) {
+                    *local_active_custom_theme = Some(new_name.clone());
+                }
+                persist_local(
+                    local_theme,
+                    local_ui,
+                    local_panels,
+                    local_style,
+                    local_font,
+                    local_custom_themes,
+                    local_active_custom_theme,
+                    local_bookmarks,
+                    app,
+                );
+                app.status = Some(format!("renamed theme '{old_name}' to '{new_name}'"));
+            }
+        }
+        AppearanceOutcome::DeleteTheme(index) => {
+            if index < local_custom_themes.len() {
+                let removed = local_custom_themes.remove(index);
+                // The live look itself is left as it is; it just no longer tracks a saved theme.
+                if local_active_custom_theme.as_deref() == Some(removed.name.as_str()) {
+                    *local_active_custom_theme = None;
+                }
+                persist_local(
+                    local_theme,
+                    local_ui,
+                    local_panels,
+                    local_style,
+                    local_font,
+                    local_custom_themes,
+                    local_active_custom_theme,
+                    local_bookmarks,
+                    app,
+                );
+                app.status = Some(format!("deleted theme '{}'", removed.name));
+            }
+        }
+    }
+    if let Some(popup) = appearance.as_mut() {
+        popup.sync_saved(local_custom_themes);
     }
 }
 
@@ -1175,6 +1247,9 @@ fn run(
             hud::Mode::Normal
         };
 
+        if let Some(popup) = appearance.as_mut() {
+            popup.sync_saved(&local_custom_themes);
+        }
         terminal.draw(|frame| {
             draw(
                 frame,

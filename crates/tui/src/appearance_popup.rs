@@ -36,7 +36,9 @@
 
 use crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
-use theming::{Font, GlyphSet, Hsv, RawTheme, STYLE_ELEMENTS, Styles, Theme, hex_to_hsv};
+use theming::{
+    CustomTheme, Font, GlyphSet, Hsv, RawTheme, STYLE_ELEMENTS, Styles, Theme, hex_to_hsv,
+};
 
 /// The built-in palettes the "Theme" row cycles through, in order. `catppuccin-latte` isn't
 /// here — it's only reached via `Theme::auto` on a light terminal, or by naming it explicitly in
@@ -53,6 +55,8 @@ pub enum Category {
     Glyphs,
     Styles,
     Font,
+    /// The custom themes saved from "Save theme": apply, rename or delete one.
+    SavedThemes,
 }
 
 impl Category {
@@ -65,6 +69,7 @@ impl Category {
             Category::Glyphs => "Glyphs ›",
             Category::Styles => "Text styles ›",
             Category::Font => "Font ›",
+            Category::SavedThemes => "Saved themes ›",
         }
     }
 }
@@ -113,6 +118,10 @@ pub enum Row {
     FontFamily,
     /// Lives in `Category::Font`.
     FontSize,
+    /// An index into the saved custom themes (see `AppearancePopup::sync_saved`). Lives in
+    /// `Category::SavedThemes`; its label is the theme's own name, which `Row::label` can't return
+    /// (it is `'static`), so `overlay_view` asks `AppearancePopup::saved_name` instead.
+    SavedTheme(usize),
     /// Saves the live look as a named custom theme — updating the one it was loaded from/last
     /// saved as, if it still matches one, or prompting for a new name otherwise. Root-level.
     SaveTheme,
@@ -194,6 +203,7 @@ impl Row {
             Row::StyleElement(i) => STYLE_ELEMENTS.get(i).copied().unwrap_or("?"),
             Row::FontFamily => "Font family",
             Row::FontSize => "Font size",
+            Row::SavedTheme(_) => "(saved theme)",
             Row::SaveTheme => "Save theme",
             Row::Reset => "Reset to defaults",
         }
@@ -206,7 +216,7 @@ impl Row {
             Row::Separator => Some(RowKind::Cycle(&["flat", "arrow", "auto"])),
             Row::Glyphs => Some(RowKind::Cycle(&["unicode", "nerd", "ascii"])),
             Row::StyleElement(_) | Row::FontFamily | Row::FontSize => Some(RowKind::Text),
-            Row::Category(_) | Row::Back | Row::SaveTheme | Row::Reset => None,
+            Row::Category(_) | Row::Back | Row::SavedTheme(_) | Row::SaveTheme | Row::Reset => None,
             Row::Selection
             | Row::SelectionText
             | Row::Border
@@ -261,7 +271,7 @@ pub struct AppearanceView<'a> {
 impl AppearanceView<'_> {
     pub fn value(&self, row: Row) -> String {
         match row {
-            Row::Category(_) | Row::Back => String::new(),
+            Row::Category(_) | Row::Back | Row::SavedTheme(_) => String::new(),
             Row::Theme => self.theme_name.to_string(),
             Row::Selection => self.theme.selection_bg.clone(),
             Row::SelectionText => self.theme.selection_fg.clone(),
@@ -348,6 +358,7 @@ pub fn preview(theme: &Theme, row: Row, value: &str) -> Theme {
         | Row::StyleElement(_)
         | Row::FontFamily
         | Row::FontSize
+        | Row::SavedTheme(_)
         | Row::SaveTheme
         | Row::Reset => {}
     }
@@ -409,6 +420,7 @@ pub fn commit(overrides: &mut RawTheme, row: Row, value: String) {
         | Row::StyleElement(_)
         | Row::FontFamily
         | Row::FontSize
+        | Row::SavedTheme(_)
         | Row::SaveTheme
         | Row::Reset => {}
     }
@@ -476,6 +488,14 @@ pub enum Outcome {
     /// The save flow `begin_save` started was carried through to a name — either typed fresh or
     /// confirmed as an update.
     SaveTheme(SaveTarget),
+    /// Make saved theme `.0` (an index into the list `sync_saved` last gave the popup) the live
+    /// look.
+    ApplyTheme(usize),
+    /// Rename saved theme `.0` to `.1`, which the popup has already checked is non-empty and not
+    /// another saved theme's name.
+    RenameTheme(usize, String),
+    /// Delete saved theme `.0`, after the popup's own confirmation.
+    DeleteTheme(usize),
 }
 
 /// What `Outcome::WantSaveTheme` resolves to, once the caller has compared the live theme
@@ -628,6 +648,16 @@ enum SaveState {
     Name(String),
 }
 
+/// The "Saved themes" category's rename and delete flows — like `SaveState`, a small modal step
+/// over the row list rather than a row of its own.
+#[derive(Debug, Clone, PartialEq)]
+enum ManageState {
+    /// Typing a new name for saved theme `index`; starts as its current name.
+    Rename { index: usize, buffer: String },
+    /// Asking `y`/`n` before deleting saved theme `.0`.
+    ConfirmDelete(usize),
+}
+
 pub struct AppearancePopup {
     cursor: usize,
     view: View,
@@ -635,6 +665,12 @@ pub struct AppearancePopup {
     editing: Option<EditState>,
     /// `Some(_)` while the "Save theme" flow is asking for a choice or a name.
     save: Option<SaveState>,
+    /// `Some(_)` while a saved theme is being renamed or is awaiting delete confirmation.
+    manage: Option<ManageState>,
+    /// The saved custom themes' names, in `local.toml` order. The popup never sees `Config` or
+    /// `local.toml` (see `Outcome::WantSaveTheme`), so `main` hands it this list through
+    /// `sync_saved` instead; it is what gives `Category::SavedThemes` its rows.
+    saved: Vec<String>,
 }
 
 /// A color row's in-progress edit: either typed as text (a name or `#rrggbb`/`#rgb` hex, exactly
@@ -654,6 +690,8 @@ impl AppearancePopup {
             view: View::Root,
             editing: None,
             save: None,
+            manage: None,
+            saved: Vec::new(),
         }
     }
 
@@ -667,6 +705,7 @@ impl AppearancePopup {
                 Row::Category(Category::Glyphs),
                 Row::Category(Category::Styles),
                 Row::Category(Category::Font),
+                Row::Category(Category::SavedThemes),
                 Row::SaveTheme,
                 Row::Reset,
             ],
@@ -685,6 +724,11 @@ impl AppearancePopup {
                 rows
             }
             View::Category(Category::Font) => vec![Row::Back, Row::FontFamily, Row::FontSize],
+            View::Category(Category::SavedThemes) => {
+                let mut rows = vec![Row::Back];
+                rows.extend((0..self.saved.len()).map(Row::SavedTheme));
+                rows
+            }
         }
     }
 
@@ -725,6 +769,44 @@ impl AppearancePopup {
         self.editing = Some(EditState::Text(initial));
     }
 
+    /// Replaces the popup's copy of the saved custom themes' names with `themes`' — called by
+    /// `main` whenever the list may have changed (a save, a rename, a delete, or the popup just
+    /// opening). Any rename or delete in flight is dropped if the theme it targeted is gone, and
+    /// the cursor is pulled back onto a row that still exists.
+    pub fn sync_saved(&mut self, themes: &[CustomTheme]) {
+        let names: Vec<String> = themes.iter().map(|t| t.name.clone()).collect();
+        if names == self.saved {
+            return;
+        }
+        self.saved = names;
+        let stale = match &self.manage {
+            Some(ManageState::Rename { index, .. }) | Some(ManageState::ConfirmDelete(index)) => {
+                *index >= self.saved.len()
+            }
+            None => false,
+        };
+        if stale {
+            self.manage = None;
+        }
+        self.cursor = self.cursor.min(self.rows().len() - 1);
+    }
+
+    /// The name of saved theme `index`, for `overlay_view` to use as that row's label.
+    pub fn saved_name(&self, index: usize) -> Option<&str> {
+        self.saved.get(index).map(String::as_str)
+    }
+
+    /// What the rename/delete flow is currently showing, for `overlay_view::render_appearance`.
+    pub fn manage_view(&self) -> Option<ManageView<'_>> {
+        match &self.manage {
+            Some(ManageState::Rename { buffer, .. }) => Some(ManageView::Rename(buffer)),
+            Some(ManageState::ConfirmDelete(index)) => {
+                self.saved_name(*index).map(ManageView::ConfirmDelete)
+            }
+            None => None,
+        }
+    }
+
     /// What the "Save theme" flow should ask, from `Outcome::WantSaveTheme` — a no-op for
     /// `SaveChoice::Unchanged`, since there's nothing to save.
     pub fn begin_save(&mut self, choice: SaveChoice) {
@@ -754,10 +836,17 @@ impl AppearancePopup {
         if self.save.is_some() {
             return self.key_saving(code);
         }
+        if self.manage.is_some() {
+            return self.key_managing(code);
+        }
         if self.editing.is_some() {
             return self.key_editing(code);
         }
         let rows = self.rows();
+        let saved_index = match rows[self.cursor] {
+            Row::SavedTheme(index) => Some(index),
+            _ => None,
+        };
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.cursor = (self.cursor + 1) % rows.len();
@@ -771,6 +860,16 @@ impl AppearancePopup {
                 if matches!(rows[self.cursor].kind(), Some(RowKind::Cycle(_))) =>
             {
                 Outcome::Cycle(rows[self.cursor])
+            }
+            KeyCode::Char('r') if saved_index.is_some() => {
+                let index = saved_index.expect("checked by the guard");
+                let buffer = self.saved[index].clone();
+                self.manage = Some(ManageState::Rename { index, buffer });
+                Outcome::Stay
+            }
+            KeyCode::Char('d') if saved_index.is_some() => {
+                self.manage = saved_index.map(ManageState::ConfirmDelete);
+                Outcome::Stay
             }
             KeyCode::Enter => self.activate(),
             KeyCode::Esc => match self.view {
@@ -901,6 +1000,56 @@ impl AppearancePopup {
         }
     }
 
+    /// The rename buffer and the delete confirmation both live here. `Esc` cancels either without
+    /// changing anything; a rename to an empty name, or to another saved theme's name, is ignored
+    /// rather than committed, the same way an empty new name is in `key_saving`.
+    fn key_managing(&mut self, code: KeyCode) -> Outcome {
+        match self.manage.take().expect("checked by the caller") {
+            ManageState::ConfirmDelete(index) => match code {
+                KeyCode::Char('y') => Outcome::DeleteTheme(index),
+                KeyCode::Char('n') | KeyCode::Esc => Outcome::Stay,
+                _ => {
+                    self.manage = Some(ManageState::ConfirmDelete(index));
+                    Outcome::Stay
+                }
+            },
+            ManageState::Rename { index, mut buffer } => match code {
+                KeyCode::Esc => Outcome::Stay,
+                KeyCode::Enter => {
+                    let name = buffer.trim().to_string();
+                    let clashes = self
+                        .saved
+                        .iter()
+                        .enumerate()
+                        .any(|(i, saved)| i != index && *saved == name);
+                    if name.is_empty() || clashes {
+                        self.manage = Some(ManageState::Rename { index, buffer });
+                        Outcome::Stay
+                    } else if self.saved.get(index) == Some(&name) {
+                        // Unchanged: nothing to write.
+                        Outcome::Stay
+                    } else {
+                        Outcome::RenameTheme(index, name)
+                    }
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    self.manage = Some(ManageState::Rename { index, buffer });
+                    Outcome::Stay
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    self.manage = Some(ManageState::Rename { index, buffer });
+                    Outcome::Stay
+                }
+                _ => {
+                    self.manage = Some(ManageState::Rename { index, buffer });
+                    Outcome::Stay
+                }
+            },
+        }
+    }
+
     /// A left click on `row_index` (from `hit`), which acts on that row exactly like `Enter`
     /// would after moving the cursor there — a mouse user and a keyboard user reach the same
     /// outcome. Abandons any in-progress edit or save flow on a different row without committing
@@ -912,6 +1061,7 @@ impl AppearancePopup {
         self.cursor = row_index;
         self.editing = None;
         self.save = None;
+        self.manage = None;
         self.activate()
     }
 
@@ -951,6 +1101,7 @@ impl AppearancePopup {
             }
             Row::Reset => Outcome::Reset,
             Row::SaveTheme => Outcome::WantSaveTheme,
+            Row::SavedTheme(index) => Outcome::ApplyTheme(index),
             row => match row.kind().expect("every other row has a kind") {
                 RowKind::Color | RowKind::Text => Outcome::WantEdit(row),
                 RowKind::Cycle(_) => Outcome::Cycle(row),
@@ -976,6 +1127,15 @@ pub enum SaveView<'a> {
     Choice(&'a str),
     /// The buffer being typed for a new theme's name.
     Name(&'a str),
+}
+
+/// What the rename/delete flow is showing, for `overlay_view::render_appearance` to draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManageView<'a> {
+    /// The buffer being typed as a saved theme's new name.
+    Rename(&'a str),
+    /// The name of the saved theme awaiting a `y`/`n` delete confirmation.
+    ConfirmDelete(&'a str),
 }
 
 impl Default for AppearancePopup {
@@ -1135,8 +1295,9 @@ mod tests {
     fn the_reset_row_is_an_action_not_a_color_or_a_cycle() {
         assert!(Row::Reset.kind().is_none());
         let mut popup = AppearancePopup::new();
-        // Root: [ThemeColors, BorderSeparator, Glyphs, Styles, Font, SaveTheme, Reset]
-        for _ in 0..6 {
+        // Root: [ThemeColors, BorderSeparator, Glyphs, Styles, Font, SavedThemes, SaveTheme,
+        // Reset]
+        for _ in 0..7 {
             popup.key(KeyCode::Char('j'));
         }
         assert_eq!(popup.rows()[popup.cursor()], Row::Reset);
@@ -1147,7 +1308,7 @@ mod tests {
     fn the_save_theme_row_is_an_action_that_wants_a_save() {
         assert!(Row::SaveTheme.kind().is_none());
         let mut popup = AppearancePopup::new();
-        for _ in 0..5 {
+        for _ in 0..6 {
             popup.key(KeyCode::Char('j'));
         }
         assert_eq!(popup.rows()[popup.cursor()], Row::SaveTheme);
@@ -1513,5 +1674,156 @@ mod tests {
                 proptest::prop_assert!((0.0..360.0).contains(&hsv.h));
             }
         }
+    }
+
+    fn themes(names: &[&str]) -> Vec<CustomTheme> {
+        names
+            .iter()
+            .map(|name| CustomTheme {
+                name: (*name).to_string(),
+                theme: RawTheme::default(),
+            })
+            .collect()
+    }
+
+    /// A popup already inside "Saved themes" with `names` synced, cursor on the first saved theme.
+    fn saved_themes_popup(names: &[&str]) -> AppearancePopup {
+        let mut popup = AppearancePopup::new();
+        popup.sync_saved(&themes(names));
+        popup.view = View::Category(Category::SavedThemes);
+        popup.cursor = 1;
+        popup
+    }
+
+    #[test]
+    fn saved_themes_category_lists_one_row_per_saved_theme_after_back() {
+        let mut popup = AppearancePopup::new();
+        popup.view = View::Category(Category::SavedThemes);
+        assert_eq!(popup.rows(), vec![Row::Back], "nothing saved yet");
+        popup.sync_saved(&themes(&["sunset", "midnight"]));
+        assert_eq!(
+            popup.rows(),
+            vec![Row::Back, Row::SavedTheme(0), Row::SavedTheme(1)]
+        );
+        assert_eq!(popup.saved_name(1), Some("midnight"));
+        assert_eq!(popup.saved_name(2), None);
+    }
+
+    #[test]
+    fn enter_on_a_saved_theme_asks_to_apply_it() {
+        let mut popup = saved_themes_popup(&["sunset", "midnight"]);
+        popup.key(KeyCode::Char('j'));
+        assert_eq!(popup.key(KeyCode::Enter), Outcome::ApplyTheme(1));
+        assert_eq!(
+            popup.click_row(1),
+            Outcome::ApplyTheme(0),
+            "a click acts like enter on that row"
+        );
+    }
+
+    #[test]
+    fn rename_starts_from_the_current_name_and_commits_the_edit() {
+        let mut popup = saved_themes_popup(&["sunset", "midnight"]);
+        assert_eq!(popup.key(KeyCode::Char('r')), Outcome::Stay);
+        assert_eq!(popup.manage_view(), Some(ManageView::Rename("sunset")));
+        popup.key(KeyCode::Backspace);
+        popup.key(KeyCode::Char('!'));
+        assert_eq!(popup.manage_view(), Some(ManageView::Rename("sunse!")));
+        assert_eq!(
+            popup.key(KeyCode::Enter),
+            Outcome::RenameTheme(0, "sunse!".into())
+        );
+        assert_eq!(popup.manage_view(), None, "the flow ends on commit");
+    }
+
+    #[test]
+    fn rename_ignores_an_empty_or_clashing_name_and_esc_cancels() {
+        let mut popup = saved_themes_popup(&["sunset", "midnight"]);
+        popup.key(KeyCode::Char('r'));
+        for _ in 0.."sunset".len() {
+            popup.key(KeyCode::Backspace);
+        }
+        assert_eq!(popup.key(KeyCode::Enter), Outcome::Stay, "empty is ignored");
+        assert_eq!(popup.manage_view(), Some(ManageView::Rename("")));
+
+        for c in "midnight".chars() {
+            popup.key(KeyCode::Char(c));
+        }
+        assert_eq!(
+            popup.key(KeyCode::Enter),
+            Outcome::Stay,
+            "a clash is ignored"
+        );
+        assert_eq!(popup.manage_view(), Some(ManageView::Rename("midnight")));
+
+        assert_eq!(popup.key(KeyCode::Esc), Outcome::Stay);
+        assert_eq!(popup.manage_view(), None);
+    }
+
+    #[test]
+    fn renaming_to_the_unchanged_name_writes_nothing() {
+        let mut popup = saved_themes_popup(&["sunset"]);
+        popup.key(KeyCode::Char('r'));
+        assert_eq!(popup.key(KeyCode::Enter), Outcome::Stay);
+        assert_eq!(popup.manage_view(), None);
+    }
+
+    #[test]
+    fn delete_needs_a_y_and_anything_but_y_or_n_keeps_asking() {
+        let mut popup = saved_themes_popup(&["sunset", "midnight"]);
+        popup.key(KeyCode::Char('d'));
+        assert_eq!(
+            popup.manage_view(),
+            Some(ManageView::ConfirmDelete("sunset"))
+        );
+        assert_eq!(popup.key(KeyCode::Char('x')), Outcome::Stay);
+        assert_eq!(
+            popup.manage_view(),
+            Some(ManageView::ConfirmDelete("sunset")),
+            "an unrelated key doesn't dismiss the question"
+        );
+        assert_eq!(popup.key(KeyCode::Char('n')), Outcome::Stay);
+        assert_eq!(popup.manage_view(), None, "n cancels");
+
+        popup.key(KeyCode::Char('d'));
+        assert_eq!(popup.key(KeyCode::Char('y')), Outcome::DeleteTheme(0));
+    }
+
+    #[test]
+    fn r_and_d_do_nothing_off_a_saved_theme_row() {
+        let mut popup = saved_themes_popup(&["sunset"]);
+        popup.cursor = 0; // Back
+        assert_eq!(popup.key(KeyCode::Char('r')), Outcome::Stay);
+        assert_eq!(popup.key(KeyCode::Char('d')), Outcome::Stay);
+        assert_eq!(popup.manage_view(), None);
+    }
+
+    #[test]
+    fn sync_saved_pulls_the_cursor_back_and_drops_a_flow_on_a_vanished_theme() {
+        let mut popup = saved_themes_popup(&["sunset", "midnight"]);
+        popup.key(KeyCode::Char('j')); // midnight, the last row
+        popup.key(KeyCode::Char('d'));
+        popup.sync_saved(&themes(&["sunset"]));
+        assert_eq!(popup.manage_view(), None, "its target no longer exists");
+        assert_eq!(popup.cursor(), 1, "still on a row that exists");
+        popup.sync_saved(&themes(&[]));
+        assert_eq!(popup.cursor(), 0, "only Back is left");
+    }
+
+    #[test]
+    fn a_saved_theme_row_is_an_action_with_no_value() {
+        assert!(Row::SavedTheme(0).kind().is_none());
+        let theme = Theme::default();
+        let styles = Styles::default();
+        let font = Font::default();
+        let view = AppearanceView {
+            theme: &theme,
+            glyphs: GlyphSet::Unicode,
+            styles: &styles,
+            font: &font,
+            theme_name: "neon",
+            active_custom_theme: None,
+        };
+        assert_eq!(view.value(Row::SavedTheme(0)), "");
     }
 }
