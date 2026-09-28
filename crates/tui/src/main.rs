@@ -48,6 +48,7 @@ mod system_hud;
 mod terminal_init;
 mod text_preview;
 
+use std::collections::BTreeMap;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -392,6 +393,20 @@ enum ShellChordMode {
     Move,
 }
 
+/// Which half of the bookmark chord (`` ` ``/`Action::BookmarkJump` or `B`/`Action::BookmarkSet`)
+/// is waiting for its next key — the letter or digit naming the register. Unlike `ShellChordMode`,
+/// this is a one-shot gesture: whichever key completes it (or fails to name a register) ends the
+/// chord immediately rather than repeating.
+#[derive(Debug, Clone, Copy)]
+enum BookmarkChord {
+    /// The next key names a register to jump the browser to, or reports there's nothing saved
+    /// under it.
+    Jump,
+    /// The next key names a register to save the browsed directory under, overwriting whatever
+    /// it held before.
+    Set,
+}
+
 /// The distance a single `hjkl`/arrow press moves the box in move-chord mode, in cells —
 /// deliberately coarser than `RESIZE_STEP`'s 5%, since a cell is already the finest unit an
 /// offset moves in.
@@ -729,12 +744,14 @@ fn effective_panels(config: &Config, local_panels: &RawPanels) -> PanelsConfig {
 /// survive to the next launch — called after every commit from either popup. A failure (e.g. a
 /// read-only filesystem) is reported in the status line rather than treated as fatal: the change
 /// is already applied for the rest of this session regardless of whether it could be saved.
+#[allow(clippy::too_many_arguments)]
 fn persist_local(
     local_theme: &RawTheme,
     local_ui: &RawUi,
     local_panels: &RawPanels,
     local_custom_themes: &[CustomTheme],
     local_active_custom_theme: &Option<String>,
+    local_bookmarks: &BTreeMap<char, PathBuf>,
     app: &mut App,
 ) {
     let local = RawLocal {
@@ -743,6 +760,7 @@ fn persist_local(
         panels: local_panels.clone(),
         custom_themes: local_custom_themes.to_vec(),
         active_custom_theme: local_active_custom_theme.clone(),
+        bookmarks: local_bookmarks.clone(),
     };
     if let Err(e) = Config::save_local(&local) {
         app.status = Some(format!("could not save to local.toml: {e}"));
@@ -780,6 +798,7 @@ fn apply_appearance_outcome(
     local_panels: &RawPanels,
     local_custom_themes: &mut Vec<CustomTheme>,
     local_active_custom_theme: &mut Option<String>,
+    local_bookmarks: &BTreeMap<char, PathBuf>,
     config: &Config,
     app: &mut App,
 ) {
@@ -821,6 +840,7 @@ fn apply_appearance_outcome(
                     local_panels,
                     local_custom_themes,
                     local_active_custom_theme,
+                    local_bookmarks,
                     app,
                 );
             }
@@ -833,6 +853,7 @@ fn apply_appearance_outcome(
                 local_panels,
                 local_custom_themes,
                 local_active_custom_theme,
+                local_bookmarks,
                 app,
             );
         }
@@ -848,6 +869,7 @@ fn apply_appearance_outcome(
                 local_panels,
                 local_custom_themes,
                 local_active_custom_theme,
+                local_bookmarks,
                 app,
             );
         }
@@ -885,6 +907,7 @@ fn apply_appearance_outcome(
                 local_panels,
                 local_custom_themes,
                 local_active_custom_theme,
+                local_bookmarks,
                 app,
             );
             app.status = Some(format!("saved theme '{name}'"));
@@ -963,6 +986,11 @@ fn run(
     // The active resize/move chord, if any — `hjkl`/arrows are interpreted specially while this
     // is `Some`, instead of driving the browser or forwarding to a shell.
     let mut shell_chord: Option<ShellChordMode> = None;
+    // Set for exactly one keystroke after `Action::BookmarkJump`/`BookmarkSet`, waiting to see
+    // which letter or digit names the register; any other key drops it (see `BookmarkChord`).
+    // Unrelated to `pending_leader`/`shell_chord` above, which are only ever set while a shell
+    // pane is open — this one fires from plain browsing instead.
+    let mut pending_bookmark: Option<BookmarkChord> = None;
     // Lets `app.status` messages clear themselves after a few seconds instead of lingering.
     let mut status_clock = hud::StatusClock::new(Instant::now());
     // Kept across frames rather than rebuilt in `draw`, because a click has to be mapped back to
@@ -993,6 +1021,9 @@ fn run(
     let mut local_panels = config.local_panels.clone();
     let mut local_custom_themes = config.local_custom_themes.clone();
     let mut local_active_custom_theme = config.local_active_custom_theme.clone();
+    // The saved bookmark registers, mutated live by `Action::BookmarkSet` and persisted the same
+    // way as the popups' own state above.
+    let mut local_bookmarks = config.local_bookmarks.clone();
 
     loop {
         if boot_splash
@@ -1062,6 +1093,11 @@ fn run(
             }
         } else if shells.is_some() && shell_focused {
             hud::Mode::Shell
+        } else if let Some(chord) = pending_bookmark {
+            match chord {
+                BookmarkChord::Jump => hud::Mode::BookmarkJump,
+                BookmarkChord::Set => hud::Mode::BookmarkSet,
+            }
         } else if let Some(prompt) = &app.prompt {
             hud::Mode::Prompt {
                 label: prompt.label(),
@@ -1217,6 +1253,7 @@ fn run(
                             &local_panels,
                             &mut local_custom_themes,
                             &mut local_active_custom_theme,
+                            &local_bookmarks,
                             config,
                             app,
                         );
@@ -1306,6 +1343,7 @@ fn run(
                             shell_focused = false;
                             pending_leader = false;
                             shell_chord = None;
+                            pending_bookmark = None;
                             if matches!(hit, Hit::ParentRow(_) | Hit::CurrentRow(_)) {
                                 let click = clicks.register(hit, Instant::now());
                                 // Read before the click is applied: opening a directory moves
@@ -1332,6 +1370,7 @@ fn run(
                             shell_focused = false;
                             pending_leader = false;
                             shell_chord = None;
+                            pending_bookmark = None;
                             // A right-click selects what it lands on first, the way a left click
                             // would, so the menu is always about something the user can see lit.
                             let on_entry = match hit {
@@ -1535,6 +1574,7 @@ fn run(
                                     shell_focused = !shell_focused;
                                     pending_leader = false;
                                     shell_chord = None;
+                                    pending_bookmark = None;
                                 }
                             }
                         }
@@ -1556,6 +1596,7 @@ fn run(
                 {
                     pending_leader = false;
                     shell_chord = None;
+                    pending_bookmark = None;
                     dragging_divider = None;
                     // A new shell is where you'd want to type, same as the leader's split.
                     if command == AltCommand::Split {
@@ -1707,6 +1748,7 @@ fn run(
                                 &local_panels,
                                 &local_custom_themes,
                                 &local_active_custom_theme,
+                                &local_bookmarks,
                                 app,
                             );
                             let panels = effective_panels(config, &local_panels);
@@ -1732,6 +1774,7 @@ fn run(
                         &local_panels,
                         &mut local_custom_themes,
                         &mut local_active_custom_theme,
+                        &local_bookmarks,
                         config,
                         app,
                     );
@@ -1878,6 +1921,52 @@ fn run(
                     }
                 }
 
+                // The bookmark chord is one-shot: whichever key ends it below, this is always the
+                // last iteration it's `Some`, unlike `shell_chord`'s repeatable resize/move.
+                if let Some(mode) = pending_bookmark.take() {
+                    match key.code {
+                        KeyCode::Esc => {}
+                        KeyCode::Char(c) if c.is_ascii_alphanumeric() => {
+                            match mode {
+                                BookmarkChord::Jump => match local_bookmarks.get(&c) {
+                                    Some(path) => match browser.goto(vfs, path) {
+                                        Ok(()) => {
+                                            app.status = Some(format!("jumped to bookmark '{c}'"));
+                                        }
+                                        Err(e) => {
+                                            app.status = Some(format!("bookmark '{c}': {e}"));
+                                        }
+                                    },
+                                    None => {
+                                        app.status = Some(format!("no bookmark at '{c}'"));
+                                    }
+                                },
+                                BookmarkChord::Set => {
+                                    local_bookmarks.insert(c, browser.current_dir().to_path_buf());
+                                    persist_local(
+                                        &local_theme,
+                                        &local_ui,
+                                        &local_panels,
+                                        &local_custom_themes,
+                                        &local_active_custom_theme,
+                                        &local_bookmarks,
+                                        app,
+                                    );
+                                    app.status = Some(format!("bookmark '{c}' set"));
+                                }
+                            }
+                            continue;
+                        }
+                        // Any other key ends the chord but still gets dispatched normally below
+                        // (e.g. `q` should still quit), matching `shell_chord`'s own fallback —
+                        // except `Esc`, which only ever means "leave this mode" (see above).
+                        _ => {}
+                    }
+                    if key.code == KeyCode::Esc {
+                        continue;
+                    }
+                }
+
                 // Typing mode: every key belongs to the focused shell — `Tab`, `Space`, `o`, `%`,
                 // `Esc` and all the rest, since a program inside the pane (vim, fzf, ...) needs
                 // `Esc` for itself. The ways out are all `Alt`-layer or mouse: tap `Alt`, click
@@ -1931,6 +2020,11 @@ fn run(
                     Some(Action::Command) => app.begin_command(),
                     Some(Action::Cancel) => app.cancel_all(browser),
                     Some(Action::Select) => browser.toggle_mark(),
+                    // A directory bookmark, distinct from `Select`'s per-file marks above — the
+                    // status bar names what the next key does (see `hud::hints`); the register
+                    // itself is read back in the `pending_bookmark` block up above.
+                    Some(Action::BookmarkJump) => pending_bookmark = Some(BookmarkChord::Jump),
+                    Some(Action::BookmarkSet) => pending_bookmark = Some(BookmarkChord::Set),
                     Some(Action::DiskUsage) => {
                         usage = Some(app.begin_disk_usage(browser.current_dir().to_path_buf()));
                     }

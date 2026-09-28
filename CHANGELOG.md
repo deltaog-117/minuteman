@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `theming`, `tui`: Ranger-style directory bookmarks. `` ` `` then a letter or digit jumps to the
+  directory saved under that register; `B` then a letter or digit saves the browsed directory
+  there (`m` was already `cut`, so bookmark-set defaults to `B` instead of Ranger's own `m`). Both
+  are one-shot chords, shown in the status bar's mode pill (`BOOKMARK`/`SET BOOKMARK`) while
+  pending, with `Esc` to cancel and any other key both ending the chord and still dispatching
+  normally. Registers persist to `local.toml`'s new `[bookmarks]` table, the same way saved custom
+  themes already do. A jump to an empty register reports it in the status line instead of erroring.
 - `tui`: a "caps lock" header pill, shown for as long as Caps Lock is on and hidden the moment
   it's off. `App` now tracks the state itself (`caps_lock`/`set_caps_lock`), updated from every
   key event's `KeyEventState` — including under a modal view or prompt — so the pill stays

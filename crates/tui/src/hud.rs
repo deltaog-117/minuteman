@@ -430,6 +430,10 @@ pub enum Mode {
     Leader,
     Resize,
     Move,
+    /// `` ` `` was just pressed; the next key names a bookmark register to jump to.
+    BookmarkJump,
+    /// `B` was just pressed; the next key names a register to save the browsed directory under.
+    BookmarkSet,
     /// A background copy/move/delete is running.
     Busy,
     Prompt {
@@ -540,6 +544,9 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
         ],
         Mode::Shell => vec![fixed("alt", "browse")],
         Mode::Resize | Mode::Move => vec![fixed("hjkl", "nudge"), fixed("esc", "done")],
+        Mode::BookmarkJump | Mode::BookmarkSet => {
+            vec![fixed("a-z 0-9", "register"), fixed("esc", "cancel")]
+        }
         Mode::Busy => vec![fixed("esc", "cancel"), bound(Action::Cancel, "cancel all")],
         Mode::Prompt {
             text_input: true, ..
@@ -556,6 +563,8 @@ fn mode_pill(mode: Mode, theme: &theming::Theme) -> (String, Color) {
         Mode::Leader => ("LEADER", &theme.accent_fg),
         Mode::Resize => ("RESIZE", &theme.config_fg),
         Mode::Move => ("MOVE", &theme.config_fg),
+        Mode::BookmarkJump => ("BOOKMARK", &theme.config_fg),
+        Mode::BookmarkSet => ("SET BOOKMARK", &theme.config_fg),
         Mode::Busy => ("BUSY", &theme.archive_fg),
         Mode::Prompt {
             label, destructive, ..
@@ -900,6 +909,7 @@ mod tests {
             local_panels: theming::RawPanels::default(),
             local_custom_themes: Vec::new(),
             local_active_custom_theme: None,
+            local_bookmarks: std::collections::BTreeMap::new(),
         }
     }
 

@@ -70,6 +70,13 @@ pub enum Action {
     /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
     /// later bulk action (e.g. `Delete`) instead of acting on it immediately.
     Select,
+    /// Waits for one more key — any letter or digit — naming a bookmark register, then jumps the
+    /// browser to the directory saved under it. A register with nothing saved just reports that
+    /// in the status line. See `BookmarkSet` to save one; unrelated to `Select`'s per-file marks.
+    BookmarkJump,
+    /// Waits for one more key naming a register, then saves the browsed directory under it,
+    /// overwriting whatever that register held before.
+    BookmarkSet,
     /// The single leader key for every shell-pane command. Inert with no shell pane open; while
     /// one is, and keystrokes aren't going to the shell (`Esc` leaves that typing mode), the next
     /// key is the command: `Space` again to go back to typing in the focused pane, `hjkl`/arrows
@@ -107,6 +114,8 @@ pub struct RawKeyMap {
     pub preview_up: Vec<String>,
     pub disk_usage: Vec<String>,
     pub appearance: Vec<String>,
+    pub bookmark_jump: Vec<String>,
+    pub bookmark_set: Vec<String>,
     pub leader: Vec<String>,
 }
 
@@ -136,6 +145,9 @@ impl Default for RawKeyMap {
             preview_up: vec!["K".into()],
             disk_usage: vec!["u".into()],
             appearance: vec!["a".into()],
+            // `m` is already `cut`, so `B` ("Bookmark") stands in for Ranger's own default.
+            bookmark_jump: vec!["`".into()],
+            bookmark_set: vec!["B".into()],
             leader: vec!["space".into()],
         }
     }
@@ -198,6 +210,8 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.preview_up, Action::PreviewUp);
         bind_all(&raw.disk_usage, Action::DiskUsage);
         bind_all(&raw.appearance, Action::Appearance);
+        bind_all(&raw.bookmark_jump, Action::BookmarkJump);
+        bind_all(&raw.bookmark_set, Action::BookmarkSet);
         bind_all(&raw.leader, Action::Leader);
 
         Self { bindings }
@@ -275,6 +289,14 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('K')), Some(Action::PreviewUp));
         assert_eq!(keymap.resolve(KeyCode::Char('u')), Some(Action::DiskUsage));
         assert_eq!(keymap.resolve(KeyCode::Char('a')), Some(Action::Appearance));
+        assert_eq!(
+            keymap.resolve(KeyCode::Char('`')),
+            Some(Action::BookmarkJump)
+        );
+        assert_eq!(
+            keymap.resolve(KeyCode::Char('B')),
+            Some(Action::BookmarkSet)
+        );
         // `Tab`, `o`, `%` and `"` used to be shell-pane keys; they belong to the shell now.
         for freed in [
             KeyCode::Tab,
@@ -347,5 +369,17 @@ mod tests {
     fn unrecognised_key_strings_are_skipped_not_fatal() {
         assert_eq!(parse_key("ctrl-something-weird"), None);
         assert_eq!(parse_key(""), None);
+    }
+
+    /// `m` (lowercase) was already `cut` before bookmarks existed, so the bookmark-set default
+    /// had to land on a different key rather than shadowing it — this pins that they stay distinct.
+    #[test]
+    fn bookmark_set_does_not_shadow_cut() {
+        let keymap: KeyMap = RawKeyMap::default().into();
+        assert_eq!(keymap.resolve(KeyCode::Char('m')), Some(Action::Cut));
+        assert_ne!(
+            keymap.resolve(KeyCode::Char('m')),
+            Some(Action::BookmarkSet)
+        );
     }
 }

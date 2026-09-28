@@ -192,6 +192,13 @@ select = ["v"]
 # change here (and every one the settings popup makes) is saved at once to
 # ~/.config/minuteman/local.toml, so it survives a restart — see the note on that file below.
 appearance = ["a"]
+# Waits for one more key — any letter or digit — naming a bookmark register, then jumps straight
+# to the directory saved under it; a register with nothing saved just says so in the status line.
+# `m` is already cut above, so bookmark-set below defaults to `B` instead of Ranger's own `m`.
+bookmark_jump = ["`"]
+# Waits for one more key naming a register, then saves the directory you're browsing under it,
+# overwriting whatever that register held before.
+bookmark_set = ["B"]
 # The one leader key for every mini-shell command, and for the settings popup. With a shell open
 # and not being typed into (tap Alt or click the browser to stop typing), leader followed by:
 # leader again = type in the shell; h/j/k/l or the arrows = focus the pane in that direction;

@@ -858,8 +858,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   blinking or pulsing: this project's own diary records a pulsing selection highlight built,
   verified and then cut for being distracting, so a static, always-correct pill was chosen instead
   of reviving that effect for a different indicator.
-- **Bookmarks / marks** – jump-to-directory bookmarks (Ranger-style `` ` ``/`m` register) so
-  frequently visited paths don't require re-navigating the miller columns each time.
+- ✅ **Bookmarks / marks** – Ranger-style jump-to-directory bookmarks, so a frequently visited path
+  is one chord away instead of re-navigating the miller columns. `` ` `` then a letter or digit
+  jumps to whatever directory is saved under that register; `B` then a letter or digit saves the
+  browsed directory there, overwriting whatever it held before (`m` was already `cut`, so the
+  bookmark-set default landed on `B` — "Bookmark" — instead of Ranger's own `m`). Both chords are
+  one-shot: any key that isn't a letter or digit cancels without acting, `Esc` cancels silently,
+  and anything else still dispatches normally afterward (e.g. `q` still quits mid-chord), the same
+  fallback `Alt`+leader's shell-pane chords already use. Registers persist to `local.toml`'s new
+  `[bookmarks]` table (a `BTreeMap<char, PathBuf>`, mirroring how saved custom themes already live
+  there) so they survive a restart. A miss (jumping to a register nothing was ever saved under)
+  just reports that in the status line rather than erroring.
 
 ---
 
@@ -1057,7 +1066,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    danger color, and disappears the moment it's off again, kept in sync on every key event (even
    while a modal view or a prompt owns the keyboard) so it never lags behind what the next letter
    key will actually do.
+   Then the newest: press `B` then a letter (say `a`) in any directory to bookmark it — the status
+   bar confirms with `bookmark 'a' set`. Navigate elsewhere, then press `` ` `` then the same
+   letter to jump straight back, or a letter nothing was ever saved under to see `no bookmark at
+   'x'` instead of an error. Either chord shows `SET BOOKMARK`/`BOOKMARK` in the status bar's mode
+   pill while it's waiting for that second key, with `Esc` to back out.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: the mouse's stage 2 (multi-select and breadcrumb clicks) or bookmarks/marks.
+4. Next cycle: the mouse's stage 2 (multi-select and breadcrumb clicks).

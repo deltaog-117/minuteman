@@ -54,6 +54,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-26 | UI Overhaul, Phase C (Start) | Animation tick plus animated shell-pane focus-border transitions (COA A); a pulsing selection was built, verified, and cut on taste alone before committing | ✅ Confirmed |
 | 2026-09-27 | UI Overhaul, Phase C (Remainder) | Boot splash, gradient borders/titles, typewriter preview reveal, system/git HUD off `/proc` with no new dependency (COA A, measured against the `sysinfo` crate's real +276 KiB/8-crate cost first); pulsing selection dropped from scope for good | ✅ Confirmed |
 | 2026-09-27 | Caps Lock Header Pill | Static header pill kept in sync from every key event's `KeyEventState` (COA A); a blinking/pulsing version, matching the plain reading of "loop it," was raised and rejected at the user's own clarification, consistent with the pulsing selection already cut for taste | ✅ Confirmed |
+| 2026-09-28 | Bookmarks / Marks | A `main.rs`-local pending-chord (mirroring `shell_chord`) plus a new `RawLocal::bookmarks` field reusing `local.toml` (COA A), over a heavier `Prompt`-variant UI (B) or a whole new file format and picker overlay (C) | ✅ Confirmed |
 
 ---
 
@@ -3916,6 +3917,82 @@ every subsequent letter keystroke does and is the one piece of header state wort
 including new tests: `glyphs`'s ascii-purity and pill tests extended to cover `caps_lock`,
 `hud::tests::the_caps_lock_pill_shows_only_while_it_is_on`, and
 `app::tests::caps_lock_starts_off_and_tracks_the_last_key_event`).
+
+---
+
+### Bookmarks / Marks: a Local Chord, Not a New Prompt or File
+
+**Date:** 2026-09-28
+**Status:** Confirmed
+
+#### Context / Background
+
+The next High Priority roadmap item was Ranger-style directory bookmarks: `` ` ``/`m` jumps to a
+saved directory, `m` saves the current one under a register letter. Before writing anything, a
+codebase pass turned up a naming collision the roadmap wording didn't anticipate: `m` was already
+the default `Action::Cut` binding (`crates/theming/src/keymap.rs`), and this project's own
+`Select` action already owns the word "mark" for per-file multi-select. Ranger's own default key
+for saving a bookmark could not be reused as-is.
+
+#### Options Considered
+
+**Option A: a `main.rs`-local pending chord, `local.toml` persistence (chosen)**
+- Two new `Action` variants, `BookmarkJump` (default `` ` ``, free) and `BookmarkSet` (default
+  `B` — "Bookmark", since `m` was taken), resolved through the same `KeyMap` every other binding
+  uses. `run`'s event loop gets a `pending_bookmark: Option<BookmarkChord>` local, set from the
+  final action-dispatch match and consumed one keystroke later — the exact shape `shell_chord`
+  already uses for the leader's resize/move chords, except one-shot: whichever key completes it
+  (a letter/digit register, `Esc`, or anything else) ends it immediately, there is nothing to
+  repeat. Registers live in a new `RawLocal::bookmarks: BTreeMap<char, PathBuf>`, mirroring exactly
+  how `custom_themes` already rides along in `local.toml` unmerged with `config.toml`/
+  `appearance.toml` — no new file, no new format, and `Config::local_bookmarks` follows the same
+  `local_*` mirroring every other `local.toml` table already gets.
+- A miss (jumping to a register nothing was ever saved under) reports `no bookmark at 'x'` in the
+  status line rather than erroring; the status bar's mode pill shows `BOOKMARK`/`SET BOOKMARK`
+  while a chord is pending, with its own `hud::hints` row (`a-z 0-9 register`, `esc cancel`) — the
+  same treatment every other pending chord in this codebase already gets.
+
+**Option B: a new `Prompt::BookmarkJump`/`BookmarkSet` variant**
+- Would reuse `Prompt`'s existing status-bar label/render plumbing for free, but `Prompt` is built
+  for blocking, often-destructive flows (`is_destructive()`, full text input) — stretching it over
+  a quick one-key register tap is a semantic mismatch with the rest of that enum, for no real gain
+  over `shell_chord`'s already-proven shape.
+
+**Option C: a dedicated `bookmarks.toml` plus a browsable picker overlay**
+- Richer (not capped at 26 letters, browsable rather than register-only), but a new file format and
+  a new overlay rendering surface is well beyond what the roadmap item — explicitly "Ranger-style
+  `` ` ``/`m` register" — asked for.
+
+Chosen: **A**. It is the smallest extension of patterns already proven in this exact codebase
+(`shell_chord` for the pending-key gesture, `custom_themes` for the `local.toml` persistence
+shape), and matches the roadmap's own wording — a register, not a picker.
+
+#### Consequences
+
+`m` stays `Cut`; a dedicated test (`bookmark_set_does_not_shadow_cut`) pins the two apart so a
+future rebind of either can't silently reintroduce the collision. `persist_local` and
+`apply_appearance_outcome` both grew a `local_bookmarks` parameter threaded alongside their
+existing `local_custom_themes`/`local_active_custom_theme` ones, since every save of `local.toml`
+writes the whole file back out regardless of which table actually changed (same reasoning as
+`local_panels` already being read-only in `apply_appearance_outcome` — see that function's own
+doc). `BTreeMap` rather than `HashMap` for `bookmarks`, so `local.toml`'s `[bookmarks]` table comes
+out in the same sorted order on every save instead of shuffling for no reason — the same choice
+`custom_themes` would have made if a `Vec`'s insertion order weren't already sufficient there.
+
+**Verification.** `scripts/check` passes: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `cargo test --workspace` green — `theming` grew
+from 76 to 79 passed with three new tests (`keymap::tests::bookmark_set_does_not_shadow_cut` and
+`config::tests`' `bookmarks_are_read_from_local_toml_unmerged` /
+`a_bookmark_saved_from_the_running_session_round_trips_through_local_toml`); `tui`'s own 408 is
+unchanged, since the new dispatch code is exercised by the manual smoke test below rather than a
+unit test of `run`'s event loop. Also smoke-tested
+against the actual compiled binary in an isolated `tmux` session (a scratch directory tree, a
+throwaway `XDG_CONFIG_HOME` so it never touched a real `local.toml`): `B` then `a` saved a bookmark
+and showed `bookmark 'a' set`; entering a subdirectory and then `` ` `` then `a` jumped straight
+back with `jumped to bookmark 'a'`; `` ` `` then `z` (never saved) showed `no bookmark at 'z'`
+without changing directory or crashing; the mode pill read `SET BOOKMARK`/`BOOKMARK` while each
+chord was pending; `q` quit cleanly. `local.toml` came out exactly as expected: `[bookmarks]`
+followed by `a = "/tmp/bm-test"`.
 
 ---
 

@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
@@ -178,6 +179,11 @@ pub struct RawLocal {
     /// different theme" when "Save theme" is used again. `None` once `Reset` clears it, or if
     /// `theme` was never saved as a custom theme this session.
     pub active_custom_theme: Option<String>,
+    /// Ranger-style directory bookmarks: the register key `Action::BookmarkSet` was pressed with,
+    /// mapped to the directory browsed at the time. A `BTreeMap` rather than a `HashMap` so
+    /// `local.toml`'s bookmarks come out in a stable, sorted order every save instead of shuffling
+    /// around for no reason.
+    pub bookmarks: BTreeMap<char, PathBuf>,
 }
 
 /// One theme a user named and saved from the appearance popup. `name` is unique within
@@ -259,6 +265,8 @@ pub struct Config {
     pub local_custom_themes: Vec<CustomTheme>,
     /// See `RawLocal::active_custom_theme`.
     pub local_active_custom_theme: Option<String>,
+    /// See `RawLocal::bookmarks`.
+    pub local_bookmarks: BTreeMap<char, PathBuf>,
 }
 
 impl Config {
@@ -323,6 +331,7 @@ impl Config {
             local_panels: local.panels,
             local_custom_themes: local.custom_themes,
             local_active_custom_theme: local.active_custom_theme,
+            local_bookmarks: local.bookmarks,
         }
     }
 
@@ -372,6 +381,8 @@ fn parse<T: DeserializeOwned + Default>(file: &str, text: Option<&str>) -> T {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::appearance::Mods;
     use crate::panels::PanelsConfig;
@@ -663,6 +674,42 @@ mod tests {
         assert_eq!(parsed, local);
         let resolved: Theme = parsed.custom_themes[0].theme.clone().into();
         assert_eq!(resolved, Theme::named("dracula"));
+    }
+
+    #[test]
+    fn bookmarks_are_read_from_local_toml_unmerged() {
+        let config = Config::from_sources(
+            None,
+            None,
+            Some("[bookmarks]\na = \"/home/user/projects\"\nB = \"/tmp\"\n"),
+        );
+        assert_eq!(
+            config.local_bookmarks.get(&'a').map(PathBuf::as_path),
+            Some(Path::new("/home/user/projects"))
+        );
+        assert_eq!(
+            config.local_bookmarks.get(&'B').map(PathBuf::as_path),
+            Some(Path::new("/tmp"))
+        );
+        assert!(
+            Config::from_sources(None, None, None)
+                .local_bookmarks
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_bookmark_saved_from_the_running_session_round_trips_through_local_toml() {
+        let local = RawLocal {
+            bookmarks: BTreeMap::from([
+                ('a', PathBuf::from("/home/user/projects")),
+                ('Z', PathBuf::from("/var/log")),
+            ]),
+            ..Default::default()
+        };
+        let text = toml::to_string(&local).unwrap();
+        let parsed: RawLocal = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, local);
     }
 
     #[test]
