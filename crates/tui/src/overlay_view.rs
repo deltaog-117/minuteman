@@ -31,6 +31,7 @@ use crate::appearance_popup::{
 };
 use crate::compress_popup::{CompressPopup, Row as CompressRow};
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
+use crate::extract_popup::{ExtractPopup, Row as ExtractRow};
 use crate::glyphs;
 use crate::hud::{fit_width, pad_to, text_width};
 use crate::inspect::InspectView;
@@ -304,6 +305,115 @@ pub fn render_compress(frame: &mut Frame<'_>, popup: &CompressPopup, config: &Co
     });
     lines.push(Line::styled(
         "↑/↓ move, ←/→ or Space change, Enter compress, Esc cancel",
+        dim_style,
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Label column of the extract form, wide enough for "Existing files".
+const EXTRACT_LABEL_COLUMN: usize = 18;
+
+/// The extract form's panel.
+pub fn extract_area(frame: Rect, popup: &ExtractPopup) -> Rect {
+    panel_area(frame, popup.rows().len())
+}
+
+/// Where the form's rows are drawn, laid out like the compress form's.
+fn extract_inner(area: Rect) -> Rect {
+    area.inner(Margin::new(2, 1))
+}
+
+/// What a click landed on in the extract form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractHit {
+    Row(usize),
+    /// Inside the panel but not on a row.
+    Panel,
+    Outside,
+}
+
+pub fn extract_hit(frame: Rect, popup: &ExtractPopup, at: ratatui::layout::Position) -> ExtractHit {
+    let area = extract_area(frame, popup);
+    if !area.contains(at) {
+        return ExtractHit::Outside;
+    }
+    let inner = extract_inner(area);
+    let first = inner.y.saturating_add(1);
+    let row = usize::from(at.y.saturating_sub(first));
+    if at.y >= first && row < popup.rows().len() && at.x >= inner.x && at.x < inner.right() {
+        ExtractHit::Row(row)
+    } else {
+        ExtractHit::Panel
+    }
+}
+
+/// Draws the extract form: one row per choice with the focused row highlighted, and the folder
+/// with a cursor and a note when it is empty (extract into the browsed directory).
+pub fn render_extract(frame: &mut Frame<'_>, popup: &ExtractPopup, config: &Config) {
+    let theme = &config.theme;
+    let area = extract_area(frame.area(), popup);
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, &popup.title(), true);
+    frame.render_widget(block, area);
+    let inner = extract_inner(area);
+
+    let label_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let dim_style = Style::default().fg(style::color(&theme.border_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+    let value_width = usize::from(inner.width).saturating_sub(EXTRACT_LABEL_COLUMN);
+
+    let mut lines = vec![Line::raw("")];
+    lines.extend(popup.rows().iter().enumerate().map(|(i, &row)| {
+        let base = if i == popup.cursor() {
+            selected_style
+        } else {
+            Style::default()
+        };
+        let inert = row == ExtractRow::Folder && !popup.folder_applies();
+        let mut spans = vec![Span::styled(
+            pad_to(row.label(), EXTRACT_LABEL_COLUMN),
+            label_style.patch(base),
+        )];
+        if row == ExtractRow::Folder && !inert {
+            // A bar after the text marks where typing goes; an empty name says what that means.
+            let note = if popup.folder().is_empty() {
+                "(empty: extract into this directory)"
+            } else {
+                "/"
+            };
+            let room = value_width.saturating_sub(text_width(note) + 1);
+            spans.push(Span::styled(
+                fit_tail(popup.folder(), room),
+                value_style.patch(base),
+            ));
+            if i == popup.cursor() {
+                spans.push(Span::styled("▏", value_style.patch(base)));
+            }
+            spans.push(Span::styled(note, dim_style.patch(base)));
+        } else {
+            let style = if inert { dim_style } else { value_style };
+            spans.push(Span::styled(
+                fit_width(&popup.value(row), value_width),
+                style.patch(base),
+            ));
+        }
+        Line::from(spans)
+    }));
+    lines.push(match popup.error() {
+        Some(message) => Line::styled(
+            fit_width(message, usize::from(inner.width)),
+            Style::default().fg(style::color(&theme.danger_fg)),
+        ),
+        None => Line::raw(""),
+    });
+    lines.push(Line::styled(
+        "↑/↓ move, ←/→ or Space change, Enter extract, Esc cancel",
         dim_style,
     ));
     frame.render_widget(Paragraph::new(lines), inner);
@@ -718,6 +828,7 @@ mod tests {
             mark_count: 0,
             clipboard: false,
             hidden_shown: false,
+            archive: false,
         };
         ContextMenu::new(
             Position::new(at.0, at.1),
@@ -836,6 +947,49 @@ mod tests {
         assert_eq!(
             compress_hit(frame, &form, Position::new(0, 0)),
             CompressHit::Outside
+        );
+    }
+
+    fn extract_form() -> ExtractPopup {
+        ExtractPopup::new(
+            vec![std::path::PathBuf::from("/w/photos.tar.gz")],
+            std::path::PathBuf::from("/w"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_extract_form_draws_every_row_with_the_folder_and_its_cursor() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let form = extract_form();
+        terminal
+            .draw(|frame| render_extract(frame, &form, &config()))
+            .unwrap();
+        let text = screen_text(&terminal);
+        for label in ["Folder", "Existing files", "Delete archives"] {
+            assert!(text.contains(label), "{label}");
+        }
+        assert!(text.contains("photos▏/"), "{text}");
+        assert!(text.contains("extract: photos.tar.gz"));
+    }
+
+    #[test]
+    fn a_click_on_an_extract_row_hits_that_row_and_outside_the_panel_misses() {
+        let frame = Rect::new(0, 0, 100, 30);
+        let form = extract_form();
+        let area = extract_area(frame, &form);
+        let inner = extract_inner(area);
+        for row in 0..form.rows().len() {
+            let at = Position::new(inner.x + 2, inner.y + 1 + row as u16);
+            assert_eq!(extract_hit(frame, &form, at), ExtractHit::Row(row));
+        }
+        assert_eq!(
+            extract_hit(frame, &form, Position::new(inner.x + 2, inner.y)),
+            ExtractHit::Panel
+        );
+        assert_eq!(
+            extract_hit(frame, &form, Position::new(0, 0)),
+            ExtractHit::Outside
         );
     }
 

@@ -295,7 +295,7 @@ impl CompressPopup {
 
 /// Why `base` cannot be an archive's name, or `Ok` if it can: a single plain component that
 /// cannot climb out of the directory, and short enough to store.
-fn check_name(base: &str) -> Result<(), &'static str> {
+pub(crate) fn check_name(base: &str) -> Result<(), &'static str> {
     if base.is_empty() {
         Err("the name is empty")
     } else if base == "." || base == ".." {

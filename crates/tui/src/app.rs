@@ -45,6 +45,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::disk_usage::DiskUsageView;
+use crate::extract_popup::{self, ExtractPopup};
 use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
 use crate::live_refresh::LiveRefresh;
@@ -261,6 +262,12 @@ impl BulkKind {
 struct CompressJob {
     sources: Vec<PathBuf>,
     out: PathBuf,
+}
+
+/// One archive to unpack: `archive` into the directory `dest`.
+struct ExtractJob {
+    archive: PathBuf,
+    dest: PathBuf,
 }
 
 enum BulkMsg {
@@ -1349,8 +1356,82 @@ impl App {
             .collect();
         match archives.is_empty() {
             true => self.status = Some("extract: no zip, tar or tar.gz selected".into()),
-            false => self.spawn_extract(browser.current_dir().to_path_buf(), archives),
+            false => {
+                let jobs = Self::extract_jobs_per_archive(browser.current_dir(), archives);
+                self.spawn_extract(jobs, ConflictPolicy::Abort, false);
+            }
         }
+    }
+
+    /// One job per archive, each into a folder of `dir` named after it.
+    fn extract_jobs_per_archive(dir: &Path, archives: Vec<PathBuf>) -> Vec<ExtractJob> {
+        archives
+            .into_iter()
+            .map(|archive| {
+                let stem = Format::stem_of(&archive).unwrap_or_else(|| "extracted".into());
+                ExtractJob {
+                    dest: dir.join(stem),
+                    archive,
+                }
+            })
+            .collect()
+    }
+
+    /// The extract form for the marked (or selected) archives, or `None` if there are none.
+    pub fn begin_extract_form(&mut self, browser: &BrowserState) -> Option<ExtractPopup> {
+        let archives: Vec<PathBuf> = Self::marked_or_selected(browser)
+            .into_iter()
+            .filter(|path| Format::of(path).is_some())
+            .collect();
+        let form = ExtractPopup::new(archives, browser.current_dir().to_path_buf());
+        if form.is_none() {
+            self.status = Some("extract: no zip, tar or tar.gz selected".into());
+        }
+        form
+    }
+
+    /// Starts the job a submitted extract form describes.
+    ///
+    /// # Errors
+    ///
+    /// A message for the form to show when the job cannot start: another operation is running, or
+    /// (with existing files set to stop) a folder the job would create already exists.
+    pub fn start_extract(&mut self, request: extract_popup::Request) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("an operation is already in progress".into());
+        }
+        let jobs = match request.destination {
+            extract_popup::Destination::Here => request
+                .archives
+                .into_iter()
+                .map(|archive| ExtractJob {
+                    archive,
+                    dest: request.dir.clone(),
+                })
+                .collect(),
+            extract_popup::Destination::Folder(name) => request
+                .archives
+                .into_iter()
+                .map(|archive| ExtractJob {
+                    archive,
+                    dest: request.dir.join(&name),
+                })
+                .collect(),
+            extract_popup::Destination::PerArchive => {
+                Self::extract_jobs_per_archive(&request.dir, request.archives)
+            }
+        };
+        // Extracting into a folder that is already there is what "skip" and "replace" are for;
+        // with "stop" it would only fail on the first clashing file, after writing the others.
+        if request.policy == ConflictPolicy::Abort
+            && let Some(taken) = jobs
+                .iter()
+                .find(|job| job.dest != request.dir && std::fs::symlink_metadata(&job.dest).is_ok())
+        {
+            return Err(format!("{} already exists", display_name(&taken.dest)));
+        }
+        self.spawn_extract(jobs, request.policy, request.delete_archives);
+        Ok(())
     }
 
     /// Starts packing the marked (or selected) entries into `name` in the browsed directory.
@@ -1385,7 +1466,15 @@ impl App {
         (tx, rx, Arc::new(AtomicBool::new(false)))
     }
 
-    fn spawn_extract(&mut self, dir: PathBuf, archives: Vec<PathBuf>) {
+    /// Starts one extraction per entry of `jobs`, in order, stopping at the first failure. With
+    /// `delete_archives`, each archive goes to the trash once it has been extracted, so a failure
+    /// never costs an archive its contents.
+    fn spawn_extract(
+        &mut self,
+        jobs: Vec<ExtractJob>,
+        policy: ConflictPolicy,
+        delete_archives: bool,
+    ) {
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
             return;
@@ -1405,15 +1494,18 @@ impl App {
                 }
             };
             let mut result = Ok(Outcome::Completed);
-            for archive in &archives {
-                let stem = Format::stem_of(archive).unwrap_or_else(|| "extracted".into());
+            for job in &jobs {
                 if let Err(e) = archive::extract(
-                    archive,
-                    &dir.join(stem),
-                    ConflictPolicy::Abort,
+                    &job.archive,
+                    &job.dest,
+                    policy,
                     ExtractLimits::default(),
                     &mut on_progress,
                 ) {
+                    result = Err(e);
+                    break;
+                }
+                if delete_archives && let Err(e) = file_ops::trash(&job.archive) {
                     result = Err(e);
                     break;
                 }
@@ -1928,6 +2020,115 @@ mod tests {
             layout,
             delete_originals: false,
         }
+    }
+
+    /// A fixture holding `proj.tar.gz`, made from a folder that held `inner/a.txt`.
+    fn fixture_with_archive(name: &str) -> Fixture {
+        let mut f = Fixture::new(name);
+        std::fs::create_dir_all(f.root.join("proj/inner")).unwrap();
+        std::fs::write(f.root.join("proj/inner/a.txt"), b"alpha").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "proj");
+        f.run("compress proj.tar.gz");
+        f.wait_for_idle();
+        std::fs::remove_dir_all(f.root.join("proj")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "proj.tar.gz");
+        f
+    }
+
+    fn extract_request(
+        f: &Fixture,
+        destination: extract_popup::Destination,
+        policy: ConflictPolicy,
+        delete_archives: bool,
+    ) -> extract_popup::Request {
+        extract_popup::Request {
+            archives: vec![f.root.join("proj.tar.gz")],
+            dir: f.root.clone(),
+            destination,
+            policy,
+            delete_archives,
+        }
+    }
+
+    #[test]
+    fn the_extract_form_opens_only_for_archives() {
+        let mut f = Fixture::new("extract-form-none");
+        f.run("touch plain.txt");
+        select_named(&mut f, "plain.txt");
+        assert!(f.app.begin_extract_form(&f.browser).is_none());
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("extract: no zip, tar or tar.gz selected")
+        );
+
+        let mut f = fixture_with_archive("extract-form-some");
+        assert!(f.app.begin_extract_form(&f.browser).is_some());
+    }
+
+    #[test]
+    fn the_extract_form_can_unpack_into_a_named_folder() {
+        let mut f = fixture_with_archive("extract-named");
+        let request = extract_request(
+            &f,
+            extract_popup::Destination::Folder("out".into()),
+            ConflictPolicy::Abort,
+            false,
+        );
+        f.app.start_extract(request).unwrap();
+        f.wait_for_idle();
+        assert_eq!(f.app.status.as_deref(), Some("extract complete"));
+        assert_eq!(
+            std::fs::read(f.root.join("out/proj/inner/a.txt")).unwrap(),
+            b"alpha"
+        );
+        // The archive stays unless asked otherwise.
+        assert!(f.root.join("proj.tar.gz").exists());
+    }
+
+    #[test]
+    fn the_extract_form_can_unpack_here_and_trash_the_archive() {
+        let mut f = fixture_with_archive("extract-here");
+        let request = extract_request(
+            &f,
+            extract_popup::Destination::Here,
+            ConflictPolicy::Abort,
+            true,
+        );
+        f.app.start_extract(request).unwrap();
+        f.wait_for_idle();
+        assert_eq!(f.app.status.as_deref(), Some("extract complete"));
+        assert!(f.root.join("proj/inner/a.txt").exists());
+        assert!(!f.root.join("proj.tar.gz").exists());
+    }
+
+    #[test]
+    fn stopping_on_existing_files_will_not_enter_a_folder_that_is_there() {
+        let mut f = fixture_with_archive("extract-taken");
+        std::fs::create_dir(f.root.join("out")).unwrap();
+        let request = extract_request(
+            &f,
+            extract_popup::Destination::Folder("out".into()),
+            ConflictPolicy::Abort,
+            false,
+        );
+        assert_eq!(
+            f.app.start_extract(request),
+            Err("out already exists".into())
+        );
+        assert!(!f.app.is_busy());
+
+        // "Replace" is how a folder that is there gets filled.
+        let request = extract_request(
+            &f,
+            extract_popup::Destination::Folder("out".into()),
+            ConflictPolicy::Overwrite,
+            false,
+        );
+        f.app.start_extract(request).unwrap();
+        f.wait_for_idle();
+        assert!(f.root.join("out/proj/inner/a.txt").exists());
     }
 
     #[test]

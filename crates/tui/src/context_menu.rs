@@ -44,6 +44,8 @@ pub enum MenuCommand {
     Delete,
     /// Opens the compress form for the clicked or marked entries.
     Compress,
+    /// Opens the extract form for the clicked or marked archives.
+    Extract,
     /// The "new file or folder" prompt.
     New,
     ToggleMark,
@@ -77,6 +79,8 @@ pub struct Context {
     /// Whether something is waiting to be pasted.
     pub clipboard: bool,
     pub hidden_shown: bool,
+    /// Whether the clicked entry is a zip, tar or tar.gz archive.
+    pub archive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +176,11 @@ pub fn entries(context: &Context, open_with: &[String]) -> Vec<Entry> {
                 Entry::item("Rename", MenuCommand::Rename),
                 Entry::item(batch("Delete"), MenuCommand::Delete),
                 Entry::item(batch("Compress…"), MenuCommand::Compress),
+            ]);
+            if context.archive {
+                list.push(Entry::item("Extract…", MenuCommand::Extract));
+            }
+            list.extend([
                 Entry::Separator,
                 Entry::item(
                     if context.marked { "Unmark" } else { "Mark" },
@@ -511,6 +520,7 @@ mod tests {
             mark_count: 0,
             clipboard: false,
             hidden_shown: false,
+            archive: false,
         }
     }
 

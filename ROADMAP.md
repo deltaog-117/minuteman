@@ -915,6 +915,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `tui::compress_popup` (a `Request` can only describe a well-formed job) and `file_ops::archive`
   gained `Level` and `compress_with_level`. Chosen as COA A over a format submenu feeding the
   prompt bar (B) and a chain of prompts (C).
+- ✅ **Extract form on the right-click menu** – "Extract…" on a zip, tar or tar.gz opens a modal
+  form shaped like the compress one: the **folder** to extract into (named after the archive by
+  default, typed freely, and empty to extract straight into the browsed directory; unused with
+  several archives, which each go to a folder named after them), **existing files** (stop, skip
+  them or replace them) and **delete archives** (to the trash, and only once that archive has been
+  extracted). With "stop", a folder that is already there is refused inside the form. The pure
+  state lives in `tui::extract_popup` (a `Destination` is `Here`, one plain folder name, or a
+  folder per archive) and `:extract` is unchanged. Chosen as COA C over a single "Extract" item
+  (A) and an "Extract here / to…" submenu (B).
 
 ---
 
@@ -944,10 +953,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   does not hide file names (anyone can still list what is inside); hiding them needs 7z. Wrong
   password and unsupported-encryption errors need their own messages.
 - **Archives, remainder** – there is no key binding for the compress form (only the right-click
-  menu, `:compress` and `:extract`), and no "Extract…" entry on the menu; the form has no
-  destination folder (archives go beside the originals) and no live warning as you type a name
-  that exists; an existing destination is an error rather than the overwrite/skip/abort prompt a
-  paste gets; `rar`
+  menu, `:compress` and `:extract`); the compress form has no destination folder (archives go
+  beside the originals) and neither form warns live as you type a name that exists; `:compress` and
+  `:extract` still treat an existing destination as an error rather than the overwrite/skip/abort
+  choice the extract form offers; `rar`
   (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2` compression are not supported, the
   codecs being opt-in cargo features if wanted; zip entries carry no modification time; a `zip`
   central directory is read whole into memory on extraction (the preview refuses oversized ones,

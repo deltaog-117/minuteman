@@ -59,6 +59,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-28 | Saved Custom Themes | A "Saved themes" category listing saved themes, with apply, rename and delete (COA A), over making the Theme row cycle them (B) or a manage view opened from the Save row (C) | ✅ Confirmed |
 | 2026-09-28 | Archive Compress/Extract | In-process `zip`/`tar`/`flate2` in `file_ops::archive` with a `SafePath` newtype and extraction limits (COA A), over system tools (B) or a hybrid (C) | ✅ Confirmed |
 | 2026-09-28 | Compress Form | A modal form popup on the right-click menu with pure state and a validated `Request` (COA A), over a format submenu into the prompt bar (B) or a chain of prompts (C); password deferred | ✅ Confirmed |
+| 2026-09-28 | Extract Form | A modal form popup on an archive's right-click menu with pure state and a validated `Request` (COA C, the user's pick of the compress-form shape), over a single "Extract" item (A) or an "Extract here / to…" submenu (B) | ✅ Confirmed |
 
 ---
 
@@ -4257,6 +4258,62 @@ produced a `backup.tar.gz` that `tar` listed correctly, and the header said "com
 Not exercised by hand: delete originals (it would fill the real trash; the option and the trash
 call are only covered as far as the form's `Request`), the taken-name error in the terminal (unit
 tested through the app), a click on a form row, and a folder or a marked set as the source.
+
+### Extract Form: the Compress Form's Shape, a `Destination` Instead of a Name (COA C)
+
+**Date:** 2026-09-28
+**Status:** Confirmed
+
+#### Context / Background
+
+`:extract` unpacked archives but the right-click menu had no way to reach it. The user asked for
+extraction "similar to how compression is done", which ruled out a bare menu item.
+
+#### Options Considered
+
+**Option A: a single "Extract" item running `:extract`**
+- Tiny and safe, but no choice of destination or of what happens to files already there.
+  Difficulty: small.
+
+**Option B: an "Extract here / to…" submenu**
+- Covers the common cases, but "to…" still needs a path prompt and there is no conflict choice.
+  Difficulty: medium.
+
+**Option C: a form like the compress form**
+- Destination, conflict policy and delete-archive in one place with inline errors, consistent with
+  compression. The cost is a second popup with its own keys, drawing and hit-testing. Difficulty:
+  high.
+
+Chosen: **C**, because it was what the user asked for.
+
+#### Consequences
+
+`extract_popup` mirrors `compress_popup`: pure state, drawn by `overlay_view`, acted on only by
+`main`. Its `Request` carries a `Destination`, which is `Here`, `Folder(name)` or `PerArchive`, so a
+typed name together with several archives cannot be expressed; the Folder row is greyed for several
+archives. The default folder is the archive's stem, as `:extract` uses, so a tarball of loose files
+does not litter the browsed directory; emptying the field is the deliberate way to extract here,
+and it skips the name check that would otherwise reject an empty name. A typed name reuses
+`compress_popup::check_name` (now `pub(crate)`), so a submitted folder is one plain path component;
+a proptest types arbitrary characters and asserts that. The conflict choice maps onto the existing
+`ConflictPolicy` (stop, skip, replace). With "stop", `App::start_extract` refuses a destination
+folder that already exists before writing anything, reported inside the form, because otherwise
+extraction would write the non-clashing files and only then fail on the first clash; "here" is
+exempt since the browsed directory always exists. "Delete archives" trashes an archive only after
+its extraction succeeds and a failure stops the batch, so an archive never loses its contents.
+`spawn_extract` now takes a list of `ExtractJob { archive, dest }` plus a policy, and `:extract`
+builds the same per-archive jobs it always did with "stop" and no deletion. The menu item is only
+listed when the clicked entry is a supported archive (`Context::archive`), and the form takes the
+archives among the marked entries, as `:extract` does.
+
+**Verification.** `scripts/check` passes: format, clippy with `-D warnings` and the workspace's
+tests are clean. `tui` went from 449 to 467 tests. The new ones cover the form's keys, focus wrap,
+policy cycling, the delete toggle, the default folder, empty meaning here, several archives, name
+validation, a proptest on submitted folders, drawing and click hit-testing, and, through the app,
+the form opening only for archives, extracting into a named folder, extracting here and trashing
+the archive, and "stop" refusing a folder that exists while "replace" fills it. Not exercised by
+hand in the terminal: the right-click flow itself (the compiled binary was not driven through
+`tmux` this time) and the trash call for "delete archives", which would fill the real trash.
 
 ---
 

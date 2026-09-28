@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`: an extract form on the right-click menu. "Extract…" appears on a zip, tar or tar.gz and
+  opens a form for the destination folder (named after the archive by default; emptied, it means
+  the browsed directory itself), what to do with files that already exist (stop, skip them or
+  replace them) and whether to send the archive to the trash once it is extracted. With several
+  archives marked each goes to a folder named after it. With "stop" a folder that already exists
+  is refused inside the form before anything is written. `:extract` behaves as before.
 - `tui`, `file_ops`: a compress form on the right-click menu. "Compress…" on a file or folder (with
   a count when several are marked) opens a form for the archive's name, format (zip, tar.gz, tar),
   level (fast, normal, smallest), whether to make one archive per item, and whether to send the

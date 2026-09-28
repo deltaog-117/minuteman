@@ -26,6 +26,7 @@ mod compress_popup;
 mod context_menu;
 mod disk_usage;
 mod disk_usage_view;
+mod extract_popup;
 mod git_status;
 mod glyphs;
 mod gradient;
@@ -82,6 +83,8 @@ use crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use disk_usage::DiskUsageView;
+use extract_popup::ExtractPopup;
+use file_ops::archive::Format;
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect::InspectView;
 use ratatui::Terminal;
@@ -355,6 +358,7 @@ struct Overlay<'a> {
     usage: Option<&'a DiskUsageView>,
     settings: Option<&'a SettingsPopup>,
     compress: Option<&'a CompressPopup>,
+    extract: Option<&'a ExtractPopup>,
     appearance: Option<&'a AppearancePopup>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
@@ -377,6 +381,7 @@ struct Panels<'a> {
     usage: &'a mut Option<DiskUsageView>,
     appearance: &'a mut Option<AppearancePopup>,
     compress: &'a mut Option<CompressPopup>,
+    extract: &'a mut Option<ExtractPopup>,
 }
 
 struct ShellView<'a> {
@@ -1148,6 +1153,8 @@ fn run(
     let mut settings: Option<SettingsPopup> = None;
     // The compress form ("Compress…" on an entry's right-click menu) while one is open; modal too.
     let mut compress: Option<CompressPopup> = None;
+    // The extract form ("Extract…" on an archive's right-click menu) while one is open; modal too.
+    let mut extract: Option<ExtractPopup> = None;
     // The appearance popup (`a`, or "Appearance…" on blank space's right-click menu) while one is
     // open; modal too.
     let mut appearance: Option<AppearancePopup> = None;
@@ -1278,6 +1285,7 @@ fn run(
                     usage: usage.as_ref(),
                     settings: settings.as_ref(),
                     compress: compress.as_ref(),
+                    extract: extract.as_ref(),
                     appearance: appearance.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
@@ -1382,6 +1390,20 @@ fn run(
                             }
                             overlay_view::CompressHit::Panel => {}
                             overlay_view::CompressHit::Outside => compress = None,
+                        }
+                    }
+                    continue;
+                }
+                if let Some(popup) = extract.as_mut() {
+                    if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                        let at = Position::new(mouse.column, mouse.row);
+                        match overlay_view::extract_hit(frame_area, popup, at) {
+                            overlay_view::ExtractHit::Row(row) => {
+                                popup.focus(row);
+                                popup.cycle(true);
+                            }
+                            overlay_view::ExtractHit::Panel => {}
+                            overlay_view::ExtractHit::Outside => extract = None,
                         }
                     }
                     continue;
@@ -1531,6 +1553,7 @@ fn run(
                                     usage: &mut usage,
                                     appearance: &mut appearance,
                                     compress: &mut compress,
+                                    extract: &mut extract,
                                 },
                             )?;
                         }
@@ -1633,6 +1656,9 @@ fn run(
                                 mark_count: browser.marked_paths().len(),
                                 clipboard: app.clipboard.is_some(),
                                 hidden_shown: browser.show_hidden(),
+                                archive: browser.selected_entry().is_some_and(|entry| {
+                                    on_entry && Format::of(&entry.path).is_some()
+                                }),
                             };
                             let names: Vec<String> = open::open_with_entries(&config.open_with)
                                 .into_iter()
@@ -1933,6 +1959,7 @@ fn run(
                                     usage: &mut usage,
                                     appearance: &mut appearance,
                                     compress: &mut compress,
+                                    extract: &mut extract,
                                 },
                             )?;
                         }
@@ -1947,6 +1974,17 @@ fn run(
                         compress_popup::Key::Close => compress = None,
                         compress_popup::Key::Submit(request) => match app.start_compress(request) {
                             Ok(()) => compress = None,
+                            Err(message) => popup.set_error(message),
+                        },
+                    }
+                    continue;
+                }
+                if let Some(popup) = extract.as_mut() {
+                    match popup.key(key.code) {
+                        extract_popup::Key::Stay => {}
+                        extract_popup::Key::Close => extract = None,
+                        extract_popup::Key::Submit(request) => match app.start_extract(request) {
+                            Ok(()) => extract = None,
                             Err(message) => popup.set_error(message),
                         },
                     }
@@ -2393,6 +2431,7 @@ fn run_menu_command(
             *panels.usage = Some(app.begin_disk_usage(subject.clone()));
         }
         (MenuCommand::Compress, _) => *panels.compress = app.begin_compress_form(browser),
+        (MenuCommand::Extract, _) => *panels.extract = app.begin_extract_form(browser),
         (MenuCommand::Appearance, _) => *panels.appearance = Some(AppearancePopup::new()),
         (MenuCommand::ToggleHidden, _) => {
             let shown = browser.toggle_hidden(vfs)?;
@@ -2449,6 +2488,7 @@ fn draw(
         usage,
         settings,
         compress,
+        extract,
         appearance,
         local_theme,
         local_ui,
@@ -2731,6 +2771,9 @@ fn draw(
     }
     if let Some(popup) = compress {
         overlay_view::render_compress(frame, popup, config);
+    }
+    if let Some(popup) = extract {
+        overlay_view::render_extract(frame, popup, config);
     }
     if let Some(popup) = appearance {
         // `config` is already the effective one composed above, so its `theme`/`ui.glyphs`/
