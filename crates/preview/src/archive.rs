@@ -406,6 +406,15 @@ mod tests {
             files in proptest::collection::vec(("[a-z]{1,8}(/[a-z]{1,8}){0,2}", 0usize..600), 0..12),
             dir_name in "[a-z]{1,6}",
         ) {
+            // A zip rejects a duplicate entry name outright, and a tar's read-back order for one
+            // would be an implementation detail rather than something this test means to pin
+            // down; the generator has no uniqueness constraint of its own, so duplicates are
+            // dropped here, keeping each name's first occurrence.
+            let mut seen = std::collections::HashSet::new();
+            let files: Vec<(String, usize)> = files
+                .into_iter()
+                .filter(|(name, _)| seen.insert(name.clone()))
+                .collect();
             let mut items = files.clone();
             items.push((format!("{dir_name}/"), 0));
             let expected: Vec<(String, u64)> =
