@@ -969,6 +969,7 @@ mod tests {
             system_hud: false,
             interactive_commands: Vec::new(),
             open_with: Vec::new(),
+            open_rules: Vec::new(),
             preview_hooks: Vec::new(),
             plugins: Vec::new(),
             keys: theming::keymap::RawKeyMap::default().into(),

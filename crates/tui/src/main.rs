@@ -18,6 +18,7 @@ mod alt_keys;
 mod anim;
 mod app;
 mod appearance_popup;
+mod associations;
 mod boot_splash;
 mod browser_drag;
 mod browser_mouse;
@@ -25,6 +26,7 @@ mod cli;
 mod command;
 mod compress_popup;
 mod context_menu;
+mod desktop_entry;
 mod disk_usage;
 mod disk_usage_view;
 mod extract_popup;
@@ -36,6 +38,7 @@ mod image_preview;
 mod inspect;
 mod live_refresh;
 mod marked_size;
+mod mime_type;
 mod open;
 mod osc52;
 mod overlay_view;
@@ -686,6 +689,7 @@ fn main() -> Result<()> {
         .with_git_status(config.git_status)
         .with_system_hud(config.system_hud)
         .with_interactive_commands(config.interactive_commands.clone())
+        .with_open_config(config.open_rules.clone(), config.open_with.clone())
         .with_plugins(config.plugins.clone(), browser.current_dir());
 
     let mut guard = TerminalGuard::new()?;
@@ -1642,7 +1646,6 @@ fn run(
                                 browser,
                                 app,
                                 vfs,
-                                config,
                                 &mut Panels {
                                     inspect: &mut inspect,
                                     usage: &mut usage,
@@ -1819,10 +1822,17 @@ fn run(
                                     on_entry && Format::of(&entry.path).is_some()
                                 }),
                             };
-                            let names: Vec<String> = open::open_with_entries(&config.open_with)
-                                .into_iter()
-                                .map(|choice| choice.name)
-                                .collect();
+                            // Everything that can open the clicked file, with "Other…" last to
+                            // type a command for it. Nothing to list on a folder or blank space.
+                            let names: Vec<String> = match browser.selected_entry() {
+                                Some(entry) if on_entry && !entry.is_dir => app
+                                    .open_choices(&entry.path)
+                                    .into_iter()
+                                    .map(|choice| choice.name)
+                                    .chain(std::iter::once(OTHER_LABEL.to_string()))
+                                    .collect(),
+                                _ => Vec::new(),
+                            };
                             menu = Some(ContextMenu::new(
                                 pointer,
                                 target,
@@ -2121,7 +2131,6 @@ fn run(
                                 browser,
                                 app,
                                 vfs,
-                                config,
                                 &mut Panels {
                                     inspect: &mut inspect,
                                     usage: &mut usage,
@@ -2452,7 +2461,15 @@ fn run(
                     }
                     Some(Action::MoveDown) => browser.move_down(),
                     Some(Action::MoveUp) => browser.move_up(),
-                    Some(Action::Enter) => browser.enter(vfs)?,
+                    // A folder opens; a file opens with its rule or the desktop's default, the
+                    // way `l` does on a file in Ranger.
+                    Some(Action::Enter) => match browser.selected_entry() {
+                        Some(entry) if !entry.is_dir => {
+                            let path = entry.path.clone();
+                            app.open_default(browser, &path);
+                        }
+                        _ => browser.enter(vfs)?,
+                    },
                     Some(Action::Leave) => browser.leave(vfs)?,
                     Some(Action::Yank) => app.yank(browser),
                     Some(Action::Cut) => app.cut(browser),
@@ -2546,7 +2563,6 @@ fn run_menu_command(
     browser: &mut BrowserState,
     app: &mut App,
     vfs: &LocalVfs,
-    config: &Config,
     panels: &mut Panels<'_>,
 ) -> Result<()> {
     // The keys are all ignored while an operation runs; the ones below would start another
@@ -2572,8 +2588,12 @@ fn run_menu_command(
         (MenuCommand::Open, Some((_, true))) => browser.enter(vfs)?,
         (MenuCommand::Open, Some((path, false))) => app.open_default(browser, &path),
         (MenuCommand::OpenWith(index), Some((path, _))) => {
-            if let Some(choice) = open::open_with_entries(&config.open_with).get(index) {
-                app.open_with(browser, &choice.command, &path);
+            // The menu listed these choices plus "Other…" after them, so an index past the end
+            // is "Other…".
+            let choices = app.open_choices(&path);
+            match choices.get(index) {
+                Some(choice) => app.open_choice(browser, choice, &path),
+                None => app.begin_open_other(path),
             }
         }
         (MenuCommand::PasteInto, Some((path, true))) => app.begin_paste_into(path),
@@ -2651,6 +2671,9 @@ fn header_view<'a>(browser: &'a BrowserState, app: &App) -> hud::HeaderView<'a> 
         system: app.system_summary(Instant::now()),
     }
 }
+
+/// The last entry of a file's "Open with" submenu: type a command to open it with.
+const OTHER_LABEL: &str = "Other…";
 
 /// How often a dragged entry hovering at a list's edge scrolls it by a row — also the loop's
 /// tick while a drag is in progress, so a pointer held still keeps scrolling.

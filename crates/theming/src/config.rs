@@ -35,6 +35,45 @@ use crate::ui::{RawUi, Ui};
 pub struct OpenWith {
     pub name: String,
     pub command: String,
+    /// Whether the program draws on the terminal (or reads the keyboard) and so needs it handed
+    /// over, whatever `interactive_commands` says about its name. Set for a discovered app whose
+    /// `.desktop` file says `Terminal=true`.
+    #[serde(default)]
+    pub terminal: bool,
+}
+
+/// A single string or a list of them, so `match = "md"` and `match = ["md", "txt"]` both work: a
+/// typo in one rule must not cost the user their whole config.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(one) => vec![one],
+        OneOrMany::Many(many) => many,
+    })
+}
+
+/// One `[[open_rule]]` table: which program opens which files. Each `match` entry is either a
+/// file extension (`md`, `tar.gz`; case-insensitive, a leading dot is allowed) or, when it holds a
+/// `/`, a MIME type pattern (`image/*`, `text/x-python`). The first rule that matches wins, for
+/// `enter` and double-click and for the top of the "Open with" list; it beats whatever the desktop
+/// has registered. `command` follows the same `{}` rules as [`OpenWith`].
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OpenRule {
+    #[serde(rename = "match", deserialize_with = "one_or_many")]
+    pub matches: Vec<String>,
+    pub command: String,
+    /// The label in the "Open with" list; the command's program when left out.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// As on [`OpenWith`].
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 /// One `[[preview_hook]]` table: an external command that produces a thumbnail image or
@@ -126,6 +165,8 @@ struct RawConfig {
     interactive_commands: Option<Vec<String>>,
     /// The `[[open_with]]` tables, in the order the submenu lists them.
     open_with: Vec<OpenWith>,
+    /// The `[[open_rule]]` tables, in priority order.
+    open_rule: Vec<OpenRule>,
     /// The `[[preview_hook]]` tables, matched by extension in the order they're listed.
     preview_hook: Vec<PreviewHook>,
     /// The `[[plugin]]` tables, in the order they were spawned.
@@ -270,6 +311,8 @@ pub struct Config {
     /// What the context menu's "Open with" lists. Empty means the menu offers `$VISUAL` or
     /// `$EDITOR` alone.
     pub open_with: Vec<OpenWith>,
+    /// The `[[open_rule]]` tables, in priority order: which program opens which files.
+    pub open_rules: Vec<OpenRule>,
     /// The `[[preview_hook]]` tables — external commands that thumbnail or extract text for a
     /// file extension the built-in previews can't otherwise show. See `tui::preview_hook`.
     pub preview_hooks: Vec<PreviewHook>,
@@ -368,6 +411,7 @@ impl Config {
                 .interactive_commands
                 .unwrap_or_else(default_interactive_commands),
             open_with: config.open_with,
+            open_rules: config.open_rule,
             preview_hooks: config.preview_hook,
             plugins: config.plugin.into_iter().map(PluginSpec::from).collect(),
             keys: config.keys.into(),
@@ -875,6 +919,26 @@ mod tests {
         );
         assert!(!config.panels.show_hud);
         assert!(config.panels.show_command_bar);
+    }
+
+    #[test]
+    fn open_rules_accept_one_pattern_or_a_list_and_default_to_none() {
+        let config = Config::from_sources(
+            Some(
+                "[[open_rule]]\nmatch = \"md\"\ncommand = \"nvim\"\n\
+                 [[open_rule]]\nmatch = [\"png\", \"image/*\"]\ncommand = \"imv {}\"\n\
+                 name = \"imv\"\nterminal = true\n",
+            ),
+            None,
+            None,
+        );
+        assert_eq!(config.open_rules.len(), 2);
+        assert_eq!(config.open_rules[0].matches, ["md"]);
+        assert!(!config.open_rules[0].terminal && config.open_rules[0].name.is_none());
+        assert_eq!(config.open_rules[1].matches, ["png", "image/*"]);
+        assert_eq!(config.open_rules[1].name.as_deref(), Some("imv"));
+        assert!(config.open_rules[1].terminal);
+        assert!(Config::from_sources(None, None, None).open_rules.is_empty());
     }
 
     #[test]

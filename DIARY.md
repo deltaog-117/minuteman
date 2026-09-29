@@ -62,6 +62,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-28 | Extract Form | A modal form popup on an archive's right-click menu with pure state and a validated `Request` (COA C, the user's pick of the compress-form shape), over a single "Extract" item (A) or an "Extract here / to…" submenu (B) | ✅ Confirmed |
 | 2026-09-29 | Mouse Stage 2 | `Ctrl`-click toggles, a configurable range modifier (`Shift` or `Alt`, both by default) marks a span, header path segments and middle-click navigate (COA B), over the roadmap's `Shift` only (A) or a two-cycle split (C) | ✅ Confirmed |
 | 2026-09-29 | Mouse Stage 3 | Drag and drop with a pure state machine, a pointer label and lit target, drops on both file columns, up a level, and shell panes, plus edge auto-scroll (COA C), over a release-only drop (A) or feedback without shell and scroll (B) | ✅ Confirmed |
+| 2026-09-29 | Open With | Read the shared MIME database, `mimeapps.list`, `mimeinfo.cache` and `.desktop` files in-process, with `[[open_rule]]`, `enter`-to-open and "Other…" (COA A), over shelling out to `xdg-mime`/`gio` (B) or a hybrid launching through `gio` (C) | ✅ Confirmed |
 
 ---
 
@@ -4454,6 +4455,83 @@ the top border scrolling 80 files back to a folder that began out of view. Harne
 drag of fewer than two cells is correctly a click, which made three of my own first tests fail; and
 the label drawn beside the pointer covers the row being aimed at when hovering the top border.
 Not tried in a real terminal or with a real mouse.
+
+---
+
+### Open With: Associations Read In-Process (COA A)
+
+**Date:** 2026-09-29
+**Status:** Confirmed
+
+#### Context / Background
+
+`enter` on a file did nothing and the "Open with" list was only what was hand-written in
+`config.toml`. The roadmap asked for choosing a program by extension or MIME type from config,
+listing the programs actually installed, `enter` opening a file, and an "Other…" entry.
+
+#### Options Considered
+
+**Option A: in-process, no new crates**
+- Parse the shared MIME database, `mimeapps.list`, `mimeinfo.cache` and the `.desktop` files,
+  expand `Exec` ourselves. No process to build a menu, testable with fixture files, and
+  `Terminal=true` programs can use the existing terminal handover. The cost is the specification's
+  detail. Difficulty: high.
+
+**Option B: delegate to `xdg-mime` and `gio`**
+- Least code, the tools know every quirk. But a spawned process on every menu open, a dependency
+  on `xdg-utils`/`gio`, platform differences, poor hermetic testing, and `Terminal=true` programs
+  escape the handover. Difficulty: small to medium.
+
+**Option C: in-process discovery, launch through `gio`**
+- Real listing with less of the spec, but two launch paths and `gio` still required for the hard
+  cases. Difficulty: medium.
+
+Chosen: **A**, because it is the only one that lists what is installed, works in a terminal-only
+session and stays testable without the user's desktop.
+
+#### Consequences
+
+Three modules. `mime_type` picks the highest-weight matching glob and breaks a tie by the longest
+pattern (so `*.tar.gz` beats `*.gz`), honours case-sensitive globs, follows `subclasses` and
+`aliases` (an app registered under `text/x-markdown` opens `text/markdown`), treats every `text/*`
+as also plain text, and has a small built-in table for a machine without the database. A name that
+matches nothing is sniffed: the first 512 bytes, text if valid UTF-8 without a NUL, allowing the cut
+to fall inside a character. A directory is `inode/directory` and is never sniffed, or it would have
+been offered every text editor. `desktop_entry` reads only the first group and turns `Exec` into
+the command form `[[open_with]]` already uses; the file's place is `{}`, and a literal `{}` in an
+`Exec` word is broken up with quotes so the launcher never mistakes it for the file. `associations`
+merges lists in the specification's order, per type from the most specific to its parents: the
+user's default, their added associations, then what is installed; a removed association is never
+offered, and a program that is not installed is skipped (`TryExec`, else the first word of
+`Exec`). `NoDisplay` programs stay out of the menu but can be the default.
+
+A decision worth keeping: a rule's `match` accepts one string or a list, because a config parse
+error costs the user the whole file, and `match = "md"` is the mistake anyone makes first. Another:
+`enter`, `l` and `→` are all one action in the default keymap, so `l` on a file now opens it, as in
+Ranger; the ROADMAP notes it as the thing a person used to browsing with `l` may find eager. The
+menu's "Other…" is added in `main` past the end of the list rather than in `context_menu`, which
+keeps that module's "empty list is shown but cannot be opened" behaviour and its test unchanged.
+The associations load on first use, held in a `OnceCell` on `App`, so a session that never opens
+a file never reads a megabyte of MIME data.
+
+Writing the tests found a real bug. A desktop entry for a program under a path with a space or a
+parenthesis produces a quoted first word, and `launch` looked for a program literally named
+`'/opt/My App/bin/app'`, reporting "command not found". The old `program_of` split on whitespace and
+never unquoted. `open::program_word` reads the first word as the shell does, with a property test
+that any quoted path reads back as itself. Another fix from the same tests: the specification says
+only double quotes group in `Exec`, so a test that used single quotes was wrong, not the parser.
+
+**Verification.** `scripts/check` passes. New tests cover the glob precedence and the built-in table,
+lineage with cycles, text sniffing, the parser and its locale choice, `Exec` splitting and every
+field code, the command line launched under a real `sh` for hostile file names (a property test),
+the association order, removal, parents, aliases, hidden and missing programs, desktop-specific
+and user-over-system precedence, dashed IDs and an empty database, rule matching by extension and
+MIME pattern, and through `App`: a rule beating the desktop's default, the default running with
+the exact path, `Terminal=true` asking for the terminal, the fallback naming `xdg-open`, the menu's
+order, and "Other…" running or cancelling. Driven against the real binary in a PTY read through
+`pyte`, on a scratch desktop with its own globs, applications and cache: every behaviour in the
+ROADMAP entry, including a real `Terminal=true` program taking the screen and returning to the
+browser. Not tried against a full real desktop's application set.
 
 ---
 

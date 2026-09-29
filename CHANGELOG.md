@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`: a program path that needs shell quoting (a space, a parenthesis) is now found when
+  opening a file with it; it was reported as "command not found". The status line names the
+  program by its file name rather than its full path.
 - `tui`: a completed cut-and-paste now drops the marks on the files it moved, and only empties the
   clipboard when it still holds the cut that was just pasted.
 
@@ -20,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `theming`: opening files by association. `enter`, `l`, `→` and a double-click on a file
+  open it with the first matching `[[open_rule]]` (new in `config.toml`: `match` takes extensions
+  or MIME patterns), else the program the desktop has for its type, else `xdg-open`. The
+  right-click "Open with" submenu now lists matching rules, `[[open_with]]` entries and every
+  installed program for the file's type (from `.desktop` files, `mimeinfo.cache` and
+  `mimeapps.list`), and ends with "Other…", which asks for a command. `Terminal=true` programs
+  take over the terminal. New modules `mime_type`, `desktop_entry` and `associations`; new
+  `terminal` field on `[[open_with]]`; new `open::program_word`.
 - `tui`: mouse stage 3, drag and drop. Dragging a row (or the marked set, when the pressed row is
   marked) onto a folder in the middle or left column moves it there, `Ctrl` held at the drop copies,
   and blank space in the left column means the folder above. Dropping on a mini-shell pane types

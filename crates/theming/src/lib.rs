@@ -29,7 +29,8 @@ pub mod ui;
 pub use appearance::{Font, Mods, RawFont, RawStyles, STYLE_ELEMENTS, Styles};
 pub use color::{Hsv, hex_to_hsv};
 pub use config::{
-    Config, CustomTheme, HookKind, OpenWith, PluginSpec, PreviewHook, RangeModifier, RawLocal,
+    Config, CustomTheme, HookKind, OpenRule, OpenWith, PluginSpec, PreviewHook, RangeModifier,
+    RawLocal,
 };
 pub use keymap::{Action, KeyMap};
 pub use panels::{ColumnLayout, PanelsConfig, RawPanels};

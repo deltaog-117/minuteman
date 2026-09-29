@@ -974,15 +974,43 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   scrolling a list of 80 files back to a folder that started out of view and dropping into it.
   Not tried in a real terminal or with a real mouse.
 
+- ✅ **Open-with, remainder: associations, discovery, `enter` and "Other…"** – `enter` (and `l`,
+  `→`, a double-click, a middle-click) on a file now opens it: the first `[[open_rule]]` in
+  `config.toml` that matches (`match` is an extension such as `md` or `tar.gz`, or a MIME pattern
+  such as `image/*`; a string or a list), else the program the desktop has as the default for the
+  file's type, else `xdg-open` as before. The right-click "Open with" submenu lists, best first,
+  the matching rules, the `[[open_with]]` entries, then every program installed for the type, and
+  ends with **Other…**, a prompt for a command (`{}` is the file, otherwise it is appended). Chosen
+  as COA A — everything read in-process, no new crate — over shelling out to `xdg-mime`/`gio` (B)
+  and a hybrid that launches through `gio` (C). New `tui::mime_type` reads the shared MIME
+  database (`globs2` with weight and longest-pattern precedence and case-sensitive flags,
+  `subclasses`, `aliases`) with a built-in extension table when it is missing, and calls a
+  name-less file text or not by its first 512 bytes; new `tui::desktop_entry` parses a `.desktop`
+  file (localized `Name`, `Hidden`, `NoDisplay`, `TryExec`, `Terminal`) and turns its `Exec` — the
+  quoting, escapes and `%f %F %u %U %c %k %i %%` field codes — into the same `{}` command line
+  `[[open_with]]` uses; new `tui::associations` merges `mimeapps.list` (desktop-specific before
+  general, user before system: defaults, added, removed) with each `mimeinfo.cache`, follows a
+  type's aliases and parents, finds a desktop file ID's file (including `kde-foo.desktop` as
+  `kde/foo.desktop`), and skips a program that is not installed. `Terminal=true` apps and rules
+  with `terminal = true` take the terminal through the existing handover. The associations are
+  read on first use, not at startup. Property-tested: an `Exec` line launched under a real `sh`
+  hands the program any file name (spaces, quotes, `$`, backticks, `{}`) exactly, a quoted program
+  path reads back as itself, a rule for an extension covers exactly the names ending in it, the
+  offered apps never repeat and never include a removed one, and every glob resolves to a
+  well-formed type. Writing the tests found a real bug — a program path that needs quoting (a
+  space or a parenthesis, as under `/opt/My App/`) reached the launcher still quoted and was
+  reported as "command not found" — fixed with `open::program_word`, which reads the first word
+  the way the shell does. Verified against the real binary in a PTY read through `pyte`, on a
+  scratch desktop: `enter` ran the registered default with the exact path, the menu listed the
+  installed programs in order with **Other…** last, choosing one and typing a command into
+  **Other…** each opened the file, a rule won for its files, a `Terminal=true` program took the
+  screen and the browser came back, and `enter` on a folder still entered it. Not tried against
+  the real desktop's files on a machine with a full set of applications.
+
 ---
 
 ## 🟡 Medium Priority (Important)
 
-- **Open-with, remainder: associations and discovery** – Open and Open with exist (the menu,
-  double-click, `[[open_with]]`); what is left is choosing the program by MIME type or extension
-  from `config.toml` rules, listing the programs actually installed by reading XDG `.desktop`
-  files and `mimeinfo.cache` (instead of a hand-written list), `enter` on a file opening it, and
-  an "Other..." entry that prompts for a command.
 - **Encrypted archives (password)** – the compress form has no password field yet, and extraction
   cannot open an encrypted zip. Plan: zip AES-256 through the `zip` crate's `aes-crypto` feature
   (about seven small RustCrypto-family crates), a masked password and confirm field on the form
@@ -1021,6 +1049,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   and can cover the row being aimed at when hovering the top border; auto-scroll moves the
   selection with the view and does not restore it; dropping on the shell types paths but cannot
   choose bracketed paste; a drop of files whose names are not valid text into a shell skips them.
+- **Open with, follow-ups** – a stale or missing `mimeinfo.cache` is trusted as it is (reading each
+  `.desktop` file's `MimeType=` would cover an app installed since); file types come from names and
+  a text-or-not check, not from content signatures (`magic`), so a mislabeled file is opened as its
+  name says; the marked set opens as one file rather than passing every path to a program that
+  takes several (`%F`); desktop actions (`[Desktop Action …]`) and `%i` icons are ignored;
+  "Open with" cannot set the default (writing `mimeapps.list`) or remember the last choice; the
+  associations are read once per session, so an app installed while it runs is not seen; `l` and
+  `→` on a file now open it, which someone used to browsing with them may find eager.
 - **Native remote filesystem browsing (SSH/SFTP)** – browse and operate on `ssh://`/`sftp://`
   paths directly through the VFS abstraction, no FUSE mount required.
 - **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed** – a second, sandboxed plugin
@@ -1192,8 +1228,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    `Ctrl`-click a few rows first and drag one of them to carry the lot. Drag onto a mini-shell pane
    to type the quoted paths into it, and hold the pointer at the top or bottom border of the
    middle column to scroll. `Esc` cancels.
+   Then the newest: put `[[open_rule]]` entries in `config.toml` (`match = ["md"]`, `command =
+   "nvim"`), then press `enter` on a file — it opens with your rule, or with the program your
+   desktop has for its type (a `Terminal=true` one takes the whole terminal). Right-click a file and
+   hover "Open with": your rules, then every installed program for that type, then "Other…" to
+   type a command.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: pick from Medium Priority — the *Open-with remainder* (`enter` on a file, `.desktop`
-   discovery) is the natural next one.
+4. Next cycle: pick from Medium Priority — *Archives, remainder* has several small independent
+   pieces (a key for the compress form, a destination folder, the overwrite/skip/abort choice for
+   `:compress`); *Undo history* is the biggest usability win.

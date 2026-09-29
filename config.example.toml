@@ -68,11 +68,28 @@ interactive_commands = [
     "top", "mpv", "ssh", "tmux", "fzf",
 ]
 
-# What the right-click menu's "Open with" submenu lists, in this order. `command` runs under
+# Which program opens which files, ahead of anything the desktop has registered. `enter` and a
+# double-click on a file use the first rule that matches, and every matching rule heads the "Open
+# with" list. Each `match` entry is a file extension (`md`, `tar.gz`; any letter case) or, when it
+# holds a `/`, a MIME type (`image/*`, `text/x-python`). `command` follows the `{}` rules below;
+# `name` labels it in the menu (the program's name when left out); `terminal = true` hands the
+# terminal over for a program that draws on it whatever its name.
+# [[open_rule]]
+# match = ["md", "txt"]
+# command = "nvim"
+#
+# [[open_rule]]
+# match = "video/*"
+# command = "mpv {}"
+# name = "mpv"
+
+# What the right-click menu's "Open with" submenu lists after any matching rule, in this order.
+# The programs actually installed for the file's type (read from your desktop's `.desktop` files
+# and `mimeapps.list`) follow, and "Other…" lets you type a command. `command` runs under
 # `sh -c`; a `{}` stands for the file's path (already quoted), and without one the path is added
 # on the end. A program named in `interactive_commands` above (an editor, a pager) takes over the
-# terminal; anything else is started on its own and left running. With none of these tables the
-# submenu offers your $VISUAL or $EDITOR alone.
+# terminal; anything else is started on its own and left running. With none of these tables and
+# nothing installed for the type, the submenu offers your $VISUAL or $EDITOR.
 # [[open_with]]
 # name = "Neovim"
 # command = "nvim"

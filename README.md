@@ -147,7 +147,7 @@ terminals keep `Shift`+mouse for text selection, so `Alt`-click also marks a ran
 |---------|--------|
 | click a row in the middle column | select it |
 | double-click a directory | open it |
-| double-click a file | open it with the desktop's default program (`xdg-open`) |
+| `enter` (or `l`, `→`) or double-click a file | open it: your first matching `[[open_rule]]`, else the program your desktop has for its type, else `xdg-open` |
 | middle-click a row | open it in place (a folder) or with the default program (a file) |
 | `Ctrl`-click a row in the middle column | toggle its mark |
 | `Shift`- or `Alt`-click a row | mark everything from the last clicked row to this one |
@@ -172,9 +172,15 @@ owner and group, link count and the modified, accessed and created times (UTC). 
 also counts the files, subfolders and total size below it, in the background. `Esc`, `Enter` or a
 click closes it. Owner, on-disk size and link count come from the local filesystem only.
 
-**Open with** lists the `[[open_with]]` entries from `config.toml` (see below), or your
-`$VISUAL` / `$EDITOR` when there are none. A program named in `interactive_commands` takes over the
-terminal, as `:nvim` does; any other is started detached, so a viewer outlives the browser.
+**Open with** lists, best first: the `[[open_rule]]` entries that match the file, the
+`[[open_with]]` entries from `config.toml` (see below), and the programs installed for the file's
+type, read in-process from your desktop's `.desktop` files, `mimeinfo.cache` and `mimeapps.list`
+(your default first, removed associations left out); then **Other…**, which asks for a command.
+With none of those, your `$VISUAL` / `$EDITOR`. A program named in `interactive_commands`, or an
+installed one that says `Terminal=true`, takes over the terminal, as `:nvim` does; any other is
+started detached, so a viewer outlives the browser. The file's type comes from the shared MIME
+database's file-name patterns, or, for a name that matches none, from whether its first bytes are
+text.
 **Copy path** asks the terminal to put the path on the system clipboard (OSC 52), which most modern
 terminals honour, including over `ssh` and inside `tmux`.
 
@@ -261,6 +267,12 @@ file, a missing file, even one that fails to parse never stops Minuteman from st
 # Programs a `:` command gives the whole terminal to (`:nvim notes.md`); `:!cmd` does it for any.
 interactive_commands = ["nvim", "vim", "vi", "nano", "emacs", "micro", "hx", "less", "more",
                         "man", "htop", "btop", "top", "mpv", "ssh", "tmux", "fzf"]
+
+# Which program opens which files, ahead of the desktop's choice: extensions (`md`, `tar.gz`) or
+# MIME types (`image/*`). The first match wins for `enter` and double-click.
+[[open_rule]]
+match = ["md", "txt"]
+command = "nvim"
 
 # The right-click menu's "Open with" list. `{}` stands for the file's path; without one the path
 # is added on the end.

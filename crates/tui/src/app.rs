@@ -39,9 +39,10 @@ use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use plugins::PluginManager;
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
-use theming::PluginSpec;
+use theming::{OpenRule, OpenWith, PluginSpec};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::associations::{self, Associations};
 use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::disk_usage::DiskUsageView;
@@ -132,6 +133,11 @@ pub enum Prompt {
     CommandInput {
         buffer: String,
     },
+    /// The command typed for the "Open with" menu's "Other…": what should open `path`.
+    OpenOther {
+        path: PathBuf,
+        buffer: String,
+    },
 }
 
 impl Prompt {
@@ -145,6 +151,7 @@ impl Prompt {
             Prompt::Conflict(_) => "CONFLICT",
             Prompt::SearchInput { .. } => "SEARCH",
             Prompt::CommandInput { .. } => "COMMAND",
+            Prompt::OpenOther { .. } => "OPEN WITH",
         }
     }
 
@@ -157,6 +164,7 @@ impl Prompt {
                 | Prompt::CreateInput { .. }
                 | Prompt::SearchInput { .. }
                 | Prompt::CommandInput { .. }
+                | Prompt::OpenOther { .. }
         )
     }
 
@@ -192,6 +200,9 @@ impl Prompt {
             }
             Prompt::SearchInput { buffer, .. } => format!("/{buffer}"),
             Prompt::CommandInput { buffer } => format!(":{buffer}"),
+            Prompt::OpenOther { path, buffer } => {
+                format!("open {} with: {buffer}", display_name(path))
+            }
         }
     }
 }
@@ -313,6 +324,13 @@ pub struct App {
     handle: tokio::runtime::Handle,
     /// Program names a `:` command hands the terminal to (see `command::parse`).
     interactive: Vec<String>,
+    /// The `[[open_rule]]` tables: which program opens which files, ahead of the desktop's choice.
+    open_rules: Vec<OpenRule>,
+    /// The hand-written `[[open_with]]` entries the menu lists.
+    open_with: Vec<OpenWith>,
+    /// What the desktop has registered for each file type, read on first use rather than at
+    /// startup, since most sessions never open a file.
+    associations: std::cell::OnceCell<Associations>,
     handover: Option<Handover>,
     /// The `/` prompt's search in flight, if any. Only ever `Some` while that prompt is open.
     search_job: Option<SearchJob>,
@@ -337,6 +355,9 @@ impl App {
             system: None,
             handle,
             interactive: Vec::new(),
+            open_rules: Vec::new(),
+            open_with: Vec::new(),
+            associations: std::cell::OnceCell::new(),
             handover: None,
             search_job: None,
             search_state: SearchState::Idle,
@@ -365,6 +386,13 @@ impl App {
     /// Sets which program names `:` hands the terminal to.
     pub fn with_interactive_commands(mut self, interactive: Vec<String>) -> Self {
         self.interactive = interactive;
+        self
+    }
+
+    /// Sets the `[[open_rule]]` and `[[open_with]]` tables.
+    pub fn with_open_config(mut self, rules: Vec<OpenRule>, open_with: Vec<OpenWith>) -> Self {
+        self.open_rules = rules;
+        self.open_with = open_with;
         self
     }
 
@@ -859,26 +887,81 @@ impl App {
         }
     }
 
-    /// Opens `path` with whatever the desktop has registered for its type.
+    fn associations(&self) -> &Associations {
+        self.associations.get_or_init(Associations::from_env)
+    }
+
+    /// Every choice the "Open with" submenu offers for `path`, best first: matching
+    /// `[[open_rule]]`s, the `[[open_with]]` entries, then the programs installed for its type.
+    pub fn open_choices(&self, path: &Path) -> Vec<OpenWith> {
+        let assoc = self.associations();
+        let mime = assoc.mime_of(path);
+        let discovered = assoc
+            .apps_for(&mime)
+            .iter()
+            .map(associations::choice)
+            .collect();
+        open::choices(
+            &self.open_rules,
+            &self.open_with,
+            discovered,
+            &display_name(path),
+            &mime,
+        )
+    }
+
+    /// Opens `path` the way the user would expect: the first `[[open_rule]]` that covers it, else
+    /// the program the desktop has as the default for its type, else whatever `xdg-open` picks.
     pub fn open_default(&mut self, browser: &BrowserState, path: &Path) {
-        self.open_with(browser, open::DEFAULT_OPENER, path);
+        let mime = self.associations().mime_of(path);
+        let choice = open::first_rule(&self.open_rules, &display_name(path), &mime)
+            .map(open::rule_choice)
+            .or_else(|| {
+                self.associations()
+                    .default_for(&mime)
+                    .map(|entry| associations::choice(&entry))
+            });
+        match choice {
+            Some(choice) => self.open_choice(browser, &choice, path),
+            None => self.open_with(browser, open::DEFAULT_OPENER, path),
+        }
+    }
+
+    /// Opens `path` with one of the menu's choices, taking over the terminal if it needs it.
+    pub fn open_choice(&mut self, browser: &BrowserState, choice: &OpenWith, path: &Path) {
+        self.launch(browser, &choice.command, path, choice.terminal);
+    }
+
+    /// Asks for a command to open `path` with — the menu's "Other…".
+    pub fn begin_open_other(&mut self, path: PathBuf) {
+        self.prompt = Some(Prompt::OpenOther {
+            path,
+            buffer: String::new(),
+        });
     }
 
     /// Opens `path` with `command` (see `open::command_line` for where the path goes). A program
     /// in the `interactive_commands` list takes over the terminal like a `:` command does; any
     /// other is started on its own, since it opens a window and must not be waited on.
     pub fn open_with(&mut self, browser: &BrowserState, command: &str, path: &Path) {
-        let Some(program) = open::program_of(command) else {
+        self.launch(browser, command, path, false);
+    }
+
+    /// The one place a file is handed to a program. `terminal` forces the terminal handover for a
+    /// program that needs it whatever its name (a `Terminal=true` desktop entry).
+    fn launch(&mut self, browser: &BrowserState, command: &str, path: &Path, terminal: bool) {
+        let Some(program) = open::program_word(command) else {
             self.status = Some("open with: the command is empty".into());
             return;
         };
+        let program = program.as_str();
         // `VAR=value prog` is shell syntax, not a program name to look for.
         if !program.contains('=') && !open::program_exists(program) {
             self.status = Some(format!("{program}: command not found"));
             return;
         }
         let line = open::command_line(command, path);
-        if command::names_interactive_program(program, &self.interactive) {
+        if terminal || command::names_interactive_program(program, &self.interactive) {
             if self.is_busy() {
                 self.status = Some(format!("an operation is already in progress: {line}"));
             } else {
@@ -891,7 +974,14 @@ impl App {
         }
         self.status = Some(
             match shell_overlay::spawn_detached(browser.current_dir(), &line) {
-                Ok(()) => format!("opening {} with {program}", display_name(path)),
+                Ok(()) => format!(
+                    "opening {} with {}",
+                    display_name(path),
+                    Path::new(program).file_name().map_or_else(
+                        || program.to_string(),
+                        |name| name.to_string_lossy().into_owned()
+                    )
+                ),
                 Err(e) => format!("cannot open {}: {e}", display_name(path)),
             },
         );
@@ -988,6 +1078,26 @@ impl App {
                     self.prompt = Some(Prompt::SearchInput { buffer, origin });
                 }
                 _ => self.prompt = Some(Prompt::SearchInput { buffer, origin }),
+            },
+            Prompt::OpenOther { path, mut buffer } => match code {
+                KeyCode::Esc => self.status = Some("open with cancelled".into()),
+                KeyCode::Enter => {
+                    let command = buffer.trim().to_string();
+                    if command.is_empty() {
+                        self.status = Some("open with cancelled".into());
+                    } else {
+                        self.open_with(browser, &command, &path);
+                    }
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    self.prompt = Some(Prompt::OpenOther { path, buffer });
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    self.prompt = Some(Prompt::OpenOther { path, buffer });
+                }
+                _ => self.prompt = Some(Prompt::OpenOther { path, buffer }),
             },
             Prompt::CommandInput { mut buffer } => match code {
                 KeyCode::Esc => self.status = Some("command cancelled".into()),
@@ -2580,6 +2690,214 @@ mod tests {
         f.wait_for_search();
 
         assert_eq!(f.selected_name(), "aerend.md");
+    }
+
+    /// Waits for `record` to hold something, which a detached program writes.
+    fn wait_for_record(record: &Path) -> String {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let text = std::fs::read_to_string(record).unwrap_or_default();
+            if !text.is_empty() {
+                return text;
+            }
+            assert!(Instant::now() < deadline, "the program never ran");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A desktop that knows one type, `application/x-zzz` (`*.zzz`), and one program for it: a
+    /// script that writes the file it was given to `record`. `extra` goes in its `.desktop`.
+    fn install_zzz_opener(f: &mut Fixture, record: &Path, extra: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let sys = f.root.join("xdg/sys");
+        std::fs::create_dir_all(sys.join("applications")).unwrap();
+        std::fs::create_dir_all(sys.join("mime")).unwrap();
+        let script = f.root.join("rec.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf %s \"$1\" > {}\n",
+                open::shell_quote(&record.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            sys.join("applications/rec.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Recorder\nExec={} %f\n{extra}\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            sys.join("applications/mimeinfo.cache"),
+            "[MIME Cache]\napplication/x-zzz=rec.desktop;\n",
+        )
+        .unwrap();
+        std::fs::write(sys.join("mime/globs2"), "50:application/x-zzz:*.zzz\n").unwrap();
+        let xdg = crate::mime_type::XdgDirs {
+            data_home: f.root.join("xdg/none"),
+            data_dirs: vec![sys],
+            config_home: f.root.join("xdg/none"),
+            ..Default::default()
+        };
+        assert!(f.app.associations.set(Associations::load(xdg)).is_ok());
+    }
+
+    #[test]
+    fn opening_a_file_uses_the_program_the_desktop_registered_for_its_type() {
+        let mut f = Fixture::new("open-desktop-default");
+        let record = f.root.join("record");
+        install_zzz_opener(&mut f, &record, "");
+        let file = f.root.join("it's a file.zzz");
+        std::fs::write(&file, b"").unwrap();
+
+        f.app.open_default(&f.browser, &file);
+
+        assert_eq!(wait_for_record(&record), file.to_string_lossy());
+    }
+
+    #[test]
+    fn an_open_rule_beats_the_desktops_default() {
+        let mut f = Fixture::new("open-rule-wins");
+        let (desktop_record, rule_record) = (f.root.join("desktop"), f.root.join("rule"));
+        install_zzz_opener(&mut f, &desktop_record, "");
+        f.app.open_rules = vec![OpenRule {
+            matches: vec!["zzz".into()],
+            command: format!(
+                "sh -c 'printf %s \"$0\" > \"$1\"' {{}} {}",
+                open::shell_quote(&rule_record.to_string_lossy())
+            ),
+            name: None,
+            terminal: false,
+        }];
+        let file = f.root.join("a.zzz");
+        std::fs::write(&file, b"").unwrap();
+
+        f.app.open_default(&f.browser, &file);
+
+        assert_eq!(wait_for_record(&rule_record), file.to_string_lossy());
+        assert!(
+            !desktop_record.exists(),
+            "the desktop's program ran as well"
+        );
+    }
+
+    #[test]
+    fn a_terminal_program_takes_over_the_terminal_whatever_its_name() {
+        let mut f = Fixture::new("open-terminal-entry");
+        let record = f.root.join("record");
+        install_zzz_opener(&mut f, &record, "Terminal=true");
+        let file = f.root.join("a.zzz");
+        std::fs::write(&file, b"").unwrap();
+
+        f.app.open_default(&f.browser, &file);
+
+        let handover = f
+            .app
+            .take_handover()
+            .expect("Terminal=true asks for the terminal");
+        assert!(handover.line.contains("rec.sh"), "{}", handover.line);
+        assert!(
+            !record.exists(),
+            "it must not be started behind the interface"
+        );
+    }
+
+    #[test]
+    fn a_file_the_desktop_knows_nothing_about_falls_back_to_the_system_opener() {
+        let mut f = Fixture::new("open-fallback");
+        let file = f.root.join("a.unknownkind");
+        std::fs::write(&file, [0u8, 1, 2]).unwrap();
+        f.app.associations.set(Associations::default()).unwrap();
+
+        f.app.open_default(&f.browser, &file);
+
+        // Nothing registered and nothing ruled: the status names `xdg-open` (or says it is not
+        // installed here), rather than opening nothing silently.
+        let status = f.app.status.clone().unwrap_or_default();
+        assert!(status.contains(open::DEFAULT_OPENER), "{status}");
+    }
+
+    #[test]
+    fn the_menu_lists_rules_then_configured_then_installed_programs() {
+        let mut f = Fixture::new("open-choices");
+        let record = f.root.join("record");
+        install_zzz_opener(&mut f, &record, "");
+        f.app.open_rules = vec![OpenRule {
+            matches: vec!["zzz".into()],
+            command: "ruled".into(),
+            name: Some("Ruled".into()),
+            terminal: false,
+        }];
+        f.app.open_with = vec![OpenWith {
+            name: "Configured".into(),
+            command: "configured".into(),
+            terminal: false,
+        }];
+        let names: Vec<String> = f
+            .app
+            .open_choices(&f.root.join("a.zzz"))
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["Ruled", "Configured", "Recorder"]);
+        // A `.txt` is not a `.zzz`: the rule stays out of it.
+        let plain: Vec<String> = f
+            .app
+            .open_choices(&f.root.join("a.txt"))
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(!plain.contains(&"Ruled".to_string()), "{plain:?}");
+    }
+
+    #[test]
+    fn other_asks_for_a_command_and_opens_the_file_with_it() {
+        let mut f = Fixture::new("open-other");
+        let record = f.root.join("record");
+        let file = f.root.join("x y.zzz");
+        std::fs::write(&file, b"").unwrap();
+        f.app.begin_open_other(file.clone());
+        assert!(f.app.prompt.as_ref().is_some_and(Prompt::is_text_input));
+
+        let command = format!(
+            "sh -c 'printf %s \"$0\" > \"$1\"' {{}} {}",
+            open::shell_quote(&record.to_string_lossy())
+        );
+        for c in command.chars() {
+            let _ = f
+                .app
+                .handle_prompt_key(KeyCode::Char(c), &LocalVfs, &mut f.browser)
+                .unwrap();
+        }
+        let _ = f
+            .app
+            .handle_prompt_key(KeyCode::Enter, &LocalVfs, &mut f.browser)
+            .unwrap();
+
+        assert!(f.app.prompt.is_none());
+        assert_eq!(wait_for_record(&record), file.to_string_lossy());
+    }
+
+    #[test]
+    fn other_can_be_cancelled_or_left_empty_without_running_anything() {
+        let mut f = Fixture::new("open-other-cancel");
+        let file = f.root.join("a.zzz");
+        std::fs::write(&file, b"").unwrap();
+        for keys in [vec![KeyCode::Esc], vec![KeyCode::Char(' '), KeyCode::Enter]] {
+            f.app.begin_open_other(file.clone());
+            for key in keys {
+                let _ = f
+                    .app
+                    .handle_prompt_key(key, &LocalVfs, &mut f.browser)
+                    .unwrap();
+            }
+            assert!(f.app.prompt.is_none());
+            assert_eq!(f.app.status.as_deref(), Some("open with cancelled"));
+            assert!(f.app.take_handover().is_none());
+        }
     }
 
     #[test]
