@@ -19,6 +19,7 @@ mod anim;
 mod app;
 mod appearance_popup;
 mod boot_splash;
+mod browser_drag;
 mod browser_mouse;
 mod cli;
 mod command;
@@ -90,7 +91,7 @@ use inspect::InspectView;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui_image::StatefulImage;
@@ -350,6 +351,9 @@ struct Overlay<'a> {
     current_list: &'a mut ListState,
     /// The boot splash, drawn dead last so nothing else can show through it.
     boot_splash: Option<&'a BootSplash>,
+    /// The drag in progress, if any, so `draw` can light up the folder a drop would land in and
+    /// draw the label that follows the pointer.
+    drag: Option<&'a browser_drag::Active>,
     /// The right-click menu, the Inspect panel and the settings popup, drawn last so they sit
     /// over everything.
     menu: Option<&'a ContextMenu>,
@@ -1142,6 +1146,10 @@ fn run(
     let mut current_list = ListState::default();
     // Tells a double-click on a row from two single clicks (see `browser_mouse`).
     let mut clicks = ClickTracker::default();
+    // The drag and drop in progress: a press on a row, then (past a few cells of motion) a drag
+    // (see `browser_drag`), and when the auto-scroll at the list's edge last moved the view.
+    let mut drag = browser_drag::Drag::default();
+    let mut last_edge_scroll = Instant::now();
     // The right-click menu while one is open. It owns the mouse and the keyboard until it
     // closes, so nothing else has to know it exists.
     let mut menu: Option<ContextMenu> = None;
@@ -1232,6 +1240,27 @@ fn run(
 
         status_clock.tick(&mut app.status, Instant::now());
 
+        // Hovering a dragged entry at the top or bottom border of the middle column scrolls it, so
+        // a folder out of view can be reached. Timed on the loop's tick, not on pointer motion,
+        // because a pointer held still at the edge sends no events.
+        if let Some(active) = drag.active()
+            && last_edge_scroll.elapsed() >= EDGE_SCROLL_EVERY
+        {
+            let panels = effective_panels(config, &local_panels);
+            let layout =
+                BrowserLayout::split(terminal.size()?.into(), panels.columns, panels.show_hud);
+            if let Some(row) = browser_drag::edge_scroll(
+                active.pointer,
+                layout.current,
+                browser_mouse::list_area(layout.current),
+                current_list.offset(),
+                browser.current_entries().len(),
+            ) {
+                browser.select_index(row);
+            }
+            last_edge_scroll = Instant::now();
+        }
+
         // Mirrors the order the key handling below checks these in, so the pill always names
         // what the next keystroke will actually do.
         let mode = if shells.is_some() && pending_leader {
@@ -1280,6 +1309,7 @@ fn run(
                     }),
                     current_list: &mut current_list,
                     boot_splash: boot_splash.as_ref(),
+                    drag: drag.active(),
                     menu: menu.as_ref(),
                     inspect: inspect.as_ref(),
                     usage: usage.as_ref(),
@@ -1309,6 +1339,8 @@ fn run(
             .is_some_and(|started| started.elapsed() < anim::REVEAL_MAX_WINDOW);
         let poll_timeout = if shells.is_some() || boot_splash.is_some() || revealing {
             Duration::from_millis(16)
+        } else if drag.active().is_some() {
+            EDGE_SCROLL_EVERY
         } else {
             Duration::from_millis(100)
         };
@@ -1348,6 +1380,69 @@ fn run(
                 // the shell box, not mid-drag (a drag that leaves the box must still finish it),
                 // and not under a prompt, which owns the selection until it is answered.
                 let frame_area: Rect = terminal.size()?.into();
+
+                // A drag owns the pointer from the moment it starts until the button comes up,
+                // wherever that is — over the shell box, off the columns, on another folder.
+                if !drag.is_idle() {
+                    let pointer = Position::new(mouse.column, mouse.row);
+                    let ctrl = mouse.modifiers.contains(KeyModifiers::CONTROL);
+                    match mouse.kind {
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            drag.motion(pointer, ctrl, |row| drag_sources(browser, row));
+                            continue;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            if let Some(active) = drag.release(pointer, ctrl) {
+                                let panels = effective_panels(config, &local_panels);
+                                let shell_box = shells
+                                    .as_ref()
+                                    .map(|_| shell_area(frame_area, shell_offset, shell_size));
+                                let target = drop_target(
+                                    frame_area,
+                                    panels.columns,
+                                    panels.show_hud,
+                                    browser,
+                                    current_list.offset(),
+                                    shell_box,
+                                    pointer,
+                                    &active.sources,
+                                );
+                                match target {
+                                    browser_drag::Target::Folder { dst, sources } => {
+                                        app.begin_drop(sources, active.mode, dst);
+                                    }
+                                    browser_drag::Target::Shell => {
+                                        if let (Some(panes), Some(area)) =
+                                            (shells.as_mut(), shell_box)
+                                        {
+                                            app.status = Some(drop_into_shell(
+                                                panes,
+                                                area,
+                                                pointer,
+                                                &active.sources,
+                                            ));
+                                            shell_focused = true;
+                                            pending_leader = false;
+                                            shell_chord = None;
+                                        }
+                                    }
+                                    browser_drag::Target::Nothing => {
+                                        app.status = Some("nothing to drop on there".into());
+                                    }
+                                }
+                                continue;
+                            }
+                            // Never moved far enough to be a drag: an ordinary click, handled
+                            // below like any other release.
+                        }
+                        // Any other button ends the gesture rather than starting a second one.
+                        MouseEventKind::Down(_) => {
+                            drag.cancel();
+                            drag = browser_drag::Drag::Idle;
+                        }
+                        _ => {}
+                    }
+                }
 
                 // The disk usage view, the Inspect panel and the menu are modal: they take every
                 // mouse event until they close, so a click meant to dismiss one never also
@@ -1662,6 +1757,15 @@ fn run(
                                 if let Some(path) = file_to_open {
                                     app.open_default(browser, &path);
                                 }
+                                // A plain single click on a row of the middle column may turn
+                                // into a drag; a double-click has already opened it, and a
+                                // marking click returned above.
+                                if !middle
+                                    && click == Click::Single
+                                    && let Hit::CurrentRow(row) = hit
+                                {
+                                    drag.press(row, Position::new(mouse.column, mouse.row));
+                                }
                             }
                             continue;
                         }
@@ -1889,6 +1993,15 @@ fn run(
                 }
                 alt_tap_armed = false;
                 let key = with_shifted_letter_uppercased(key);
+
+                // `Esc` abandons a drag, ahead of everything else, so it can never also reach a
+                // shell or close something underneath.
+                if key.code == KeyCode::Esc && !drag.is_idle() {
+                    if drag.cancel() {
+                        app.status = Some("drop cancelled".into());
+                    }
+                    continue;
+                }
 
                 // `Alt` commands come first and work in every mode — typing in a shell, browsing,
                 // mid-chord — because a held `Alt` is what says "this is for the shell box, not
@@ -2539,6 +2652,90 @@ fn header_view<'a>(browser: &'a BrowserState, app: &App) -> hud::HeaderView<'a> 
     }
 }
 
+/// How often a dragged entry hovering at a list's edge scrolls it by a row — also the loop's
+/// tick while a drag is in progress, so a pointer held still keeps scrolling.
+const EDGE_SCROLL_EVERY: Duration = Duration::from_millis(80);
+
+/// What a drag started on middle-column row `row` carries: the whole marked set when that row is
+/// one of the marked entries, otherwise only the row. Dragging an unmarked row never disturbs the
+/// marks, and never drags them along.
+fn drag_sources(browser: &BrowserState, row: usize) -> Vec<PathBuf> {
+    let Some(entry) = browser.current_entries().get(row) else {
+        return Vec::new();
+    };
+    if browser.is_marked(&entry.path) {
+        browser.marked_paths()
+    } else {
+        vec![entry.path.clone()]
+    }
+}
+
+/// What a drop of `sources` at `pointer` would do. Called by both the release that carries it
+/// out and `draw`, which highlights the result, so what is lit is exactly what would happen.
+#[allow(clippy::too_many_arguments)]
+fn drop_target(
+    frame_area: Rect,
+    columns: theming::ColumnLayout,
+    show_hud: bool,
+    browser: &BrowserState,
+    list_offset: usize,
+    shell_box: Option<Rect>,
+    pointer: Position,
+    sources: &[PathBuf],
+) -> browser_drag::Target {
+    let hit = browser_mouse::hit_test(
+        &BrowserLayout::split(frame_area, columns, show_hud),
+        pointer,
+        Listing::unscrolled(browser.parent_entries().len()),
+        Listing {
+            len: browser.current_entries().len(),
+            offset: list_offset,
+        },
+    );
+    browser_drag::resolve(
+        hit,
+        shell_box.is_some_and(|area| area.contains(pointer)),
+        &browser_drag::Scene {
+            current_dir: browser.current_dir(),
+            current: browser.current_entries(),
+            parent: browser.parent_entries(),
+        },
+        sources,
+    )
+}
+
+/// Types `sources`, quoted and space-separated, into the shell pane under `pointer` and focuses
+/// it, like a click there would. Nothing is sent that could run: no newline. A path that is not
+/// valid UTF-8 is skipped rather than mangled into a different one. Returns the status line.
+fn drop_into_shell(
+    panes: &mut ShellPanes,
+    area: Rect,
+    pointer: Position,
+    sources: &[PathBuf],
+) -> String {
+    let words: Vec<String> = sources
+        .iter()
+        .filter_map(|path| path.to_str().map(open::shell_quote))
+        .collect();
+    if words.is_empty() {
+        return "cannot paste: no path is valid text".into();
+    }
+    panes.focus_at(area, pointer.x, pointer.y);
+    let text = format!("{} ", words.join(" "));
+    if let Err(e) = panes.focused_shell().write_input(text.as_bytes()) {
+        return format!("cannot paste into the shell: {e}");
+    }
+    let skipped = sources.len() - words.len();
+    if skipped > 0 {
+        format!(
+            "pasted {} paths into the shell, skipped {skipped}",
+            words.len()
+        )
+    } else {
+        format!("pasted {} into the shell", words.len())
+    }
+}
+
 fn draw(
     frame: &mut ratatui::Frame<'_>,
     browser: &BrowserState,
@@ -2553,6 +2750,7 @@ fn draw(
         shell,
         current_list: current_state,
         boot_splash,
+        drag,
         menu,
         inspect,
         usage,
@@ -2622,6 +2820,32 @@ fn draw(
         .filter(|e| e.is_dir)
         .map(|_| browser.preview_entries(vfs));
 
+    // What a drop at the pointer would do right now, asked of the same function the release
+    // asks, so the row lit here is the folder the files would land in.
+    let drop = drag.map(|active| {
+        let shell_box = shell
+            .as_ref()
+            .map(|view| shell_area(frame.area(), view.offset, view.size));
+        let target = drop_target(
+            frame.area(),
+            config.panels.columns,
+            config.panels.show_hud,
+            browser,
+            current_state.offset(),
+            shell_box,
+            active.pointer,
+            &active.sources,
+        );
+        (active, target)
+    });
+    let drop_dir: Option<&Path> = match &drop {
+        Some((_, browser_drag::Target::Folder { dst, .. })) => Some(dst.as_path()),
+        _ => None,
+    };
+    // "Up a level" has no row to light — the directory above isn't listed — so its column's
+    // frame lights instead.
+    let drop_up = drop_dir.is_some() && drop_dir == browser.current_dir().parent();
+
     // Background only: the selected row's text color is set per span in `entry_item` (so the
     // accent stripe and file-type colors survive the highlight).
     let selection_style = Style::default().bg(color_from_name(&config.theme.selection_bg));
@@ -2633,10 +2857,16 @@ fn draw(
         let parent_items: Vec<ListItem> = browser
             .parent_entries()
             .iter()
-            .map(|e| entry_item(e, config, Row::PLAIN, None))
+            .map(|e| {
+                let row = Row {
+                    drop: drop_dir == Some(e.path.as_path()),
+                    ..Row::PLAIN
+                };
+                entry_item(e, config, row, None)
+            })
             .collect();
         frame.render_widget(
-            List::new(parent_items).block(style::themed_block(config, "..", false)),
+            List::new(parent_items).block(style::themed_block(config, "..", drop_up)),
             columns[0],
         );
     }
@@ -2659,6 +2889,7 @@ fn draw(
                 gutter: true,
                 selected: has_selection && i == browser.selected_index(),
                 marked: browser.is_marked(&e.path),
+                drop: drop_dir == Some(e.path.as_path()),
             };
             entry_item(e, config, row, Some((plan, now)))
         })
@@ -2852,6 +3083,14 @@ fn draw(
             config,
         );
     }
+    if let Some((active, target)) = &drop {
+        overlay_view::render_drag_ghost(
+            frame,
+            active.pointer,
+            &browser_drag::ghost_text(active, target),
+            config,
+        );
+    }
     if let Some(splash) = boot_splash {
         boot_splash::render(frame, frame.area(), splash, config);
     }
@@ -2865,6 +3104,8 @@ struct Row {
     gutter: bool,
     selected: bool,
     marked: bool,
+    /// The folder a drag would drop into: drawn inverted so it stands out from the selection.
+    drop: bool,
 }
 
 impl Row {
@@ -2872,6 +3113,7 @@ impl Row {
         gutter: false,
         selected: false,
         marked: false,
+        drop: false,
     };
 }
 
@@ -2954,7 +3196,12 @@ fn entry_item(
         }
         None => spans.push(Span::styled(label, name_style)),
     }
-    ListItem::new(Line::from(spans))
+    let item = ListItem::new(Line::from(spans));
+    if row.drop {
+        item.style(Style::default().add_modifier(Modifier::REVERSED))
+    } else {
+        item
+    }
 }
 
 fn entry_label(entry: &DirEntryInfo) -> String {

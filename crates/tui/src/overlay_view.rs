@@ -19,7 +19,7 @@
 //! alone (the panel), so this file only paints: it holds no state and decides nothing.
 
 use ratatui::Frame;
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -60,6 +60,31 @@ fn frame_block(config: &Config) -> Block<'static> {
 }
 
 /// Draws `menu` and its open submenu, if any, over whatever is underneath.
+/// The label that follows the pointer during a drag: what is carried and where it would land. Kept
+/// on screen wherever the pointer is, and drawn last so it is never under a pane.
+pub fn render_drag_ghost(frame: &mut Frame<'_>, pointer: Position, text: &str, config: &Config) {
+    let screen = frame.area();
+    if screen.width < 3 || screen.height == 0 {
+        return;
+    }
+    let width = (text_width(text) + 2).min(usize::from(screen.width)) as u16;
+    // Offset from the pointer so the label doesn't hide what is being aimed at.
+    let x = (pointer.x.saturating_add(2)).min(screen.right() - width);
+    let y = (pointer.y.saturating_add(1)).min(screen.bottom() - 1);
+    let area = Rect::new(x, y, width, 1);
+    let theme = &config.theme;
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(format!(" {} ", fit_width(text, usize::from(width) - 2))).style(
+            Style::default()
+                .fg(style::color(&theme.accent_fg))
+                .bg(style::color(&theme.bar_bg))
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
 pub fn render_menu(frame: &mut Frame<'_>, menu: &ContextMenu, config: &Config) {
     let layout = menu.layout(frame.area());
     let marker = if glyphs::of(config).ascii_borders {
@@ -819,6 +844,39 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn the_drag_ghost_shows_its_text_and_never_leaves_the_screen() {
+        for (width, height, pointer) in [
+            (80, 24, (10, 5)),
+            (80, 24, (79, 23)),
+            (80, 24, (0, 0)),
+            (12, 3, (11, 2)),
+            (200, 60, (500, 500)),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_drag_ghost(
+                        frame,
+                        Position::new(pointer.0, pointer.1),
+                        "move 3 items to sub/",
+                        &config(),
+                    );
+                })
+                .unwrap();
+            let shown = screen_text(&terminal);
+            let text = if width >= 24 {
+                "move 3 items to sub/"
+            } else {
+                "move 3 i"
+            };
+            assert!(
+                shown.contains(text) || shown.contains(&text[..text.len().min(8)]),
+                "nothing drawn at {pointer:?} on {width}x{height}:\n{shown}"
+            );
+        }
     }
 
     fn file_menu(at: (u16, u16)) -> ContextMenu {

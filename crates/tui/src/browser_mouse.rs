@@ -96,7 +96,7 @@ impl BrowserLayout {
 }
 
 /// Where the rows of a pane's list are drawn: inside the one-cell border every pane has.
-fn list_area(pane: Rect) -> Rect {
+pub(crate) fn list_area(pane: Rect) -> Rect {
     pane.inner(Margin::new(1, 1))
 }
 

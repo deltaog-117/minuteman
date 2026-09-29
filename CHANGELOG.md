@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `tui`: a completed cut-and-paste now drops the marks on the files it moved, and only empties the
+  clipboard when it still holds the cut that was just pasted.
+
 ### Fixed
 - `preview`: the archive round-trip proptest could generate two entries with the same name,
   which a zip archive rejects outright and which made a tar's read-back order for the duplicate
@@ -16,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`: mouse stage 3, drag and drop. Dragging a row (or the marked set, when the pressed row is
+  marked) onto a folder in the middle or left column moves it there, `Ctrl` held at the drop copies,
+  and blank space in the left column means the folder above. Dropping on a mini-shell pane types
+  the quoted paths into it. A label follows the pointer, the target folder is drawn inverted,
+  holding at the middle column's top or bottom border scrolls it, and `Esc` cancels. A drop uses the
+  same background paste as `p`, leaves the yank/cut clipboard alone, and refuses to move a folder
+  into itself. New module `browser_drag`, `App::begin_drop`, and
+  `overlay_view::render_drag_ghost`.
 - `tui`, `browser`, `theming`: mouse stage 2. `Ctrl`-click on a row toggles its mark; a range
   click (`Shift` or `Alt`, chosen by the new `mouse_range_modifier` option, default `"either"`)
   marks every entry from the last one clicked to this one, keeping earlier marks; clicking a

@@ -61,6 +61,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-28 | Compress Form | A modal form popup on the right-click menu with pure state and a validated `Request` (COA A), over a format submenu into the prompt bar (B) or a chain of prompts (C); password deferred | ✅ Confirmed |
 | 2026-09-28 | Extract Form | A modal form popup on an archive's right-click menu with pure state and a validated `Request` (COA C, the user's pick of the compress-form shape), over a single "Extract" item (A) or an "Extract here / to…" submenu (B) | ✅ Confirmed |
 | 2026-09-29 | Mouse Stage 2 | `Ctrl`-click toggles, a configurable range modifier (`Shift` or `Alt`, both by default) marks a span, header path segments and middle-click navigate (COA B), over the roadmap's `Shift` only (A) or a two-cycle split (C) | ✅ Confirmed |
+| 2026-09-29 | Mouse Stage 3 | Drag and drop with a pure state machine, a pointer label and lit target, drops on both file columns, up a level, and shell panes, plus edge auto-scroll (COA C), over a release-only drop (A) or feedback without shell and scroll (B) | ✅ Confirmed |
 
 ---
 
@@ -4385,6 +4386,74 @@ before its first frame, and the first click after start is lost unless the harne
 query of `ratatui-image`'s probe (device attributes, window size, background colour and device
 status), not just the first — the same gap already recorded in the Image Preview Concurrency
 entry. Not tried in a real terminal, so whether `Shift`-click arrives there is still unchecked.
+
+---
+
+### Mouse Stage 3: Drag and Drop Through the Paste Path, With Feedback and Every Surface (COA C)
+
+**Date:** 2026-09-29
+**Status:** Confirmed
+
+#### Context / Background
+
+The roadmap asked for dragging a row or the marked set onto a folder to move it (copy with `Ctrl`),
+reusing the `file_ops` paste and conflict flow, with drag events routed to the browser, a
+highlighted target, and a rule for dropping on the parent column, blank space and the shell box.
+
+#### Options Considered
+
+**Option A: release-only drop**
+- Smallest: press, drag, release over a folder. No feedback until release, so the user cannot
+  tell whether the drop will land or whether it copies. Difficulty: small to medium.
+
+**Option B: a state machine with visible feedback**
+- A pure module, a label at the pointer, the target row lit, `Esc` to cancel. Leaves the shell
+  and the edges out. Difficulty: medium.
+
+**Option C: B plus every surface**
+- Adds the left column (folder rows and "up a level"), the shell box and auto-scroll at the list's
+  edges. Most of the scope is separate small pieces. Difficulty: high.
+
+Chosen: **C**, on the user's pick.
+
+#### Consequences
+
+`browser_drag` is pure, like `browser_mouse`: `Drag` (`Idle`, `Pressed`, `Active`), `resolve` (what a
+drop at a spot does), `landing` (what actually travels), `edge_scroll` and `ghost_text`. A press
+becomes a drag after two cells of travel, so a click that wobbles by a cell stays a click; what the
+pressed row carries is only worked out then. The label and the highlight in `draw` and the release
+in `main` all call one `drop_target`, so what is lit is the drop that happens.
+
+Decisions worth keeping. A drag only starts from a plain press: `Ctrl`- and range-clicks mark, so
+`Ctrl` for copy is read at the drop, not the press. A drag carries the marked set only when the
+pressed row is in it; an unmarked row carries itself and leaves the marks alone. A drop is refused
+when any dragged folder contains the target, rather than carrying on without that one, and
+entries already directly in the target are dropped from the batch (copying them would only raise a
+conflict with themselves). Blank space in the left column means the folder above the browsed one;
+that folder has no row, so its column's frame lights instead. The drop is the ordinary background
+paste through the new `App::begin_drop`, which keeps the yank/cut clipboard out of it. That exposed
+a small trap in `poll_bulk`: a finished move always emptied the clipboard, which would have
+cleared one the user filled separately, so it now empties it only when it holds the cut that was
+just pasted; a completed move also prunes marks on the files that moved. Dropping on a shell
+pane writes the shell-quoted paths and a trailing space into the pane under the pointer and
+focuses it, never a newline, so nothing runs; a path that is not valid text is skipped and
+reported rather than sent mangled. Auto-scroll aims the selection at the row just outside the
+view, because the list keeps the selection on screen and nothing else moves the view; it runs on
+the loop's tick (50 ms while dragging, a row per 80 ms) because a pointer held still sends no
+events.
+
+**Verification.** `scripts/check` passes. New tests: the state machine (threshold, click release,
+`Ctrl` at the drop, empty press, cancel), the target rules for both columns, blank space, the shell
+box and a folder on itself, two proptests (a folder target is never a source or inside one and
+nothing already in it travels; the scroll target is one row outside the view), the label text and
+the label staying on screen, and three `App` tests (a dropped move leaves the clipboard alone, a
+dropped copy keeps the original and a moved mark is forgotten, a conflict asks before
+overwriting). Driven against the real binary in a PTY read through `pyte`: every gesture in the
+ROADMAP entry, including a real shell receiving the quoted path and staying focused, and holding at
+the top border scrolling 80 files back to a folder that began out of view. Harness findings: a
+drag of fewer than two cells is correctly a click, which made three of my own first tests fail; and
+the label drawn beside the pointer covers the row being aimed at when hovering the top border.
+Not tried in a real terminal or with a real mouse.
 
 ---
 

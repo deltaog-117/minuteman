@@ -152,6 +152,10 @@ terminals keep `Shift`+mouse for text selection, so `Alt`-click also marks a ran
 | `Ctrl`-click a row in the middle column | toggle its mark |
 | `Shift`- or `Alt`-click a row | mark everything from the last clicked row to this one |
 | click a segment of the header's path | jump to that directory |
+| drag a row (or the marked set) onto a folder | move it there; hold `Ctrl` as you drop to copy |
+| drag onto blank space in the left column | move it up a level |
+| drag onto a mini-shell pane | type the quoted paths into it |
+| hold a drag at the top or bottom border | scroll the list; `Esc` cancels the drag |
 | click a row in the left column | go up and select that entry |
 | wheel over the left or middle column | move the selection |
 | right-click a file or folder | open its context menu |

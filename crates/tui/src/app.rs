@@ -600,8 +600,18 @@ impl App {
                     let Some(clip) = self.try_continue_paste(clip, dst_dir, index) else {
                         return Ok(());
                     };
-                    if clip.mode == ClipboardMode::Move {
+                    // Only the cut this paste came from: a drop moves files without ever
+                    // touching the clipboard, and must not empty one the user filled meanwhile.
+                    if clip.mode == ClipboardMode::Move
+                        && self
+                            .clipboard
+                            .as_ref()
+                            .is_some_and(|held| held.paths == clip.paths)
+                    {
                         self.clipboard = None;
+                    }
+                    if clip.mode == ClipboardMode::Move {
+                        browser.prune_marks(vfs);
                     }
                 } else if is_delete {
                     browser.prune_marks(vfs);
@@ -825,6 +835,17 @@ impl App {
             return;
         };
         self.spawn_paste_item(clip, dst_dir, 0, ConflictPolicy::Abort);
+    }
+
+    /// Moves or copies `paths` into `dst_dir` for a drag and drop, through the same background
+    /// paste a `p` does (progress, cancel, and the overwrite/skip/abort prompt on a conflict).
+    /// The yank/cut clipboard is left alone: a drop is not a paste of what the user copied.
+    pub fn begin_drop(&mut self, paths: Vec<PathBuf>, mode: ClipboardMode, dst_dir: PathBuf) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
+        self.spawn_paste_item(Clipboard { paths, mode }, dst_dir, 0, ConflictPolicy::Abort);
     }
 
     /// Opens the Inspect panel for `path`, or says on the status line why it cannot.
@@ -2641,6 +2662,86 @@ mod tests {
 
         assert!(f.root.join("dest").join("a.txt").exists());
         assert_eq!(f.listed().iter().filter(|n| *n == "a.txt").count(), 1);
+    }
+
+    #[test]
+    fn a_dropped_move_lands_in_the_folder_and_leaves_the_users_clipboard_alone() {
+        let mut f = Fixture::new("drop-move");
+        std::fs::write(f.root.join("a.txt"), b"a").unwrap();
+        std::fs::write(f.root.join("keep.txt"), b"k").unwrap();
+        std::fs::create_dir(f.root.join("dest")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        f.browser
+            .select_index(f.listed().iter().position(|n| n == "keep.txt").unwrap());
+        f.app.yank(&f.browser);
+
+        f.app.begin_drop(
+            vec![f.root.join("a.txt")],
+            ClipboardMode::Move,
+            f.root.join("dest"),
+        );
+        f.wait_for_idle();
+
+        assert!(f.root.join("dest").join("a.txt").exists());
+        assert!(!f.root.join("a.txt").exists());
+        let held = f
+            .app
+            .clipboard
+            .as_ref()
+            .expect("the yank survived the drop");
+        assert_eq!(held.paths, [f.root.join("keep.txt")]);
+    }
+
+    #[test]
+    fn a_dropped_copy_keeps_the_original_and_a_moved_mark_is_forgotten() {
+        let mut f = Fixture::new("drop-copy");
+        std::fs::write(f.root.join("a.txt"), b"a").unwrap();
+        std::fs::write(f.root.join("b.txt"), b"b").unwrap();
+        std::fs::create_dir(f.root.join("dest")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        f.browser
+            .select_index(f.listed().iter().position(|n| n == "b.txt").unwrap());
+        f.browser.toggle_mark();
+
+        f.app.begin_drop(
+            vec![f.root.join("a.txt")],
+            ClipboardMode::Copy,
+            f.root.join("dest"),
+        );
+        f.wait_for_idle();
+        assert!(f.root.join("a.txt").exists() && f.root.join("dest/a.txt").exists());
+
+        f.app.begin_drop(
+            vec![f.root.join("b.txt")],
+            ClipboardMode::Move,
+            f.root.join("dest"),
+        );
+        f.wait_for_idle();
+        assert!(!f.root.join("b.txt").exists());
+        assert!(
+            f.browser.marked_paths().is_empty(),
+            "the mark on a moved file outlived it"
+        );
+    }
+
+    #[test]
+    fn a_drop_onto_an_existing_name_asks_before_overwriting() {
+        let mut f = Fixture::new("drop-conflict");
+        std::fs::write(f.root.join("a.txt"), b"new").unwrap();
+        std::fs::create_dir(f.root.join("dest")).unwrap();
+        std::fs::write(f.root.join("dest/a.txt"), b"old").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_drop(
+            vec![f.root.join("a.txt")],
+            ClipboardMode::Move,
+            f.root.join("dest"),
+        );
+        f.wait_for_idle();
+
+        assert!(f.app.prompt.is_some(), "a conflict must raise the prompt");
+        assert_eq!(std::fs::read(f.root.join("dest/a.txt")).unwrap(), b"old");
+        assert!(f.root.join("a.txt").exists());
     }
 
     #[test]

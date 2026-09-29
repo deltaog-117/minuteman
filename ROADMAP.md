@@ -944,6 +944,36 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `Shift`-click marked, spanned and unmarked as described, and a middle-click entered a folder.
   Not tried in a real terminal, so whether `Shift`-click reaches the program there is unchecked.
 
+- ✅ **Mouse, stage 3 — drag and drop** – press a middle-column row and move the pointer a couple
+  of cells to start a drag; a label follows the pointer (`move 3 items to sub/`, `copy …` while
+  `Ctrl` is held at the drop, `paste … into the shell`, or `… - drop on a folder` over nothing), and
+  the folder a drop would land in is drawn inverted. Dropping on a folder row in either file column
+  moves the entry there, or the whole marked set when the pressed row is one of the marked entries
+  (an unmarked row carries only itself and leaves the marks alone); dropping on blank space in the
+  left column moves up a level; dropping on a file, blank middle space or the preview does
+  nothing; dropping onto a mini-shell pane types the paths, shell-quoted and space-separated and
+  without a newline, into the pane under the pointer and focuses it. Holding the pointer at the
+  middle column's top or bottom border scrolls the list a row every 80 ms so a folder out of view
+  can be reached, and `Esc` abandons the drag. Chosen as COA C — every surface the roadmap item
+  listed, with feedback — over a release-only drop with no feedback (A) and the feedback without
+  the shell drop and auto-scroll (B). The drop is the same background paste as `p`
+  (`App::begin_drop`), so progress, cancel, and the overwrite/skip/abort prompt on a conflict come
+  free; it never touches the yank/cut clipboard, and a completed move now forgets marks on the
+  files that moved. A drop is refused when any dragged folder contains the target, and entries
+  already in the target folder are left out of the batch. The pure `tui::browser_drag` module
+  holds the press-move-release state machine, `resolve` (what a drop at a spot does), `edge_scroll`
+  and the label text; `draw` and the release both call the same `drop_target`, so the row lit is
+  the drop that happens. Property-tested: a folder target is never one of its sources or inside
+  one and nothing already in it travels, and the auto-scroll target is always one row outside the
+  view. Verified against the real binary in a PTY read through `pyte`: the ghost and the inverted
+  row while hovering; a move onto a folder; `Ctrl` at the drop copying; a marked pair moving
+  together and an unmarked row moving alone; drops onto a sibling folder in the left column and on
+  its blank space (up a level); no change when dropped on a file, on the preview or a folder on
+  itself; `Esc` cancelling; a one-cell wobble staying a click; the yank surviving a drop; a path
+  typed into a real shell pane with the shell still focused; and holding at the top border
+  scrolling a list of 80 files back to a folder that started out of view and dropping into it.
+  Not tried in a real terminal or with a real mouse.
+
 ---
 
 ## 🟡 Medium Priority (Important)
@@ -953,11 +983,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   from `config.toml` rules, listing the programs actually installed by reading XDG `.desktop`
   files and `mimeinfo.cache` (instead of a hand-written list), `enter` on a file opening it, and
   an "Other..." entry that prompts for a command.
-- **Mouse, stage 3 — drag and drop** – drag a row (or the marked set) onto a folder to move it,
-  with `Ctrl` held to copy, using the existing `file_ops` paste and conflict flow. Needs drag
-  events routed to the browser, a highlighted drop target, and a rule for dropping on the parent
-  column, blank space and the shell box. The scrollable preview (wheel over the preview column)
-  is under *Preview extras, stage 1* above.
 - **Encrypted archives (password)** – the compress form has no password field yet, and extraction
   cannot open an encrypted zip. Plan: zip AES-256 through the `zip` crate's `aes-crypto` feature
   (about seven small RustCrypto-family crates), a masked password and confirm field on the form
@@ -990,6 +1015,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   keyboard's `v` does not set the range anchor; a range click past the edge of the view does not
   scroll it; there is no rubber-band selection by dragging; the `…` in the breadcrumb could jump
   to the nearest hidden ancestor.
+- **Drag and drop, follow-ups** – no drop onto a segment of the header's path; no drag out of the
+  left column or from the disk usage view; a drag cannot start on a `Ctrl`- or range-click (those
+  mark), so copy is `Ctrl` at the drop rather than at the press; the label is not styled by kind
+  and can cover the row being aimed at when hovering the top border; auto-scroll moves the
+  selection with the view and does not restore it; dropping on the shell types paths but cannot
+  choose bracketed paste; a drop of files whose names are not valid text into a shell skips them.
 - **Native remote filesystem browsing (SSH/SFTP)** – browse and operate on `ssh://`/`sftp://`
   paths directly through the VFS abstraction, no FUSE mount required.
 - **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed** – a second, sandboxed plugin
@@ -1156,7 +1187,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    your terminal passes it on) a row further down to mark the span from the last row you clicked,
    click a segment of the path in the header to jump there, and middle-click a folder to open it.
    `mouse_range_modifier` in `config.toml` picks `"either"`, `"shift"` or `"alt"`.
+   Then the newest: press a file row and drag it onto a folder in the middle or left column, or
+   onto blank space in the left column to move it up a level; hold `Ctrl` as you let go to copy;
+   `Ctrl`-click a few rows first and drag one of them to carry the lot. Drag onto a mini-shell pane
+   to type the quoted paths into it, and hold the pointer at the top or bottom border of the
+   middle column to scroll. `Esc` cancels.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: the mouse's stage 3 (drag and drop), or pick another item under Medium Priority.
+4. Next cycle: pick from Medium Priority — the *Open-with remainder* (`enter` on a file, `.desktop`
+   discovery) is the natural next one.
