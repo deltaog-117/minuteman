@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `browser`, `theming`: mouse stage 2. `Ctrl`-click on a row toggles its mark; a range
+  click (`Shift` or `Alt`, chosen by the new `mouse_range_modifier` option, default `"either"`)
+  marks every entry from the last one clicked to this one, keeping earlier marks; clicking a
+  segment of the header's path jumps to that directory; a middle-click opens an entry (a folder in
+  place, a file with its default program). A modified click never pairs into a double-click.
+  `BrowserState` gained `toggle_mark_at`, `mark_range_to` and `anchor_here`; `hud` gained `crumbs`
+  and `crumb_rects`, and `breadcrumb` keeps its signature.
 - `tui`: an extract form on the right-click menu. "Extract…" appears on a zip, tar or tar.gz and
   opens a form for the destination folder (named after the archive by default; emptied, it means
   the browsed directory itself), what to do with files that already exist (stop, skip them or

@@ -32,6 +32,10 @@ pub struct BrowserState {
     /// Ranger-style marks: paths toggled via `Select`, persisting across navigation until
     /// explicitly toggled off or consumed by a bulk action (e.g. `Delete`).
     marked: HashSet<PathBuf>,
+    /// The entry a range mark (`mark_range_to`) starts from: the last one clicked or toggled by
+    /// mouse. Held as a path, not an index, so it survives a re-sort or a refresh; one that is no
+    /// longer in the listing is ignored.
+    range_anchor: Option<PathBuf>,
     /// Whether dot-prefixed entries appear in the listings. Filtering happens when a listing is
     /// stored, not when it is drawn, so `selected`, `/` search and mouse hit-testing all index
     /// the same list the user sees.
@@ -77,6 +81,7 @@ impl BrowserState {
             current_entries: Vec::new(),
             selected: 0,
             marked: HashSet::new(),
+            range_anchor: None,
             show_hidden,
         };
         state.refresh(vfs)?;
@@ -123,6 +128,48 @@ impl BrowserState {
         let path = entry.path.clone();
         if !self.marked.remove(&path) {
             self.marked.insert(path);
+        }
+    }
+
+    /// Makes the selected entry the start of the next range mark.
+    pub fn anchor_here(&mut self) {
+        self.range_anchor = self.selected_entry().map(|entry| entry.path.clone());
+    }
+
+    /// Selects `index` and toggles its mark, the way a `Ctrl`-click does; it also becomes the
+    /// range anchor. No-op on an empty listing.
+    pub fn toggle_mark_at(&mut self, index: usize) {
+        self.select_index(index);
+        self.toggle_mark();
+        self.anchor_here();
+    }
+
+    /// Selects `index` and marks every entry from the range anchor to it, inclusive and in
+    /// either direction, keeping whatever was already marked. Without a usable anchor the entry
+    /// under the cursor before the click stands in for it. The anchor stays put, so a second
+    /// range click re-spans from the same start. No-op on an empty listing.
+    pub fn mark_range_to(&mut self, index: usize) {
+        if self.current_entries.is_empty() {
+            return;
+        }
+        let from = self
+            .range_anchor
+            .as_ref()
+            .and_then(|anchor| self.current_entries.iter().position(|e| &e.path == anchor))
+            .unwrap_or(self.selected);
+        self.select_index(index);
+        let (low, high) = if from <= self.selected {
+            (from, self.selected)
+        } else {
+            (self.selected, from)
+        };
+        let paths: Vec<PathBuf> = self.current_entries[low..=high]
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.marked.extend(paths);
+        if self.range_anchor.is_none() {
+            self.range_anchor = self.current_entries.get(from).map(|e| e.path.clone());
         }
     }
 
@@ -338,6 +385,7 @@ impl BrowserState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use shared::LocalVfs;
 
     fn make_tree() -> PathBuf {
@@ -449,6 +497,104 @@ mod tests {
         assert_eq!(state.selected_index(), state.current_entries().len() - 1);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A directory of `count` files named so they list in a known order.
+    fn make_files(tag: &str, count: usize) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "minuteman-browser-range-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..count {
+            std::fs::write(root.join(format!("f{i:02}")), b"x").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn toggle_mark_at_twice_restores_the_marks() {
+        let root = make_files("toggle", 6);
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+
+        state.toggle_mark_at(3);
+        assert_eq!(state.marked_paths().len(), 1);
+        assert_eq!(state.selected_index(), 3);
+        state.toggle_mark_at(3);
+        assert!(state.marked_paths().is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn range_without_an_anchor_starts_at_the_cursor() {
+        let root = make_files("noanchor", 6);
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+        state.select_index(1);
+
+        state.mark_range_to(3);
+        let names: Vec<_> = state
+            .marked_paths()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["f01", "f02", "f03"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn range_ignores_an_anchor_that_left_the_listing() {
+        let root = make_files("stale", 4);
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+        state.select_index(0);
+        state.anchor_here();
+        std::fs::remove_file(root.join("f00")).unwrap();
+        state.refresh(&vfs).unwrap();
+        state.select_index(1);
+
+        state.mark_range_to(2);
+        assert_eq!(state.marked_paths().len(), 2);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    proptest! {
+        #[test]
+        fn range_marks_exactly_the_span_between_anchor_and_click(
+            anchor in 0usize..10,
+            click in 0usize..10,
+            before in proptest::collection::vec(0usize..10, 0..4),
+        ) {
+            let root = make_files("prop", 10);
+            let vfs = LocalVfs;
+            let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+            let paths: Vec<PathBuf> =
+                state.current_entries().iter().map(|e| e.path.clone()).collect();
+            for i in &before {
+                state.select_index(*i);
+                if !state.is_marked(&paths[*i]) {
+                    state.toggle_mark();
+                }
+            }
+            state.select_index(anchor);
+            state.anchor_here();
+
+            state.mark_range_to(click);
+
+            let (low, high) = (anchor.min(click), anchor.max(click));
+            for (i, path) in paths.iter().enumerate() {
+                let expected = (low..=high).contains(&i) || before.contains(&i);
+                prop_assert_eq!(state.is_marked(path), expected, "entry {}", i);
+            }
+            prop_assert_eq!(state.selected_index(), click);
+            std::fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     #[test]

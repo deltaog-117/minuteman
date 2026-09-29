@@ -139,13 +139,19 @@ named `init` must be passed as `./init`.
 ### Mouse
 
 The three file columns answer the mouse like a conventional file manager (set
-`browser_mouse = false` in `config.toml` to leave the mouse to the mini-shell box alone).
+`browser_mouse = false` in `config.toml` to leave the mouse to the mini-shell box alone). Most
+terminals keep `Shift`+mouse for text selection, so `Alt`-click also marks a range;
+`mouse_range_modifier` (`"either"`, `"shift"` or `"alt"`) picks which.
 
 | Gesture | Action |
 |---------|--------|
 | click a row in the middle column | select it |
 | double-click a directory | open it |
 | double-click a file | open it with the desktop's default program (`xdg-open`) |
+| middle-click a row | open it in place (a folder) or with the default program (a file) |
+| `Ctrl`-click a row in the middle column | toggle its mark |
+| `Shift`- or `Alt`-click a row | mark everything from the last clicked row to this one |
+| click a segment of the header's path | jump to that directory |
 | click a row in the left column | go up and select that entry |
 | wheel over the left or middle column | move the selection |
 | right-click a file or folder | open its context menu |

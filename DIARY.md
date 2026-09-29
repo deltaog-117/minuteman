@@ -60,6 +60,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-28 | Archive Compress/Extract | In-process `zip`/`tar`/`flate2` in `file_ops::archive` with a `SafePath` newtype and extraction limits (COA A), over system tools (B) or a hybrid (C) | ✅ Confirmed |
 | 2026-09-28 | Compress Form | A modal form popup on the right-click menu with pure state and a validated `Request` (COA A), over a format submenu into the prompt bar (B) or a chain of prompts (C); password deferred | ✅ Confirmed |
 | 2026-09-28 | Extract Form | A modal form popup on an archive's right-click menu with pure state and a validated `Request` (COA C, the user's pick of the compress-form shape), over a single "Extract" item (A) or an "Extract here / to…" submenu (B) | ✅ Confirmed |
+| 2026-09-29 | Mouse Stage 2 | `Ctrl`-click toggles, a configurable range modifier (`Shift` or `Alt`, both by default) marks a span, header path segments and middle-click navigate (COA B), over the roadmap's `Shift` only (A) or a two-cycle split (C) | ✅ Confirmed |
 
 ---
 
@@ -4314,6 +4315,76 @@ the form opening only for archives, extracting into a named folder, extracting h
 the archive, and "stop" refusing a folder that exists while "replace" fills it. Not exercised by
 hand in the terminal: the right-click flow itself (the compiled binary was not driven through
 `tmux` this time) and the trash call for "delete archives", which would fill the real trash.
+
+---
+
+### Mouse Stage 2: Marks by Click, a Range Key the Terminal Delivers, Breadcrumb Jumps (COA B)
+
+**Date:** 2026-09-29
+**Status:** Confirmed
+
+#### Context / Background
+
+The roadmap's next item was multi-select and breadcrumb clicks: `Ctrl`-click toggles a mark,
+`Shift`-click marks a range, a click on a segment of the header's path jumps there, and a
+middle-click opens the entry. The catch is `Shift`: most terminals keep `Shift`+mouse for their
+own text selection and never report it to the application, so a range click bound to `Shift`
+alone would silently do nothing in kitty, alacritty and others. This could not be tested here
+against a real terminal.
+
+#### Options Considered
+
+**Option A: the roadmap as written, `Shift` for ranges**
+- Matches desktop file managers, one cycle. Range select is dead wherever the terminal keeps
+  `Shift`. Difficulty: medium.
+
+**Option B: the same, with the range modifier configurable and `Alt` accepted by default**
+- Works in every terminal, and `Alt`-click is free over the browser (the shell box claims `Alt`
+  only over itself). One option beyond the roadmap. Difficulty: medium.
+
+**Option C: two cycles, navigation first and modifiers later**
+- Small first step, but the modifier plumbing is still needed and the item takes two loops.
+  Difficulty: small, then medium.
+
+Chosen: **B**, because it keeps A's scope and removes the failure that could not be checked.
+
+#### Consequences
+
+`mouse_range_modifier` in `config.toml` is `"either"` (the default: `Shift` or `Alt`), `"shift"` or
+`"alt"`; an unrecognised value falls back to the default like every other field. `Select::of`
+turns a click's modifiers into `Plain`, `Toggle` (`Ctrl`) or `Range`, with the range winning when
+both are held since it is the more specific request. `BrowserState` gained a range anchor, kept as
+a path rather than an index so a refresh cannot move it, and `toggle_mark_at`/`mark_range_to`. A
+range keeps earlier marks and spans anchor to click in either direction; without a usable anchor
+the cursor before the click stands in for it. A plain click sets the anchor, as in a desktop file
+manager; the keyboard's `v` does not, to keep this change to the mouse path.
+
+A modified click resets the `ClickTracker`. Without that, two quick `Ctrl`-clicks on a folder
+paired into a double-click and opened it. The middle-click is a new `Click::Open` that never goes
+through the tracker at all.
+
+The header needed the most care. `hud::breadcrumb` returned only strings, and how wide the
+breadcrumb is depends on how much room the right-hand pills leave it, which depends on live app
+state. `breadcrumb` is now a thin wrapper over `crumbs`, which keeps each segment's directory (the
+`…` that stands for dropped segments has none, so it is not clickable). The pills moved into
+`header_pills`, and `crumb_rects` lays the segments out with the same widths and separators
+`render_header` draws with; `main` builds the header's data through one `header_view` for both, so
+a click cannot land on a different segment than the one drawn. A click on the last segment (where
+the user already is) is ignored rather than resetting the cursor to the top.
+
+**Verification.** `scripts/check` passes. New tests: a proptest that a range marks exactly the
+span between anchor and click, plus earlier marks, in either direction; toggling twice restores
+the marks; a stale anchor is ignored; the modifier table for all three settings; the tracker
+reset; the middle-click opening a folder in place; crumb targets, and a proptest that every
+clickable rectangle sits over the text drawn for it at any width. Driven against the real binary
+in a PTY read through `pyte`: header clicks on `sub`, `proj` and `~` jumped there, a click on the
+last segment did nothing; `Ctrl`-click marked, `Alt`-click and `Shift`-click marked the span,
+`Ctrl`-click unmarked, two quick `Ctrl`-clicks left the marks unchanged without opening anything,
+and a middle-click entered a folder. Two harness findings: a debug build needs about three seconds
+before its first frame, and the first click after start is lost unless the harness answers every
+query of `ratatui-image`'s probe (device attributes, window size, background colour and device
+status), not just the first — the same gap already recorded in the Image Preview Concurrency
+entry. Not tried in a real terminal, so whether `Shift`-click arrives there is still unchecked.
 
 ---
 

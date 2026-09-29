@@ -105,6 +105,9 @@ struct RawConfig {
     alt_tap: Option<bool>,
     /// `None` when absent, for the same reason as `alt_tap`.
     browser_mouse: Option<bool>,
+    /// Which modifier turns a click into a range mark; kept as text so an unrecognised value can
+    /// fall back to the default instead of failing the whole config.
+    mouse_range_modifier: Option<String>,
     /// `None` when absent, for the same reason as `alt_tap`.
     git_status: Option<bool>,
     /// `None` when absent, so "unset" can default to hidden rather than serde's `false` meaning
@@ -198,6 +201,38 @@ pub struct CustomTheme {
     pub theme: RawTheme,
 }
 
+/// The modifier held while clicking to mark everything between the last clicked entry and this
+/// one. `Shift` is the desktop convention, but most terminals keep `Shift`+mouse for their own
+/// text selection and never report it, so `Alt` is accepted by default as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RangeModifier {
+    /// `Shift` or `Alt` — whichever the terminal delivers.
+    #[default]
+    Either,
+    Shift,
+    Alt,
+}
+
+impl RangeModifier {
+    /// Parses a config value (case-insensitive); `None` for anything unrecognised.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "either" | "both" => Some(Self::Either),
+            "shift" => Some(Self::Shift),
+            "alt" => Some(Self::Alt),
+            _ => None,
+        }
+    }
+
+    pub fn accepts_shift(self) -> bool {
+        matches!(self, Self::Either | Self::Shift)
+    }
+
+    pub fn accepts_alt(self) -> bool {
+        matches!(self, Self::Either | Self::Alt)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Whether tapping `Alt` on its own switches between the mini-shell and the file browser.
@@ -208,6 +243,8 @@ pub struct Config {
     /// constant so a misbehaving terminal or a habit of clicking by accident can turn it off
     /// without a rebuild; the mini-shell's own mouse gestures don't depend on it.
     pub browser_mouse: bool,
+    /// The modifier that makes a click mark a range of entries (see [`RangeModifier`]).
+    pub mouse_range_modifier: RangeModifier,
     /// Whether the status bar shows the branch and the selection's git state. It runs the `git`
     /// binary in the background, so it is a switch for anyone who would rather it never did.
     pub git_status: bool,
@@ -316,6 +353,11 @@ impl Config {
         Self {
             alt_tap: config.alt_tap.unwrap_or(true),
             browser_mouse: config.browser_mouse.unwrap_or(true),
+            mouse_range_modifier: config
+                .mouse_range_modifier
+                .as_deref()
+                .and_then(RangeModifier::parse)
+                .unwrap_or_default(),
             git_status: config.git_status.unwrap_or(true),
             show_hidden: config.show_hidden.unwrap_or(false),
             boot_splash: config.boot_splash.unwrap_or(true),
@@ -420,6 +462,7 @@ mod tests {
         let raw: RawConfig = toml::from_str(text).unwrap();
         assert_eq!(raw.alt_tap, Some(true));
         assert_eq!(raw.browser_mouse, Some(true));
+        assert_eq!(raw.mouse_range_modifier.as_deref(), Some("either"));
         assert_eq!(raw.git_status, Some(true));
         assert_eq!(raw.show_hidden, Some(false));
         assert_eq!(raw.boot_splash, Some(true));
@@ -480,6 +523,25 @@ mod tests {
         assert!(Config::from_sources(Some("[keys]\nquit = [\"x\"]\n"), None, None).browser_mouse);
         assert!(!Config::from_sources(Some("browser_mouse = false\n"), None, None).browser_mouse);
         assert!(Config::from_sources(Some("browser_mouse = true\n"), None, None).browser_mouse);
+    }
+
+    #[test]
+    fn mouse_range_modifier_defaults_to_either_and_falls_back_on_a_typo() {
+        let range =
+            |text: Option<&str>| Config::from_sources(text, None, None).mouse_range_modifier;
+        assert_eq!(range(None), RangeModifier::Either);
+        assert_eq!(
+            range(Some("mouse_range_modifier = \"Alt\"\n")),
+            RangeModifier::Alt
+        );
+        assert_eq!(
+            range(Some("mouse_range_modifier = \"shift\"\n")),
+            RangeModifier::Shift
+        );
+        assert_eq!(
+            range(Some("mouse_range_modifier = \"nope\"\n")),
+            RangeModifier::Either
+        );
     }
 
     #[test]

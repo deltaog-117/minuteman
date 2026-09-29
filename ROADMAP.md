@@ -925,6 +925,25 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   folder per archive) and `:extract` is unchanged. Chosen as COA C over a single "Extract" item
   (A) and an "Extract here / to…" submenu (B).
 
+- ✅ **Mouse, stage 2 — marks by click, range select, breadcrumb jumps, middle-click** –
+  `Ctrl`-click on a middle-column row toggles its mark; a range click marks everything from the last
+  entry clicked (the range anchor, a path on `BrowserState`, set by a plain, `Ctrl` or range click)
+  to the one under the pointer, in either direction, keeping earlier marks; a click on a segment
+  of the header's path jumps to that directory (the `…` that stands for dropped segments and the
+  last segment do nothing); a middle-click opens the entry, a folder in place and a file with its
+  default program. Chosen as COA B: because most terminals keep `Shift`+mouse for their own text
+  selection, the range modifier is the new `mouse_range_modifier` option (`"either"`, the default,
+  accepting `Shift` or `Alt`; `"shift"`; `"alt"`) over the roadmap's `Shift` alone (A) and over a
+  two-cycle split (C). A modified click resets the double-click clock, so two quick `Ctrl`-clicks
+  toggle twice instead of opening the folder. `hud::breadcrumb` became a wrapper over `crumbs`,
+  which keeps each segment's directory; `hud::crumb_rects` lays them out from the same widths
+  `render_header` draws with, through one shared `header_view`. Property-tested: a range marks
+  exactly the span between anchor and click plus earlier marks, and every clickable header
+  rectangle sits over the text drawn for it at any width. Verified against the real binary in a
+  PTY read through `pyte`: header clicks jumped to `sub`, `proj` and `~`, `Ctrl`-, `Alt`- and
+  `Shift`-click marked, spanned and unmarked as described, and a middle-click entered a folder.
+  Not tried in a real terminal, so whether `Shift`-click reaches the program there is unchecked.
+
 ---
 
 ## 🟡 Medium Priority (Important)
@@ -934,11 +953,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   from `config.toml` rules, listing the programs actually installed by reading XDG `.desktop`
   files and `mimeinfo.cache` (instead of a hand-written list), `enter` on a file opening it, and
   an "Other..." entry that prompts for a command.
-- **Mouse, stage 2 — multi-select and breadcrumb clicks** – `Ctrl`-click toggles a mark and
-  `Shift`-click marks a range, the way a desktop file manager selects; a click on a segment of
-  the header's path jumps to that directory; a middle-click opens the entry (a folder in place,
-  a file with its default program). Needs modifier bits on the click path and a path-segment
-  hit-test in `browser_mouse`.
 - **Mouse, stage 3 — drag and drop** – drag a row (or the marked set) onto a folder to move it,
   with `Ctrl` held to copy, using the existing `file_ops` paste and conflict flow. Needs drag
   events routed to the browser, a highlighted drop target, and a rule for dropping on the parent
@@ -972,6 +986,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟢 Low Priority (Nice-to-Have)
 
+- **Mouse, stage 2 follow-ups** – `Ctrl`/range clicks in the left column act as plain clicks; the
+  keyboard's `v` does not set the range anchor; a range click past the edge of the view does not
+  scroll it; there is no rubber-band selection by dragging; the `…` in the breadcrumb could jump
+  to the nearest hidden ancestor.
 - **Native remote filesystem browsing (SSH/SFTP)** – browse and operate on `ssh://`/`sftp://`
   paths directly through the VFS abstraction, no FUSE mount required.
 - **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed** – a second, sandboxed plugin
@@ -1134,7 +1152,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    per element (`bold, italic`) and previews it as you type; every commit is saved to `local.toml`.
    Then the newest: save a look with "Save theme", change some colors, then open "Saved themes" —
    `Enter` on a name brings that look back, `r` renames it and `d` (then `y`) deletes it.
+   Then the newest: `Ctrl`-click rows to mark them one by one, `Alt`-click (or `Shift`-click, where
+   your terminal passes it on) a row further down to mark the span from the last row you clicked,
+   click a segment of the path in the header to jump there, and middle-click a folder to open it.
+   `mouse_range_modifier` in `config.toml` picks `"either"`, `"shift"` or `"alt"`.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: the mouse's stage 2 (multi-select and breadcrumb clicks).
+4. Next cycle: the mouse's stage 3 (drag and drop), or pick another item under Medium Priority.

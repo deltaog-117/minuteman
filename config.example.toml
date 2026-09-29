@@ -20,6 +20,14 @@ alt_tap = true
 # keyboard back from a mini-shell. Set this to false to leave the mouse to the mini-shell box only.
 browser_mouse = true
 
+# Clicking a row with a modifier held selects several entries, the way a desktop file manager
+# does: Ctrl+click toggles that entry's mark, and a range click marks everything between the last
+# entry clicked and this one (keeping earlier marks). A click on a segment of the header's path
+# jumps to that directory, and a middle-click opens an entry. Most terminals keep Shift+mouse for
+# their own text selection and never pass it on, so the range click also accepts Alt by default.
+# "either" (Shift or Alt), "shift" or "alt".
+mouse_range_modifier = "either"
+
 # The status bar's git segment: the branch, how far it is ahead of or behind its upstream, counts
 # of staged, modified and untracked files, and the state of the selected file. It runs `git status`
 # in the background (read-only, without taking git's index lock) whenever you browse inside a

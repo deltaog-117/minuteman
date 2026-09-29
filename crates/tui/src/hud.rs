@@ -141,9 +141,25 @@ pub fn format_perms(mode: u32) -> String {
         .collect()
 }
 
+/// One breadcrumb segment: what is drawn, and the directory a click on it goes to. The `…` that
+/// stands in for dropped segments has no single directory, so it has no target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Crumb {
+    pub label: String,
+    pub target: Option<PathBuf>,
+}
+
 /// The path as breadcrumb segments — `~` for the home directory, `/` for the root — shortened
 /// from the left with a `…` segment until the joined result fits `max_width` cells.
 pub fn breadcrumb(path: &Path, home: Option<&Path>, max_width: usize) -> Vec<String> {
+    crumbs(path, home, max_width)
+        .into_iter()
+        .map(|crumb| crumb.label)
+        .collect()
+}
+
+/// [`breadcrumb`] with each segment's directory kept, so the header can be clicked.
+pub fn crumbs(path: &Path, home: Option<&Path>, max_width: usize) -> Vec<Crumb> {
     let names = |p: &Path| -> Vec<String> {
         p.components()
             .filter_map(|c| match c {
@@ -152,25 +168,37 @@ pub fn breadcrumb(path: &Path, home: Option<&Path>, max_width: usize) -> Vec<Str
             })
             .collect()
     };
-    let mut segments = match home.and_then(|h| path.strip_prefix(h).ok()) {
-        Some(rest) => std::iter::once("~".to_string())
-            .chain(names(rest))
-            .collect(),
-        None => std::iter::once("/".to_string())
-            .chain(names(path))
-            .collect::<Vec<_>>(),
-    };
+    let (root_label, root_dir, rest) =
+        match home.and_then(|h| path.strip_prefix(h).ok().map(|r| (h, r))) {
+            Some((h, rest)) => ("~", h.to_path_buf(), names(rest)),
+            None => ("/", PathBuf::from("/"), names(path)),
+        };
+    let mut dir = root_dir.clone();
+    let mut segments = vec![Crumb {
+        label: root_label.to_string(),
+        target: Some(root_dir),
+    }];
+    for name in rest {
+        dir.push(&name);
+        segments.push(Crumb {
+            label: name,
+            target: Some(dir.clone()),
+        });
+    }
 
-    let joined_width = |segs: &[String]| {
-        segs.iter().map(|s| text_width(s)).sum::<usize>() + 3 * segs.len().saturating_sub(1)
+    let joined_width = |segs: &[Crumb]| {
+        segs.iter().map(|s| text_width(&s.label)).sum::<usize>() + 3 * segs.len().saturating_sub(1)
     };
     while joined_width(&segments) > max_width && segments.len() > 2 {
         // Drop the segment right after the first (or after an existing ellipsis) so the root and
         // the deepest directories — the parts that orient you — stay.
-        if segments[1] == "…" {
+        if segments[1].label == "…" {
             segments.remove(2);
         } else {
-            segments[1] = "…".into();
+            segments[1] = Crumb {
+                label: "…".into(),
+                target: None,
+            };
         }
     }
     if joined_width(&segments) > max_width {
@@ -180,7 +208,7 @@ pub fn breadcrumb(path: &Path, home: Option<&Path>, max_width: usize) -> Vec<Str
             n => joined_width(&segments[..n - 1]) + 3,
         };
         if let Some(last) = segments.last_mut() {
-            *last = fit_width(last, max_width.saturating_sub(before_last).max(1));
+            last.label = fit_width(&last.label, max_width.saturating_sub(before_last).max(1));
         }
     }
     segments
@@ -312,7 +340,9 @@ pub fn progress_fill(progress: &Progress, cells: usize) -> usize {
     }
 }
 
-pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, config: &Config) {
+/// The pills on the header's right edge. Built apart from drawing so a click can learn how much
+/// room they leave the breadcrumb without drawing anything.
+fn header_pills(view: &HeaderView<'_>, config: &Config) -> Line<'static> {
     let theme = &config.theme;
     let g = glyphs::of(config);
     let pill_bg = style::color(&theme.bar_bg);
@@ -364,7 +394,49 @@ pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, c
         }
         right.push(p);
     }
-    let right_line = Line::from(right);
+    Line::from(right)
+}
+
+/// Where each clickable breadcrumb segment sits on the header row `area`, with the directory it
+/// jumps to. Laid out by the same `crumbs` call, widths and separators `render_header` draws
+/// with, so a click lands on the segment the user was looking at.
+pub fn crumb_rects(area: Rect, view: &HeaderView<'_>, config: &Config) -> Vec<(Rect, PathBuf)> {
+    let g = glyphs::of(config);
+    let right_width = header_pills(view, config).width().min(area.width as usize);
+    let left_width = (area.width as usize).saturating_sub(right_width + 1);
+    let prefix_width = text_width(g.header_prefix);
+    let segments = crumbs(
+        view.path,
+        view.home.as_deref(),
+        left_width.saturating_sub(prefix_width),
+    );
+    let sep_width = text_width(g.crumb_sep);
+    let mut x = prefix_width;
+    let mut rects = Vec::new();
+    for (i, crumb) in segments.into_iter().enumerate() {
+        if i > 0 {
+            x += sep_width;
+        }
+        let width = text_width(&crumb.label);
+        // Stop at the edge the breadcrumb is drawn inside, which is narrower than the row.
+        if x + width <= left_width
+            && let Some(target) = crumb.target
+        {
+            rects.push((
+                Rect::new(area.x + x as u16, area.y, width as u16, 1),
+                target,
+            ));
+        }
+        x += width;
+    }
+    rects
+}
+
+pub fn render_header(frame: &mut Frame<'_>, area: Rect, view: &HeaderView<'_>, config: &Config) {
+    let theme = &config.theme;
+    let g = glyphs::of(config);
+    let styles = &config.styles;
+    let right_line = header_pills(view, config);
     let right_width = right_line.width().min(area.width as usize);
 
     let left_width = (area.width as usize).saturating_sub(right_width + 1);
@@ -879,6 +951,7 @@ impl StatusClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -887,6 +960,7 @@ mod tests {
         Config {
             alt_tap: true,
             browser_mouse: true,
+            mouse_range_modifier: theming::RangeModifier::default(),
             git_status: true,
             show_hidden: false,
             boot_splash: true,
@@ -1002,6 +1076,63 @@ mod tests {
         let segs = breadcrumb(Path::new("/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), None, 10);
         let width: usize = segs.iter().map(|s| text_width(s)).sum::<usize>() + 3 * (segs.len() - 1);
         assert!(width <= 10, "{segs:?} is {width} wide");
+    }
+
+    #[test]
+    fn crumbs_point_at_their_own_directory_and_the_ellipsis_at_none() {
+        let home = Path::new("/home/me");
+        let c = crumbs(Path::new("/home/me/dev/mm"), Some(home), 80);
+        let targets: Vec<_> = c.iter().map(|c| c.target.as_deref()).collect();
+        assert_eq!(
+            targets,
+            [
+                Some(home),
+                Some(Path::new("/home/me/dev")),
+                Some(Path::new("/home/me/dev/mm"))
+            ]
+        );
+        let elided = crumbs(Path::new("/aaaa/bbbb/cccc/dddd"), None, 14);
+        assert!(elided.iter().any(|c| c.label == "…" && c.target.is_none()));
+        assert_eq!(
+            elided.last().and_then(|c| c.target.as_deref()),
+            Some(Path::new("/aaaa/bbbb/cccc/dddd"))
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn crumb_rects_cover_exactly_the_text_drawn(
+            names in proptest::collection::vec("[a-z]{1,9}", 0..8),
+            width in 30u16..140,
+            marks in 0usize..3,
+        ) {
+            let path: PathBuf = std::iter::once("/".to_string()).chain(names).collect();
+            let view = HeaderView {
+                path: &path,
+                home: None,
+                marks,
+                marks_total: None,
+                clipboard: None,
+                progress: None,
+                caps_lock: false,
+                system: None,
+            };
+            let config = test_config();
+            let drawn = render_to_text(width, |f, a| render_header(f, a, &view, &config));
+            let cells: Vec<char> = drawn.chars().collect();
+            let rects = crumb_rects(Rect::new(0, 0, width, 1), &view, &config);
+            for (rect, target) in rects {
+                let text: String = cells[rect.x as usize..(rect.x + rect.width) as usize]
+                    .iter()
+                    .collect();
+                let name = target.file_name().map_or("/".to_string(), |n| {
+                    n.to_string_lossy().into_owned()
+                });
+                // The last segment may have been shortened to fit, never any other.
+                prop_assert!(name.starts_with(text.trim_end_matches('…')) || text == name,
+                    "rect over {:?} but {:?} is drawn", target, text);
+            }
+        }
     }
 
     #[test]

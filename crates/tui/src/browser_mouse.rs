@@ -25,10 +25,10 @@
 use std::time::{Duration, Instant};
 
 use browser::BrowserState;
-use crossterm::event::MouseEventKind;
+use crossterm::event::{KeyModifiers, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Position, Rect};
 use shared::{Vfs, VfsError};
-use theming::ColumnLayout;
+use theming::{ColumnLayout, RangeModifier};
 
 /// Two clicks on the same row this close together are a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -188,6 +188,54 @@ pub fn hit_test(layout: &BrowserLayout, pos: Position, parent: Listing, current:
 pub enum Click {
     Single,
     Double,
+    /// A middle-click: open the entry without needing a second click.
+    Open,
+}
+
+/// What a left click does to the marks, decided by the modifiers held with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Select {
+    /// No modifier: just move the cursor there.
+    Plain,
+    /// `Ctrl`: flip that entry's mark.
+    Toggle,
+    /// The configured range modifier: mark everything from the anchor to that entry.
+    Range,
+}
+
+impl Select {
+    /// The range modifier wins over `Ctrl` when both are held, since a range is the more
+    /// specific request.
+    pub fn of(modifiers: KeyModifiers, range: RangeModifier) -> Self {
+        let range_held = (range.accepts_shift() && modifiers.contains(KeyModifiers::SHIFT))
+            || (range.accepts_alt() && modifiers.contains(KeyModifiers::ALT));
+        if range_held {
+            Select::Range
+        } else if modifiers.contains(KeyModifiers::CONTROL) {
+            Select::Toggle
+        } else {
+            Select::Plain
+        }
+    }
+}
+
+/// Which of `rects` (a row's clickable segments) `pos` is over.
+pub fn crumb_at(rects: &[Rect], pos: Position) -> Option<usize> {
+    rects.iter().position(|rect| rect.contains(pos))
+}
+
+/// Carries out a `Ctrl`- or range-click on `hit`. Only a row in the middle column can be marked;
+/// anything else reports `false` so the caller treats the click as a plain one.
+pub fn apply_select(browser: &mut BrowserState, hit: Hit, select: Select) -> bool {
+    let Hit::CurrentRow(index) = hit else {
+        return false;
+    };
+    match select {
+        Select::Plain => return false,
+        Select::Toggle => browser.toggle_mark_at(index),
+        Select::Range => browser.mark_range_to(index),
+    }
+    true
 }
 
 /// Turns a stream of clicks into [`Click`]s. Time is passed in rather than read, so the
@@ -198,6 +246,12 @@ pub struct ClickTracker {
 }
 
 impl ClickTracker {
+    /// Forgets the last click, so one made with a modifier never pairs with the next into a
+    /// double-click (two `Ctrl`-clicks in a row must toggle twice, not open the entry).
+    pub fn reset(&mut self) {
+        self.last = None;
+    }
+
     /// Registers a click on `hit` at `now`. It is a double-click if the click before it landed on
     /// the same row within [`DOUBLE_CLICK`]; a double-click is then spent, so a third quick click
     /// starts over as a single instead of chaining into another double.
@@ -263,14 +317,18 @@ pub fn apply_click(
     click: Click,
 ) -> Result<(), VfsError> {
     match (hit, click) {
-        (Hit::CurrentRow(index), Click::Single) => browser.select_index(index),
+        (Hit::CurrentRow(index), Click::Single) => {
+            browser.select_index(index);
+            // A plain click also starts the next range, the way it does in a desktop file manager.
+            browser.anchor_here();
+        }
         // `enter` does nothing on a file; the caller opens a double-clicked file itself, since
         // that needs the `App`.
-        (Hit::CurrentRow(index), Click::Double) => {
+        (Hit::CurrentRow(index), Click::Double | Click::Open) => {
             browser.select_index(index);
             browser.enter(vfs)?;
         }
-        (Hit::ParentRow(index), Click::Single) => {
+        (Hit::ParentRow(index), Click::Single | Click::Open) => {
             let Some(target) = browser.parent_entries().get(index).map(|e| e.path.clone()) else {
                 return Ok(());
             };
@@ -486,6 +544,89 @@ mod tests {
 
     fn index_of(entries: &[shared::DirEntryInfo], name: &str) -> usize {
         entries.iter().position(|e| e.name == name).unwrap()
+    }
+
+    #[test]
+    fn select_mode_follows_the_modifiers_and_the_configured_range_key() {
+        let s = |m, r| Select::of(m, r);
+        assert_eq!(s(KeyModifiers::NONE, RangeModifier::Either), Select::Plain);
+        assert_eq!(
+            s(KeyModifiers::CONTROL, RangeModifier::Either),
+            Select::Toggle
+        );
+        assert_eq!(s(KeyModifiers::SHIFT, RangeModifier::Either), Select::Range);
+        assert_eq!(s(KeyModifiers::ALT, RangeModifier::Either), Select::Range);
+        assert_eq!(s(KeyModifiers::ALT, RangeModifier::Shift), Select::Plain);
+        assert_eq!(s(KeyModifiers::SHIFT, RangeModifier::Alt), Select::Plain);
+        assert_eq!(s(KeyModifiers::ALT, RangeModifier::Alt), Select::Range);
+        // Both held: the range, the more specific request.
+        let both = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(s(both, RangeModifier::Either), Select::Range);
+    }
+
+    #[test]
+    fn crumb_at_finds_the_segment_under_the_pointer() {
+        let rects = [Rect::new(2, 0, 1, 1), Rect::new(6, 0, 3, 1)];
+        assert_eq!(crumb_at(&rects, at(2, 0)), Some(0));
+        assert_eq!(crumb_at(&rects, at(8, 0)), Some(1));
+        assert_eq!(crumb_at(&rects, at(4, 0)), None);
+        assert_eq!(crumb_at(&rects, at(2, 1)), None);
+    }
+
+    #[test]
+    fn ctrl_click_marks_and_range_click_spans_from_the_last_click() {
+        let root = tree("marks");
+        let mut browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        let len = browser.current_entries().len();
+        assert!(len >= 3, "fixture has too few entries");
+
+        apply_click(&mut browser, &LocalVfs, Hit::CurrentRow(0), Click::Single).unwrap();
+        assert!(apply_select(
+            &mut browser,
+            Hit::CurrentRow(len - 1),
+            Select::Range
+        ));
+        assert_eq!(browser.marked_paths().len(), len);
+        assert!(apply_select(
+            &mut browser,
+            Hit::CurrentRow(1),
+            Select::Toggle
+        ));
+        assert_eq!(browser.marked_paths().len(), len - 1);
+        // Only a middle-column row can be marked; a plain click is left to the caller.
+        assert!(!apply_select(
+            &mut browser,
+            Hit::ParentRow(0),
+            Select::Range
+        ));
+        assert!(!apply_select(
+            &mut browser,
+            Hit::CurrentRow(0),
+            Select::Plain
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_middle_click_opens_a_directory_in_place() {
+        let root = tree("middle");
+        let mut browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        let row = index_of(browser.current_entries(), "sub");
+
+        apply_click(&mut browser, &LocalVfs, Hit::CurrentRow(row), Click::Open).unwrap();
+
+        assert_eq!(browser.current_dir(), root.join("sub"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_modified_click_never_pairs_into_a_double_click() {
+        let mut clicks = ClickTracker::default();
+        let hit = Hit::CurrentRow(2);
+        let now = Instant::now();
+        assert_eq!(clicks.register(hit, now), Click::Single);
+        clicks.reset();
+        assert_eq!(clicks.register(hit, now), Click::Single);
     }
 
     #[test]

@@ -65,7 +65,7 @@ use appearance_popup::{
 };
 use boot_splash::BootSplash;
 use browser::BrowserState;
-use browser_mouse::{BrowserLayout, Click, ClickTracker, Hit, Listing, Pane, Wheel};
+use browser_mouse::{BrowserLayout, Click, ClickTracker, Hit, Listing, Pane, Select, Wheel};
 use compress_popup::CompressPopup;
 use context_menu::{
     Context as MenuContext, ContextMenu, MenuCommand, Nav, Outcome as MenuOutcome,
@@ -1571,8 +1571,24 @@ fn run(
                     || alt_resizing.is_some();
                 if config.browser_mouse && !over_shell && !dragging && app.prompt.is_none() {
                     let panels = effective_panels(config, &local_panels);
+                    let layout = BrowserLayout::split(frame_area, panels.columns, panels.show_hud);
+                    // A click on the header's path jumps to that segment's directory. Only worked
+                    // out for the buttons that act on it, since it lays the header out again.
+                    let crumb_dir = if panels.show_hud
+                        && matches!(
+                            mouse.kind,
+                            MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+                        ) {
+                        let crumbs =
+                            hud::crumb_rects(layout.header, &header_view(browser, app), config);
+                        let rects: Vec<Rect> = crumbs.iter().map(|(rect, _)| *rect).collect();
+                        browser_mouse::crumb_at(&rects, Position::new(mouse.column, mouse.row))
+                            .map(|i| crumbs[i].1.clone())
+                    } else {
+                        None
+                    };
                     let hit = browser_mouse::hit_test(
-                        &BrowserLayout::split(frame_area, panels.columns, panels.show_hud),
+                        &layout,
                         Position::new(mouse.column, mouse.row),
                         Listing::unscrolled(browser.parent_entries().len()),
                         Listing {
@@ -1581,7 +1597,26 @@ fn run(
                         },
                     );
                     match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) if hit != Hit::Elsewhere => {
+                        MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+                            if crumb_dir.is_some() =>
+                        {
+                            shell_focused = false;
+                            pending_leader = false;
+                            shell_chord = None;
+                            pending_bookmark = None;
+                            clicks.reset();
+                            // The last segment is where the user already is; jumping there would
+                            // only throw the cursor back to the top.
+                            if let Some(dir) = crumb_dir.filter(|d| d != browser.current_dir())
+                                && let Err(e) = browser.goto(vfs, &dir)
+                            {
+                                app.status = Some(format!("cannot open: {e}"));
+                            }
+                            continue;
+                        }
+                        MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+                            if hit != Hit::Elsewhere =>
+                        {
                             // Clicking the browser is how a mouse user says "stop typing in the
                             // shell", the same as tapping `Alt`.
                             shell_focused = false;
@@ -1589,15 +1624,35 @@ fn run(
                             shell_chord = None;
                             pending_bookmark = None;
                             if matches!(hit, Hit::ParentRow(_) | Hit::CurrentRow(_)) {
-                                let click = clicks.register(hit, Instant::now());
+                                let middle =
+                                    mouse.kind == MouseEventKind::Down(MouseButton::Middle);
+                                let select = if middle {
+                                    Select::Plain
+                                } else {
+                                    Select::of(mouse.modifiers, config.mouse_range_modifier)
+                                };
+                                if browser_mouse::apply_select(browser, hit, select) {
+                                    // A marking click must not pair with the next into a
+                                    // double-click, which would open what it just marked.
+                                    clicks.reset();
+                                    continue;
+                                }
+                                let click = if middle {
+                                    clicks.reset();
+                                    Click::Open
+                                } else {
+                                    clicks.register(hit, Instant::now())
+                                };
                                 // Read before the click is applied: opening a directory moves
                                 // the cursor into it, and the file to open is the one clicked.
                                 let file_to_open = match (hit, click) {
-                                    (Hit::CurrentRow(index), Click::Double) => browser
-                                        .current_entries()
-                                        .get(index)
-                                        .filter(|entry| !entry.is_dir)
-                                        .map(|entry| entry.path.clone()),
+                                    (Hit::CurrentRow(index), Click::Double | Click::Open) => {
+                                        browser
+                                            .current_entries()
+                                            .get(index)
+                                            .filter(|entry| !entry.is_dir)
+                                            .map(|entry| entry.path.clone())
+                                    }
                                     _ => None,
                                 };
                                 if let Err(e) = browser_mouse::apply_click(browser, vfs, hit, click)
@@ -2469,6 +2524,21 @@ fn leader_focus_dir(code: KeyCode) -> Option<NudgeDir> {
     }
 }
 
+/// What the header shows, gathered in one place so drawing it and hit-testing a click on its
+/// path build it the same way — the breadcrumb is only as wide as the pills leave it.
+fn header_view<'a>(browser: &'a BrowserState, app: &App) -> hud::HeaderView<'a> {
+    hud::HeaderView {
+        path: browser.current_dir(),
+        home: std::env::var_os("HOME").map(PathBuf::from),
+        marks: browser.marked_paths().len(),
+        marks_total: app.marked_total(),
+        clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
+        progress: app.progress(),
+        caps_lock: app.caps_lock(),
+        system: app.system_summary(Instant::now()),
+    }
+}
+
 fn draw(
     frame: &mut ratatui::Frame<'_>,
     browser: &BrowserState,
@@ -2681,21 +2751,7 @@ fn draw(
     }
 
     if config.panels.show_hud {
-        hud::render_header(
-            frame,
-            header_row,
-            &hud::HeaderView {
-                path: browser.current_dir(),
-                home: std::env::var_os("HOME").map(PathBuf::from),
-                marks: browser.marked_paths().len(),
-                marks_total: app.marked_total(),
-                clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
-                progress: app.progress(),
-                caps_lock: app.caps_lock(),
-                system: app.system_summary(Instant::now()),
-            },
-            config,
-        );
+        hud::render_header(frame, header_row, &header_view(browser, app), config);
     }
 
     let mut message = app.status_line();
