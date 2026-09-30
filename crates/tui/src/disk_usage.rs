@@ -35,11 +35,11 @@
 
 use std::cell::Cell;
 use std::collections::HashSet;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use shared::{FileKind, Metadata, Vfs};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -146,7 +146,10 @@ pub enum End {
 
 /// Everything the scan of one folder needs to keep track of.
 struct Walk<'a> {
-    root_dev: u64,
+    vfs: &'a dyn Vfs,
+    /// The filesystem the scan started on, or `None` when the backend does not say (nothing is
+    /// then treated as another filesystem).
+    root_dev: Option<u64>,
     cancel: &'a AtomicBool,
     seen: &'a AtomicU64,
     /// Entries looked at by this scan; compared with `limit`.
@@ -171,15 +174,24 @@ impl Walk<'_> {
     }
 
     /// The sizes `meta` adds: nothing for a second link to a file already counted.
-    fn sizes_of(&mut self, meta: &std::fs::Metadata) -> Sizes {
-        if !meta.is_dir() && meta.nlink() > 1 && !self.links.insert((meta.dev(), meta.ino())) {
+    fn sizes_of(&mut self, meta: &Metadata) -> Sizes {
+        if meta.kind != FileKind::Dir
+            && meta.nlink.is_some_and(|links| links > 1)
+            && let (Some(device), Some(inode)) = (meta.device, meta.inode)
+            && !self.links.insert((device, inode))
+        {
             return Sizes::default();
         }
         Sizes {
-            // `st_blocks` counts 512-byte units whatever the filesystem's block size is.
-            disk: meta.blocks().saturating_mul(512),
-            apparent: meta.len(),
+            // A backend that cannot say what is allocated is measured by length alone.
+            disk: meta.allocated.unwrap_or(meta.len),
+            apparent: meta.len,
         }
+    }
+
+    /// Whether `meta` is on another filesystem than the scan started on.
+    fn is_elsewhere(&self, meta: &Metadata) -> bool {
+        matches!((self.root_dev, meta.device), (Some(root), Some(device)) if root != device)
     }
 }
 
@@ -192,7 +204,7 @@ struct Below {
 
 /// Adds up everything below `dir` (and `dir`'s own node), staying on the root's filesystem and not
 /// following links.
-fn walk_dir(dir: &Path, own: &std::fs::Metadata, walk: &mut Walk<'_>) -> Result<Below, End> {
+fn walk_dir(dir: &Path, own: &Metadata, walk: &mut Walk<'_>) -> Result<Below, End> {
     let mut below = Below {
         sizes: walk.sizes_of(own),
         items: 0,
@@ -200,24 +212,24 @@ fn walk_dir(dir: &Path, own: &std::fs::Metadata, walk: &mut Walk<'_>) -> Result<
     };
     let mut pending = vec![dir.to_path_buf()];
     while let Some(current) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&current) else {
+        let Ok(entries) = walk.vfs.scan_dir(&current) else {
             below.partial = true;
             continue;
         };
-        for entry in entries.flatten() {
+        for entry in entries {
             walk.tick()?;
-            let Ok(meta) = entry.metadata() else {
+            // A scan entry is described as itself, so a link is a link here.
+            let Some(meta) = entry.metadata else {
                 below.partial = true;
                 continue;
             };
-            // `DirEntry::metadata` does not follow a symlink, so a link is a link here.
-            if meta.is_dir() {
-                if meta.dev() != walk.root_dev {
+            if meta.kind == FileKind::Dir {
+                if walk.is_elsewhere(&meta) {
                     continue;
                 }
                 below.sizes = below.sizes.plus(walk.sizes_of(&meta));
                 below.items += 1;
-                pending.push(entry.path());
+                pending.push(entry.path);
             } else {
                 below.sizes = below.sizes.plus(walk.sizes_of(&meta));
                 below.items += 1;
@@ -227,14 +239,11 @@ fn walk_dir(dir: &Path, own: &std::fs::Metadata, walk: &mut Walk<'_>) -> Result<
     Ok(below)
 }
 
-fn kind_of(meta: &std::fs::Metadata) -> Kind {
-    let file_type = meta.file_type();
-    if file_type.is_symlink() {
-        Kind::Link
-    } else if file_type.is_file() {
-        Kind::File
-    } else {
-        Kind::Other
+fn kind_of(meta: &Metadata) -> Kind {
+    match meta.kind {
+        FileKind::Symlink => Kind::Link,
+        FileKind::File => Kind::File,
+        FileKind::Dir | FileKind::Other => Kind::Other,
     }
 }
 
@@ -284,32 +293,35 @@ impl Files {
 /// when `cancel` is set or after `limit` entries. `seen` counts entries looked at, for a progress
 /// display.
 pub fn scan_level(
+    vfs: &dyn Vfs,
     root: &Path,
     limit: u64,
     cancel: &AtomicBool,
     seen: &AtomicU64,
     emit: &mut dyn FnMut(Vec<Row>),
 ) -> End {
-    let Ok(meta) = std::fs::symlink_metadata(root) else {
+    let Ok(meta) = vfs.symlink_metadata(root) else {
         return End::Unreadable;
     };
-    scan_level_on(root, meta.dev(), limit, cancel, seen, emit)
+    scan_level_on(vfs, root, meta.device, limit, cancel, seen, emit)
 }
 
 /// `scan_level` with the filesystem to stay on given, so tests can pretend everything below is on
 /// another one.
 fn scan_level_on(
+    vfs: &dyn Vfs,
     root: &Path,
-    root_dev: u64,
+    root_dev: Option<u64>,
     limit: u64,
     cancel: &AtomicBool,
     seen: &AtomicU64,
     emit: &mut dyn FnMut(Vec<Row>),
 ) -> End {
-    let Ok(entries) = std::fs::read_dir(root) else {
+    let Ok(entries) = vfs.scan_dir(root) else {
         return End::Unreadable;
     };
     let mut walk = Walk {
+        vfs,
         root_dev,
         cancel,
         seen,
@@ -318,11 +330,11 @@ fn scan_level_on(
         links: HashSet::new(),
     };
     let mut files = Files::default();
-    let mut dirs: Vec<(PathBuf, std::fs::Metadata)> = Vec::new();
+    let mut dirs: Vec<(PathBuf, Metadata)> = Vec::new();
     let mut other_filesystems = Vec::new();
 
     let mut ending = End::Complete;
-    for entry in entries.flatten() {
+    for entry in entries {
         match walk.tick() {
             Ok(()) => {}
             Err(End::Cancelled) => return End::Cancelled,
@@ -332,10 +344,12 @@ fn scan_level_on(
                 break;
             }
         }
-        let path = entry.path();
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            if meta.dev() == root_dev {
+        let path = entry.path;
+        let Some(meta) = entry.metadata else {
+            continue;
+        };
+        if meta.kind == FileKind::Dir {
+            if !walk.is_elsewhere(&meta) {
                 dirs.push((path, meta));
             } else {
                 other_filesystems.push(Row {
@@ -485,6 +499,7 @@ impl Level {
 
 /// The disk usage view: a stack of levels, the top one being looked at.
 pub struct DiskUsageView {
+    vfs: Arc<dyn Vfs>,
     handle: tokio::runtime::Handle,
     levels: Vec<Level>,
     measure: Measure,
@@ -497,8 +512,9 @@ pub struct DiskUsageView {
 
 impl DiskUsageView {
     /// Opens the view on `path` and starts scanning it.
-    pub fn open(handle: tokio::runtime::Handle, path: PathBuf) -> Self {
+    pub fn open(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>, path: PathBuf) -> Self {
         let mut view = Self {
+            vfs,
             handle,
             levels: vec![Level::new(path)],
             measure: Measure::default(),
@@ -529,12 +545,20 @@ impl DiskUsageView {
         level.moved = false;
         let (path, seen) = (level.path.clone(), Arc::clone(&level.seen));
         seen.store(0, Ordering::Relaxed);
+        let vfs = Arc::clone(&self.vfs);
         // Replacing the job drops the old one, which cancels its scan.
         self.job = Some(Job { cancel, rx });
         self.handle.spawn_blocking(move || {
-            let end = scan_level(&path, MAX_ENTRIES, &cancel_bg, &seen, &mut |rows| {
-                let _ = tx.send(Message::Rows(rows));
-            });
+            let end = scan_level(
+                vfs.as_ref(),
+                &path,
+                MAX_ENTRIES,
+                &cancel_bg,
+                &seen,
+                &mut |rows| {
+                    let _ = tx.send(Message::Rows(rows));
+                },
+            );
             let _ = tx.send(Message::Done(end));
         });
     }
@@ -691,6 +715,8 @@ impl DiskUsageView {
 
 #[cfg(test)]
 mod tests {
+    use shared::LocalVfs;
+
     use super::*;
     use proptest::prelude::*;
     use std::time::{Duration, Instant};
@@ -717,6 +743,7 @@ mod tests {
     fn scan_with_limit(root: &Path, limit: u64) -> (Vec<Row>, End) {
         let mut rows = Vec::new();
         let end = scan_level(
+            &LocalVfs,
             root,
             limit,
             &AtomicBool::new(false),
@@ -811,8 +838,9 @@ mod tests {
         let mut rows = Vec::new();
         // Pretending the root is on a device no folder below it is on.
         let end = scan_level_on(
+            &LocalVfs,
             &root,
-            u64::MAX,
+            Some(u64::MAX),
             MAX_ENTRIES,
             &AtomicBool::new(false),
             &seen,
@@ -873,6 +901,7 @@ mod tests {
         write(&root.join("a"), 1);
         let seen = AtomicU64::new(0);
         let end = scan_level(
+            &LocalVfs,
             &root,
             MAX_ENTRIES,
             &AtomicBool::new(true),
@@ -1046,7 +1075,7 @@ mod tests {
         write(&root.join("small"), 10);
         write(&root.join("sub/big"), 500_000);
         write(&root.join("sub/other"), 100);
-        let mut view = DiskUsageView::open(rt.handle().clone(), root.clone());
+        let mut view = DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.clone());
         wait(&mut view);
         assert_eq!(view.path(), root);
         assert_eq!(view.rows()[0].name, "sub", "the biggest is first");
@@ -1072,7 +1101,8 @@ mod tests {
         write(&root.join("aaa/x"), 10);
         write(&root.join("zzz/y"), 900_000);
         write(&root.join("mmm/z"), 40_000);
-        let mut view = DiskUsageView::open(rt.handle().clone(), root.join("mmm"));
+        let mut view =
+            DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.join("mmm"));
         wait(&mut view);
         assert!(view.leave());
         wait(&mut view);
@@ -1087,7 +1117,7 @@ mod tests {
         let root = scratch("measure");
         write(&root.join("aa"), 1);
         write(&root.join("bb"), 20_000);
-        let mut view = DiskUsageView::open(rt.handle().clone(), root.clone());
+        let mut view = DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.clone());
         wait(&mut view);
         view.move_to(1);
         let chosen = view.selected_row().unwrap().name.clone();
@@ -1106,7 +1136,7 @@ mod tests {
         for i in 0..30 {
             write(&root.join(format!("f{i:02}")), 10 + i);
         }
-        let mut view = DiskUsageView::open(rt.handle().clone(), root.clone());
+        let mut view = DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.clone());
         wait(&mut view);
         view.move_by(-5);
         assert_eq!(view.selected(), 0);
@@ -1126,7 +1156,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("drop");
         write(&root.join("a"), 1);
-        let view = DiskUsageView::open(rt.handle().clone(), root.clone());
+        let view = DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.clone());
         let cancel = Arc::clone(&view.job.as_ref().unwrap().cancel);
         drop(view);
         assert!(cancel.load(Ordering::Relaxed));
@@ -1145,6 +1175,7 @@ mod tests {
         let seen = AtomicU64::new(0);
         let started = Instant::now();
         let end = scan_level(
+            &LocalVfs,
             Path::new(&root),
             MAX_ENTRIES,
             &AtomicBool::new(false),
@@ -1160,5 +1191,91 @@ mod tests {
             entries < 1000 || per_second > 20_000.0,
             "{per_second:.0} entries/s"
         );
+    }
+
+    // ---- a backend that is not the local disk ----
+
+    fn scan_memory(mem: &shared::MemVfs, root: &str) -> Vec<Row> {
+        let mut rows = Vec::new();
+        let end = scan_level(
+            mem,
+            Path::new(root),
+            MAX_ENTRIES,
+            &AtomicBool::new(false),
+            &AtomicU64::new(0),
+            &mut |batch| rows.extend(batch),
+        );
+        assert_eq!(end, End::Complete);
+        rows
+    }
+
+    #[test]
+    fn a_scan_of_another_backend_reports_allocated_and_apparent_sizes() {
+        let mem = shared::MemVfs::new();
+        mem.add_file("/r/file", vec![0u8; 5000]);
+        mem.add_file("/r/sub/inner", vec![0u8; 100]);
+        mem.add_symlink("/r/link", "/r/file");
+
+        let rows = scan_memory(&mem, "/r");
+        let find = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
+
+        assert_eq!(
+            find("file").sizes,
+            Sizes {
+                disk: 8192,
+                apparent: 5000
+            }
+        );
+        assert_eq!(find("file").kind, Kind::File);
+        assert_eq!(find("link").kind, Kind::Link, "a link counts as the link");
+        // The folder: its own node plus what is below it, in blocks.
+        assert_eq!(find("sub").kind, Kind::Dir);
+        assert_eq!(find("sub").sizes.apparent, 4096 + 100);
+        assert_eq!(find("sub").sizes.disk, 4096 + 4096);
+    }
+
+    #[test]
+    fn a_backend_with_no_allocated_size_is_measured_by_length_on_both_measures() {
+        let mem = shared::MemVfs::new().sparse();
+        mem.add_file("/r/file", vec![0u8; 5000]);
+
+        let rows = scan_memory(&mem, "/r");
+
+        assert_eq!(
+            rows[0].sizes,
+            Sizes {
+                disk: 5000,
+                apparent: 5000
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_folder_on_another_backend_is_unreadable_not_empty() {
+        let mem = shared::MemVfs::new();
+        let end = scan_level(
+            &mem,
+            Path::new("/nope"),
+            10,
+            &AtomicBool::new(false),
+            &AtomicU64::new(0),
+            &mut |_| {},
+        );
+        assert_eq!(end, End::Unreadable);
+    }
+
+    #[test]
+    fn the_view_runs_on_another_backend() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mem = shared::MemVfs::new();
+        mem.add_file("/v/small", vec![0u8; 10]);
+        mem.add_file("/v/sub/big", vec![0u8; 500_000]);
+        let mut view = DiskUsageView::open(rt.handle().clone(), Arc::new(mem), PathBuf::from("/v"));
+        wait(&mut view);
+
+        assert_eq!(view.rows()[0].name, "sub", "the biggest is first");
+        assert!(view.enter());
+        wait(&mut view);
+        assert_eq!(view.rows()[0].name, "big");
     }
 }

@@ -25,11 +25,13 @@
 //! with results drained once per render tick via [`ImagePreview::update`].
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Capability, Picker};
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
+use shared::{LocalVfs, Vfs};
 use theming::{HookKind, PreviewHook};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -110,9 +112,17 @@ pub struct ImagePreview {
     resize_response_tx: UnboundedSender<ResizeResponse>,
     resize_response_rx: UnboundedReceiver<ResizeResponse>,
     handle: tokio::runtime::Handle,
+    /// Where the images being previewed are read from.
+    vfs: Arc<dyn Vfs>,
 }
 
 impl ImagePreview {
+    /// Reads the previewed images through `vfs` instead of the local disk.
+    pub fn with_vfs(mut self, vfs: Arc<dyn Vfs>) -> Self {
+        self.vfs = vfs;
+        self
+    }
+
     /// Queries the terminal for graphics-protocol support (Kitty/iTerm2/Sixel) and its background
     /// color (OSC 11, for `theme::auto`), falling back to halfblocks and no detected background
     /// if the terminal never answers or a real error occurs — a typo'd or unusual terminal must
@@ -144,6 +154,7 @@ impl ImagePreview {
             resize_response_tx,
             resize_response_rx,
             handle,
+            vfs: Arc::new(LocalVfs),
         }
     }
 
@@ -238,13 +249,19 @@ impl ImagePreview {
         let generation = self.generation;
         let tx = self.decode_tx.clone();
         let picker = self.picker.clone();
+        let vfs = Arc::clone(&self.vfs);
         self.handle.spawn_blocking(move || {
             let via_hook = matches!(source, Source::Hook(_));
             let image = match source {
-                Source::Direct => preview::load_image(&path),
-                Source::Hook(hook) => match preview_hook::run(&hook, &path) {
-                    HookOutcome::Image(image) => Some(image),
-                    _ => None,
+                Source::Direct => preview::load_image(vfs.as_ref(), &path),
+                // A hook hands the file to another program, which needs it on this machine's
+                // disk; off it the hook counts as failed, like a missing program would.
+                Source::Hook(hook) => match vfs.local_path(&path) {
+                    Some(local) => match preview_hook::run(&hook, &local) {
+                        HookOutcome::Image(image) => Some(image),
+                        _ => None,
+                    },
+                    None => None,
                 },
             };
             let outcome = match image {

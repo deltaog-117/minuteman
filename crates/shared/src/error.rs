@@ -30,4 +30,8 @@ pub enum VfsError {
     NotFound(PathBuf),
     #[error("already exists: {0}")]
     AlreadyExists(PathBuf),
+    /// The backend cannot do this at all (for example, a remote one asked for a device number);
+    /// distinct from a failure, so a caller can leave the field out instead of reporting an error.
+    #[error("not supported by this filesystem: {0}")]
+    Unsupported(&'static str),
 }

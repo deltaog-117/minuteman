@@ -343,6 +343,12 @@ impl BulkKind {
     }
 }
 
+/// Whether anything is at `path`, a dangling symlink included (`exists` follows links and would
+/// call one missing).
+fn lexists(vfs: &dyn Vfs, path: &Path) -> bool {
+    vfs.symlink_metadata(path).is_ok()
+}
+
 /// One archive to write: `sources` packed into `out`.
 #[derive(Debug)]
 struct CompressJob {
@@ -445,6 +451,9 @@ pub struct App {
     search_job: Option<SearchJob>,
     search_state: SearchState,
     plugins: PluginManager,
+    /// The filesystem being browsed. Every feature reaches a browsed path through this, and the
+    /// background jobs take a clone, so a backend other than the local disk needs no change here.
+    vfs: Arc<dyn Vfs>,
     /// Whether the last key event carried the keyboard protocol's Caps Lock flag, for the header
     /// pill (see `main`'s `with_caps_lock_applied`, which reads the same flag to fix up a
     /// letter's case). Only ever known while the terminal reports it; stays `false` otherwise.
@@ -453,6 +462,7 @@ pub struct App {
 
 impl App {
     pub fn new(handle: tokio::runtime::Handle) -> Self {
+        let vfs: Arc<dyn Vfs> = Arc::new(LocalVfs);
         Self {
             clipboard: None,
             prompt: None,
@@ -460,8 +470,8 @@ impl App {
             bulk: None,
             history: History::default(),
             untracked: 0,
-            live: LiveRefresh::new(handle.clone()),
-            marked_size: MarkedSize::new(handle.clone()),
+            live: LiveRefresh::new(handle.clone(), Arc::clone(&vfs)),
+            marked_size: MarkedSize::new(handle.clone(), Arc::clone(&vfs)),
             git: GitStatus::new(handle.clone(), true),
             system: None,
             handle,
@@ -473,16 +483,26 @@ impl App {
             search_job: None,
             search_state: SearchState::Idle,
             plugins: PluginManager::new(),
+            vfs,
             caps_lock: false,
         }
     }
 
     /// Opens the disk usage view on `path`, starting its scan on the blocking pool.
     pub fn begin_disk_usage(&self, path: PathBuf) -> DiskUsageView {
-        DiskUsageView::open(self.handle.clone(), path)
+        DiskUsageView::open(self.handle.clone(), Arc::clone(&self.vfs), path)
     }
 
     /// Turns the status bar's git segment on or off (`git_status` in `config.toml`).
+    /// Browses `vfs` instead of the local disk: the background jobs, previews and scans started by
+    /// this app all read through it.
+    pub fn with_vfs(mut self, vfs: Arc<dyn Vfs>) -> Self {
+        self.live = LiveRefresh::new(self.handle.clone(), Arc::clone(&vfs));
+        self.marked_size = MarkedSize::new(self.handle.clone(), Arc::clone(&vfs));
+        self.vfs = vfs;
+        self
+    }
+
     pub fn with_git_status(mut self, enabled: bool) -> Self {
         self.git = GitStatus::new(self.handle.clone(), enabled);
         self
@@ -607,8 +627,8 @@ impl App {
     /// Keeps the browser's lists in step with changes made on disk behind its back (see
     /// `live_refresh`). Call once per render tick; returns whether the selected file itself
     /// changed, so its preview needs re-reading.
-    pub fn poll_disk(&mut self, browser: &mut BrowserState, vfs: &LocalVfs, now: Instant) -> bool {
-        self.live.poll(browser, vfs, now)
+    pub fn poll_disk(&mut self, browser: &mut BrowserState, now: Instant) -> bool {
+        self.live.poll(browser, now)
     }
 
     /// Keeps the figures the HUD shows about the browsed directory and the marks up to date: the
@@ -1036,7 +1056,7 @@ impl App {
 
     /// Opens the Inspect panel for `path`, or says on the status line why it cannot.
     pub fn begin_inspect(&mut self, path: &Path) -> Option<InspectView> {
-        match InspectView::open(&self.handle, path) {
+        match InspectView::open(&self.handle, Arc::clone(&self.vfs), path) {
             Ok(view) => Some(view),
             Err(message) => {
                 self.status = Some(message);
@@ -1371,6 +1391,7 @@ impl App {
         }
         self.search_job = Some(SearchJob::start(
             &self.handle,
+            Arc::clone(&self.vfs),
             origin.dir.clone(),
             query,
             browser.show_hidden(),
@@ -1656,9 +1677,9 @@ impl App {
         let cancel_bg = Arc::clone(&cancel);
         let mode = clip.mode;
         let dst_bg = dst.clone();
+        let vfs = Arc::clone(&self.vfs);
 
         self.handle.spawn_blocking(move || {
-            let vfs = LocalVfs;
             let progress_tx = tx.clone();
             let mut on_progress = move |path: &Path| -> ControlFlow<()> {
                 let _ = progress_tx.send(BulkMsg::Progress {
@@ -1671,12 +1692,20 @@ impl App {
                 }
             };
             let result = match mode {
-                ClipboardMode::Copy => {
-                    file_ops::copy_with_progress(&vfs, &src, &dst_bg, policy, &mut on_progress)
-                }
-                ClipboardMode::Move => {
-                    file_ops::mv_with_progress(&vfs, &src, &dst_bg, policy, &mut on_progress)
-                }
+                ClipboardMode::Copy => file_ops::copy_with_progress(
+                    vfs.as_ref(),
+                    &src,
+                    &dst_bg,
+                    policy,
+                    &mut on_progress,
+                ),
+                ClipboardMode::Move => file_ops::mv_with_progress(
+                    vfs.as_ref(),
+                    &src,
+                    &dst_bg,
+                    policy,
+                    &mut on_progress,
+                ),
             };
             let _ = tx.send(BulkMsg::Done(result));
         });
@@ -1708,12 +1737,12 @@ impl App {
         }
         let (tx, rx) = unbounded_channel();
         let targets_bg = targets.clone();
+        let vfs = Arc::clone(&self.vfs);
 
         self.handle.spawn_blocking(move || {
-            let vfs = LocalVfs;
             let mut result = Ok(Outcome::Completed);
             for target in &targets_bg {
-                match file_ops::delete(&vfs, target) {
+                match file_ops::delete(vfs.as_ref(), target) {
                     Ok(()) => {
                         let _ = tx.send(BulkMsg::Progress {
                             path: display_name(target),
@@ -1766,7 +1795,7 @@ impl App {
             && let Some(job) = pending
                 .jobs
                 .iter()
-                .find(|job| std::fs::symlink_metadata(&job.dest).is_ok())
+                .find(|job| lexists(self.vfs.as_ref(), &job.dest))
         {
             let dest = job.dest.clone();
             self.prompt = Some(Prompt::Conflict(ConflictSource::Extract { pending, dest }));
@@ -1797,7 +1826,10 @@ impl App {
             .collect();
         let mut form = ExtractPopup::new(archives, browser.current_dir().to_path_buf());
         match form.as_mut() {
-            Some(form) => Self::refresh_extract_warning(form),
+            Some(form) => {
+                let warning = Self::extract_warning(self.vfs.as_ref(), form);
+                form.set_warning(warning);
+            }
             None => self.status = Some("extract: no zip, tar or tar.gz selected".into()),
         }
         form
@@ -1813,7 +1845,7 @@ impl App {
         if self.is_busy() {
             return Err("an operation is already in progress".into());
         }
-        if let Some(problem) = Self::extract_problem(&request) {
+        if let Some(problem) = Self::extract_problem(self.vfs.as_ref(), &request) {
             return Err(problem);
         }
         let jobs = Self::extract_jobs(&request);
@@ -1849,13 +1881,13 @@ impl App {
     /// Why an extract form's request would be refused, if it would. Extracting into a folder that
     /// is already there is what "skip" and "replace" are for; with "stop" it would only fail on the
     /// first clashing file, after writing the others. Shown live as a warning and again on Enter.
-    pub fn extract_problem(request: &extract_popup::Request) -> Option<String> {
+    pub fn extract_problem(vfs: &dyn Vfs, request: &extract_popup::Request) -> Option<String> {
         if request.policy != ConflictPolicy::Abort {
             return None;
         }
         Self::extract_jobs(request)
             .iter()
-            .find(|job| job.dest != request.dir && std::fs::symlink_metadata(&job.dest).is_ok())
+            .find(|job| job.dest != request.dir && lexists(vfs, &job.dest))
             .map(|taken| {
                 format!(
                     "{} already exists: set Existing files to skip or replace",
@@ -1903,7 +1935,7 @@ impl App {
             && let Some(job) = pending
                 .jobs
                 .iter()
-                .find(|job| std::fs::symlink_metadata(&job.out).is_ok())
+                .find(|job| lexists(self.vfs.as_ref(), &job.out))
         {
             let out = job.out.clone();
             self.prompt = Some(Prompt::Conflict(ConflictSource::Compress { pending, out }));
@@ -2189,9 +2221,13 @@ impl App {
         let mut form = CompressPopup::new(
             Self::marked_or_selected(browser),
             browser.current_dir().to_path_buf(),
+            self.vfs.as_ref(),
         );
         match form.as_mut() {
-            Some(form) => Self::refresh_compress_warning(form),
+            Some(form) => {
+                let warning = Self::compress_warning(self.vfs.as_ref(), form);
+                form.set_warning(warning);
+            }
             None => self.status = Some("compress: nothing selected".into()),
         }
         form
@@ -2207,7 +2243,7 @@ impl App {
         if self.is_busy() {
             return Err("an operation is already in progress".into());
         }
-        if let Some(problem) = Self::compress_problem(&request) {
+        if let Some(problem) = Self::compress_problem(self.vfs.as_ref(), &request) {
             return Err(problem);
         }
         let jobs = Self::compress_jobs(&request);
@@ -2222,21 +2258,31 @@ impl App {
         Ok(())
     }
 
-    /// Re-works the form's heads-up from the disk: call after every change to the form.
-    pub fn refresh_compress_warning(popup: &mut CompressPopup) {
-        let warning = popup
+    /// The heads-up for the compress form as it stands, worked out from the filesystem.
+    fn compress_warning(vfs: &dyn Vfs, popup: &CompressPopup) -> Option<String> {
+        popup
             .build()
             .ok()
-            .and_then(|request| Self::compress_problem(&request));
+            .and_then(|request| Self::compress_problem(vfs, &request))
+    }
+
+    /// The heads-up for the extract form as it stands, worked out from the filesystem.
+    fn extract_warning(vfs: &dyn Vfs, popup: &ExtractPopup) -> Option<String> {
+        popup
+            .build()
+            .ok()
+            .and_then(|request| Self::extract_problem(vfs, &request))
+    }
+
+    /// Re-works the form's heads-up from the filesystem: call after every change to the form.
+    pub fn refresh_compress_warning(&self, popup: &mut CompressPopup) {
+        let warning = Self::compress_warning(self.vfs.as_ref(), popup);
         popup.set_warning(warning);
     }
 
-    /// Re-works the form's heads-up from the disk: call after every change to the form.
-    pub fn refresh_extract_warning(popup: &mut ExtractPopup) {
-        let warning = popup
-            .build()
-            .ok()
-            .and_then(|request| Self::extract_problem(&request));
+    /// Re-works the form's heads-up from the filesystem: call after every change to the form.
+    pub fn refresh_extract_warning(&self, popup: &mut ExtractPopup) {
+        let warning = Self::extract_warning(self.vfs.as_ref(), popup);
         popup.set_warning(warning);
     }
 
@@ -2269,13 +2315,13 @@ impl App {
     /// Why a compress form's request would be refused, if it would: the folder to save in is not
     /// there, or a file the job would create already exists (the form never overwrites). Shown
     /// live as a warning and again on Enter.
-    pub fn compress_problem(request: &compress_popup::Request) -> Option<String> {
-        if !request.dir.is_dir() {
+    pub fn compress_problem(vfs: &dyn Vfs, request: &compress_popup::Request) -> Option<String> {
+        if !vfs.is_dir(&request.dir) {
             return Some(format!("{} is not a folder", request.dir.display()));
         }
         Self::compress_jobs(request)
             .iter()
-            .find(|job| std::fs::symlink_metadata(&job.out).is_ok())
+            .find(|job| lexists(vfs, &job.out))
             .map(|taken| format!("{} already exists", display_name(&taken.out)))
     }
 
@@ -2910,13 +2956,13 @@ mod tests {
 
         // A different name clears it; a folder that is not there is reported instead.
         form.key(KeyCode::Char('2'));
-        App::refresh_compress_warning(&mut form);
+        f.app.refresh_compress_warning(&mut form);
         assert_eq!(form.warning(), None);
         form.key(KeyCode::Down);
         for c in "nope".chars() {
             form.key(KeyCode::Char(c));
         }
-        App::refresh_compress_warning(&mut form);
+        f.app.refresh_compress_warning(&mut form);
         assert!(form.warning().unwrap().ends_with("nope is not a folder"));
     }
 
@@ -2930,7 +2976,7 @@ mod tests {
         // Existing files -> skip: merging is now what is asked for, so nothing to warn about.
         form.key(KeyCode::Down);
         form.key(KeyCode::Right);
-        App::refresh_extract_warning(&mut form);
+        f.app.refresh_extract_warning(&mut form);
         assert_eq!(form.warning(), None);
     }
 
@@ -4076,5 +4122,156 @@ mod tests {
 
         f.app.set_caps_lock(false);
         assert!(!f.app.caps_lock());
+    }
+
+    // ---- an app browsing a backend that is not the local disk ----
+
+    /// An app and browser over an in-memory filesystem holding `/w`.
+    struct MemoryApp {
+        _runtime: tokio::runtime::Runtime,
+        mem: Arc<shared::MemVfs>,
+        app: App,
+        browser: BrowserState,
+    }
+
+    impl MemoryApp {
+        fn new(build: impl FnOnce(&shared::MemVfs)) -> Self {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let mem = Arc::new(shared::MemVfs::new());
+            mem.add_dir("/w");
+            build(&mem);
+            let app = App::new(runtime.handle().clone()).with_vfs(mem.clone());
+            let browser = BrowserState::new(mem.as_ref(), PathBuf::from("/w")).unwrap();
+            Self {
+                _runtime: runtime,
+                mem,
+                app,
+                browser,
+            }
+        }
+
+        fn wait_for_idle(&mut self) {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while self.app.is_busy() && Instant::now() < deadline {
+                self.app
+                    .poll_bulk(&mut self.browser, self.mem.as_ref())
+                    .unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(!self.app.is_busy(), "the job did not finish in time");
+        }
+    }
+
+    #[test]
+    fn a_permanent_delete_runs_against_the_injected_backend() {
+        let mut m = MemoryApp::new(|mem| {
+            mem.add_file("/w/a.txt", "a");
+            mem.add_file("/w/tree/inner/b.txt", "b");
+        });
+
+        m.app
+            .spawn_delete(vec![PathBuf::from("/w/a.txt"), PathBuf::from("/w/tree")]);
+        m.wait_for_idle();
+
+        assert!(!m.mem.exists(Path::new("/w/a.txt")));
+        assert!(!m.mem.exists(Path::new("/w/tree")));
+        assert_eq!(m.app.status.as_deref(), Some("delete complete"));
+    }
+
+    #[test]
+    fn a_copy_and_a_move_run_against_the_injected_backend() {
+        let mut m = MemoryApp::new(|mem| {
+            mem.add_file("/w/keep.txt", "keep");
+            mem.add_file("/w/move.txt", "move");
+            mem.add_dir("/w/dest");
+        });
+
+        m.app.begin_drop(
+            vec![PathBuf::from("/w/keep.txt")],
+            ClipboardMode::Copy,
+            PathBuf::from("/w/dest"),
+        );
+        m.wait_for_idle();
+        m.app.begin_drop(
+            vec![PathBuf::from("/w/move.txt")],
+            ClipboardMode::Move,
+            PathBuf::from("/w/dest"),
+        );
+        m.wait_for_idle();
+
+        assert!(
+            m.mem.exists(Path::new("/w/keep.txt")),
+            "a copy leaves the original"
+        );
+        assert!(m.mem.exists(Path::new("/w/dest/keep.txt")));
+        assert!(!m.mem.exists(Path::new("/w/move.txt")));
+        assert!(m.mem.exists(Path::new("/w/dest/move.txt")));
+    }
+
+    #[test]
+    fn undo_reverses_a_move_on_the_injected_backend() {
+        let mut m = MemoryApp::new(|mem| {
+            mem.add_file("/w/a.txt", "a");
+            mem.add_dir("/w/dest");
+        });
+        m.app.begin_drop(
+            vec![PathBuf::from("/w/a.txt")],
+            ClipboardMode::Move,
+            PathBuf::from("/w/dest"),
+        );
+        m.wait_for_idle();
+
+        m.app.undo(&mut m.browser, m.mem.as_ref()).unwrap();
+
+        assert!(m.mem.exists(Path::new("/w/a.txt")));
+        assert!(!m.mem.exists(Path::new("/w/dest/a.txt")));
+    }
+
+    #[test]
+    fn the_compress_form_checks_the_injected_backend_for_a_taken_name_and_a_missing_folder() {
+        let m = MemoryApp::new(|mem| {
+            mem.add_file("/w/a.txt", "a");
+            mem.add_file("/w/a.zip", "already");
+        });
+        let mut request = compress_popup::Request {
+            sources: vec![PathBuf::from("/w/a.txt")],
+            dir: PathBuf::from("/w"),
+            format: Format::Zip,
+            level: Level::Normal,
+            password: None,
+            layout: compress_popup::Layout::One {
+                file_name: "a.zip".into(),
+            },
+            delete_originals: false,
+        };
+
+        assert_eq!(
+            App::compress_problem(m.mem.as_ref(), &request),
+            Some("a.zip already exists".into())
+        );
+        request.dir = PathBuf::from("/nowhere");
+        assert_eq!(
+            App::compress_problem(m.mem.as_ref(), &request),
+            Some("/nowhere is not a folder".into())
+        );
+    }
+
+    #[test]
+    fn inspect_and_disk_usage_open_on_the_injected_backend() {
+        let mut m = MemoryApp::new(|mem| mem.add_file("/w/f.txt", vec![0u8; 100]));
+
+        let inspect = m.app.begin_inspect(Path::new("/w/f.txt"));
+        assert!(inspect.is_some_and(|view| {
+            view.rows()
+                .iter()
+                .any(|(l, v)| *l == "Name" && v == "f.txt")
+        }));
+        let mut usage = m.app.begin_disk_usage(PathBuf::from("/w"));
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while usage.end().is_none() && Instant::now() < deadline {
+            usage.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(usage.rows()[0].name, "f.txt");
     }
 }

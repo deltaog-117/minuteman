@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use browser::search::{Limits, Outcome, Query, find_below};
-use shared::LocalVfs;
+use shared::Vfs;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -65,6 +65,7 @@ impl SearchJob {
     /// Starts searching `root` for `query` on `handle`'s blocking pool. Returns at once.
     pub fn start(
         handle: &tokio::runtime::Handle,
+        vfs: Arc<dyn Vfs>,
         root: PathBuf,
         query: Query,
         show_hidden: bool,
@@ -74,7 +75,7 @@ impl SearchJob {
         let cancel_bg = Arc::clone(&cancel);
         handle.spawn_blocking(move || {
             let outcome = find_below(
-                &LocalVfs,
+                vfs.as_ref(),
                 &root,
                 &query,
                 show_hidden,
@@ -105,6 +106,8 @@ impl Drop for SearchJob {
 
 #[cfg(test)]
 mod tests {
+    use shared::LocalVfs;
+
     use super::*;
     use std::time::{Duration, Instant};
 
@@ -138,6 +141,7 @@ mod tests {
 
         let mut job = SearchJob::start(
             runtime.handle(),
+            Arc::new(LocalVfs),
             root.clone(),
             Query::new("AEREND").unwrap(),
             false,
@@ -157,6 +161,7 @@ mod tests {
 
         let mut job = SearchJob::start(
             runtime.handle(),
+            Arc::new(LocalVfs),
             root.clone(),
             Query::new("nothing-like-it").unwrap(),
             false,
@@ -171,6 +176,7 @@ mod tests {
         let root = scratch("drop");
         let job = SearchJob::start(
             runtime.handle(),
+            Arc::new(LocalVfs),
             root.clone(),
             Query::new("x").unwrap(),
             false,

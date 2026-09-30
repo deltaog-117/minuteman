@@ -20,19 +20,21 @@
 //! seconds, so `InspectView` runs it on the blocking pool the way `search_job` does and shows
 //! "counting…" until it lands. Dropping the view cancels the walk.
 //!
-//! Owner, group, link count and disk usage come straight from `std::fs`, so they exist only for
-//! local paths; `Vfs` has no such fields and the panel says so rather than guessing.
+//! Owner, group, link count, permissions and disk usage are whatever the backend reports through
+//! `Vfs::symlink_metadata`; a backend that has no such field leaves it out of the panel rather
+//! than the panel guessing. Owner and group are numbers on the wire, turned into names with this
+//! machine's `passwd` and `group` only for a path on this machine's own disk, since another
+//! machine's ids mean nothing in them.
 //!
 //! Everything that turns numbers into text lives here as plain functions (`mode_string`,
 //! `format_utc`, `group_thousands`) so it can be tested without a terminal.
 
-use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use shared::{FileKind, Vfs, VfsError};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -62,11 +64,12 @@ pub struct Inspection {
     pub link_broken: bool,
     /// The entry's own size in bytes (for a folder, the directory node — not its contents).
     pub size: u64,
-    pub disk_bytes: u64,
-    pub mode: u32,
-    pub owner: String,
-    pub group: String,
-    pub hard_links: u64,
+    /// Fields a backend may not have are `None`, and the panel leaves them out.
+    pub disk_bytes: Option<u64>,
+    pub mode: Option<u32>,
+    pub owner: Option<String>,
+    pub group: Option<String>,
+    pub hard_links: Option<u64>,
     pub modified: Option<SystemTime>,
     pub accessed: Option<SystemTime>,
     pub created: Option<SystemTime>,
@@ -80,22 +83,19 @@ impl Inspection {
     ///
     /// # Errors
     ///
-    /// Returns the I/O error from `lstat` (the path is gone, or not readable).
-    pub fn of(path: &Path) -> io::Result<Self> {
-        let meta = std::fs::symlink_metadata(path)?;
-        let file_type = meta.file_type();
-        let kind = if file_type.is_symlink() {
-            Kind::Symlink
-        } else if file_type.is_dir() {
-            Kind::Directory
-        } else if file_type.is_file() {
-            Kind::File
-        } else {
-            Kind::Other
+    /// Returns the backend's error from `lstat` (the path is gone, or not readable).
+    pub fn of(vfs: &dyn Vfs, path: &Path) -> Result<Self, VfsError> {
+        let meta = vfs.symlink_metadata(path)?;
+        let kind = match meta.kind {
+            FileKind::Symlink => Kind::Symlink,
+            FileKind::Dir => Kind::Directory,
+            FileKind::File => Kind::File,
+            FileKind::Other => Kind::Other,
         };
         let link_target = (kind == Kind::Symlink)
-            .then(|| std::fs::read_link(path).ok())
+            .then(|| vfs.read_link(path).ok())
             .flatten();
+        let local = vfs.local_path(path).is_some();
         let content = (kind == Kind::File).then(|| {
             if preview::is_image(path) {
                 "image"
@@ -112,18 +112,17 @@ impl Inspection {
                 |name| name.to_string_lossy().into_owned(),
             ),
             kind,
-            link_broken: kind == Kind::Symlink && !path.exists(),
+            link_broken: kind == Kind::Symlink && !vfs.exists(path),
             link_target,
-            size: meta.len(),
-            // `st_blocks` counts 512-byte units whatever the filesystem's block size is.
-            disk_bytes: meta.blocks() * 512,
-            mode: meta.mode(),
-            owner: name_for_id("/etc/passwd", meta.uid()),
-            group: name_for_id("/etc/group", meta.gid()),
-            hard_links: meta.nlink(),
-            modified: meta.modified().ok(),
-            accessed: meta.accessed().ok(),
-            created: meta.created().ok(),
+            size: meta.len,
+            disk_bytes: meta.allocated,
+            mode: meta.mode,
+            owner: meta.uid.map(|id| owner_name(local, "/etc/passwd", id)),
+            group: meta.gid.map(|id| owner_name(local, "/etc/group", id)),
+            hard_links: meta.nlink,
+            modified: meta.modified,
+            accessed: meta.accessed,
+            created: meta.created,
             content,
         })
     }
@@ -145,13 +144,21 @@ impl Inspection {
             Kind::Directory => rows.push(("Contents", contents.label())),
             Kind::File | Kind::Symlink | Kind::Other => rows.push(("Size", size_label(self.size))),
         }
-        rows.push(("On disk", size_label(self.disk_bytes)));
-        rows.push((
-            "Permissions",
-            format!("{} ({:04o})", mode_string(self.mode), self.mode & 0o7777),
-        ));
-        rows.push(("Owner", format!("{}:{}", self.owner, self.group)));
-        rows.push(("Links", self.hard_links.to_string()));
+        if let Some(disk_bytes) = self.disk_bytes {
+            rows.push(("On disk", size_label(disk_bytes)));
+        }
+        if let Some(mode) = self.mode {
+            rows.push((
+                "Permissions",
+                format!("{} ({:04o})", mode_string(mode), mode & 0o7777),
+            ));
+        }
+        if let (Some(owner), Some(group)) = (&self.owner, &self.group) {
+            rows.push(("Owner", format!("{owner}:{group}")));
+        }
+        if let Some(hard_links) = self.hard_links {
+            rows.push(("Links", hard_links.to_string()));
+        }
         rows.push(("Modified", format_utc(self.modified)));
         rows.push(("Accessed", format_utc(self.accessed)));
         rows.push(("Created", format_utc(self.created)));
@@ -265,11 +272,13 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
-/// The name for `id` in a `passwd`- or `group`-format file, or the number itself when the file
-/// is unreadable or has no such line (a container, a deleted user).
-fn name_for_id(table: &str, id: u32) -> String {
-    std::fs::read_to_string(table)
-        .ok()
+/// The name for `id`: looked up in this machine's `passwd`- or `group`-format file when the path
+/// is on this machine's disk, and the number itself when it is not, the file is unreadable, or it
+/// has no such line (a container, a deleted user).
+fn owner_name(local: bool, table: &str, id: u32) -> String {
+    local
+        .then(|| std::fs::read_to_string(table).ok())
+        .flatten()
         .and_then(|text| name_in(&text, id))
         .unwrap_or_else(|| id.to_string())
 }
@@ -305,31 +314,31 @@ pub enum Ending {
 
 /// Walks `root` counting what is below it, without following symlinks (so a link loop cannot
 /// hang it) and stopping early once `limit` entries were seen or `cancel` is set.
-pub fn tally_dir(root: &Path, limit: u64, cancel: &AtomicBool) -> (Tally, Ending) {
+pub fn tally_dir(vfs: &dyn Vfs, root: &Path, limit: u64, cancel: &AtomicBool) -> (Tally, Ending) {
     let mut tally = Tally::default();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = vfs.scan_dir(&dir) else {
             tally.unreadable += 1;
             continue;
         };
-        for entry in entries.flatten() {
+        for entry in entries {
             if cancel.load(Ordering::Relaxed) {
                 return (tally, Ending::Cancelled);
             }
             if tally.files + tally.dirs >= limit {
                 return (tally, Ending::Truncated);
             }
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => {
+            match entry.metadata {
+                Some(meta) if meta.kind == FileKind::Dir => {
                     tally.dirs += 1;
-                    pending.push(entry.path());
+                    pending.push(entry.path);
                 }
-                Ok(_) => {
+                Some(meta) => {
                     tally.files += 1;
-                    tally.bytes += entry.metadata().map_or(0, |m| m.len());
+                    tally.bytes += meta.len;
                 }
-                Err(_) => tally.unreadable += 1,
+                None => tally.unreadable += 1,
             }
         }
     }
@@ -396,9 +405,13 @@ impl InspectView {
     /// # Errors
     ///
     /// Returns the `lstat` failure, worded for the status line.
-    pub fn open(handle: &tokio::runtime::Handle, path: &Path) -> Result<Self, String> {
-        let info =
-            Inspection::of(path).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+    pub fn open(
+        handle: &tokio::runtime::Handle,
+        vfs: Arc<dyn Vfs>,
+        path: &Path,
+    ) -> Result<Self, String> {
+        let info = Inspection::of(vfs.as_ref(), path)
+            .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
         if info.kind != Kind::Directory {
             return Ok(Self {
                 info,
@@ -410,7 +423,7 @@ impl InspectView {
         let cancel = Arc::new(AtomicBool::new(false));
         let (root, cancel_bg) = (path.to_path_buf(), Arc::clone(&cancel));
         handle.spawn_blocking(move || {
-            let _ = tx.send(tally_dir(&root, TALLY_LIMIT, &cancel_bg));
+            let _ = tx.send(tally_dir(vfs.as_ref(), &root, TALLY_LIMIT, &cancel_bg));
         });
         Ok(Self {
             info,
@@ -496,7 +509,7 @@ mod tests {
         assert_eq!(name_in(table, 0).as_deref(), Some("root"));
         assert_eq!(name_in(table, 1000).as_deref(), Some("da vi"));
         assert_eq!(name_in(table, 7), None);
-        assert_eq!(name_for_id("/no/such/table", 42), "42");
+        assert_eq!(owner_name(true, "/no/such/table", 42), "42");
     }
 
     #[test]
@@ -507,7 +520,7 @@ mod tests {
         std::fs::write(root.join("a").join("two"), [0u8; 20]).unwrap();
         std::fs::write(root.join("a").join("b").join("three"), [0u8; 5]).unwrap();
 
-        let (tally, ending) = tally_dir(&root, 100, &AtomicBool::new(false));
+        let (tally, ending) = tally_dir(&shared::LocalVfs, &root, 100, &AtomicBool::new(false));
         assert_eq!(ending, Ending::Complete);
         assert_eq!(
             tally,
@@ -527,9 +540,9 @@ mod tests {
         for i in 0..6 {
             std::fs::write(root.join(format!("f{i}")), b"").unwrap();
         }
-        let (tally, ending) = tally_dir(&root, 3, &AtomicBool::new(false));
+        let (tally, ending) = tally_dir(&shared::LocalVfs, &root, 3, &AtomicBool::new(false));
         assert_eq!((tally.files, ending), (3, Ending::Truncated));
-        let (tally, ending) = tally_dir(&root, 100, &AtomicBool::new(true));
+        let (tally, ending) = tally_dir(&shared::LocalVfs, &root, 100, &AtomicBool::new(true));
         assert_eq!((tally.files, ending), (0, Ending::Cancelled));
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -538,7 +551,7 @@ mod tests {
     fn a_symlink_loop_is_counted_once_not_followed() {
         let root = scratch("loop");
         std::os::unix::fs::symlink(&root, root.join("again")).unwrap();
-        let (tally, ending) = tally_dir(&root, 100, &AtomicBool::new(false));
+        let (tally, ending) = tally_dir(&shared::LocalVfs, &root, 100, &AtomicBool::new(false));
         assert_eq!((tally.files, tally.dirs, ending), (1, 0, Ending::Complete));
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -548,7 +561,7 @@ mod tests {
         let root = scratch("file");
         let file = root.join("note.txt");
         std::fs::write(&file, b"hello").unwrap();
-        let info = Inspection::of(&file).unwrap();
+        let info = Inspection::of(&shared::LocalVfs, &file).unwrap();
         assert_eq!(
             (info.kind, info.size, info.name.as_str()),
             (Kind::File, 5, "note.txt")
@@ -566,7 +579,7 @@ mod tests {
         let root = scratch("broken");
         let link = root.join("dangling");
         std::os::unix::fs::symlink(root.join("missing"), &link).unwrap();
-        let info = Inspection::of(&link).unwrap();
+        let info = Inspection::of(&shared::LocalVfs, &link).unwrap();
         assert_eq!(info.kind, Kind::Symlink);
         assert!(info.link_broken);
         assert!(info.type_label().ends_with("(broken)"));
@@ -575,11 +588,15 @@ mod tests {
 
     #[test]
     fn a_path_that_is_gone_is_an_error_not_a_panic() {
-        assert!(Inspection::of(Path::new("/no/such/minuteman/path")).is_err());
+        assert!(Inspection::of(&shared::LocalVfs, Path::new("/no/such/minuteman/path")).is_err());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         assert!(
-            InspectView::open(runtime.handle(), Path::new("/no/such/minuteman/path"))
-                .is_err_and(|message| message.starts_with("cannot inspect"))
+            InspectView::open(
+                runtime.handle(),
+                Arc::new(shared::LocalVfs),
+                Path::new("/no/such/minuteman/path")
+            )
+            .is_err_and(|message| message.starts_with("cannot inspect"))
         );
     }
 
@@ -588,7 +605,8 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("view");
         std::fs::write(root.join("x"), [0u8; 3]).unwrap();
-        let mut view = InspectView::open(runtime.handle(), &root).unwrap();
+        let mut view =
+            InspectView::open(runtime.handle(), Arc::new(shared::LocalVfs), &root).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while view.contents == Contents::Counting {
             assert!(
@@ -608,7 +626,7 @@ mod tests {
     fn dropping_a_folder_view_cancels_its_walk() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("drop");
-        let view = InspectView::open(runtime.handle(), &root).unwrap();
+        let view = InspectView::open(runtime.handle(), Arc::new(shared::LocalVfs), &root).unwrap();
         let flag = Arc::clone(&view.job.as_ref().unwrap().cancel);
         assert!(!flag.load(Ordering::Relaxed));
         drop(view);
@@ -632,5 +650,116 @@ mod tests {
         fn grouping_only_adds_commas(n in any::<u64>()) {
             prop_assert_eq!(group_thousands(n).replace(',', ""), n.to_string());
         }
+    }
+
+    // ---- a backend that is not the local disk ----
+
+    #[test]
+    fn a_file_on_another_backend_shows_what_it_reports_without_a_local_name_lookup() {
+        let mem = shared::MemVfs::new();
+        mem.add_file("/d/f.txt", vec![0u8; 5000]);
+
+        let info = Inspection::of(&mem, Path::new("/d/f.txt")).unwrap();
+
+        assert_eq!((info.kind, info.size), (Kind::File, 5000));
+        assert_eq!(info.disk_bytes, Some(8192));
+        assert_eq!(info.hard_links, Some(1));
+        // Another machine's uid means nothing in this one's /etc/passwd, so it stays a number.
+        assert_eq!(info.owner.as_deref(), Some("1000"));
+        assert_eq!(info.group.as_deref(), Some("1000"));
+        let labels: Vec<_> = info
+            .rows(&Contents::NotApplicable)
+            .iter()
+            .map(|r| r.0)
+            .collect();
+        assert!(
+            ["Size", "On disk", "Permissions", "Owner", "Links"]
+                .iter()
+                .all(|label| labels.contains(label))
+        );
+    }
+
+    #[test]
+    fn a_backend_without_owner_or_disk_fields_has_those_rows_left_out() {
+        let mem = shared::MemVfs::new().sparse();
+        mem.add_file("/f.txt", "hi");
+
+        let info = Inspection::of(&mem, Path::new("/f.txt")).unwrap();
+        let rows = info.rows(&Contents::NotApplicable);
+        let labels: Vec<_> = rows.iter().map(|r| r.0).collect();
+
+        assert_eq!(
+            labels,
+            [
+                "Name", "Location", "Type", "Size", "Modified", "Accessed", "Created"
+            ]
+        );
+        assert_eq!(
+            (info.disk_bytes, info.mode, info.hard_links),
+            (None, None, None)
+        );
+        assert!(info.owner.is_none() && info.group.is_none());
+    }
+
+    #[test]
+    fn a_link_on_another_backend_is_inspected_as_a_link() {
+        let mem = shared::MemVfs::new();
+        mem.add_file("/real", "x");
+        mem.add_symlink("/good", "/real");
+        mem.add_symlink("/bad", "/missing");
+
+        let good = Inspection::of(&mem, Path::new("/good")).unwrap();
+        let bad = Inspection::of(&mem, Path::new("/bad")).unwrap();
+
+        assert_eq!(good.kind, Kind::Symlink);
+        assert_eq!(good.link_target, Some(PathBuf::from("/real")));
+        assert!(!good.link_broken);
+        assert!(bad.link_broken);
+        assert!(Inspection::of(&mem, Path::new("/nope")).is_err());
+    }
+
+    #[test]
+    fn a_folder_on_another_backend_is_tallied_without_following_links() {
+        let mem = shared::MemVfs::new();
+        mem.add_file("/r/one", vec![0u8; 10]);
+        mem.add_file("/r/a/two", vec![0u8; 20]);
+        mem.add_file("/r/a/b/three", vec![0u8; 5]);
+        mem.add_symlink("/r/a/loop", "/r");
+
+        let (tally, ending) = tally_dir(&mem, Path::new("/r"), 100, &AtomicBool::new(false));
+
+        assert_eq!(ending, Ending::Complete);
+        assert_eq!(
+            (tally.files, tally.dirs),
+            (4, 2),
+            "the link is one entry, not followed"
+        );
+        assert_eq!(
+            tally.bytes,
+            35 + "/r".len() as u64,
+            "a link counts as the link"
+        );
+    }
+
+    #[test]
+    fn a_folder_view_counts_on_another_backend_in_the_background() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mem = shared::MemVfs::new();
+        mem.add_file("/r/x", vec![0u8; 3]);
+        let mut view = InspectView::open(runtime.handle(), Arc::new(mem), Path::new("/r")).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while view.contents == Contents::Counting {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the count never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            view.poll();
+        }
+        let rows = view.rows();
+        assert_eq!(
+            rows.iter().find(|(l, _)| *l == "Contents").unwrap().1,
+            "1 files, 0 folders, 3B"
+        );
     }
 }

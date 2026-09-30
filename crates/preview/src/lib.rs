@@ -18,9 +18,11 @@
 //! and terminal-agnostic — `tui` owns the graphics-protocol rendering and background threading
 //! built on top of this.
 
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use image::DynamicImage;
+use shared::{FileKind, Vfs};
 
 pub mod archive;
 pub mod hex;
@@ -45,9 +47,8 @@ pub fn is_image(path: &Path) -> bool {
 /// happens to have — still decodes correctly. Returns `None` on any I/O or decode failure — the
 /// caller falls back to the plain file-name preview rather than surfacing an error for a corrupt
 /// or unsupported image.
-pub fn load_image(path: &Path) -> Option<DynamicImage> {
-    image::ImageReader::open(path)
-        .ok()?
+pub fn load_image(vfs: &dyn Vfs, path: &Path) -> Option<DynamicImage> {
+    image::ImageReader::new(BufReader::new(vfs.open_read(path).ok()?))
         .with_guessed_format()
         .ok()?
         .decode()
@@ -112,13 +113,19 @@ pub fn is_text(path: &Path) -> bool {
 /// Reads `path` as UTF-8 text. Returns `None` if the file exceeds [`MAX_TEXT_PREVIEW_BYTES`],
 /// contains a null byte (a binary file mislabeled with a text-like name), or isn't valid UTF-8 —
 /// the caller falls back to the plain file-name preview rather than surfacing an error.
-pub fn load_text(path: &Path) -> Option<String> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if metadata.len() > MAX_TEXT_PREVIEW_BYTES {
+pub fn load_text(vfs: &dyn Vfs, path: &Path) -> Option<String> {
+    if vfs.metadata(path).ok()?.len > MAX_TEXT_PREVIEW_BYTES {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.contains(&0) {
+    // Read one byte past the cap, so a file that grew since the length was taken is still refused
+    // rather than read whole.
+    let mut bytes = Vec::new();
+    vfs.open_read(path)
+        .ok()?
+        .take(MAX_TEXT_PREVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_TEXT_PREVIEW_BYTES || bytes.contains(&0) {
         return None;
     }
     String::from_utf8(bytes).ok()
@@ -154,16 +161,20 @@ pub fn looks_like_text(head: &[u8]) -> bool {
 /// slow disk — call it off the render thread. In order: an archive (by name) is listed; a file
 /// that is text, by its name or its content, is read whole up to 1 MiB; everything else is shown
 /// as bytes. A text-named file over the size cap, or one that cannot be read, is `Failed`.
-pub fn load(path: &Path) -> Loaded {
-    let Some(head) = hex::read_head(path) else {
+pub fn load(vfs: &dyn Vfs, path: &Path) -> Loaded {
+    let Some(head) = hex::read_head(vfs, path) else {
         // `read_head` refuses anything that is not a regular file, and a regular file it could
         // not read is a failure worth saying so; tell the two apart by asking again.
-        return match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() => Loaded::Failed,
+        return match vfs.metadata(path) {
+            Ok(meta) if meta.kind == FileKind::File => Loaded::Failed,
             _ => Loaded::Unsupported,
         };
     };
-    if let Some(listing) = archive::list(path) {
+    // A listing reads the archive by seeking through its own directory structure, which needs a
+    // file on this machine's disk; on any other backend the archive is shown as bytes instead.
+    if let Some(local) = vfs.local_path(path)
+        && let Some(listing) = archive::list(&local)
+    {
         return Loaded::Archive(listing);
     }
     let named_text = is_text(path);
@@ -172,7 +183,7 @@ pub fn load(path: &Path) -> Loaded {
     }
     if head.total <= MAX_TEXT_PREVIEW_BYTES
         && (named_text || looks_like_text(&head.bytes))
-        && let Some(text) = load_text(path)
+        && let Some(text) = load_text(vfs, path)
     {
         return Loaded::Text(text);
     }
@@ -209,7 +220,7 @@ mod tests {
         let path = dir.join("not_an_image.png");
         std::fs::write(&path, b"not actually a png").unwrap();
 
-        assert!(load_image(&path).is_none());
+        assert!(load_image(&shared::LocalVfs, &path).is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -222,7 +233,7 @@ mod tests {
             .save(&path)
             .unwrap();
 
-        let decoded = load_image(&path).unwrap();
+        let decoded = load_image(&shared::LocalVfs, &path).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (1, 1));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -244,7 +255,10 @@ mod tests {
         let path = dir.join("notes.txt");
         std::fs::write(&path, "hello, minuteman").unwrap();
 
-        assert_eq!(load_text(&path).unwrap(), "hello, minuteman");
+        assert_eq!(
+            load_text(&shared::LocalVfs, &path).unwrap(),
+            "hello, minuteman"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -255,7 +269,7 @@ mod tests {
         let path = dir.join("notes.txt");
         std::fs::write(&path, [0u8, 159, 146, 150]).unwrap();
 
-        assert!(load_text(&path).is_none());
+        assert!(load_text(&shared::LocalVfs, &path).is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -266,7 +280,7 @@ mod tests {
         let path = dir.join("huge.txt");
         std::fs::write(&path, vec![b'a'; (MAX_TEXT_PREVIEW_BYTES + 1) as usize]).unwrap();
 
-        assert!(load_text(&path).is_none());
+        assert!(load_text(&shared::LocalVfs, &path).is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -292,25 +306,31 @@ mod tests {
             path
         };
 
-        assert_eq!(load(&write("a.txt", b"hi")), Loaded::Text("hi".into()));
+        assert_eq!(
+            load(&shared::LocalVfs, &write("a.txt", b"hi")),
+            Loaded::Text("hi".into())
+        );
         // No known extension, but plainly text.
-        assert_eq!(load(&write("notes", b"hi")), Loaded::Text("hi".into()));
+        assert_eq!(
+            load(&shared::LocalVfs, &write("notes", b"hi")),
+            Loaded::Text("hi".into())
+        );
         // A text name over a binary body falls back to the bytes.
         assert!(matches!(
-            load(&write("bin.txt", &[0, 1, 2])),
+            load(&shared::LocalVfs, &write("bin.txt", &[0, 1, 2])),
             Loaded::Bytes(_)
         ));
         assert!(matches!(
-            load(&write("prog", &[0x7f, b'E', 0, 0])),
+            load(&shared::LocalVfs, &write("prog", &[0x7f, b'E', 0, 0])),
             Loaded::Bytes(_)
         ));
         // A damaged archive is just bytes; if it happens to be readable text, it is text.
         assert!(matches!(
-            load(&write("bad.zip", &[0x50, 0x4b, 0, 1])),
+            load(&shared::LocalVfs, &write("bad.zip", &[0x50, 0x4b, 0, 1])),
             Loaded::Bytes(_)
         ));
         assert_eq!(
-            load(&write("words.zip", b"not a zip")),
+            load(&shared::LocalVfs, &write("words.zip", b"not a zip")),
             Loaded::Text("not a zip".into())
         );
 
@@ -319,7 +339,7 @@ mod tests {
             &vec![b'a'; (MAX_TEXT_PREVIEW_BYTES + 1) as usize],
         );
         assert_eq!(
-            load(&big),
+            load(&shared::LocalVfs, &big),
             Loaded::Failed,
             "a text-named file over the cap still fails"
         );
@@ -327,10 +347,91 @@ mod tests {
             "big.data",
             &vec![b'a'; (MAX_TEXT_PREVIEW_BYTES + 1) as usize],
         );
-        assert!(matches!(load(&big_unnamed), Loaded::Bytes(_)));
+        assert!(matches!(
+            load(&shared::LocalVfs, &big_unnamed),
+            Loaded::Bytes(_)
+        ));
 
-        assert_eq!(load(&dir), Loaded::Unsupported);
-        assert_eq!(load(&dir.join("missing")), Loaded::Unsupported);
+        assert_eq!(load(&shared::LocalVfs, &dir), Loaded::Unsupported);
+        assert_eq!(
+            load(&shared::LocalVfs, &dir.join("missing")),
+            Loaded::Unsupported
+        );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- a backend that is not the local disk ----
+
+    fn memory() -> shared::MemVfs {
+        shared::MemVfs::new()
+    }
+
+    #[test]
+    fn text_and_bytes_load_from_a_backend_that_is_not_the_disk() {
+        let mem = memory();
+        mem.add_file("/notes.txt", "hello from memory");
+        mem.add_file("/blob", vec![0x7f, b'E', 0, 0]);
+        mem.add_symlink("/link.txt", "/notes.txt");
+
+        assert_eq!(
+            load(&mem, Path::new("/notes.txt")),
+            Loaded::Text("hello from memory".into())
+        );
+        assert_eq!(
+            load(&mem, Path::new("/link.txt")),
+            Loaded::Text("hello from memory".into()),
+            "a link is followed"
+        );
+        assert!(matches!(load(&mem, Path::new("/blob")), Loaded::Bytes(_)));
+        assert_eq!(load(&mem, Path::new("/")), Loaded::Unsupported);
+        assert_eq!(load(&mem, Path::new("/missing")), Loaded::Unsupported);
+    }
+
+    #[test]
+    fn an_image_decodes_from_a_backend_that_is_not_the_disk() {
+        let mut png = Vec::new();
+        DynamicImage::new_rgb8(3, 2)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mem = memory();
+        mem.add_file("/pic.png", png);
+        mem.add_file("/fake.png", "not an image");
+
+        let decoded = load_image(&mem, Path::new("/pic.png")).unwrap();
+
+        assert_eq!((decoded.width(), decoded.height()), (3, 2));
+        assert!(load_image(&mem, Path::new("/fake.png")).is_none());
+    }
+
+    #[test]
+    fn an_archive_off_the_local_disk_is_shown_as_bytes_not_listed() {
+        // A real zip, but the backend cannot hand back a local file to read its directory from.
+        let dir = scratch_dir("mem-zip");
+        let zip = dir.join("a.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        writer
+            .start_file("inside.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut writer, b"hi").unwrap();
+        writer.finish().unwrap();
+        let bytes = std::fs::read(&zip).unwrap();
+        let mem = memory();
+        mem.add_file("/a.zip", bytes);
+
+        assert!(matches!(load(&shared::LocalVfs, &zip), Loaded::Archive(_)));
+        assert!(matches!(load(&mem, Path::new("/a.zip")), Loaded::Bytes(_)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_text_file_over_the_cap_is_refused_on_any_backend() {
+        let mem = memory();
+        mem.add_file(
+            "/big.txt",
+            vec![b'a'; (MAX_TEXT_PREVIEW_BYTES + 1) as usize],
+        );
+
+        assert!(load_text(&mem, Path::new("/big.txt")).is_none());
+        assert_eq!(load(&mem, Path::new("/big.txt")), Loaded::Failed);
     }
 }

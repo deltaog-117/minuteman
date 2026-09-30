@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Fails when code that handles a browsed path reaches for the local disk directly instead of going
+# through the `Vfs` trait, so a backend other than the local disk keeps working with every feature.
+#
+# Only non-test code is looked at (everything from a `#[cfg(test)]` module down is skipped, as are
+# comment lines). A file that is local by nature is listed below with the reason; the gate also
+# fails when a listed file no longer touches the disk directly, so the list cannot go stale.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+declare -A allowed=(
+  [crates/shared/src/vfs.rs]="the local disk backend itself"
+  [crates/file_ops/src/archive.rs]="archives are read and written as seekable streams; moving them onto Vfs is its own change"
+  [crates/preview/src/archive.rs]="lists an archive by seeking through it; only reached for a path Vfs::local_path gives"
+  [crates/trash/src/lib.rs]="the desktop trash is a local-disk concept"
+  [crates/theming/src/config.rs]="the app's own config and appearance files"
+  [crates/tui/src/cli.rs]="writes the --cwd-file the shell wrapper reads"
+  [crates/tui/src/main.rs]="resolves the start directory from the command line, before any backend exists"
+  [crates/tui/src/system_hud.rs]="reads this machine's /proc"
+  [crates/tui/src/git_status.rs]="finds a repository for the git program, which runs on the local disk"
+  [crates/tui/src/open.rs]="finds programs to launch on this machine's PATH"
+  [crates/tui/src/mime_type.rs]="the shared MIME database, and sniffing a local file to pick a desktop program for it"
+  [crates/tui/src/associations.rs]="the desktop's application and MIME-association files"
+  [crates/tui/src/preview_hook.rs]="external preview programs read and write local scratch files"
+  [crates/tui/src/inspect.rs]="this machine's passwd and group, only consulted for a path on the local disk"
+)
+
+pattern='std::fs\b|\bfs::[a-z_]+|File::(open|create)|OpenOptions|\.(is_dir|is_file|exists|metadata|symlink_metadata|canonicalize|read_dir|read_link)\(\)'
+
+hits_in() {
+  # A `#[cfg(test)] mod` ends the scan; any other `#[cfg(test)]` item is test-only code, so it and
+  # its first line are skipped.
+  awk '
+    /^#\[cfg\(test\)\]/ { pending = 1; next }
+    pending {
+      pending = 0
+      if ($0 ~ /^mod /) { exit }
+      next
+    }
+    /^[[:space:]]*\/\// { next }
+    { print FILENAME ":" NR ": " $0 }
+  ' "$1" | grep -E "$pattern" || true
+}
+
+status=0
+while IFS= read -r file; do
+  hits=$(hits_in "$file")
+  if [[ -n "${allowed[$file]+set}" ]]; then
+    if [[ -z "$hits" ]]; then
+      echo "vfs-gate: $file no longer touches the disk directly; remove it from the allow-list in scripts/vfs-gate"
+      status=1
+    fi
+  elif [[ -n "$hits" ]]; then
+    echo "vfs-gate: direct filesystem access outside the Vfs trait (use Vfs, or Vfs::local_path for what must be local):"
+    echo "$hits"
+    status=1
+  fi
+done < <(find crates -path '*/src/*' -name '*.rs' | sort)
+
+exit "$status"

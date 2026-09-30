@@ -181,6 +181,24 @@ mod tests {
             entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
             Ok(entries)
         }
+        fn metadata(&self, _: &Path) -> Result<shared::Metadata, VfsError> {
+            unimplemented!("a search only lists")
+        }
+        fn symlink_metadata(&self, _: &Path) -> Result<shared::Metadata, VfsError> {
+            unimplemented!("a search only lists")
+        }
+        fn read_link(&self, _: &Path) -> Result<PathBuf, VfsError> {
+            unimplemented!("a search only lists")
+        }
+        fn open_read(&self, _: &Path) -> Result<Box<dyn shared::ReadSeek>, VfsError> {
+            unimplemented!("a search only lists")
+        }
+        fn scan_dir(&self, _: &Path) -> Result<Vec<shared::ScanEntry>, VfsError> {
+            unimplemented!("a search only lists")
+        }
+        fn local_path(&self, _: &Path) -> Option<PathBuf> {
+            None
+        }
         fn is_dir(&self, _: &Path) -> bool {
             unimplemented!("a search only lists")
         }

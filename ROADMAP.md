@@ -1009,6 +1009,28 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ---
 
+- ✅ **VFS abstraction hardening (COA A: complete the trait, move the readers)** – `Vfs` is now
+  `Send + Sync` and gained `metadata` (following links) and `symlink_metadata` (not), returning a
+  `Metadata` with kind, length, allocated size, mode, owner, link count, three times and device and
+  inode, every field but kind and length optional so a backend reports what it has; `read_link`;
+  `open_read`, a seekable `Read`; `scan_dir`, one call listing a folder with each entry described as
+  itself, for scans; and `local_path`, which says whether a path is on this machine's disk, so a
+  feature that can only work on a real local file (handing it to another program, an archive
+  listing, a preview hook) skips it elsewhere instead of failing oddly. `VfsError::Unsupported` lets
+  a backend decline. Preview (text, hex, images), Inspect, the disk usage view, the marked-size
+  pill, the compress form's default name, and every background job in `App` (copy, move, delete,
+  the `/` search, the live refresh, undo) now read through an `Arc<dyn Vfs>` the app is built with.
+  A field a backend does not report is left out of Inspect, and disk usage falls back to length
+  when nothing is allocated. A second backend, `shared::MemVfs` (in memory, with symlinks and a
+  `sparse()` mode that reports only kind, length and times), and `shared::conformance::check_backend`
+  (twelve scenarios every backend must pass) keep the trait honest: both the local disk and memory
+  pass it, and each migrated feature is also tested on memory. `scripts/vfs-gate`, run by
+  `scripts/check`, fails when non-test code outside an allow-list (each entry with its reason)
+  touches the disk directly, and when a listed file stops doing so. Chosen over also moving
+  archives onto the trait (B) and a guardrails-only change (C).
+
+---
+
 - ✅ **Archives, remainder (COA A: UX and robustness, no new dependencies)** – `C` opens the
   compress form and `E` the extract form for the marked entries (`compress`/`extract` under
   `[keys]`, marks-only like yank and delete). The compress form has a **Save in** row, a folder
@@ -1100,8 +1122,16 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   still records it, but one interrupted mid-item records nothing for that item; on platforms
   whose trash cannot be read back (macOS) a trash is not undoable; and the history is not kept
   between sessions.
-- **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
-  file_ops, preview, and trash, so backends can be swapped without touching feature code.
+- **VFS, follow-ups** – archives (`file_ops::archive`, `preview::archive`) are still read and
+  written through `std::fs`, because zip and tar want seekable streams; moving them onto
+  `Vfs::open_read` (and a matching write) is what remote extraction and browsing inside an archive
+  need, and is the largest piece left. The trait has no way to write bytes, make a symlink or
+  change permissions, so those are not yet possible on another backend, and there is no copy
+  between two different backends. The remaining direct users of the disk are listed, each with its
+  reason, in `scripts/vfs-gate`: the desktop trash, git, launching programs, the desktop's MIME
+  and application files, this machine's `/proc`, the app's own config and the start directory.
+  Owner names are looked up in this machine's `passwd` only for a path on its disk, so another
+  backend's owners show as numbers until it can supply names.
 
 ---
 
@@ -1145,8 +1175,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   latency-sensitive hooks that don't need "any language."
 - **Menu and Inspect polish** – Inspect times are UTC because the standard library has no time
   zone database; a `chrono`/`jiff` dependency or `TZ` handling would show local time. Inspect
-  could also total the marked set, follow a symlink to its target's details, and work on `ssh://`
-  paths once a backend exists (owner and on-disk size need a `Vfs` method). The menu could grow
+  could also total the marked set and follow a symlink to its target's details. The menu could grow
   keyboard-first access (a key to open it on the selection), per-item shortcut hints, and a
   configurable item list.
 - **Git status, follow-ups** – the segment refreshes every three seconds, so a `:git commit` or a
@@ -1165,8 +1194,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   instant instead of a rescan; sort by name or entry count; show modified times and the owner; an
   option for the starting measure; key hints that follow rebound keys (they are fixed text, and
   `a`, `r`, `PageUp`, `PageDown`, `Home` and `End` are not configurable); refresh when the live
-  refresh sees a change; and a `Vfs` method that reports allocated size, without which the view
-  cannot work on `ssh://` paths once a backend exists (it reads `std::fs` metadata directly).
+  refresh sees a change.
 - **Fuzzy ranking for `/` search** – search now finds the nearest substring match anywhere below
   the directory. Still missing: subsequence matching (`aernd` finding `aerend`), ranking by match
   quality rather than depth alone, and stepping through further matches (`n`/`N`, or the arrows
@@ -1304,5 +1332,5 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: pick from Medium Priority — *VFS abstraction hardening* is the groundwork for the
-   SSH/SFTP backend and for browsing inside archives.
+4. Next cycle: Medium Priority is empty. The VFS work unblocks *Native remote filesystem browsing
+   (SSH/SFTP)*; archive browsing needs archives moved onto `Vfs` first (see *VFS, follow-ups*).

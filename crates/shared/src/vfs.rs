@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -32,10 +33,92 @@ pub struct DirEntryInfo {
     pub mode: Option<u32>,
 }
 
-pub trait Vfs {
+/// What kind of thing a path is. A symlink is its own kind: `Vfs::symlink_metadata` reports one,
+/// and `Vfs::metadata` reports what it points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    File,
+    Dir,
+    Symlink,
+    /// A socket, pipe or device.
+    Other,
+}
+
+/// Everything a properties view, a size scan or a preview needs to know about one path. Every
+/// field but `kind` and `len` is optional, because a backend reports what it has (a remote one
+/// may have no inode numbers, a FAT disk no owner); a caller leaves a missing field out rather
+/// than guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Metadata {
+    pub kind: FileKind,
+    /// Length in bytes. For a folder it is the directory node's own size, not its contents.
+    pub len: u64,
+    /// Bytes allocated on the backing store, which differs from `len` for a sparse or compressed
+    /// file and is rounded up to whole blocks.
+    pub allocated: Option<u64>,
+    /// The permission and type bits (`st_mode`).
+    pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    /// How many names the file has; over one means it is hard-linked.
+    pub nlink: Option<u64>,
+    pub modified: Option<SystemTime>,
+    pub accessed: Option<SystemTime>,
+    /// When the file was created, on a filesystem that records it.
+    pub created: Option<SystemTime>,
+    /// Which filesystem the file is on. With `inode` it identifies a file for hard-link counting,
+    /// and a scan uses it to stay on the filesystem it started on.
+    pub device: Option<u64>,
+    pub inode: Option<u64>,
+}
+
+/// One entry of [`Vfs::scan_dir`]: its path and, unless it could not be read, its own metadata
+/// (a symlink is described as the link, not what it points at).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub metadata: Option<Metadata>,
+}
+
+/// A readable, seekable stream of a file's bytes, as [`Vfs::open_read`] returns.
+pub trait ReadSeek: Read + Seek + Send {}
+
+impl<T: Read + Seek + Send> ReadSeek for T {}
+
+/// A filesystem the file manager can browse: the local disk, and in time remote ones. Every
+/// feature that touches a browsed path goes through this, so a backend added here works with all
+/// of them. `Send + Sync` because background jobs (copies, scans, previews) share one.
+///
+/// `shared::conformance::check_backend` is the test a backend must pass.
+pub trait Vfs: Send + Sync {
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>, VfsError>;
     fn is_dir(&self, path: &Path) -> bool;
     fn exists(&self, path: &Path) -> bool;
+
+    /// Describes `path`, following symlinks (like `stat`).
+    fn metadata(&self, path: &Path) -> Result<Metadata, VfsError>;
+
+    /// Describes `path` itself, so a symlink is reported as a link (like `lstat`).
+    fn symlink_metadata(&self, path: &Path) -> Result<Metadata, VfsError>;
+
+    /// Where the symlink at `path` points, as written in the link.
+    fn read_link(&self, path: &Path) -> Result<PathBuf, VfsError>;
+
+    /// Opens the regular file at `path` for reading, following symlinks. A directory, or a file
+    /// that cannot be read, is an error.
+    fn open_read(&self, path: &Path) -> Result<Box<dyn ReadSeek>, VfsError>;
+
+    /// Lists `path` for a scan: every entry with its own metadata, in no particular order and
+    /// without the sorting and symlink-following `list_dir` does for display. One call, so a
+    /// remote backend can answer in one round trip.
+    fn scan_dir(&self, path: &Path) -> Result<Vec<ScanEntry>, VfsError>;
+
+    /// The same file as a path on this machine's own disk, or `None` when the backend is not the
+    /// local disk. A feature that can only work on a real local file (handing it to another
+    /// program, reading an archive by seeking) asks this first and skips the file when it is
+    /// `None`, so a remote backend degrades to "not available" instead of failing oddly.
+    fn local_path(&self, path: &Path) -> Option<PathBuf>;
 
     /// Creates a single directory. Fails with `VfsError::AlreadyExists` if `path` already
     /// exists, and does not create missing parents (mirrors `std::fs::create_dir`).
@@ -72,6 +155,52 @@ fn unix_mode(metadata: &std::fs::Metadata) -> Option<u32> {
 #[cfg(not(unix))]
 fn unix_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
     None
+}
+
+/// `std`'s metadata as this crate's. The owner, link count, allocated size and device/inode are
+/// Unix facts; elsewhere they are `None`.
+fn convert(metadata: &std::fs::Metadata) -> Metadata {
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_symlink() {
+        FileKind::Symlink
+    } else if file_type.is_dir() {
+        FileKind::Dir
+    } else if file_type.is_file() {
+        FileKind::File
+    } else {
+        FileKind::Other
+    };
+    #[cfg(unix)]
+    let (mode, uid, gid, nlink, allocated, device, inode) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            Some(metadata.mode()),
+            Some(metadata.uid()),
+            Some(metadata.gid()),
+            Some(metadata.nlink()),
+            // `st_blocks` counts 512-byte units whatever the filesystem's block size is.
+            Some(metadata.blocks().saturating_mul(512)),
+            Some(metadata.dev()),
+            Some(metadata.ino()),
+        )
+    };
+    #[cfg(not(unix))]
+    let (mode, uid, gid, nlink, allocated, device, inode) =
+        (None, None, None, None, None, None, None);
+    Metadata {
+        kind,
+        len: metadata.len(),
+        allocated,
+        mode,
+        uid,
+        gid,
+        nlink,
+        modified: metadata.modified().ok(),
+        accessed: metadata.accessed().ok(),
+        created: metadata.created().ok(),
+        device,
+        inode,
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -123,6 +252,57 @@ impl Vfs for LocalVfs {
 
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn metadata(&self, path: &Path) -> Result<Metadata, VfsError> {
+        std::fs::metadata(path)
+            .map(|m| convert(&m))
+            .map_err(|source| map_io_err(path, source))
+    }
+
+    fn symlink_metadata(&self, path: &Path) -> Result<Metadata, VfsError> {
+        std::fs::symlink_metadata(path)
+            .map(|m| convert(&m))
+            .map_err(|source| map_io_err(path, source))
+    }
+
+    fn read_link(&self, path: &Path) -> Result<PathBuf, VfsError> {
+        std::fs::read_link(path).map_err(|source| map_io_err(path, source))
+    }
+
+    fn open_read(&self, path: &Path) -> Result<Box<dyn ReadSeek>, VfsError> {
+        // `open` on a directory succeeds on Unix and only fails on the first read, so say so now.
+        if path.is_dir() {
+            return Err(VfsError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "is a directory"),
+            });
+        }
+        std::fs::File::open(path)
+            .map(|file| Box::new(file) as Box<dyn ReadSeek>)
+            .map_err(|source| map_io_err(path, source))
+    }
+
+    fn scan_dir(&self, path: &Path) -> Result<Vec<ScanEntry>, VfsError> {
+        let io = |source| VfsError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(path).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            entries.push(ScanEntry {
+                path: entry.path(),
+                name: entry.file_name().to_string_lossy().into_owned(),
+                // `DirEntry::metadata` does not follow a symlink, which is what a scan wants.
+                metadata: entry.metadata().ok().map(|m| convert(&m)),
+            });
+        }
+        Ok(entries)
+    }
+
+    fn local_path(&self, path: &Path) -> Option<PathBuf> {
+        Some(path.to_path_buf())
     }
 
     fn create_dir(&self, path: &Path) -> Result<(), VfsError> {

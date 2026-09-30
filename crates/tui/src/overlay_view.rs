@@ -1003,6 +1003,7 @@ mod tests {
                 std::path::PathBuf::from("/w/b"),
             ],
             std::path::PathBuf::from("/w"),
+            &shared::LocalVfs,
         )
         .unwrap()
     }
@@ -1114,7 +1115,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("note.txt"), b"hello").unwrap();
-        let view = InspectView::open(runtime.handle(), &dir.join("note.txt")).unwrap();
+        let view = InspectView::open(
+            runtime.handle(),
+            std::sync::Arc::new(shared::LocalVfs),
+            &dir.join("note.txt"),
+        )
+        .unwrap();
 
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal

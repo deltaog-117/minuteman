@@ -5,9 +5,10 @@
 //! than up front, because how many bytes fit in a row depends on the pane's width, which changes
 //! when the terminal is resized, and only the rows on screen need formatting at all.
 
-use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+
+use shared::{FileKind, Vfs};
 
 /// How much of a file the hex view (and the text-or-binary check) reads.
 pub const HEAD_BYTES: usize = 64 * 1024;
@@ -31,16 +32,22 @@ impl Head {
 /// Reads the first [`HEAD_BYTES`] of the regular file at `path`. `None` for anything that is not
 /// a regular file — opening a named pipe for reading would block forever, and a device or socket
 /// has no meaningful first bytes — or that cannot be read.
-pub fn read_head(path: &Path) -> Option<Head> {
+pub fn read_head(vfs: &dyn Vfs, path: &Path) -> Option<Head> {
     // Checked before opening: `open` on a FIFO with no writer never returns.
-    if !std::fs::metadata(path).ok()?.is_file() {
-        return None;
-    }
-    let file = File::open(path).ok()?;
-    let total = file.metadata().ok().filter(|m| m.is_file())?.len();
+    let meta = vfs
+        .metadata(path)
+        .ok()
+        .filter(|m| m.kind == FileKind::File)?;
     let mut bytes = Vec::new();
-    file.take(HEAD_BYTES as u64).read_to_end(&mut bytes).ok()?;
-    Some(Head { bytes, total })
+    vfs.open_read(path)
+        .ok()?
+        .take(HEAD_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(Head {
+        bytes,
+        total: meta.len,
+    })
 }
 
 /// Cells taken by the offset column: eight hex digits and two spaces.
@@ -190,13 +197,13 @@ mod tests {
         let dir = scratch("cap");
         let path = dir.join("big.bin");
         std::fs::write(&path, vec![7u8; HEAD_BYTES + 500]).unwrap();
-        let head = read_head(&path).unwrap();
+        let head = read_head(&shared::LocalVfs, &path).unwrap();
         assert_eq!(head.bytes.len(), HEAD_BYTES);
         assert_eq!(head.total, (HEAD_BYTES + 500) as u64);
         assert!(head.is_cut());
 
         std::fs::write(dir.join("small.bin"), b"abc").unwrap();
-        let small = read_head(&dir.join("small.bin")).unwrap();
+        let small = read_head(&shared::LocalVfs, &dir.join("small.bin")).unwrap();
         assert_eq!(
             (small.bytes.as_slice(), small.total, small.is_cut()),
             (&b"abc"[..], 3, false)
@@ -207,8 +214,8 @@ mod tests {
     #[test]
     fn a_directory_or_a_missing_path_has_no_head() {
         let dir = scratch("nothead");
-        assert!(read_head(&dir).is_none());
-        assert!(read_head(&dir.join("nope")).is_none());
+        assert!(read_head(&shared::LocalVfs, &dir).is_none());
+        assert!(read_head(&shared::LocalVfs, &dir.join("nope")).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -222,7 +229,7 @@ mod tests {
             "mkfifo is needed for this test"
         );
         // With no writer, opening it for reading would hang the test rather than fail it.
-        assert!(read_head(&fifo).is_none());
+        assert!(read_head(&shared::LocalVfs, &fifo).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

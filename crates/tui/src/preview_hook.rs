@@ -116,7 +116,8 @@ fn spawn_and_wait(command: &str, timeout: Option<Duration>) -> bool {
 
 fn read_output(path: &Path, kind: HookKind) -> Option<HookOutcome> {
     match kind {
-        HookKind::Image => preview::load_image(path).map(HookOutcome::Image),
+        // A hook's scratch output is always a file on this machine, whatever backend is browsed.
+        HookKind::Image => preview::load_image(&shared::LocalVfs, path).map(HookOutcome::Image),
         HookKind::Text => {
             let metadata = std::fs::metadata(path).ok()?;
             if metadata.len() > MAX_TEXT_BYTES {

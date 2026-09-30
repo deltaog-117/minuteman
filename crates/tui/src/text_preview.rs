@@ -23,10 +23,12 @@
 //! `preview::load` for how that is decided). The pane it fills scrolls, and `Scroll` holds where.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use preview::Loaded;
 use preview::highlight::HighlightedLine;
+use shared::{LocalVfs, Vfs};
 use theming::{HookKind, PreviewHook};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -145,6 +147,8 @@ pub struct TextPreview {
     read_tx: UnboundedSender<ReadOutcome>,
     read_rx: UnboundedReceiver<ReadOutcome>,
     handle: tokio::runtime::Handle,
+    /// Where the files being previewed are read from.
+    vfs: Arc<dyn Vfs>,
 }
 
 impl TextPreview {
@@ -162,7 +166,14 @@ impl TextPreview {
             read_tx,
             read_rx,
             handle,
+            vfs: Arc::new(LocalVfs),
         }
+    }
+
+    /// Reads the previewed files through `vfs` instead of the local disk.
+    pub fn with_vfs(mut self, vfs: Arc<dyn Vfs>) -> Self {
+        self.vfs = vfs;
+        self
     }
 
     /// When the current selection's typewriter reveal started, or `None` if it never started
@@ -323,9 +334,13 @@ impl TextPreview {
         self.generation += 1;
         let generation = self.generation;
         let tx = self.read_tx.clone();
+        let vfs = Arc::clone(&self.vfs);
         self.handle.spawn_blocking(move || {
+            // A hook hands the file to another program, which needs it on this machine's disk; on
+            // any other backend the file is read directly instead.
+            let hook = hook.zip(vfs.local_path(&path));
             let (loaded, highlighted, via_hook) = match hook {
-                Some(hook) => match preview_hook::run(&hook, &path) {
+                Some((hook, local)) => match preview_hook::run(&hook, &local) {
                     HookOutcome::Text(text) => {
                         let highlighted = tokenize(&text, &path);
                         (Loaded::Text(text), Some(highlighted), true)
@@ -335,7 +350,7 @@ impl TextPreview {
                 // Tokenizing runs syntect's line-oriented parser over the whole file, the same
                 // amount of work as the read just above it — it belongs off the render thread too.
                 None => {
-                    let loaded = preview::load(&path);
+                    let loaded = preview::load(vfs.as_ref(), &path);
                     let highlighted = match &loaded {
                         Loaded::Text(text) => Some(tokenize(text, &path)),
                         _ => None,
@@ -577,5 +592,35 @@ mod tests {
         cache.clear();
         assert_eq!(ask(&mut cache, 50), 100, "new content is measured again");
         assert_eq!(measured, 3);
+    }
+
+    #[test]
+    fn a_file_on_another_backend_is_read_through_it() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mem = shared::MemVfs::new();
+        mem.add_file("/a.txt", "from memory");
+        mem.add_file("/b.bin", vec![0u8, 1, 2, 3]);
+        let mut preview = TextPreview::new(runtime.handle().clone()).with_vfs(Arc::new(mem));
+
+        settle(&mut preview, Some(Path::new("/a.txt")));
+        assert_eq!(preview.content(), Some(&Loaded::Text("from memory".into())));
+
+        settle(&mut preview, Some(Path::new("/b.bin")));
+        assert!(matches!(preview.content(), Some(Loaded::Bytes(_))));
+    }
+
+    #[test]
+    fn a_hook_is_skipped_for_a_file_that_is_not_on_the_local_disk() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mem = shared::MemVfs::new();
+        mem.add_file("/report.pdf", "plain text in a file named like a pdf");
+        // A hook that would fail if run; off the local disk it is never handed the file.
+        let hooks = vec![text_hook("false")];
+        let mut preview = TextPreview::new(runtime.handle().clone()).with_vfs(Arc::new(mem));
+
+        settle_with_hooks(&mut preview, Some(Path::new("/report.pdf")), &hooks);
+
+        assert_eq!(preview.status(), PreviewStatus::Ready);
+        assert!(matches!(preview.content(), Some(Loaded::Text(_))));
     }
 }

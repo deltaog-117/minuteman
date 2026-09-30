@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `shared`, `preview`, `tui`: every feature that reads a browsed path now goes through the `Vfs`
+  trait, which gained `metadata`, `symlink_metadata`, `read_link`, `open_read`, `scan_dir` and
+  `local_path` and is `Send + Sync`. Preview, Inspect, disk usage, the marked-size pill and the
+  background jobs take the filesystem the app was built with, and Inspect leaves out a field a
+  backend does not report. There is no change on the local disk. New: an in-memory backend
+  (`shared::MemVfs`), a conformance suite for backends, and `scripts/vfs-gate`, which `scripts/check`
+  runs to keep code from reaching for the disk directly.
 - `theming`, `tui`: default keys are now `d` cut (was `m`), `x` delete to the trash (was `d`) and
   `X` delete permanently (was `D`). `s` no longer opens a shell by default (`Alt+n` still does;
   set `shell = ["s"]` under `[keys]` to restore it). `y`, `d`, `x` and `X` act only on entries

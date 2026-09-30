@@ -432,7 +432,11 @@ mod tests {
     }
 
     fn fill(rt: &tokio::runtime::Runtime, root: &std::path::Path) -> DiskUsageView {
-        let mut view = DiskUsageView::open(rt.handle().clone(), root.to_path_buf());
+        let mut view = DiskUsageView::open(
+            rt.handle().clone(),
+            std::sync::Arc::new(shared::LocalVfs),
+            root.to_path_buf(),
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while view.end().is_none() {
             view.poll();
@@ -615,7 +619,11 @@ mod tests {
     fn a_scan_that_is_still_running_shows_its_progress() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("running");
-        let view = DiskUsageView::open(rt.handle().clone(), root.clone());
+        let view = DiskUsageView::open(
+            rt.handle().clone(),
+            std::sync::Arc::new(shared::LocalVfs),
+            root.clone(),
+        );
         // Drawn before any poll: the scan has not reported, so it is still "scanning".
         let out = screen(80, 8, &view, &config()).join("\n");
         assert!(out.contains("scanning"), "{out}");

@@ -63,6 +63,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-29 | Mouse Stage 2 | `Ctrl`-click toggles, a configurable range modifier (`Shift` or `Alt`, both by default) marks a span, header path segments and middle-click navigate (COA B), over the roadmap's `Shift` only (A) or a two-cycle split (C) | ✅ Confirmed |
 | 2026-09-29 | Mouse Stage 3 | Drag and drop with a pure state machine, a pointer label and lit target, drops on both file columns, up a level, and shell panes, plus edge auto-scroll (COA C), over a release-only drop (A) or feedback without shell and scroll (B) | ✅ Confirmed |
 | 2026-09-29 | Open With | Read the shared MIME database, `mimeapps.list`, `mimeinfo.cache` and `.desktop` files in-process, with `[[open_rule]]`, `enter`-to-open and "Other…" (COA A), over shelling out to `xdg-mime`/`gio` (B) or a hybrid launching through `gio` (C) | ✅ Confirmed |
+| 2026-09-30 | VFS Hardening | Complete `Vfs` (metadata, links, reads, scans, `local_path`), move the readers, prove it with an in-memory backend and a conformance suite, gate new direct disk use (COA A), over archives through `Vfs` (B) or guardrails only (C) | ✅ Confirmed |
 | 2026-09-30 | Archives Remainder | Keys, save-in folder, live warnings, `:` conflict prompts and `-p`, zip mtime, directory bound, all without new dependencies (COA A), over extra codecs (B) or browsing inside archives (C) | ✅ Confirmed |
 | 2026-09-30 | Encrypted Archives | Zip AES-256 through the `zip` crate, a password prompt on extract, a wiped-on-drop `Password` type (COA A), over 7z with header encryption (B) or a standalone `age` action (C) | ✅ Confirmed |
 | 2026-09-30 | Undo History | Inverse-operation journal in `file_ops::history`, batches as one step, conservative reverts, trash restored through the `trash` crate (COA A), over a holding area for deleted data (B) or a reverse-only popup (C) | ✅ Confirmed |
@@ -4536,6 +4537,77 @@ order, and "Other…" running or cancelling. Driven against the real binary in a
 `pyte`, on a scratch desktop with its own globs, applications and cache: every behaviour in the
 ROADMAP entry, including a real `Terminal=true` program taking the screen and returning to the
 browser. Not tried against a full real desktop's application set.
+
+---
+
+### VFS Hardening: Complete the Trait, Move the Readers (COA A)
+
+**Date:** 2026-09-30
+**Status:** Confirmed
+
+#### Context / Background
+
+The browser and the core file operations already went through `Vfs`, but the readers did not:
+preview, Inspect, disk usage, the marked-size walk and a few checks read `std::fs` directly, and the
+trait had no way to read a file, describe one, or follow a link. SSH/SFTP and browsing inside an
+archive both need exactly those, and Inspect's own docs said it could not work elsewhere because
+"`Vfs` has no such fields".
+
+#### Options Considered
+
+**Option A: complete the trait and move the readers.** Add what is missing, migrate the bypassing
+code, and test against a second backend.
+
+**Option B: A, plus archives through `Vfs`.** What archive browsing needs, but the most invasive:
+zip wants a seekable stream, and the hardened extraction code would be rewired.
+
+**Option C: guardrails only.** A lint gate and the two primitives, migrating only preview and
+inspect. Smallest, but leaves the abstraction incomplete and untested.
+
+#### Decision
+
+Option A. The design choices worth keeping:
+
+*Optional metadata.* `Metadata` makes every field but kind and length optional instead of
+inventing values. Inspect then leaves a row out, and disk usage measures by length when nothing is
+allocated, rather than showing a made-up owner or a zero.
+
+*`local_path` as the honest escape hatch.* Some things are local by nature: handing a file to
+another program, reading an archive by seeking, a preview hook. Rather than pretend they are
+portable, `Vfs::local_path` answers "is this file on this machine's disk, and where", and each such
+feature skips the file when it is `None`. That makes the remaining direct uses of the disk a short,
+explained list instead of scattered exceptions.
+
+*`scan_dir` beside `list_dir`.* `list_dir` sorts and follows links, for display. A size scan wants
+the opposite: each entry described as itself, unsorted, in one call (one round trip on a remote).
+Keeping them separate kept the local scan exactly as cheap as before.
+
+*A second backend is the proof.* `MemVfs` is in memory with real symlink resolution, a `sparse()`
+mode, and the same error behaviour as the disk, and `conformance::check_backend` runs twelve
+scenarios against both. I checked the suite has teeth by breaking three behaviours in `MemVfs`
+(rename overwriting, scans following links, `symlink_metadata` following) and confirming each made
+it fail. Each migrated feature also has a test on memory, including `App`'s background jobs, which
+took the filesystem as an `Arc<dyn Vfs>` where they used to build a `LocalVfs` inside their thread.
+
+*The gate.* `scripts/vfs-gate` greps non-test code for direct disk use and fails on any file not in
+its allow-list, and on a listed file that no longer needs its entry, so the list cannot rot. It
+skips comment lines and `#[cfg(test)]` items; a first version flagged a test-only `use` and a probe
+of mine appended a violation after the test module, where it is (correctly) not looked at; both
+were fixed in the probe or the script, not by loosening the gate.
+
+Left out on purpose: archives still use `std::fs` and are on the allow-list with that reason; the
+trait cannot yet write bytes, make a symlink or change permissions; nothing copies between two
+backends. All are in the roadmap.
+
+**Verification.** `scripts/check` passes, now including the gate. New tests: the conformance suite
+on the local disk, on memory and on a sparse memory backend, with mutations confirmed caught;
+`Send + Sync`, `local_path` and the local disk's metadata; preview text, bytes, images, symlinks
+and the size cap on memory, an archive off the disk shown as bytes, and a hook skipped off the disk;
+Inspect on memory (a file, links, a tally, the view), with the sparse backend leaving rows out and
+another machine's uid staying a number; the marked-size total, disk usage rows and the view on
+memory, and a sparse backend measured by length; and through `App`: delete, copy, move and undo on
+memory, the compress form's checks, Inspect and disk usage. Not tried in a real terminal, and there
+is no second real backend yet to try it against.
 
 ---
 

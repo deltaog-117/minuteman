@@ -26,10 +26,11 @@
 //! Going through `Vfs::list_dir` also means any future backend gets this for free.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use browser::BrowserState;
-use shared::{DirEntryInfo, LocalVfs, Vfs};
+use shared::{DirEntryInfo, Vfs};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Time between the start of one background listing and the next. Long enough that the extra
@@ -45,6 +46,7 @@ pub struct LiveRefresh {
     tx: UnboundedSender<Snapshot>,
     rx: UnboundedReceiver<Snapshot>,
     handle: tokio::runtime::Handle,
+    vfs: Arc<dyn Vfs>,
     /// A listing is already running; a slow filesystem must not pile up requests behind it.
     in_flight: bool,
     /// `None` until the first listing, which is started immediately.
@@ -52,12 +54,13 @@ pub struct LiveRefresh {
 }
 
 impl LiveRefresh {
-    pub fn new(handle: tokio::runtime::Handle) -> Self {
+    pub fn new(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>) -> Self {
         let (tx, rx) = unbounded_channel();
         Self {
             tx,
             rx,
             handle,
+            vfs,
             in_flight: false,
             last_started: None,
         }
@@ -67,7 +70,7 @@ impl LiveRefresh {
     /// one when `INTERVAL` has passed. Returns whether the selected file's own content changed on
     /// disk (its size or modified time moved while it stayed selected) — the cue to re-read its
     /// preview, which is otherwise keyed on the path alone.
-    pub fn poll(&mut self, browser: &mut BrowserState, vfs: &LocalVfs, now: Instant) -> bool {
+    pub fn poll(&mut self, browser: &mut BrowserState, now: Instant) -> bool {
         let mut selected_changed = false;
 
         while let Ok(snapshot) = self.rx.try_recv() {
@@ -78,7 +81,7 @@ impl LiveRefresh {
             let before = browser.selected_entry().cloned();
             if browser.apply_listing(&dir, current, parent) {
                 // A command may have removed a path that was marked in some other directory.
-                browser.prune_marks(vfs);
+                browser.prune_marks(self.vfs.as_ref());
                 selected_changed |= content_changed(before.as_ref(), browser.selected_entry());
             }
         }
@@ -89,14 +92,15 @@ impl LiveRefresh {
         if due && !self.in_flight {
             self.in_flight = true;
             self.last_started = Some(now);
-            self.spawn_listing(browser.current_dir().to_path_buf(), *vfs);
+            self.spawn_listing(browser.current_dir().to_path_buf());
         }
 
         selected_changed
     }
 
-    fn spawn_listing(&self, dir: PathBuf, vfs: LocalVfs) {
+    fn spawn_listing(&self, dir: PathBuf) {
         let tx = self.tx.clone();
+        let vfs = Arc::clone(&self.vfs);
         self.handle.spawn_blocking(move || {
             let snapshot = vfs.list_dir(&dir).ok().map(|current| {
                 // Mirrors `BrowserState::refresh`: an unreadable parent is an empty column.
@@ -125,6 +129,8 @@ fn content_changed(before: Option<&DirEntryInfo>, after: Option<&DirEntryInfo>) 
 
 #[cfg(test)]
 mod tests {
+    use shared::LocalVfs;
+
     use super::*;
 
     fn entry(path: &str, size: u64, modified_secs: u64) -> DirEntryInfo {
@@ -179,7 +185,7 @@ mod tests {
     ) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            let selected_changed = live.poll(browser, &LocalVfs, Instant::now());
+            let selected_changed = live.poll(browser, Instant::now());
             if done(browser, selected_changed) {
                 return true;
             }
@@ -194,7 +200,7 @@ mod tests {
         let root = scratch_dir("create");
         let work = root.join("work");
         let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
-        let mut live = LiveRefresh::new(runtime.handle().clone());
+        let mut live = LiveRefresh::new(runtime.handle().clone(), Arc::new(LocalVfs));
 
         std::fs::write(work.join("made-by-a-shell.txt"), b"hi").unwrap();
 
@@ -213,7 +219,7 @@ mod tests {
         let work = root.join("work");
         std::fs::write(work.join("note.txt"), b"a").unwrap();
         let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
-        let mut live = LiveRefresh::new(runtime.handle().clone());
+        let mut live = LiveRefresh::new(runtime.handle().clone(), Arc::new(LocalVfs));
 
         std::fs::write(work.join("note.txt"), b"a much longer body").unwrap();
 
@@ -240,7 +246,7 @@ mod tests {
         let work = root.join("work");
         std::fs::write(work.join("doomed.txt"), b"hi").unwrap();
         let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
-        let mut live = LiveRefresh::new(runtime.handle().clone());
+        let mut live = LiveRefresh::new(runtime.handle().clone(), Arc::new(LocalVfs));
         assert_eq!(browser.current_entries().len(), 1);
 
         std::fs::remove_file(work.join("doomed.txt")).unwrap();

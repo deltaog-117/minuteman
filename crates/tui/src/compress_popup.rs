@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::KeyCode;
 use file_ops::archive::{Format, Level, Password};
+use shared::Vfs;
 
 /// The longest archive file name the form accepts, in characters. Well under the 255 bytes most
 /// filesystems allow, so the extension and a `.partial` sibling still fit.
@@ -118,7 +119,7 @@ pub struct CompressPopup {
 
 impl CompressPopup {
     /// A form for compressing `sources` into `dir`. `None` when there is nothing to compress.
-    pub fn new(sources: Vec<PathBuf>, dir: PathBuf) -> Option<Self> {
+    pub fn new(sources: Vec<PathBuf>, dir: PathBuf, vfs: &dyn Vfs) -> Option<Self> {
         if sources.is_empty() {
             return None;
         }
@@ -135,7 +136,7 @@ impl CompressPopup {
         }
         rows.push(Row::DeleteOriginals);
         Some(Self {
-            name: default_name(&sources),
+            name: default_name(vfs, &sources),
             folder: String::new(),
             sources,
             dir,
@@ -424,11 +425,11 @@ pub(crate) fn check_name(base: &str) -> Result<(), &'static str> {
 
 /// The name offered first: a folder's own name, a file's without its extension (`report.pdf`
 /// becomes `report`), or `archive` for several items.
-fn default_name(sources: &[PathBuf]) -> String {
+fn default_name(vfs: &dyn Vfs, sources: &[PathBuf]) -> String {
     let [only] = sources else {
         return "archive".into();
     };
-    let name = if only.is_dir() {
+    let name = if vfs.is_dir(only) {
         only.file_name()
     } else {
         only.file_stem()
@@ -468,7 +469,7 @@ mod tests {
 
     fn popup(names: &[&str]) -> CompressPopup {
         let sources = names.iter().map(|n| PathBuf::from("/w").join(n)).collect();
-        CompressPopup::new(sources, PathBuf::from("/w")).unwrap()
+        CompressPopup::new(sources, PathBuf::from("/w"), &shared::LocalVfs).unwrap()
     }
 
     fn type_text(popup: &mut CompressPopup, text: &str) {
@@ -497,7 +498,7 @@ mod tests {
 
     #[test]
     fn nothing_selected_means_no_form() {
-        assert!(CompressPopup::new(vec![], PathBuf::from("/w")).is_none());
+        assert!(CompressPopup::new(vec![], PathBuf::from("/w"), &shared::LocalVfs).is_none());
     }
 
     #[test]
@@ -505,7 +506,7 @@ mod tests {
         assert_eq!(popup(&["report.pdf"]).name(), "report");
         assert_eq!(popup(&["a.txt", "b.txt"]).name(), "archive");
         let dir = std::env::temp_dir();
-        let folder = CompressPopup::new(vec![dir.clone()], dir.clone()).unwrap();
+        let folder = CompressPopup::new(vec![dir.clone()], dir.clone(), &shared::LocalVfs).unwrap();
         assert_eq!(
             folder.name(),
             dir.file_name().unwrap().to_string_lossy().as_ref()
@@ -821,5 +822,25 @@ mod tests {
                 prop_assert_eq!(Format::of(path), Some(request.format));
             }
         }
+    }
+
+    #[test]
+    fn a_folders_dotted_name_is_kept_whole_on_another_backend_but_a_files_is_not() {
+        let mem = shared::MemVfs::new();
+        mem.add_dir("/w/my.project");
+        mem.add_file("/w/report.pdf", "x");
+        let name = |item: &str| {
+            CompressPopup::new(
+                vec![PathBuf::from("/w").join(item)],
+                PathBuf::from("/w"),
+                &mem,
+            )
+            .unwrap()
+            .name()
+            .to_owned()
+        };
+
+        assert_eq!(name("my.project"), "my.project");
+        assert_eq!(name("report.pdf"), "report");
     }
 }

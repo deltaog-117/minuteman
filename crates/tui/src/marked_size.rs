@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use shared::{FileKind, Vfs};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -62,7 +63,12 @@ impl Total {
 /// A marked folder already covers whatever is marked inside it, so paths under a marked folder
 /// are skipped rather than counted twice. `limit` bounds how many entries the folder walks visit
 /// in all, so marking `/` cannot keep the blocking pool busy for minutes.
-pub fn total_of(paths: &[PathBuf], limit: u64, cancel: &AtomicBool) -> Option<Total> {
+pub fn total_of(
+    vfs: &dyn Vfs,
+    paths: &[PathBuf],
+    limit: u64,
+    cancel: &AtomicBool,
+) -> Option<Total> {
     let mut sorted: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     // Component-wise ordering puts everything below a folder right after it, so remembering the
     // latest folder is enough to recognise every path it covers.
@@ -82,12 +88,12 @@ pub fn total_of(paths: &[PathBuf], limit: u64, cancel: &AtomicBool) -> Option<To
         if covering.is_some_and(|folder| path.starts_with(folder)) {
             continue;
         }
-        let Ok(meta) = std::fs::symlink_metadata(path) else {
+        let Ok(meta) = vfs.symlink_metadata(path) else {
             continue;
         };
-        if meta.is_dir() {
+        if meta.kind == FileKind::Dir {
             covering = Some(path);
-            let (tally, ending) = tally_dir(path, budget, cancel);
+            let (tally, ending) = tally_dir(vfs, path, budget, cancel);
             match ending {
                 Ending::Cancelled => return None,
                 Ending::Truncated => total.exact = false,
@@ -96,7 +102,7 @@ pub fn total_of(paths: &[PathBuf], limit: u64, cancel: &AtomicBool) -> Option<To
             total.bytes = total.bytes.saturating_add(tally.bytes);
             budget = budget.saturating_sub(tally.files + tally.dirs);
         } else {
-            total.bytes = total.bytes.saturating_add(meta.len());
+            total.bytes = total.bytes.saturating_add(meta.len);
         }
     }
     Some(total)
@@ -115,6 +121,7 @@ impl Drop for Job {
 
 pub struct MarkedSize {
     handle: tokio::runtime::Handle,
+    vfs: Arc<dyn Vfs>,
     /// The marks the running (or last finished) walk was started for.
     requested: Vec<PathBuf>,
     job: Option<Job>,
@@ -122,9 +129,10 @@ pub struct MarkedSize {
 }
 
 impl MarkedSize {
-    pub fn new(handle: tokio::runtime::Handle) -> Self {
+    pub fn new(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>) -> Self {
         Self {
             handle,
+            vfs,
             requested: Vec::new(),
             job: None,
             total: None,
@@ -169,8 +177,9 @@ impl MarkedSize {
         let (tx, rx) = unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_bg = Arc::clone(&cancel);
+        let vfs = Arc::clone(&self.vfs);
         self.handle.spawn_blocking(move || {
-            let _ = tx.send(total_of(&marks, TALLY_LIMIT, &cancel_bg));
+            let _ = tx.send(total_of(vfs.as_ref(), &marks, TALLY_LIMIT, &cancel_bg));
         });
         Job { cancel, rx }
     }
@@ -226,7 +235,7 @@ mod tests {
                 })
                 .collect();
 
-            let total = total_of(&paths, TALLY_LIMIT, &never()).unwrap();
+            let total = total_of(&shared::LocalVfs, &paths, TALLY_LIMIT, &never()).unwrap();
             prop_assert_eq!(total.bytes, sizes.iter().sum::<usize>() as u64);
             prop_assert!(total.exact);
             std::fs::remove_dir_all(&root).unwrap();
@@ -247,10 +256,10 @@ mod tests {
                     path
                 })
                 .collect();
-            let forward = total_of(&paths, TALLY_LIMIT, &never());
+            let forward = total_of(&shared::LocalVfs, &paths, TALLY_LIMIT, &never());
             paths.reverse();
             paths.push(paths[0].clone());
-            prop_assert_eq!(total_of(&paths, TALLY_LIMIT, &never()), forward);
+            prop_assert_eq!(total_of(&shared::LocalVfs, &paths, TALLY_LIMIT, &never()), forward);
             std::fs::remove_dir_all(&root).unwrap();
         }
     }
@@ -270,7 +279,7 @@ mod tests {
             root.join("dir/sub/b"),
             root.join("dir.txt"),
         ];
-        let total = total_of(&marks, TALLY_LIMIT, &never()).unwrap();
+        let total = total_of(&shared::LocalVfs, &marks, TALLY_LIMIT, &never()).unwrap();
         assert_eq!(total.bytes, 100 + 200 + 300 + 7);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -281,7 +290,7 @@ mod tests {
         write(&root.join("kept"), 40);
         let marks = [root.join("kept"), root.join("gone")];
         assert_eq!(
-            total_of(&marks, TALLY_LIMIT, &never()).map(|t| t.bytes),
+            total_of(&shared::LocalVfs, &marks, TALLY_LIMIT, &never()).map(|t| t.bytes),
             Some(40)
         );
         std::fs::remove_dir_all(&root).unwrap();
@@ -292,7 +301,13 @@ mod tests {
         let root = scratch("link");
         write(&root.join("big"), 5000);
         std::os::unix::fs::symlink(root.join("big"), root.join("link")).unwrap();
-        let total = total_of(&[root.join("link")], TALLY_LIMIT, &never()).unwrap();
+        let total = total_of(
+            &shared::LocalVfs,
+            &[root.join("link")],
+            TALLY_LIMIT,
+            &never(),
+        )
+        .unwrap();
         assert!(total.bytes < 5000, "counted the target: {}", total.bytes);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -303,7 +318,7 @@ mod tests {
         for i in 0..10 {
             write(&root.join("dir").join(format!("f{i}")), 10);
         }
-        let total = total_of(&[root.join("dir")], 3, &never()).unwrap();
+        let total = total_of(&shared::LocalVfs, &[root.join("dir")], 3, &never()).unwrap();
         assert!(!total.exact);
         assert!(total.bytes < 100);
         assert!(total.label().starts_with("at least "));
@@ -315,14 +330,17 @@ mod tests {
         let root = scratch("cancel");
         write(&root.join("a"), 1);
         let cancel = AtomicBool::new(true);
-        assert_eq!(total_of(&[root.join("a")], TALLY_LIMIT, &cancel), None);
+        assert_eq!(
+            total_of(&shared::LocalVfs, &[root.join("a")], TALLY_LIMIT, &cancel),
+            None
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn nothing_marked_adds_up_to_zero() {
         assert_eq!(
-            total_of(&[], TALLY_LIMIT, &never()),
+            total_of(&shared::LocalVfs, &[], TALLY_LIMIT, &never()),
             Some(Total {
                 bytes: 0,
                 exact: true
@@ -348,7 +366,7 @@ mod tests {
         let root = scratch("tracker");
         write(&root.join("a"), 10);
         write(&root.join("b"), 25);
-        let mut sizes = MarkedSize::new(runtime.handle().clone());
+        let mut sizes = MarkedSize::new(runtime.handle().clone(), Arc::new(shared::LocalVfs));
 
         assert_eq!(sizes.total(), None, "nothing marked, nothing to show");
         let one = [root.join("a")];
@@ -365,7 +383,7 @@ mod tests {
         let root = scratch("stale");
         write(&root.join("a"), 10);
         write(&root.join("b"), 25);
-        let mut sizes = MarkedSize::new(runtime.handle().clone());
+        let mut sizes = MarkedSize::new(runtime.handle().clone(), Arc::new(shared::LocalVfs));
         let one = [root.join("a")];
         wait_for_total(&mut sizes, &one);
 
@@ -391,6 +409,31 @@ mod tests {
             }
             .label(),
             format!("at least {}", format_size(2048))
+        );
+    }
+
+    #[test]
+    fn marks_on_another_backend_add_up_and_a_folder_covers_what_is_inside_it() {
+        let mem = shared::MemVfs::new();
+        mem.add_file("/a/f1", vec![0u8; 100]);
+        mem.add_file("/a/sub/f2", vec![0u8; 50]);
+        mem.add_file("/solo", vec![0u8; 7]);
+        mem.add_symlink("/link", "/a/f1");
+        let marks: Vec<PathBuf> = ["/a", "/a/f1", "/solo", "/link", "/gone"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+
+        let total = total_of(&mem, &marks, 100, &AtomicBool::new(false)).unwrap();
+
+        // 150 in the folder (its own file marked again is not counted twice), 7, the link's own
+        // length ("/a/f1" is five bytes), and nothing for the path that is not there.
+        assert_eq!(
+            total,
+            Total {
+                bytes: 150 + 7 + 5,
+                exact: true
+            }
         );
     }
 }

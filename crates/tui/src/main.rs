@@ -58,6 +58,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use alt_keys::AltCommand;
@@ -99,7 +100,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui_image::StatefulImage;
 use settings_popup::{Outcome as SettingsOutcome, Row as SettingsRow, SettingsPopup, SettingsView};
-use shared::{DirEntryInfo, LocalVfs};
+use shared::{DirEntryInfo, LocalVfs, Vfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
 use theming::{
@@ -610,10 +611,10 @@ struct Previews {
 }
 
 impl Previews {
-    fn new(handle: tokio::runtime::Handle) -> Self {
+    fn new(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>) -> Self {
         Self {
-            image: ImagePreview::new(handle.clone()),
-            text: TextPreview::new(handle),
+            image: ImagePreview::new(handle.clone()).with_vfs(Arc::clone(&vfs)),
+            text: TextPreview::new(handle).with_vfs(vfs),
         }
     }
 
@@ -678,14 +679,17 @@ fn main() -> Result<()> {
     let start_dir = start_dir.canonicalize().unwrap_or(start_dir);
 
     let mut config = Config::load();
-    let vfs = LocalVfs;
-    let mut browser = BrowserState::with_show_hidden(&vfs, start_dir, config.show_hidden)?;
+    // The one filesystem this session browses: everything below reaches a path through it, and
+    // the background jobs and previews are handed clones.
+    let vfs: Arc<dyn Vfs> = Arc::new(LocalVfs);
+    let mut browser = BrowserState::with_show_hidden(vfs.as_ref(), start_dir, config.show_hidden)?;
 
     // Backs the blocking thread pool that copy/move/delete run on so a large operation never
     // freezes the render loop. Kept alive for the rest of `main` — dropping it would shut the
     // pool down out from under any operation still running.
     let runtime = tokio::runtime::Runtime::new()?;
     let mut app = App::new(runtime.handle().clone())
+        .with_vfs(Arc::clone(&vfs))
         .with_git_status(config.git_status)
         .with_system_hud(config.system_hud)
         .with_interactive_commands(config.interactive_commands.clone())
@@ -697,7 +701,7 @@ fn main() -> Result<()> {
     // any input — each briefly reads/writes stdio itself. The keyboard one goes first so its
     // reply is fully consumed before the graphics probe starts reading stdio directly.
     let keyboard_protocol = config.alt_tap && supports_keyboard_enhancement().unwrap_or(false);
-    let mut previews = Previews::new(runtime.handle().clone());
+    let mut previews = Previews::new(runtime.handle().clone(), Arc::clone(&vfs));
     if keyboard_protocol {
         guard.enhance_keyboard()?;
     }
@@ -715,7 +719,7 @@ fn main() -> Result<()> {
 
     let result = run(
         &mut terminal,
-        &vfs,
+        vfs.as_ref(),
         &mut browser,
         &mut app,
         &mut previews,
@@ -1075,7 +1079,7 @@ struct Session<'a> {
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    vfs: &LocalVfs,
+    vfs: &dyn Vfs,
     browser: &mut BrowserState,
     app: &mut App,
     previews: &mut Previews,
@@ -1213,7 +1217,7 @@ fn run(
         // Picks up files made or changed by a mini-shell, a `:` command or another program; a
         // change to the selected file itself needs its preview re-read, since that is otherwise
         // keyed on the path alone.
-        if app.poll_disk(browser, vfs, Instant::now()) {
+        if app.poll_disk(browser, Instant::now()) {
             previews.reload(&config.preview_hooks);
         }
         app.poll_hud(browser, Instant::now());
@@ -1486,7 +1490,7 @@ fn run(
                             overlay_view::CompressHit::Row(row) => {
                                 popup.focus(row);
                                 popup.cycle(true);
-                                App::refresh_compress_warning(popup);
+                                app.refresh_compress_warning(popup);
                             }
                             overlay_view::CompressHit::Panel => {}
                             overlay_view::CompressHit::Outside => compress = None,
@@ -1501,7 +1505,7 @@ fn run(
                             overlay_view::ExtractHit::Row(row) => {
                                 popup.focus(row);
                                 popup.cycle(true);
-                                App::refresh_extract_warning(popup);
+                                app.refresh_extract_warning(popup);
                             }
                             overlay_view::ExtractHit::Panel => {}
                             overlay_view::ExtractHit::Outside => extract = None,
@@ -2149,7 +2153,7 @@ fn run(
                 }
                 if let Some(popup) = compress.as_mut() {
                     match popup.key(key.code) {
-                        compress_popup::Key::Stay => App::refresh_compress_warning(popup),
+                        compress_popup::Key::Stay => app.refresh_compress_warning(popup),
                         compress_popup::Key::Close => compress = None,
                         compress_popup::Key::Submit(request) => match app.start_compress(request) {
                             Ok(()) => compress = None,
@@ -2160,7 +2164,7 @@ fn run(
                 }
                 if let Some(popup) = extract.as_mut() {
                     match popup.key(key.code) {
-                        extract_popup::Key::Stay => App::refresh_extract_warning(popup),
+                        extract_popup::Key::Stay => app.refresh_extract_warning(popup),
                         extract_popup::Key::Close => extract = None,
                         extract_popup::Key::Submit(request) => match app.start_extract(request) {
                             Ok(()) => extract = None,
@@ -2582,7 +2586,7 @@ fn run_menu_command(
     target: MenuTarget,
     browser: &mut BrowserState,
     app: &mut App,
-    vfs: &LocalVfs,
+    vfs: &dyn Vfs,
     panels: &mut Panels<'_>,
 ) -> Result<()> {
     // The keys are all ignored while an operation runs; the ones below would start another
@@ -2784,7 +2788,7 @@ fn draw(
     browser: &BrowserState,
     app: &App,
     previews: &mut Previews,
-    vfs: &LocalVfs,
+    vfs: &dyn Vfs,
     config: &Config,
     overlay: Overlay<'_>,
 ) {
