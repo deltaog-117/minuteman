@@ -2471,11 +2471,13 @@ fn run(
                         _ => browser.enter(vfs)?,
                     },
                     Some(Action::Leave) => browser.leave(vfs)?,
-                    Some(Action::Yank) => app.yank_marked(browser),
-                    Some(Action::Cut) => app.cut(browser),
+                    Some(Action::Yank) if app.require_marks(browser) => app.yank(browser),
+                    Some(Action::Cut) if app.require_marks(browser) => app.cut(browser),
                     Some(Action::Paste) => app.begin_paste(browser),
-                    Some(Action::Delete) => app.begin_trash(browser),
-                    Some(Action::DeletePermanently) => app.begin_delete_permanently(browser),
+                    Some(Action::Delete) if app.require_marks(browser) => app.begin_trash(browser),
+                    Some(Action::DeletePermanently) if app.require_marks(browser) => {
+                        app.begin_delete_permanently(browser)
+                    }
                     Some(Action::Rename) => app.begin_rename(browser),
                     Some(Action::Create) => app.begin_create(),
                     Some(Action::Search) => app.begin_search(browser),
@@ -2533,6 +2535,9 @@ fn run(
                             Err(e) => app.status = Some(format!("failed to start shell: {e}")),
                         }
                     }
+                    Some(
+                        Action::Yank | Action::Cut | Action::Delete | Action::DeletePermanently,
+                    ) => {}
                     Some(Action::Shell) => {}
                     None => {
                         app.dispatch_plugin_key(key.code, browser);

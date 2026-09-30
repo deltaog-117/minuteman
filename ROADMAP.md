@@ -1011,9 +1011,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 - ✅ **Key remap: `d` cuts, `x`/`X` delete, `s` no longer opens a shell, `y` needs marks** – the
   defaults are now `d` cut (was `m`), `x` delete to the trash (was `d`), `X` delete permanently
-  (was `D`), and `shell` ships unbound (`Alt+n` still opens one). `y` copies only what was marked
-  with `v`; with nothing marked it says so instead of copying the entry under the cursor. The
-  right-click Copy still acts on the clicked entry. `B` stays bookmark-set.
+  (was `D`), and `shell` ships unbound (`Alt+n` still opens one). `y`, `d`, `x` and `X` act only on
+  what was marked with `v`; with nothing marked they say so instead of using the entry under the
+  cursor. The right-click menu still acts on the clicked entry. `B` stays bookmark-set.
 
 ---
 

@@ -122,11 +122,12 @@ named `init` must be passed as `./init`.
 | `h` / `←`   | leave directory                               |
 | `q`         | quit                                          |
 | `Q`         | quit and `cd` your shell to the directory you were in (needs the `mman` wrapper above) |
-| `y`         | yank (copy) the entries marked with `v`       |
-| `d`         | cut (move) selection                          |
+| `v`         | mark the entry under the cursor; `y`, `d`, `x` and `X` work on marked entries only |
+| `y`         | yank (copy) the marked entries                |
+| `d`         | cut (move) the marked entries                 |
 | `p`         | paste                                         |
-| `x`         | delete to the trash — marked entries if any are marked, else the selection (confirm `y`/N) |
-| `X`         | delete permanently (confirm `y`)              |
+| `x`         | delete the marked entries to the trash (confirm `y`/N) |
+| `X`         | delete the marked entries permanently (confirm `y`) |
 | `r`         | rename selection                              |
 | `n`         | create — trailing `/` makes a directory       |
 | `/`         | search — jump to the nearest entry whose name contains what you type, in this directory or any below it (`Enter` stays, `Esc` goes back) |

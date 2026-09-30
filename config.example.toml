@@ -160,7 +160,7 @@ quit = ["q"]
 # case-sensitive: "Q" is Shift+q, distinct from "q". Without `--cwd-file` (the bare binary run
 # as `command mman`, not through the wrapper) it just quits.
 quit_to_cwd = ["Q"]
-# Copies the entries marked with `select` (v); with nothing marked it does nothing.
+# Yank, cut and both deletes act on the entries marked with `select` (v) only; with nothing marked they just say so.
 yank = ["y"]
 cut = ["d"]
 paste = ["p"]

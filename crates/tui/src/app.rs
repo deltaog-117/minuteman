@@ -764,13 +764,14 @@ impl App {
         }
     }
 
-    /// The `y` key: copies only what was marked with `Select`, never the entry under the cursor.
-    pub fn yank_marked(&mut self, browser: &BrowserState) {
-        if browser.marked_paths().is_empty() {
+    /// Whether anything is marked with `Select`. The yank, cut and delete keys act on marks only,
+    /// so with none this reports it on the status line and returns `false`.
+    pub fn require_marks(&mut self, browser: &BrowserState) -> bool {
+        let any = !browser.marked_paths().is_empty();
+        if !any {
             self.status = Some("nothing marked — mark with v first".into());
-            return;
         }
-        self.yank(browser);
+        any
     }
 
     pub fn yank(&mut self, browser: &BrowserState) {
@@ -2972,6 +2973,24 @@ mod tests {
             file.to_string_lossy()
         );
         assert!(!f.app.is_busy(), "a detached program is never waited on");
+    }
+
+    #[test]
+    fn the_operation_keys_need_marks_and_ignore_the_cursor() {
+        let mut f = Fixture::new("need-marks");
+        std::fs::write(f.root.join("a.txt"), b"a").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        f.browser
+            .select_index(f.listed().iter().position(|n| n == "a.txt").unwrap());
+
+        assert!(!f.app.require_marks(&f.browser));
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("nothing marked — mark with v first")
+        );
+
+        f.browser.toggle_mark();
+        assert!(f.app.require_marks(&f.browser));
     }
 
     #[test]
