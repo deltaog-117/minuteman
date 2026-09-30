@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `theming`, `tui`: default keys are now `d` cut (was `m`), `x` delete to the trash (was `d`) and
+  `X` delete permanently (was `D`). `s` no longer opens a shell by default (`Alt+n` still does;
+  set `shell = ["s"]` under `[keys]` to restore it). `y` copies only the entries marked with `v`
+  and reports "nothing marked" otherwise; the right-click Copy is unchanged.
 - `tui`: a program path that needs shell quoting (a space, a parenthesis) is now found when
   opening a file with it; it was reported as "command not found". The status line names the
   program by its file name rather than its full path.

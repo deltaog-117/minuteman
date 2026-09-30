@@ -2471,7 +2471,7 @@ fn run(
                         _ => browser.enter(vfs)?,
                     },
                     Some(Action::Leave) => browser.leave(vfs)?,
-                    Some(Action::Yank) => app.yank(browser),
+                    Some(Action::Yank) => app.yank_marked(browser),
                     Some(Action::Cut) => app.cut(browser),
                     Some(Action::Paste) => app.begin_paste(browser),
                     Some(Action::Delete) => app.begin_trash(browser),

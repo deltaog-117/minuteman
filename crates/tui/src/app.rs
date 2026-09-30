@@ -764,6 +764,15 @@ impl App {
         }
     }
 
+    /// The `y` key: copies only what was marked with `Select`, never the entry under the cursor.
+    pub fn yank_marked(&mut self, browser: &BrowserState) {
+        if browser.marked_paths().is_empty() {
+            self.status = Some("nothing marked — mark with v first".into());
+            return;
+        }
+        self.yank(browser);
+    }
+
     pub fn yank(&mut self, browser: &BrowserState) {
         let paths = Self::marked_or_selected(browser);
         if paths.is_empty() {

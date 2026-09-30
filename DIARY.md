@@ -63,6 +63,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-29 | Mouse Stage 2 | `Ctrl`-click toggles, a configurable range modifier (`Shift` or `Alt`, both by default) marks a span, header path segments and middle-click navigate (COA B), over the roadmap's `Shift` only (A) or a two-cycle split (C) | ✅ Confirmed |
 | 2026-09-29 | Mouse Stage 3 | Drag and drop with a pure state machine, a pointer label and lit target, drops on both file columns, up a level, and shell panes, plus edge auto-scroll (COA C), over a release-only drop (A) or feedback without shell and scroll (B) | ✅ Confirmed |
 | 2026-09-29 | Open With | Read the shared MIME database, `mimeapps.list`, `mimeinfo.cache` and `.desktop` files in-process, with `[[open_rule]]`, `enter`-to-open and "Other…" (COA A), over shelling out to `xdg-mime`/`gio` (B) or a hybrid launching through `gio` (C) | ✅ Confirmed |
+| 2026-09-30 | Default Key Remap | `d` cut, `x`/`X` delete, `s` unbound, `y` marks-only via a separate `yank_marked` | ✅ Confirmed |
 
 ---
 
@@ -4532,6 +4533,29 @@ order, and "Other…" running or cancelling. Driven against the real binary in a
 `pyte`, on a scratch desktop with its own globs, applications and cache: every behaviour in the
 ROADMAP entry, including a real `Terminal=true` program taking the screen and returning to the
 browser. Not tried against a full real desktop's application set.
+
+---
+
+### Default Key Remap: Marks-Only `y`
+
+**Date:** 2026-09-30
+**Status:** Confirmed
+
+#### Context / Background
+
+The default keys were changed on request: `d` cuts, `x` sends to the trash, `X` deletes
+permanently, `s` stops opening a shell, and `y` should act on marked entries only.
+
+#### Decision
+
+The key defaults moved in `RawKeyMap`; `shell` now defaults to an empty list, since `Alt+n`
+already opens a shell. `y` calls a new `App::yank_marked`, which refuses with a status message
+when nothing is marked and otherwise defers to `yank`. `yank` itself keeps its cursor fallback
+because the right-click Copy and several tests rely on it. `cut`, `x` and `X` still fall back to
+the entry under the cursor; only `y` was asked to change.
+
+**Verification.** `scripts/check` passes; the keymap tests pin the new defaults. Not tried in a
+real terminal.
 
 ---
 

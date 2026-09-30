@@ -129,13 +129,13 @@ impl Default for RawKeyMap {
             quit: vec!["q".into()],
             quit_to_cwd: vec!["Q".into()],
             yank: vec!["y".into()],
-            cut: vec!["m".into()],
+            cut: vec!["d".into()],
             paste: vec!["p".into()],
-            delete: vec!["d".into()],
-            delete_permanently: vec!["D".into()],
+            delete: vec!["x".into()],
+            delete_permanently: vec!["X".into()],
             rename: vec!["r".into()],
             create: vec!["n".into()],
-            shell: vec!["s".into()],
+            shell: vec![],
             search: vec!["/".into()],
             command: vec![":".into()],
             cancel: vec!["c".into()],
@@ -145,7 +145,7 @@ impl Default for RawKeyMap {
             preview_up: vec!["K".into()],
             disk_usage: vec!["u".into()],
             appearance: vec!["a".into()],
-            // `m` is already `cut`, so `B` ("Bookmark") stands in for Ranger's own default.
+            // `B` ("Bookmark") stands in for Ranger's own `m`, which `cut` used to hold.
             bookmark_jump: vec!["`".into()],
             bookmark_set: vec!["B".into()],
             leader: vec!["space".into()],
@@ -263,16 +263,16 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('q')), Some(Action::Quit));
         assert_eq!(keymap.resolve(KeyCode::Char('Q')), Some(Action::QuitToCwd));
         assert_eq!(keymap.resolve(KeyCode::Char('y')), Some(Action::Yank));
-        assert_eq!(keymap.resolve(KeyCode::Char('m')), Some(Action::Cut));
+        assert_eq!(keymap.resolve(KeyCode::Char('d')), Some(Action::Cut));
         assert_eq!(keymap.resolve(KeyCode::Char('p')), Some(Action::Paste));
-        assert_eq!(keymap.resolve(KeyCode::Char('d')), Some(Action::Delete));
+        assert_eq!(keymap.resolve(KeyCode::Char('x')), Some(Action::Delete));
         assert_eq!(
-            keymap.resolve(KeyCode::Char('D')),
+            keymap.resolve(KeyCode::Char('X')),
             Some(Action::DeletePermanently)
         );
         assert_eq!(keymap.resolve(KeyCode::Char('r')), Some(Action::Rename));
         assert_eq!(keymap.resolve(KeyCode::Char('n')), Some(Action::Create));
-        assert_eq!(keymap.resolve(KeyCode::Char('s')), Some(Action::Shell));
+        assert_eq!(keymap.resolve(KeyCode::Char('s')), None);
         assert_eq!(keymap.resolve(KeyCode::Char('/')), Some(Action::Search));
         assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
         assert_eq!(keymap.resolve(KeyCode::Char('c')), Some(Action::Cancel));
@@ -371,14 +371,13 @@ mod tests {
         assert_eq!(parse_key(""), None);
     }
 
-    /// `m` (lowercase) was already `cut` before bookmarks existed, so the bookmark-set default
-    /// had to land on a different key rather than shadowing it — this pins that they stay distinct.
+    /// `d` (lowercase) is `cut`, and bookmark-set lives on a different key so it never shadows it.
     #[test]
     fn bookmark_set_does_not_shadow_cut() {
         let keymap: KeyMap = RawKeyMap::default().into();
-        assert_eq!(keymap.resolve(KeyCode::Char('m')), Some(Action::Cut));
+        assert_eq!(keymap.resolve(KeyCode::Char('d')), Some(Action::Cut));
         assert_ne!(
-            keymap.resolve(KeyCode::Char('m')),
+            keymap.resolve(KeyCode::Char('d')),
             Some(Action::BookmarkSet)
         );
     }

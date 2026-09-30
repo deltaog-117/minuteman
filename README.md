@@ -28,7 +28,7 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
   large copy/move/delete never freezes the app; copy/move show live progress and are cancellable
   with `Esc`. Permanent delete (with confirmation), rename, and create file/directory round out
   the core operations, with an overwrite/skip/abort prompt on conflicts.
-- 🔹 **Interactive shell overlay** – `s` drops you into a real, fully interactive `$SHELL` in the
+- 🔹 **Interactive shell overlay** – `Alt+n` drops you into a real, fully interactive `$SHELL` in the
   browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
   auto-close-after-one-command.
 - 🔹 **The whole look in one file** – `appearance.toml` holds colors, glyphs, per-element text
@@ -54,7 +54,7 @@ trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin sy
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
 - 🔹 **Ranger-style marks** – `v` toggles a mark on the current entry; `d` (delete) acts on every
   marked entry when any are marked, falling back to the single selection otherwise.
-- 🔹 **Tiling mini-shells with a single leader key** – `s` opens a real `$SHELL` in a movable,
+- 🔹 **Tiling mini-shells with a single leader key** – `Alt+n` opens a real `$SHELL` in a movable,
   resizable box; `space` is the one leader for everything else (see below). While you type, every
   key goes to the shell — `Tab` completion and `Esc` included.
 
@@ -122,13 +122,13 @@ named `init` must be passed as `./init`.
 | `h` / `←`   | leave directory                               |
 | `q`         | quit                                          |
 | `Q`         | quit and `cd` your shell to the directory you were in (needs the `mman` wrapper above) |
-| `y`         | yank (copy) selection                         |
-| `m`         | cut (move) selection                          |
+| `y`         | yank (copy) the entries marked with `v`       |
+| `d`         | cut (move) selection                          |
 | `p`         | paste                                         |
-| `d`         | delete — marked entries if any are marked, else the selection (confirm `y`/N) |
+| `x`         | delete to the trash — marked entries if any are marked, else the selection (confirm `y`/N) |
+| `X`         | delete permanently (confirm `y`)              |
 | `r`         | rename selection                              |
 | `n`         | create — trailing `/` makes a directory       |
-| `s`         | shell — drop into `$SHELL` in the current dir |
 | `/`         | search — jump to the nearest entry whose name contains what you type, in this directory or any below it (`Enter` stays, `Esc` goes back) |
 | `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory, `:mkdir [-p] <name>...`, `:touch <name>...`, `:extract` (marked or selected `.zip`/`.tar`/`.tar.gz` into a directory named after each), `:compress <name.zip|.tar|.tar.gz>` (marked or selected entries into one archive; or right-click an entry and choose *Compress…* for a form with name, format, level and options; right-click an archive and choose *Extract…* for a form with the destination folder, what to do with existing files and whether to delete the archive); an editor or other full-screen program (`:nvim ROADMAP.md`, or any command after a `!`, as in `:!python3`) gets the whole terminal until it exits; anything else runs in `sh` in the current directory (`Esc` cancels) |
 | `c`         | cancel everything pending — the yank/cut clipboard, every mark, and a running copy/move/command — from any directory |
@@ -186,7 +186,7 @@ terminals honour, including over `ssh` and inside `tmux`.
 
 ### Mini-shell keys
 
-`s` opens a shell in the current directory. There are two modes:
+`Alt+n` opens a shell in the current directory. There are two modes:
 
 - **Typing:** every key, `Space`, `Tab` and `Esc` included, goes to the shell, so programs like `vim` keep `Esc` for themselves. Tap `Alt` or click the browser to leave typing; `Alt+m` closes the pane.
 - **Browsing:** the shell stays visible and the file browser works normally. `space` is the leader:
@@ -291,12 +291,12 @@ enter = ["l", "right", "enter"]
 leave = ["h", "left"]
 quit = ["q"]
 yank = ["y"]
-cut = ["m"]
+cut = ["d"]
 paste = ["p"]
-delete = ["d"]
+delete = ["x"]
 rename = ["r"]
 create = ["n"]
-shell = ["s"]
+shell = []
 search = ["/"]
 command = [":"]
 cancel = ["c"]

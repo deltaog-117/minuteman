@@ -160,23 +160,24 @@ quit = ["q"]
 # case-sensitive: "Q" is Shift+q, distinct from "q". Without `--cwd-file` (the bare binary run
 # as `command mman`, not through the wrapper) it just quits.
 quit_to_cwd = ["Q"]
+# Copies the entries marked with `select` (v); with nothing marked it does nothing.
 yank = ["y"]
-cut = ["m"]
+cut = ["d"]
 paste = ["p"]
 # Sends every marked entry (see `select` below) to the desktop trash if any are marked, else the
 # current selection — the same trash Nautilus/Dolphin/Explorer/Finder use. Confirms with "y" or
 # enter, since this is reversible. ":trash" does the same thing from the `:` prompt.
-delete = ["d"]
+delete = ["x"]
 # Same batching as `delete`, but permanent: bypasses the trash entirely. Single-character keys are
-# case-sensitive (see `quit_to_cwd` above), so "D" is Shift+d, distinct from "d". Confirms with "y"
+# case-sensitive (see `quit_to_cwd` above), so "X" is Shift+x, distinct from "x". Confirms with "y"
 # only.
-delete_permanently = ["D"]
+delete_permanently = ["X"]
 rename = ["r"]
 # A trailing "/" on the typed name creates a directory instead of a file.
 create = ["n"]
-# Opens the first shell pane in the current directory ("s" again does nothing once one is
+# Unbound by default (Alt+n opens a shell too). Opens the first shell pane in the current directory (the key again does nothing once one is
 # already open — split instead). Alt+m closes the pane under the pointer.
-shell = ["s"]
+shell = []
 # Finds the nearest entry whose name contains what you type, looking in this directory first and
 # then in every directory below it, and jumps there as you type. Enter stays where the search
 # landed, Esc goes back to where it started.
