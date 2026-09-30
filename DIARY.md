@@ -63,6 +63,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-29 | Mouse Stage 2 | `Ctrl`-click toggles, a configurable range modifier (`Shift` or `Alt`, both by default) marks a span, header path segments and middle-click navigate (COA B), over the roadmap's `Shift` only (A) or a two-cycle split (C) | ✅ Confirmed |
 | 2026-09-29 | Mouse Stage 3 | Drag and drop with a pure state machine, a pointer label and lit target, drops on both file columns, up a level, and shell panes, plus edge auto-scroll (COA C), over a release-only drop (A) or feedback without shell and scroll (B) | ✅ Confirmed |
 | 2026-09-29 | Open With | Read the shared MIME database, `mimeapps.list`, `mimeinfo.cache` and `.desktop` files in-process, with `[[open_rule]]`, `enter`-to-open and "Other…" (COA A), over shelling out to `xdg-mime`/`gio` (B) or a hybrid launching through `gio` (C) | ✅ Confirmed |
+| 2026-09-30 | Encrypted Archives | Zip AES-256 through the `zip` crate, a password prompt on extract, a wiped-on-drop `Password` type (COA A), over 7z with header encryption (B) or a standalone `age` action (C) | ✅ Confirmed |
 | 2026-09-30 | Undo History | Inverse-operation journal in `file_ops::history`, batches as one step, conservative reverts, trash restored through the `trash` crate (COA A), over a holding area for deleted data (B) or a reverse-only popup (C) | ✅ Confirmed |
 | 2026-09-30 | Default Key Remap | `d` cut, `x`/`X` delete, `s` unbound, `y`/`d`/`x`/`X` act on marks only | ✅ Confirmed |
 
@@ -4534,6 +4535,68 @@ order, and "Other…" running or cancelling. Driven against the real binary in a
 `pyte`, on a scratch desktop with its own globs, applications and cache: every behaviour in the
 ROADMAP entry, including a real `Terminal=true` program taking the screen and returning to the
 browser. Not tried against a full real desktop's application set.
+
+---
+
+### Encrypted Archives: Zip AES-256 (COA A)
+
+**Date:** 2026-09-30
+**Status:** Confirmed
+
+#### Context / Background
+
+The compress form had no password field, and an encrypted zip could not be opened at all. The
+roadmap's plan was zip AES-256, a masked field on the form and a prompt on extract.
+
+#### Options Considered
+
+**Option A: zip AES-256 through the `zip` crate's `aes-crypto` feature.** Fits the existing forms
+and format. Opens in 7-Zip, Keka and WinZip, not in Windows Explorer or old `unzip`. File names
+stay visible. Adds a handful of small crates.
+
+**Option B: 7z with AES-256 and header encryption.** Hides names and is a standard format, but
+pulls in an LZMA codec and a far larger dependency, and needs its own read, list and preview paths.
+
+**Option C: a standalone `age` encrypt/decrypt action.** Hides names and covers any file, but is a
+separate feature beside the archive forms and its output opens only with `age` or this app.
+
+#### Decision
+
+Option A. The password is its own type, `archive::Password`, not a `String`: it is wiped when
+dropped, prints as `Password(..)` so a stray `{:?}` of a request or a prompt cannot leak it, and
+is capped at 256 characters in a buffer reserved up front, because a growing `String` leaves the
+old, unwiped allocation behind each time it reallocates. The compress functions refuse an empty
+password and a password with a tar format, so neither reaches the writer even if a caller forgets
+to check.
+
+The form does the user-facing checks: the confirmation must match, and a password with a tar
+format, whether picked on the Format row or implied by a typed `.tar.gz` name, is an error in the
+form. An archive made with a typo in its password is lost data, so a mismatch is caught before the
+job starts rather than after.
+
+Extraction asks in a prompt of its own and not in the extract form. The form is shown before the
+archive is known to be encrypted, and `:extract` has no form at all; both go through one
+`request_extract` that looks at the archives (`needs_password`) and opens the prompt only when one
+is encrypted. The password is checked against every encrypted archive of the batch before anything
+is written (`check_password` opens the first encrypted entry, where AES verifies the password
+up front), so a wrong guess asks again instead of failing halfway through a tree.
+
+Not solved, and logged in the roadmap: `:compress` cannot take a password, names stay visible by
+the nature of zip, and a per-entry password assembled by another tool is reported at the entry
+that fails.
+
+**Verification.** `scripts/check` passes. New tests: a round trip with a folder and a nested file,
+a password, no password and a wrong one telling `PasswordRequired` from `WrongPassword`, plain
+archives needing none and ignoring one, tar and an empty password refused with nothing written, a
+symlink surviving encryption, the password's redaction and cap, and a property test that any
+printable password seals and opens arbitrary bytes and a different one never does. For the forms:
+the dots, the mismatch and tar errors, a confirmed password reaching the request; through `App`:
+an encrypted compress, the prompt opening before anything is written, a right password extracting,
+a wrong one asking again with nothing written, `Esc` cancelling, an empty one not submitted, and a
+plain archive never prompting. One assumption I checked and got wrong: deflate bit-packs short
+text, so searching the archive's bytes for the plaintext proves nothing either way; the tests use
+`needs_password` and the refusal to open. Not tried in a real terminal or with another tool's
+reading of the archive.
 
 ---
 

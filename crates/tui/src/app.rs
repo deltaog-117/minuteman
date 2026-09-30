@@ -34,7 +34,7 @@ use anyhow::Result;
 use browser::BrowserState;
 use browser::search::{Outcome as SearchOutcome, Query};
 use crossterm::event::KeyCode;
-use file_ops::archive::{self, ExtractLimits, Format, Level};
+use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use plugins::PluginManager;
@@ -139,6 +139,14 @@ pub enum Prompt {
         path: PathBuf,
         buffer: String,
     },
+    /// The password for an encrypted archive about to be extracted, shown as dots. `archive` is
+    /// the one being asked about, `error` why the last try was not accepted.
+    ExtractPassword {
+        pending: PendingExtract,
+        archive: PathBuf,
+        buffer: Password,
+        error: Option<String>,
+    },
 }
 
 impl Prompt {
@@ -153,6 +161,7 @@ impl Prompt {
             Prompt::SearchInput { .. } => "SEARCH",
             Prompt::CommandInput { .. } => "COMMAND",
             Prompt::OpenOther { .. } => "OPEN WITH",
+            Prompt::ExtractPassword { .. } => "PASSWORD",
         }
     }
 
@@ -166,6 +175,7 @@ impl Prompt {
                 | Prompt::SearchInput { .. }
                 | Prompt::CommandInput { .. }
                 | Prompt::OpenOther { .. }
+                | Prompt::ExtractPassword { .. }
         )
     }
 
@@ -203,6 +213,20 @@ impl Prompt {
             Prompt::CommandInput { buffer } => format!(":{buffer}"),
             Prompt::OpenOther { path, buffer } => {
                 format!("open {} with: {buffer}", display_name(path))
+            }
+            Prompt::ExtractPassword {
+                archive,
+                buffer,
+                error,
+                ..
+            } => {
+                let dots = "•".repeat(buffer.char_count());
+                match error {
+                    Some(error) => {
+                        format!("{error} — password for {}: {dots}", display_name(archive))
+                    }
+                    None => format!("password for {}: {dots}", display_name(archive)),
+                }
             }
         }
     }
@@ -278,7 +302,16 @@ struct CompressJob {
     out: PathBuf,
 }
 
+/// An extract waiting for the password its archive needs.
+#[derive(Debug)]
+pub struct PendingExtract {
+    jobs: Vec<ExtractJob>,
+    policy: ConflictPolicy,
+    delete_archives: bool,
+}
+
 /// One archive to unpack: `archive` into the directory `dest`.
+#[derive(Debug)]
 struct ExtractJob {
     archive: PathBuf,
     dest: PathBuf,
@@ -1163,6 +1196,41 @@ impl App {
                 }
                 _ => self.prompt = Some(Prompt::OpenOther { path, buffer }),
             },
+            Prompt::ExtractPassword {
+                pending,
+                archive,
+                mut buffer,
+                ..
+            } => match code {
+                KeyCode::Esc => self.status = Some("extract cancelled".into()),
+                KeyCode::Enter => self.submit_extract_password(pending, archive, buffer),
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    self.prompt = Some(Prompt::ExtractPassword {
+                        pending,
+                        archive,
+                        buffer,
+                        error: None,
+                    });
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    self.prompt = Some(Prompt::ExtractPassword {
+                        pending,
+                        archive,
+                        buffer,
+                        error: None,
+                    });
+                }
+                _ => {
+                    self.prompt = Some(Prompt::ExtractPassword {
+                        pending,
+                        archive,
+                        buffer,
+                        error: None,
+                    });
+                }
+            },
             Prompt::CommandInput { mut buffer } => match code {
                 KeyCode::Esc => self.status = Some("command cancelled".into()),
                 KeyCode::Enter => flow = self.run_command(vfs, browser, &buffer)?,
@@ -1571,7 +1639,7 @@ impl App {
             true => self.status = Some("extract: no zip, tar or tar.gz selected".into()),
             false => {
                 let jobs = Self::extract_jobs_per_archive(browser.current_dir(), archives);
-                self.spawn_extract(jobs, ConflictPolicy::Abort, false);
+                self.request_extract(jobs, ConflictPolicy::Abort, false);
             }
         }
     }
@@ -1643,7 +1711,7 @@ impl App {
         {
             return Err(format!("{} already exists", display_name(&taken.dest)));
         }
-        self.spawn_extract(jobs, request.policy, request.delete_archives);
+        self.request_extract(jobs, request.policy, request.delete_archives);
         Ok(())
     }
 
@@ -1663,6 +1731,7 @@ impl App {
             vec![CompressJob { sources, out }],
             format,
             Level::default(),
+            None,
             false,
         );
     }
@@ -1679,6 +1748,79 @@ impl App {
         (tx, rx, Arc::new(AtomicBool::new(false)))
     }
 
+    /// Starts `jobs`, asking for a password first if any of the archives is encrypted.
+    fn request_extract(
+        &mut self,
+        jobs: Vec<ExtractJob>,
+        policy: ConflictPolicy,
+        delete_archives: bool,
+    ) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
+        // An archive that cannot even be opened is left for the extraction to report.
+        let asking = jobs
+            .iter()
+            .find(|job| archive::needs_password(&job.archive).unwrap_or(false))
+            .map(|job| job.archive.clone());
+        match asking {
+            None => self.spawn_extract(jobs, policy, delete_archives, None),
+            Some(archive) => {
+                self.prompt = Some(Prompt::ExtractPassword {
+                    pending: PendingExtract {
+                        jobs,
+                        policy,
+                        delete_archives,
+                    },
+                    archive,
+                    buffer: Password::new(),
+                    error: None,
+                });
+            }
+        }
+    }
+
+    /// Checks the typed password against every encrypted archive of the batch before anything is
+    /// written, and asks again if one is refused.
+    fn submit_extract_password(
+        &mut self,
+        pending: PendingExtract,
+        archive: PathBuf,
+        buffer: Password,
+    ) {
+        let reprompt = |pending, archive, error: &str| Prompt::ExtractPassword {
+            pending,
+            archive,
+            buffer: Password::new(),
+            error: Some(error.to_string()),
+        };
+        if buffer.is_empty() {
+            self.prompt = Some(reprompt(pending, archive, "type the password"));
+            return;
+        }
+        for job in &pending.jobs {
+            match archive::check_password(&job.archive, &buffer) {
+                Ok(()) => {}
+                Err(FileOpsError::WrongPassword) => {
+                    let error = format!("wrong password for {}", display_name(&job.archive));
+                    self.prompt = Some(reprompt(pending, archive, &error));
+                    return;
+                }
+                Err(e) => {
+                    self.status = Some(format!("extract failed: {e}"));
+                    return;
+                }
+            }
+        }
+        self.spawn_extract(
+            pending.jobs,
+            pending.policy,
+            pending.delete_archives,
+            Some(buffer),
+        );
+    }
+
     /// Starts one extraction per entry of `jobs`, in order, stopping at the first failure. With
     /// `delete_archives`, each archive goes to the trash once it has been extracted, so a failure
     /// never costs an archive its contents.
@@ -1687,6 +1829,7 @@ impl App {
         jobs: Vec<ExtractJob>,
         policy: ConflictPolicy,
         delete_archives: bool,
+        password: Option<Password>,
     ) {
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
@@ -1708,11 +1851,12 @@ impl App {
             };
             let mut result = Ok(Outcome::Completed);
             for job in &jobs {
-                if let Err(e) = archive::extract(
+                if let Err(e) = archive::extract_with_password(
                     &job.archive,
                     &job.dest,
                     policy,
                     ExtractLimits::default(),
+                    password.as_ref(),
                     &mut on_progress,
                 ) {
                     result = Err(e);
@@ -1743,6 +1887,7 @@ impl App {
         jobs: Vec<CompressJob>,
         format: Format,
         level: Level,
+        password: Option<Password>,
         delete_originals: bool,
     ) {
         if self.is_busy() {
@@ -1765,11 +1910,12 @@ impl App {
             };
             let mut result = Ok(Outcome::Completed);
             'jobs: for job in &jobs {
-                if let Err(e) = archive::compress_with_level(
+                if let Err(e) = archive::compress_with_options(
                     &job.sources,
                     &job.out,
                     format,
                     level,
+                    password.as_ref(),
                     ConflictPolicy::Abort,
                     &mut on_progress,
                 ) {
@@ -1849,6 +1995,7 @@ impl App {
             jobs,
             request.format,
             request.level,
+            request.password,
             request.delete_originals,
         );
         Ok(())
@@ -2314,6 +2461,7 @@ mod tests {
             dir: f.root.clone(),
             format: Format::TarGz,
             level: Level::Best,
+            password: None,
             layout,
             delete_originals: false,
         }
@@ -3147,6 +3295,112 @@ mod tests {
 
         f.browser.toggle_mark();
         assert!(f.app.require_marks(&f.browser));
+    }
+
+    fn password(text: &str) -> Password {
+        let mut password = Password::new();
+        text.chars().for_each(|c| password.push(c));
+        password
+    }
+
+    /// A fixture holding `sealed.zip`, made from a folder that held `inner/a.txt`, with the
+    /// password `open sesame`.
+    fn fixture_with_sealed_zip(name: &str) -> Fixture {
+        let mut f = Fixture::new(name);
+        std::fs::create_dir_all(f.root.join("proj/inner")).unwrap();
+        std::fs::write(f.root.join("proj/inner/a.txt"), b"alpha").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        let mut request = request(
+            &f,
+            &["proj"],
+            compress_popup::Layout::One {
+                file_name: "sealed.zip".into(),
+            },
+        );
+        request.format = Format::Zip;
+        request.password = Some(password("open sesame"));
+        f.app.start_compress(request).unwrap();
+        f.wait_for_idle();
+        std::fs::remove_dir_all(f.root.join("proj")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "sealed.zip");
+        f
+    }
+
+    #[test]
+    fn a_compress_with_a_password_makes_an_encrypted_zip() {
+        let f = fixture_with_sealed_zip("seal-compress");
+        assert!(archive::needs_password(&f.root.join("sealed.zip")).unwrap());
+    }
+
+    #[test]
+    fn extracting_an_encrypted_zip_asks_for_the_password_and_then_extracts() {
+        let mut f = fixture_with_sealed_zip("seal-extract");
+
+        f.run("extract");
+        assert!(matches!(f.app.prompt, Some(Prompt::ExtractPassword { .. })));
+        assert!(
+            !f.root.join("sealed").exists(),
+            "nothing is written before the password"
+        );
+        f.type_text("open sesame");
+        f.press(KeyCode::Enter);
+        f.wait_for_idle();
+
+        assert_eq!(
+            std::fs::read(f.root.join("sealed/proj/inner/a.txt")).unwrap(),
+            b"alpha"
+        );
+    }
+
+    #[test]
+    fn a_wrong_password_asks_again_and_writes_nothing() {
+        let mut f = fixture_with_sealed_zip("seal-wrong");
+
+        f.run("extract");
+        f.type_text("guess");
+        f.press(KeyCode::Enter);
+
+        let Some(Prompt::ExtractPassword { buffer, error, .. }) = &f.app.prompt else {
+            panic!("the prompt stays open");
+        };
+        assert!(buffer.is_empty(), "the wrong attempt is cleared");
+        assert!(error.as_deref().unwrap().contains("wrong password"));
+        assert!(!f.root.join("sealed").exists());
+        assert!(!f.app.is_busy());
+    }
+
+    #[test]
+    fn the_password_prompt_shows_dots_and_escape_cancels_the_extract() {
+        let mut f = fixture_with_sealed_zip("seal-prompt");
+
+        f.run("extract");
+        f.type_text("abc");
+        let shown = f.app.prompt.as_ref().unwrap().display();
+        assert!(shown.ends_with("•••") && !shown.contains("abc"), "{shown}");
+
+        f.press(KeyCode::Esc);
+        assert!(f.app.prompt.is_none());
+        assert_eq!(f.app.status.as_deref(), Some("extract cancelled"));
+        assert!(!f.root.join("sealed").exists());
+    }
+
+    #[test]
+    fn an_empty_password_is_not_submitted() {
+        let mut f = fixture_with_sealed_zip("seal-empty");
+
+        f.run("extract");
+        f.press(KeyCode::Enter);
+
+        assert!(matches!(f.app.prompt, Some(Prompt::ExtractPassword { .. })));
+    }
+
+    #[test]
+    fn extracting_a_plain_archive_never_asks_for_a_password() {
+        let mut f = fixture_with_archive("seal-plain");
+        f.run("extract");
+        assert!(f.app.prompt.is_none());
+        f.wait_for_idle();
     }
 
     #[test]

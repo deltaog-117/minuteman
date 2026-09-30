@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `file_ops`, `tui`: encrypted zip archives. The compress form has Password and Confirm password
+  rows (zip only) that seal the archive with AES-256; the legacy ZipCrypto scheme is never written.
+  Extracting an encrypted zip, through `:extract` or the extract form, asks for the password in a
+  masked prompt before writing anything and asks again after a wrong one. File names stay visible
+  in an encrypted zip (the form says so); only contents are sealed. The password is wiped from
+  memory when dropped and is never shown or logged.
 - `file_ops`, `trash`, `tui`, `theming`: undo history. `z` takes back the newest create, rename,
   move, copy or trash and `Z` does it again (`undo` and `redo` under `[keys]`); a batch such as a
   paste of several marked files, or a `:mkdir a b c`, is one step, and the last 100 are kept for

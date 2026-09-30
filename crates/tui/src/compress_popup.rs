@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::KeyCode;
-use file_ops::archive::{Format, Level};
+use file_ops::archive::{Format, Level, Password};
 
 /// The longest archive file name the form accepts, in characters. Well under the 255 bytes most
 /// filesystems allow, so the extension and a `.partial` sibling still fit.
@@ -38,6 +38,10 @@ pub enum Row {
     Name,
     Format,
     Level,
+    /// Seals a zip with this password; empty means no encryption.
+    Password,
+    /// The password typed again, to catch a slip before it locks the archive for good.
+    Confirm,
     /// Only offered when more than one item is being compressed.
     PerItem,
     DeleteOriginals,
@@ -49,6 +53,8 @@ impl Row {
             Row::Name => "Name",
             Row::Format => "Format",
             Row::Level => "Level",
+            Row::Password => "Password",
+            Row::Confirm => "Confirm password",
             Row::PerItem => "One per item",
             Row::DeleteOriginals => "Delete originals",
         }
@@ -72,6 +78,8 @@ pub struct Request {
     pub dir: PathBuf,
     pub format: Format,
     pub level: Level,
+    /// `Some` (never empty) only for a zip that is to be encrypted.
+    pub password: Option<Password>,
     pub layout: Layout,
     /// Send the originals to the trash once their archive is complete.
     pub delete_originals: bool,
@@ -94,6 +102,8 @@ pub struct CompressPopup {
     name: String,
     format: Format,
     level: Level,
+    password: Password,
+    confirm: Password,
     per_item: bool,
     delete_originals: bool,
     error: Option<String>,
@@ -105,7 +115,13 @@ impl CompressPopup {
         if sources.is_empty() {
             return None;
         }
-        let mut rows = vec![Row::Name, Row::Format, Row::Level];
+        let mut rows = vec![
+            Row::Name,
+            Row::Format,
+            Row::Level,
+            Row::Password,
+            Row::Confirm,
+        ];
         if sources.len() > 1 {
             rows.push(Row::PerItem);
         }
@@ -118,6 +134,8 @@ impl CompressPopup {
             cursor: 0,
             format: Format::Zip,
             level: Level::Normal,
+            password: Password::new(),
+            confirm: Password::new(),
             per_item: false,
             delete_originals: false,
             error: None,
@@ -167,6 +185,22 @@ impl CompressPopup {
         self.format != Format::Tar
     }
 
+    /// Whether the password rows are used: only a zip can be encrypted. (A typed `.tar.gz` name
+    /// also picks a format; `submit` checks that against a typed password too.)
+    pub fn password_applies(&self) -> bool {
+        self.format == Format::Zip
+    }
+
+    /// What to say under the form for the focused row, instead of the key hints, or `None`.
+    pub fn note(&self) -> Option<&'static str> {
+        match self.rows[self.cursor] {
+            Row::Password | Row::Confirm if self.password_applies() => {
+                Some("Zip only, AES-256. File names stay visible; only the contents are sealed.")
+            }
+            _ => None,
+        }
+    }
+
     /// The row's value as the form displays it. The Name row is drawn by the caller (it has a
     /// cursor and a fixed extension), so its value here is only the typed text.
     pub fn value(&self, row: Row) -> String {
@@ -180,6 +214,11 @@ impl CompressPopup {
             }
             .into(),
             Row::Level if !self.level_applies() => "(a plain tar is not compressed)".into(),
+            Row::Password | Row::Confirm if !self.password_applies() => {
+                "(a tar cannot be encrypted)".into()
+            }
+            Row::Password => masked(&self.password, "(none: not encrypted)"),
+            Row::Confirm => masked(&self.confirm, "(type it again)"),
             Row::Level => match self.level {
                 Level::Fast => "fast",
                 Level::Normal => "normal",
@@ -219,17 +258,19 @@ impl CompressPopup {
                     (Level::Best, true) | (Level::Normal, false) => Level::Fast,
                 };
             }
-            Row::Level => {}
+            Row::Level | Row::Password | Row::Confirm => {}
             Row::PerItem => self.per_item = !self.per_item,
             Row::DeleteOriginals => self.delete_originals = !self.delete_originals,
         }
     }
 
-    /// Up, down, `Tab` and `BackTab` move focus, wrapping. On the Name row characters are typed
-    /// and `Backspace` deletes; on any other row `j`/`k` also move, `h`/`l`/`Space`/the side
+    /// Up, down, `Tab` and `BackTab` move focus, wrapping. On the Name and password rows
+    /// characters are typed and `Backspace` deletes; on any other row `j`/`k` also move, `h`/`l`/`Space`/the side
     /// arrows change the value, and `Enter` starts the job from any row. `Esc` closes.
     pub fn key(&mut self, code: KeyCode) -> Key {
-        let on_name = self.rows[self.cursor] == Row::Name;
+        let row = self.rows[self.cursor];
+        let on_name = row == Row::Name;
+        let on_password = matches!(row, Row::Password | Row::Confirm) && self.password_applies();
         match code {
             KeyCode::Esc => return Key::Close,
             KeyCode::Enter => return self.submit(),
@@ -245,6 +286,14 @@ impl CompressPopup {
                 self.name.pop();
                 self.error = None;
             }
+            KeyCode::Char(c) if on_password => {
+                self.typed_password(row).push(c);
+                self.error = None;
+            }
+            KeyCode::Backspace if on_password => {
+                self.typed_password(row).pop();
+                self.error = None;
+            }
             KeyCode::Char('j') => self.step(1),
             KeyCode::Char('k') => self.step(self.rows.len() - 1),
             KeyCode::Left | KeyCode::Char('h') => self.cycle(false),
@@ -252,6 +301,13 @@ impl CompressPopup {
             _ => {}
         }
         Key::Stay
+    }
+
+    fn typed_password(&mut self, row: Row) -> &mut Password {
+        match row {
+            Row::Confirm => &mut self.confirm,
+            _ => &mut self.password,
+        }
     }
 
     fn step(&mut self, by: usize) {
@@ -282,11 +338,25 @@ impl CompressPopup {
                 file_name: format!("{base}.{}", format.extension()),
             }
         };
+        // An empty password means no encryption; one that was typed must be confirmed, and only a
+        // zip can hold it, so a slip or a mismatch is an error here rather than a locked archive.
+        let password = if self.password.is_empty() && self.confirm.is_empty() {
+            None
+        } else if self.password != self.confirm {
+            self.error = Some("the passwords do not match".into());
+            return Key::Stay;
+        } else if format != Format::Zip {
+            self.error = Some("only a zip can be encrypted: pick zip or clear the password".into());
+            return Key::Stay;
+        } else {
+            Some(self.password.clone())
+        };
         Key::Submit(Request {
             sources: self.sources.clone(),
             dir: self.dir.clone(),
             format,
             level: self.level,
+            password,
             layout,
             delete_originals: self.delete_originals,
         })
@@ -332,6 +402,14 @@ fn display_name(path: &Path) -> String {
     )
 }
 
+/// A password as the form shows it: one dot per character, or `empty` when nothing is typed.
+fn masked(password: &Password, empty: &str) -> String {
+    match password.char_count() {
+        0 => empty.into(),
+        n => "•".repeat(n),
+    }
+}
+
 fn yes_no(on: bool, detail: &str) -> String {
     if on {
         format!("yes — {detail}")
@@ -360,6 +438,11 @@ mod tests {
         while !popup.name().is_empty() {
             popup.key(KeyCode::Backspace);
         }
+    }
+
+    fn focus_row(popup: &mut CompressPopup, row: Row) {
+        let index = popup.rows().iter().position(|&r| r == row).unwrap();
+        popup.focus(index);
     }
 
     fn submitted(key: Key) -> Request {
@@ -460,15 +543,15 @@ mod tests {
     #[test]
     fn the_level_is_chosen_and_ignored_for_a_plain_tar() {
         let mut p = popup(&["x"]);
-        p.focus(2);
+        focus_row(&mut p, Row::Level);
         p.key(KeyCode::Right);
         assert_eq!(submitted(p.key(KeyCode::Enter)).level, Level::Best);
 
-        p.focus(1);
+        focus_row(&mut p, Row::Format);
         p.key(KeyCode::Left);
         assert_eq!(p.format(), Format::Tar);
         assert!(!p.level_applies());
-        p.focus(2);
+        focus_row(&mut p, Row::Level);
         p.key(KeyCode::Right);
         assert_eq!(submitted(p.key(KeyCode::Enter)).level, Level::Best);
         assert_eq!(p.value(Row::Level), "(a plain tar is not compressed)");
@@ -513,11 +596,10 @@ mod tests {
     #[test]
     fn one_archive_per_item_ignores_the_name() {
         let mut p = popup(&["a", "b"]);
-        p.focus(3);
-        assert_eq!(p.rows()[3], Row::PerItem);
+        focus_row(&mut p, Row::PerItem);
         p.key(KeyCode::Char(' '));
         assert!(!p.name_applies());
-        p.focus(0);
+        focus_row(&mut p, Row::Name);
         type_text(&mut p, "zzz");
         assert_eq!(p.name(), "archive");
         let request = submitted(p.key(KeyCode::Enter));
@@ -528,12 +610,95 @@ mod tests {
     #[test]
     fn delete_originals_toggles() {
         let mut p = popup(&["x"]);
-        p.focus(3);
-        assert_eq!(p.rows()[3], Row::DeleteOriginals);
+        focus_row(&mut p, Row::DeleteOriginals);
         p.key(KeyCode::Right);
         assert!(submitted(p.key(KeyCode::Enter)).delete_originals);
         p.key(KeyCode::Right);
         assert!(!submitted(p.key(KeyCode::Enter)).delete_originals);
+    }
+
+    fn type_password(popup: &mut CompressPopup, row: Row, text: &str) {
+        focus_row(popup, row);
+        type_text(popup, text);
+    }
+
+    #[test]
+    fn no_password_means_no_encryption() {
+        let mut p = popup(&["x"]);
+        assert_eq!(submitted(p.key(KeyCode::Enter)).password, None);
+    }
+
+    #[test]
+    fn a_confirmed_password_is_submitted_with_the_request() {
+        let mut p = popup(&["x"]);
+        type_password(&mut p, Row::Password, "hunter2 j k");
+        type_password(&mut p, Row::Confirm, "hunter2 j k");
+
+        let request = submitted(p.key(KeyCode::Enter));
+
+        let mut expected = Password::new();
+        "hunter2 j k".chars().for_each(|c| expected.push(c));
+        assert_eq!(request.password, Some(expected));
+        assert_eq!(request.format, Format::Zip);
+    }
+
+    #[test]
+    fn a_mismatched_or_unconfirmed_password_is_an_error_not_a_job() {
+        let mut p = popup(&["x"]);
+        type_password(&mut p, Row::Password, "one");
+        assert_eq!(p.key(KeyCode::Enter), Key::Stay);
+        assert_eq!(p.error(), Some("the passwords do not match"));
+
+        type_password(&mut p, Row::Confirm, "two");
+        assert_eq!(p.key(KeyCode::Enter), Key::Stay);
+        assert_eq!(p.error(), Some("the passwords do not match"));
+    }
+
+    #[test]
+    fn a_password_with_a_tar_format_is_an_error_until_cleared() {
+        let mut p = popup(&["x"]);
+        type_password(&mut p, Row::Password, "pw");
+        type_password(&mut p, Row::Confirm, "pw");
+        focus_row(&mut p, Row::Format);
+        p.key(KeyCode::Right);
+        assert_eq!(p.format(), Format::TarGz);
+        assert!(!p.password_applies());
+
+        assert_eq!(p.key(KeyCode::Enter), Key::Stay);
+        assert!(p.error().unwrap().contains("only a zip"));
+        assert_eq!(p.value(Row::Password), "(a tar cannot be encrypted)");
+    }
+
+    #[test]
+    fn a_typed_tar_extension_with_a_password_is_refused_too() {
+        let mut p = popup(&["x"]);
+        type_password(&mut p, Row::Password, "pw");
+        type_password(&mut p, Row::Confirm, "pw");
+        focus_row(&mut p, Row::Name);
+        clear_name(&mut p);
+        type_text(&mut p, "a.tar.gz");
+
+        assert_eq!(p.key(KeyCode::Enter), Key::Stay);
+        assert!(p.error().unwrap().contains("only a zip"));
+    }
+
+    #[test]
+    fn the_password_is_shown_as_dots_and_never_as_text() {
+        let mut p = popup(&["x"]);
+        type_password(&mut p, Row::Password, "secret");
+
+        assert_eq!(p.value(Row::Password), "••••••");
+        assert!(!format!("{:?}", p.key(KeyCode::Enter)).contains("secret"));
+        p.key(KeyCode::Backspace);
+        assert_eq!(p.value(Row::Password), "•••••");
+    }
+
+    #[test]
+    fn the_password_rows_warn_that_names_stay_visible() {
+        let mut p = popup(&["x"]);
+        assert!(p.note().is_none());
+        focus_row(&mut p, Row::Password);
+        assert!(p.note().unwrap().contains("File names stay visible"));
     }
 
     #[test]
@@ -553,7 +718,7 @@ mod tests {
             for c in typed {
                 p.key(KeyCode::Char(c));
             }
-            p.focus(1);
+            focus_row(&mut p, Row::Format);
             for _ in 0..format_steps {
                 p.key(KeyCode::Right);
             }

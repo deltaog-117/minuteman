@@ -1009,6 +1009,24 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ---
 
+- ✅ **Encrypted archives (COA A: zip AES-256)** – the compress form has **Password** and
+  **Confirm password** rows (typed as dots; greyed for tar; a note under the form says the names
+  stay visible), and an encrypted zip is sealed with AES-256 through the `zip` crate's `aes-crypto`
+  feature (a handful of RustCrypto crates: `aes`, `hmac`, `pbkdf2`, `sha1`, `zeroize`). Chosen over
+  7z with header encryption (B) and a standalone `age` encrypt/decrypt action (C). A mismatched
+  confirmation, or a password with a tar format (including a typed `.tar.gz` name), is an error in
+  the form rather than a locked archive. Extracting an encrypted zip, from `:extract` or the
+  right-click form, opens a masked **PASSWORD** prompt before anything is written; the password is
+  checked against every encrypted archive of the batch first, a wrong one is refused with the
+  archive's name and asked for again, and `Esc` cancels. New in `file_ops::archive`: `Password`
+  (wiped on drop, redacted in `Debug`, capped at 256 characters in a buffer that never
+  reallocates), `compress_with_options`, `extract_with_password`, `needs_password` and
+  `check_password`, and the errors `PasswordRequired`, `WrongPassword`, `EmptyPassword` and
+  `EncryptionNeedsZip`. Legacy ZipCrypto is never written. Property-tested: any printable password
+  seals and opens arbitrary content, and a different one never does.
+
+---
+
 - ✅ **Undo history (COA A: inverse-operation journal)** – `z` takes back the newest create, rename,
   move, copy or trash and `Z` does it again (`undo`/`redo` under `[keys]`). Chosen over an
   app-owned holding area for deleted data (B) and a reverse-only popup (C). A new
@@ -1038,14 +1056,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟡 Medium Priority (Important)
 
-- **Encrypted archives (password)** – the compress form has no password field yet, and extraction
-  cannot open an encrypted zip. Plan: zip AES-256 through the `zip` crate's `aes-crypto` feature
-  (about seven small RustCrypto-family crates), a masked password and confirm field on the form
-  (greyed for tar, which has no encryption) held in a zeroize-on-drop buffer and never logged or
-  shown in the status line, and a password prompt on extract so an archive made here can be opened
-  here. Legacy ZipCrypto is refused as trivially breakable. The form must say that zip encryption
-  does not hide file names (anyone can still list what is inside); hiding them needs 7z. Wrong
-  password and unsupported-encryption errors need their own messages.
 - **Archives, remainder** – there is no key binding for the compress form (only the right-click
   menu, `:compress` and `:extract`); the compress form has no destination folder (archives go
   beside the originals) and neither form warns live as you type a name that exists; `:compress` and
@@ -1056,6 +1066,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   central directory is read whole into memory on extraction (the preview refuses oversized ones,
   extraction does not yet); extracting from inside an archive (browsing it as a directory) is not
   done.
+- **Encrypted archives, follow-ups** – `:compress` has no way to take a password (only the form
+  does); hiding file names needs 7z, which is not supported; an encrypted zip that uses a method
+  this build cannot read is reported as damaged rather than as unsupported encryption; one password
+  is checked for a whole batch (by the first encrypted entry of each archive), so an archive made
+  elsewhere with a different password per entry fails on that entry during extraction; the password
+  is asked for again after a wrong one but there is no limit on tries; legacy ZipCrypto archives
+  can be opened (they are common) but are never written; and encrypted archives cannot be
+  previewed beyond their listing.
 - **Undo history, follow-ups** – undo runs on the render thread, so taking back a large
   cross-device move stalls the interface until it finishes (a background job with progress and
   cancel would fix it); there is no history popup listing the stack to pick from; a compress that

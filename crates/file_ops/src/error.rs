@@ -42,6 +42,14 @@ pub enum FileOpsError {
     NothingToArchive,
     #[error("name cannot be stored in the archive: {0}")]
     UnarchivableName(PathBuf),
+    #[error("a password is needed to open {0}")]
+    PasswordRequired(PathBuf),
+    #[error("wrong password")]
+    WrongPassword,
+    #[error("the password is empty")]
+    EmptyPassword,
+    #[error("only zip archives can be encrypted")]
+    EncryptionNeedsZip,
     #[error("could not send to trash: {0}")]
     Trash(#[from] trash::TrashError),
 }

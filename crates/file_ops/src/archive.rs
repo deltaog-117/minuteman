@@ -38,6 +38,11 @@
 //! Writing an archive goes to a hidden sibling file that replaces the target only once complete,
 //! so a cancelled or failed run never leaves a half-written archive under the real name.
 //! Symlinks are stored as links, never followed. Zip entries carry no modification time.
+//!
+//! A zip can be encrypted with a [`Password`]: every file in it (and every symlink's target) is
+//! sealed with AES-256, the strong WinZip-style scheme. The legacy ZipCrypto scheme is never
+//! written, because it is broken. Encryption hides what is in the files, not what they are
+//! called: anyone can still list an encrypted zip's names and sizes. A tar cannot be encrypted.
 
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -47,10 +52,72 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use shared::VfsError;
+use zeroize::Zeroizing;
 
 use crate::{
     ConflictPolicy, FileOpsError, Outcome, ProgressFn, guard_distinct, guard_not_recursive, report,
 };
+
+/// The most characters a [`Password`] holds. The buffer is reserved at this size up front, so it
+/// never reallocates and leaves an old, unwiped copy of the password behind as it grows.
+const MAX_PASSWORD_CHARS: usize = 256;
+
+/// A password for an encrypted archive. It is wiped from memory when dropped, never shown by
+/// `Debug`, and capped at [`MAX_PASSWORD_CHARS`] characters.
+#[derive(Clone)]
+pub struct Password(Zeroizing<String>);
+
+impl Default for Password {
+    fn default() -> Self {
+        // Four bytes is the most one `char` takes in UTF-8.
+        Self(Zeroizing::new(String::with_capacity(
+            MAX_PASSWORD_CHARS * 4,
+        )))
+    }
+}
+
+impl Password {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds `c`, unless it is a control character or the password is already as long as allowed.
+    pub fn push(&mut self, c: char) {
+        if !c.is_control() && self.char_count() < MAX_PASSWORD_CHARS {
+            self.0.push(c);
+        }
+    }
+
+    pub fn pop(&mut self) {
+        self.0.pop();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn char_count(&self) -> usize {
+        self.0.chars().count()
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Password {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Password(..)")
+    }
+}
+
+impl PartialEq for Password {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_bytes() == other.0.as_bytes()
+    }
+}
+
+impl Eq for Password {}
 
 /// The archive formats that can be read and written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +311,22 @@ pub fn extract(
     limits: ExtractLimits,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<ExtractSummary, FileOpsError> {
+    extract_with_password(archive, dest, policy, limits, None, on_progress)
+}
+
+/// [`extract`] for an archive that may be encrypted. `password` is used for the entries that need
+/// one and ignored for the rest (and for a tar, which has none). An encrypted entry with no
+/// password fails with [`FileOpsError::PasswordRequired`], a wrong one with
+/// [`FileOpsError::WrongPassword`]; call [`check_password`] first to find out before anything is
+/// written.
+pub fn extract_with_password(
+    archive: &Path,
+    dest: &Path,
+    policy: ConflictPolicy,
+    limits: ExtractLimits,
+    password: Option<&Password>,
+    on_progress: &mut ProgressFn<'_>,
+) -> Result<ExtractSummary, FileOpsError> {
     let format = Format::of(archive)
         .ok_or_else(|| FileOpsError::UnsupportedArchive(archive.to_path_buf()))?;
     let file = File::open(archive).map_err(io_error(archive))?;
@@ -259,7 +342,7 @@ pub fn extract(
         bytes: 0,
     };
     match format {
-        Format::Zip => extract_zip(file, &mut sink)?,
+        Format::Zip => extract_zip(file, archive, password, &mut sink)?,
         Format::Tar => extract_tar(BufReader::new(file), &mut sink)?,
         Format::TarGz => {
             // Tar headers and padding come on top of the file data; this is generous for them.
@@ -273,10 +356,70 @@ pub fn extract(
     Ok(sink.summary)
 }
 
-fn extract_zip(file: File, sink: &mut Sink<'_>) -> Result<(), FileOpsError> {
+/// Whether any entry of `archive` is encrypted, so a password has to be asked for before it is
+/// extracted. Only a zip can be.
+pub fn needs_password(archive: &Path) -> Result<bool, FileOpsError> {
+    Ok(first_encrypted(archive)?.is_some())
+}
+
+/// Checks `password` against `archive` without extracting anything: `Ok` if nothing in it is
+/// encrypted or the password opens the first encrypted entry, [`FileOpsError::WrongPassword`] if
+/// it does not. (Every entry of an archive made here shares one password; one assembled by another
+/// tool may not, and then the extraction itself reports the entry that fails.)
+pub fn check_password(archive: &Path, password: &Password) -> Result<(), FileOpsError> {
+    let Some(index) = first_encrypted(archive)? else {
+        return Ok(());
+    };
+    let file = File::open(archive).map_err(io_error(archive))?;
+    let mut zip = zip::ZipArchive::new(BufReader::new(file)).map_err(damaged)?;
+    zip.by_index_with_options(index, read_options(Some(password)))
+        .map(drop)
+        .map_err(|e| zip_error(e, archive))
+}
+
+/// The index of the first encrypted entry of a zip, or `None` for one with none and for any
+/// other format.
+fn first_encrypted(archive: &Path) -> Result<Option<usize>, FileOpsError> {
+    if Format::of(archive) != Some(Format::Zip) {
+        return Ok(None);
+    }
+    let file = File::open(archive).map_err(io_error(archive))?;
+    let mut zip = zip::ZipArchive::new(BufReader::new(file)).map_err(damaged)?;
+    for index in 0..zip.len() {
+        if zip.by_index_raw(index).map_err(damaged)?.encrypted() {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn read_options(password: Option<&Password>) -> zip::ZipReadOptions<'_> {
+    zip::ZipReadOptions::new().password(password.map(|p| p.as_str().as_bytes()))
+}
+
+/// A zip error with the two password failures told apart from a damaged archive.
+fn zip_error(error: zip::result::ZipError, archive: &Path) -> FileOpsError {
+    use zip::result::ZipError;
+    match error {
+        ZipError::InvalidPassword => FileOpsError::WrongPassword,
+        ZipError::UnsupportedArchive(reason) if reason == ZipError::PASSWORD_REQUIRED => {
+            FileOpsError::PasswordRequired(archive.to_path_buf())
+        }
+        other => damaged(other),
+    }
+}
+
+fn extract_zip(
+    file: File,
+    path: &Path,
+    password: Option<&Password>,
+    sink: &mut Sink<'_>,
+) -> Result<(), FileOpsError> {
     let mut archive = zip::ZipArchive::new(BufReader::new(file)).map_err(damaged)?;
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(damaged)?;
+        let mut entry = archive
+            .by_index_with_options(index, read_options(password))
+            .map_err(|e| zip_error(e, path))?;
         // Some Windows tools write `\` between names; a zip's separator is `/`.
         let name = PathBuf::from(entry.name().replace('\\', "/"));
         let mode = entry.unix_mode();
@@ -586,6 +729,32 @@ pub fn compress_with_level(
     policy: ConflictPolicy,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<Outcome, FileOpsError> {
+    compress_with_options(sources, out, format, level, None, policy, on_progress)
+}
+
+/// [`compress_with_level`], optionally sealing a zip with `password` (AES-256).
+///
+/// # Errors
+///
+/// As [`compress`], plus [`FileOpsError::EmptyPassword`] for an empty password and
+/// [`FileOpsError::EncryptionNeedsZip`] for a password given with a tar format.
+pub fn compress_with_options(
+    sources: &[PathBuf],
+    out: &Path,
+    format: Format,
+    level: Level,
+    password: Option<&Password>,
+    policy: ConflictPolicy,
+    on_progress: &mut ProgressFn<'_>,
+) -> Result<Outcome, FileOpsError> {
+    if let Some(password) = password {
+        if password.is_empty() {
+            return Err(FileOpsError::EmptyPassword);
+        }
+        if format != Format::Zip {
+            return Err(FileOpsError::EncryptionNeedsZip);
+        }
+    }
     if sources.is_empty() {
         return Err(FileOpsError::NothingToArchive);
     }
@@ -609,7 +778,7 @@ pub fn compress_with_level(
     }
 
     let partial = partial_path(out)?;
-    let written = write_archive(sources, &partial, format, level, on_progress)
+    let written = write_archive(sources, &partial, format, level, password, on_progress)
         .and_then(|()| fs::rename(&partial, out).map_err(io_error(out)));
     if written.is_err() {
         let _ = fs::remove_file(&partial);
@@ -633,6 +802,7 @@ fn write_archive(
     partial: &Path,
     format: Format,
     level: Level,
+    password: Option<&Password>,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<(), FileOpsError> {
     let file = OpenOptions::new()
@@ -643,7 +813,7 @@ fn write_archive(
     let sink = BufWriter::new(file);
     match format {
         Format::Zip => {
-            let mut packer = ZipPacker(zip::ZipWriter::new(sink), level);
+            let mut packer = ZipPacker(zip::ZipWriter::new(sink), level, password);
             walk(sources, &mut packer, on_progress)?;
             let mut sink = packer.0.finish().map_err(damaged)?;
             sink.flush().map_err(io_error(partial))
@@ -733,9 +903,9 @@ impl<W: Write> Packer for TarPacker<W> {
     }
 }
 
-struct ZipPacker<W: Write + io::Seek>(zip::ZipWriter<W>, Level);
+struct ZipPacker<'p, W: Write + io::Seek>(zip::ZipWriter<W>, Level, Option<&'p Password>);
 
-impl<W: Write + io::Seek> Packer for ZipPacker<W> {
+impl<W: Write + io::Seek> Packer for ZipPacker<'_, W> {
     fn add(&mut self, real: &Path, name: &Path, meta: &Metadata) -> Result<(), FileOpsError> {
         let stored = zip_name(name)?;
         let options = zip::write::SimpleFileOptions::default()
@@ -745,8 +915,14 @@ impl<W: Write + io::Seek> Packer for ZipPacker<W> {
             .large_file(meta.len() > u64::from(u32::MAX));
         let kind = meta.file_type();
         if kind.is_dir() {
-            self.0.add_directory(stored, options).map_err(damaged)
-        } else if kind.is_symlink() {
+            // A folder's entry holds no data, so there is nothing in it to seal.
+            return self.0.add_directory(stored, options).map_err(damaged);
+        }
+        let options = match self.2 {
+            Some(password) => options.with_aes_encryption(zip::AesMode::Aes256, password.as_str()),
+            None => options,
+        };
+        if kind.is_symlink() {
             let target = fs::read_link(real).map_err(io_error(real))?;
             let target = target
                 .to_str()
@@ -1327,6 +1503,236 @@ mod tests {
                 .as_path(),
             Path::new("a/b")
         );
+    }
+
+    // ---- encryption ----
+
+    fn secret(text: &str) -> Password {
+        let mut password = Password::new();
+        text.chars().for_each(|c| password.push(c));
+        password
+    }
+
+    fn pack_with(sources: &[PathBuf], out: &Path, format: Format, password: Option<&Password>) {
+        compress_with_options(
+            sources,
+            out,
+            format,
+            Level::default(),
+            password,
+            ConflictPolicy::Abort,
+            &mut go,
+        )
+        .unwrap();
+    }
+
+    fn unpack_with(
+        archive: &Path,
+        dest: &Path,
+        password: Option<&Password>,
+    ) -> Result<ExtractSummary, FileOpsError> {
+        extract_with_password(
+            archive,
+            dest,
+            ConflictPolicy::Abort,
+            ExtractLimits::default(),
+            password,
+            &mut go,
+        )
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// A folder with one text file and one nested file, for the encryption tests.
+    fn sealed_tree(root: &Path) -> PathBuf {
+        let tree = root.join("docs");
+        fs::create_dir_all(tree.join("inner")).unwrap();
+        fs::write(tree.join("plan.txt"), "the launch is on friday").unwrap();
+        fs::write(tree.join("inner/deep.txt"), "nested secret").unwrap();
+        tree
+    }
+
+    #[test]
+    fn an_encrypted_zip_round_trips_with_its_password() {
+        let dir = scratch("enc-roundtrip");
+        let tree = sealed_tree(&dir);
+        let out = dir.join("sealed.zip");
+        let password = secret("correct horse");
+
+        pack_with(&[tree], &out, Format::Zip, Some(&password));
+        let dest = dir.join("out");
+        unpack_with(&out, &dest, Some(&password)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dest.join("docs/plan.txt")).unwrap(),
+            "the launch is on friday"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("docs/inner/deep.txt")).unwrap(),
+            "nested secret"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_contents_are_sealed_but_the_names_are_still_listed() {
+        let dir = scratch("enc-names");
+        let tree = sealed_tree(&dir);
+        let plain = dir.join("plain.zip");
+        let sealed = dir.join("sealed.zip");
+
+        pack_with(std::slice::from_ref(&tree), &plain, Format::Zip, None);
+        pack_with(&[tree], &sealed, Format::Zip, Some(&secret("pw")));
+
+        // Deflate bit-packs text, so looking for it in the bytes proves nothing either way; the
+        // archive being marked encrypted, and refusing to open without a password, is the proof.
+        assert!(!needs_password(&plain).unwrap());
+        assert!(needs_password(&sealed).unwrap());
+        let sealed_bytes = fs::read(&sealed).unwrap();
+        // What encryption does not hide, and the form says so.
+        assert!(contains(&sealed_bytes, b"docs/plan.txt"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_encrypted_zip_needs_a_password_and_a_wrong_one_is_told_apart() {
+        let dir = scratch("enc-errors");
+        let tree = sealed_tree(&dir);
+        let out = dir.join("sealed.zip");
+        pack_with(&[tree], &out, Format::Zip, Some(&secret("right")));
+        let dest = dir.join("out");
+
+        assert!(needs_password(&out).unwrap());
+        assert!(matches!(
+            unpack_with(&out, &dest, None),
+            Err(FileOpsError::PasswordRequired(_))
+        ));
+        assert!(matches!(
+            unpack_with(&out, &dest, Some(&secret("wrong"))),
+            Err(FileOpsError::WrongPassword)
+        ));
+        assert!(matches!(
+            check_password(&out, &secret("wrong")),
+            Err(FileOpsError::WrongPassword)
+        ));
+        check_password(&out, &secret("right")).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_plain_archive_needs_no_password_and_ignores_one() {
+        let dir = scratch("enc-plain");
+        let tree = sealed_tree(&dir);
+        let zip = dir.join("a.zip");
+        let tar = dir.join("a.tar");
+        pack_with(std::slice::from_ref(&tree), &zip, Format::Zip, None);
+        pack_with(&[tree], &tar, Format::Tar, None);
+
+        assert!(!needs_password(&zip).unwrap());
+        assert!(!needs_password(&tar).unwrap());
+        check_password(&zip, &secret("anything")).unwrap();
+        unpack_with(&zip, &dir.join("z"), Some(&secret("anything"))).unwrap();
+        unpack_with(&tar, &dir.join("t"), Some(&secret("anything"))).unwrap();
+        assert!(dir.join("z/docs/plan.txt").exists() && dir.join("t/docs/plan.txt").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_password_is_refused_for_a_tar_and_when_empty() {
+        let dir = scratch("enc-refused");
+        let tree = sealed_tree(&dir);
+        let opts = |format, password: &Password| {
+            compress_with_options(
+                std::slice::from_ref(&tree),
+                &dir.join("x"),
+                format,
+                Level::default(),
+                Some(password),
+                ConflictPolicy::Abort,
+                &mut go,
+            )
+        };
+
+        assert!(matches!(
+            opts(Format::TarGz, &secret("pw")),
+            Err(FileOpsError::EncryptionNeedsZip)
+        ));
+        assert!(matches!(
+            opts(Format::Tar, &secret("pw")),
+            Err(FileOpsError::EncryptionNeedsZip)
+        ));
+        assert!(matches!(
+            opts(Format::Zip, &Password::new()),
+            Err(FileOpsError::EmptyPassword)
+        ));
+        assert!(!dir.join("x").exists(), "a refused job writes nothing");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_an_encrypted_zip_comes_back_as_a_symlink() {
+        let dir = scratch("enc-link");
+        let tree = dir.join("t");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink("real.txt", tree.join("link")).unwrap();
+        let out = dir.join("sealed.zip");
+        let password = secret("pw");
+
+        pack_with(&[tree], &out, Format::Zip, Some(&password));
+        let dest = dir.join("out");
+        unpack_with(&out, &dest, Some(&password)).unwrap();
+
+        assert_eq!(
+            fs::read_link(dest.join("t/link")).unwrap(),
+            PathBuf::from("real.txt")
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_password_hides_itself_from_debug_output_and_stays_within_its_cap() {
+        let mut password = secret("hunter2");
+        assert_eq!(format!("{password:?}"), "Password(..)");
+
+        password.push('\n');
+        assert_eq!(password.char_count(), 7, "control characters are not typed");
+        for _ in 0..MAX_PASSWORD_CHARS * 2 {
+            password.push('é');
+        }
+        assert_eq!(password.char_count(), MAX_PASSWORD_CHARS);
+        password.pop();
+        assert_eq!(password.char_count(), MAX_PASSWORD_CHARS - 1);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        /// Any printable password seals and opens whatever the content is, and a different one
+        /// never does.
+        #[test]
+        fn a_sealed_zip_opens_only_with_its_own_password(
+            password in "[ -~]{1,24}",
+            other in "[ -~]{1,24}",
+            content in prop::collection::vec(any::<u8>(), 0..400),
+        ) {
+            let dir = scratch("enc-prop");
+            fs::write(dir.join("f.bin"), &content).unwrap();
+            let out = dir.join("a.zip");
+            let right = secret(&password);
+            pack_with(&[dir.join("f.bin")], &out, Format::Zip, Some(&right));
+
+            unpack_with(&out, &dir.join("ok"), Some(&right)).unwrap();
+            prop_assert_eq!(fs::read(dir.join("ok/f.bin")).unwrap(), content);
+
+            if other != password {
+                prop_assert!(unpack_with(&out, &dir.join("no"), Some(&secret(&other))).is_err());
+            }
+            fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     proptest! {

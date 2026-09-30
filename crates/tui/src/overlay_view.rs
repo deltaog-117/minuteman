@@ -293,6 +293,7 @@ pub fn render_compress(frame: &mut Frame<'_>, popup: &CompressPopup, config: &Co
         let inert = match row {
             CompressRow::Name => !popup.name_applies(),
             CompressRow::Level => !popup.level_applies(),
+            CompressRow::Password | CompressRow::Confirm => !popup.password_applies(),
             _ => false,
         };
         let mut spans = vec![Span::styled(
@@ -329,7 +330,12 @@ pub fn render_compress(frame: &mut Frame<'_>, popup: &CompressPopup, config: &Co
         None => Line::raw(""),
     });
     lines.push(Line::styled(
-        "↑/↓ move, ←/→ or Space change, Enter compress, Esc cancel",
+        fit_width(
+            popup
+                .note()
+                .unwrap_or("↑/↓ move, ←/→ or Space change, Enter compress, Esc cancel"),
+            usize::from(inner.width),
+        ),
         dim_style,
     ));
     frame.render_widget(Paragraph::new(lines), inner);
