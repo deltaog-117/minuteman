@@ -164,6 +164,12 @@ quit_to_cwd = ["Q"]
 yank = ["y"]
 cut = ["d"]
 paste = ["p"]
+# Takes back the newest file operation: a create, rename, move, copy or trash (a whole batch, such
+# as a paste of several marked files, is one step). Redo does it again. Permanent deletes,
+# overwrites, compress/extract and what a `:` shell command does cannot be undone. A created file
+# is only removed while it is still empty, and an undone copy goes to the trash.
+undo = ["z"]
+redo = ["Z"]
 # Sends every marked entry (see `select` below) to the desktop trash if any are marked, else the
 # current selection — the same trash Nautilus/Dolphin/Explorer/Finder use. Confirms with "y" or
 # enter, since this is reversible. ":trash" does the same thing from the `:` prompt.

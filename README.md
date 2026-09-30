@@ -125,6 +125,7 @@ named `init` must be passed as `./init`.
 | `v`         | mark the entry under the cursor; `y`, `d`, `x` and `X` work on marked entries only |
 | `y`         | yank (copy) the marked entries                |
 | `d`         | cut (move) the marked entries                 |
+| `z` / `Z`   | undo / redo the last create, rename, move, copy or trash (a whole batch is one step) |
 | `p`         | paste                                         |
 | `x`         | delete the marked entries to the trash (confirm `y`/N) |
 | `X`         | delete the marked entries permanently (confirm `y`) |
@@ -294,6 +295,8 @@ quit = ["q"]
 yank = ["y"]
 cut = ["d"]
 paste = ["p"]
+undo = ["z"]
+redo = ["Z"]
 delete = ["x"]
 rename = ["r"]
 create = ["n"]

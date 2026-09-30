@@ -63,6 +63,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-29 | Mouse Stage 2 | `Ctrl`-click toggles, a configurable range modifier (`Shift` or `Alt`, both by default) marks a span, header path segments and middle-click navigate (COA B), over the roadmap's `Shift` only (A) or a two-cycle split (C) | ✅ Confirmed |
 | 2026-09-29 | Mouse Stage 3 | Drag and drop with a pure state machine, a pointer label and lit target, drops on both file columns, up a level, and shell panes, plus edge auto-scroll (COA C), over a release-only drop (A) or feedback without shell and scroll (B) | ✅ Confirmed |
 | 2026-09-29 | Open With | Read the shared MIME database, `mimeapps.list`, `mimeinfo.cache` and `.desktop` files in-process, with `[[open_rule]]`, `enter`-to-open and "Other…" (COA A), over shelling out to `xdg-mime`/`gio` (B) or a hybrid launching through `gio` (C) | ✅ Confirmed |
+| 2026-09-30 | Undo History | Inverse-operation journal in `file_ops::history`, batches as one step, conservative reverts, trash restored through the `trash` crate (COA A), over a holding area for deleted data (B) or a reverse-only popup (C) | ✅ Confirmed |
 | 2026-09-30 | Default Key Remap | `d` cut, `x`/`X` delete, `s` unbound, `y`/`d`/`x`/`X` act on marks only | ✅ Confirmed |
 
 ---
@@ -4533,6 +4534,61 @@ order, and "Other…" running or cancelling. Driven against the real binary in a
 `pyte`, on a scratch desktop with its own globs, applications and cache: every behaviour in the
 ROADMAP entry, including a real `Terminal=true` program taking the screen and returning to the
 browser. Not tried against a full real desktop's application set.
+
+---
+
+### Undo History: Inverse-Operation Journal (COA A)
+
+**Date:** 2026-09-30
+**Status:** Confirmed
+
+#### Context / Background
+
+The roadmap asked for a stack of recent file operations that can be stepped back through. Delete to
+the trash had shipped; this is the other half.
+
+#### Options Considered
+
+**Option A: inverse-operation journal.** Each finished operation pushes a record that knows its
+inverse. Small and fast, but each operation site must record correctly and an overwrite or a
+permanent delete cannot be put back.
+
+**Option B: A, plus an app-owned holding area** for permanently deleted and overwritten data so
+those become undoable. Covers everything, but permanent delete stops being permanent until purged
+and needs a size cap.
+
+**Option C: a history popup with undo for only the reversible entries.** Smallest, but a second UI
+surface and partial undo.
+
+#### Decision
+
+Option A, with the keys `z` and `Z`. The journal lives in `file_ops::history`, not in the `tui`
+crate: it is the inverse of what `file_ops` does, it needs only `Vfs` and the trash, and it can be
+tested with no terminal. `tui` owns one `History`, records at the points where an operation
+finishes, and commits a batch when the next operation starts or an undo is asked for, so the
+batching needs no state at the ends of a long paste.
+
+Three choices were made for safety rather than completeness. A created file is removed only while
+it is still empty, so an undo can never throw away what was typed into it since. An undone copy
+goes to the trash, not to `remove_file`, for the same reason. A step that fails leaves itself and
+everything before it on the stack, and what did succeed becomes redoable, so the stacks always
+describe the disk.
+
+Trash needed one real addition. `trash::delete` returns nothing, and restoring needs the item. The
+`trash` crate now takes a snapshot of the trash's ids before a batch and, after it, claims the new
+item for each path by its original location (trying the parent with symlinks resolved too, since
+the trash records it that way). Nothing found means not undoable, reported on the status line.
+
+Undo runs on the render thread. A cross-device move undone is a copy, so a large one stalls the
+interface until it is done; recorded in the roadmap as a follow-up rather than building a second
+background pipeline in this cycle.
+
+**Verification.** `scripts/check` passes. New tests: each change kind both ways (including a real
+trash and restore), a written-to file refusing removal, a batch as one step, a failure partway, redo
+being forgotten by a new entry, the capacity, and a property test that any sequence of creates and
+moves round-trips through undo-all and redo-all; at the `App` level, `:mkdir` of two names, a
+rename through the prompt, a dropped batch of moves, a trashed batch, and a permanent delete
+reporting nothing to undo. Not tried in a real terminal.
 
 ---
 

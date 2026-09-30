@@ -1009,6 +1009,25 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ---
 
+- ✅ **Undo history (COA A: inverse-operation journal)** – `z` takes back the newest create, rename,
+  move, copy or trash and `Z` does it again (`undo`/`redo` under `[keys]`). Chosen over an
+  app-owned holding area for deleted data (B) and a reverse-only popup (C). A new
+  `file_ops::history` module records each finished operation as a `Change` (`Created`, `Moved`,
+  `Copied`, `Trashed`) that can `apply` itself again and `revert` itself, and groups a batch — a
+  paste or drop of several files, a trash of a marked set, a `:mkdir a b c` — into one entry, kept
+  to the last 100. Reverting is conservative: a created file or folder goes only while it is still
+  empty, a copy is sent to the trash rather than deleted, a move is moved back (failing instead
+  of overwriting if something is in the way), and a trash is restored from the desktop trash. The
+  `trash` crate gained `snapshot`/`claim`/`restore` (freedesktop trash through the `trash`
+  crate's `os_limited` API) so each trashed item is matched to the path it came from, including
+  when the parent path has symlinks. A step that fails partway leaves the rest on the stack and
+  makes what did succeed redoable. Overwrites, permanent deletes and shell commands are not
+  recorded, and the status line says so after an overwrite. Property-tested: any sequence of
+  creates and moves, undone entirely, leaves the folder as it began, and redone entirely leaves it
+  as it ended.
+
+---
+
 - ✅ **Key remap: `d` cuts, `x`/`X` delete, `s` no longer opens a shell, `y` needs marks** – the
   defaults are now `d` cut (was `m`), `x` delete to the trash (was `d`), `X` delete permanently
   (was `D`), and `shell` ships unbound (`Alt+n` still opens one). `y`, `d`, `x` and `X` act only on
@@ -1037,9 +1056,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   central directory is read whole into memory on extraction (the preview refuses oversized ones,
   extraction does not yet); extracting from inside an archive (browsing it as a directory) is not
   done.
-- **Undo history for recent file operations** – a stack of recent copy/move/delete/trash/rename/
-  create operations that can be stepped back through. Delete-to-trash itself shipped this cycle
-  (see Completed); this is the remaining half of the old "trash + undo history" item.
+- **Undo history, follow-ups** – undo runs on the render thread, so taking back a large
+  cross-device move stalls the interface until it finishes (a background job with progress and
+  cancel would fix it); there is no history popup listing the stack to pick from; a compress that
+  trashed its originals, an extract, a permanent delete and an overwrite are not recorded (holding
+  deleted and overwritten data in an app-owned area would make them undoable, at the cost of
+  `X` no longer being immediate); a cancelled paste that had already finished its current item
+  still records it, but one interrupted mid-item records nothing for that item; on platforms
+  whose trash cannot be read back (macOS) a trash is not undoable; and the history is not kept
+  between sessions.
 - **VFS abstraction hardening** – a `Filesystem`/`Vfs` trait consumed uniformly by browser,
   file_ops, preview, and trash, so backends can be swapped without touching feature code.
 
@@ -1246,4 +1271,4 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: pick from Medium Priority — *Archives, remainder* has several small independent
    pieces (a key for the compress form, a destination folder, the overwrite/skip/abort choice for
-   `:compress`); *Undo history* is the biggest usability win.
+   `:compress`).

@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `file_ops`, `trash`, `tui`, `theming`: undo history. `z` takes back the newest create, rename,
+  move, copy or trash and `Z` does it again (`undo` and `redo` under `[keys]`); a batch such as a
+  paste of several marked files, or a `:mkdir a b c`, is one step, and the last 100 are kept for
+  the session. A trash is undone by restoring the item from the desktop trash, a move by moving
+  it back, a copy by sending the copy to the trash, and a creation by removing it only while it is
+  still empty. A step whose files have changed since (something in the way, an emptied trash) is
+  refused with a message and stays on the stack. Permanent deletes, overwrites, compress/extract
+  and shell commands are not recorded.
 - `tui`, `theming`: opening files by association. `enter`, `l`, `→` and a double-click on a file
   open it with the first matching `[[open_rule]]` (new in `config.toml`: `match` takes extensions
   or MIME patterns), else the program the desktop has for its type, else `xdg-open`. The

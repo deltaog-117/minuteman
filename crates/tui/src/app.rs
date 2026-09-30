@@ -35,6 +35,7 @@ use browser::BrowserState;
 use browser::search::{Outcome as SearchOutcome, Query};
 use crossterm::event::KeyCode;
 use file_ops::archive::{self, ExtractLimits, Format, Level};
+use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use plugins::PluginManager;
 use shared::{LocalVfs, Vfs, VfsError};
@@ -221,6 +222,8 @@ enum BulkKind {
         dst_dir: PathBuf,
         index: usize,
         dst: PathBuf,
+        /// `Overwrite` replaced something, which cannot be put back, so it is not recorded.
+        policy: ConflictPolicy,
     },
     Delete {
         targets: Vec<PathBuf>,
@@ -282,7 +285,15 @@ struct ExtractJob {
 }
 
 enum BulkMsg {
-    Progress { path: String },
+    Progress {
+        path: String,
+    },
+    /// What a trash batch put in the trash, sent just before its `Done`; `untracked` counts the
+    /// items that went there but could not be found again to restore.
+    Trashed {
+        changes: Vec<Change>,
+        untracked: usize,
+    },
     Done(Result<Outcome, FileOpsError>),
     ShellDone(std::io::Result<CommandOutcome>),
 }
@@ -314,6 +325,10 @@ pub struct App {
     pub prompt: Option<Prompt>,
     pub status: Option<String>,
     bulk: Option<BulkOp>,
+    /// What can be taken back with `Undo` and done again with `Redo` (see `file_ops::history`).
+    history: History,
+    /// How many items of the trash batch just run could not be tracked for undo, for the status line.
+    untracked: usize,
     live: LiveRefresh,
     /// What the marked entries add up to, for the header pill (see `marked_size`).
     marked_size: MarkedSize,
@@ -349,6 +364,8 @@ impl App {
             prompt: None,
             status: None,
             bulk: None,
+            history: History::default(),
+            untracked: 0,
             live: LiveRefresh::new(handle.clone()),
             marked_size: MarkedSize::new(handle.clone()),
             git: GitStatus::new(handle.clone(), true),
@@ -564,15 +581,24 @@ impl App {
 
         let mut done = None;
         let mut shell_done = None;
+        let mut trashed = Vec::new();
         while let Ok(msg) = bulk.rx.try_recv() {
             match msg {
                 BulkMsg::Progress { path } => {
                     bulk.items_done += 1;
                     bulk.current = path;
                 }
+                BulkMsg::Trashed { changes, untracked } => {
+                    trashed.extend(changes);
+                    self.untracked += untracked;
+                }
                 BulkMsg::Done(result) => done = Some(result),
                 BulkMsg::ShellDone(result) => shell_done = Some(result),
             }
+        }
+
+        for change in trashed {
+            self.history.record(change);
         }
 
         if let Some(result) = shell_done {
@@ -595,6 +621,26 @@ impl App {
         };
         let bulk = self.bulk.take().expect("checked Some above");
         let past_label = bulk.kind.past_label();
+        let overwrote = matches!(
+            &bulk.kind,
+            BulkKind::Paste {
+                policy: ConflictPolicy::Overwrite,
+                ..
+            }
+        );
+        if let (
+            Ok(Outcome::Completed),
+            BulkKind::Paste {
+                clip,
+                index,
+                dst,
+                policy,
+                ..
+            },
+        ) = (&result, &bulk.kind)
+        {
+            self.record_paste(clip, *index, dst, *policy);
+        }
 
         // Delete and Trash both remove entries from the listing outright (no conflict case,
         // unlike Paste), so they share every branch below that Paste doesn't.
@@ -644,7 +690,12 @@ impl App {
                 } else if is_delete {
                     browser.prune_marks(vfs);
                 }
-                self.status = Some(format!("{past_label} complete"));
+                let caveat = match (overwrote, std::mem::take(&mut self.untracked)) {
+                    (true, _) => " (an overwrite cannot be undone)".to_string(),
+                    (false, 0) => String::new(),
+                    (false, n) => format!(" ({n} could not be tracked, so not undoable)"),
+                };
+                self.status = Some(format!("{past_label} complete{caveat}"));
             }
             Ok(Outcome::Skipped) => {
                 if let BulkKind::Paste {
@@ -666,6 +717,7 @@ impl App {
                     dst_dir,
                     index,
                     dst,
+                    ..
                 } => {
                     self.prompt = Some(Prompt::Conflict(ConflictSource::Paste {
                         clip,
@@ -872,6 +924,7 @@ impl App {
             self.status = Some("clipboard is empty".into());
             return;
         };
+        self.start_history_batch();
         self.spawn_paste_item(clip, dst_dir, 0, ConflictPolicy::Abort);
     }
 
@@ -883,6 +936,7 @@ impl App {
             self.status = Some("an operation is already in progress".into());
             return;
         }
+        self.start_history_batch();
         self.spawn_paste_item(Clipboard { paths, mode }, dst_dir, 0, ConflictPolicy::Abort);
     }
 
@@ -1289,9 +1343,26 @@ impl App {
     ) -> Result<()> {
         let mut done = 0;
         let mut first_error = None;
+        self.start_history_batch();
         for name in names {
-            match op(vfs, &browser.current_dir().join(name)) {
-                Ok(()) => done += 1,
+            let path = browser.current_dir().join(name);
+            // What this creates, outermost first: anything already there is not undoable.
+            let missing: Vec<PathBuf> = path
+                .ancestors()
+                .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !vfs.exists(ancestor))
+                .map(Path::to_path_buf)
+                .collect();
+            match op(vfs, &path) {
+                Ok(()) => {
+                    done += 1;
+                    for created in missing.into_iter().rev() {
+                        let is_dir = vfs.is_dir(&created);
+                        self.history.record(Change::Created {
+                            path: created,
+                            is_dir,
+                        });
+                    }
+                }
                 Err(e) => {
                     first_error.get_or_insert_with(|| format!("{verb} {name}: {e}"));
                 }
@@ -1438,6 +1509,7 @@ impl App {
                 dst_dir,
                 index,
                 dst,
+                policy,
             },
             items_done: 0,
             current: String::new(),
@@ -1789,14 +1861,20 @@ impl App {
             self.status = Some("an operation is already in progress".into());
             return;
         }
+        self.start_history_batch();
+        self.untracked = 0;
         let (tx, rx) = unbounded_channel();
         let targets_bg = targets.clone();
 
         self.handle.spawn_blocking(move || {
             let mut result = Ok(Outcome::Completed);
+            // Started first so what lands in the trash can be told from what was already there.
+            let tracker = TrashTracker::start();
+            let mut sent = Vec::new();
             for target in &targets_bg {
                 match file_ops::trash(target) {
                     Ok(()) => {
+                        sent.push(target.clone());
                         let _ = tx.send(BulkMsg::Progress {
                             path: display_name(target),
                         });
@@ -1807,6 +1885,8 @@ impl App {
                     }
                 }
             }
+            let (changes, untracked) = tracker.finish(&sent);
+            let _ = tx.send(BulkMsg::Trashed { changes, untracked });
             let _ = tx.send(BulkMsg::Done(result));
         });
 
@@ -1819,6 +1899,71 @@ impl App {
         });
     }
 
+    /// Records a finished copy or move of `clip.paths[index]` to `dst`, unless it replaced
+    /// something (an overwrite cannot be put back).
+    fn record_paste(&mut self, clip: &Clipboard, index: usize, dst: &Path, policy: ConflictPolicy) {
+        let Some(src) = clip.paths.get(index) else {
+            return;
+        };
+        if policy == ConflictPolicy::Overwrite {
+            return;
+        }
+        self.history.record(match clip.mode {
+            ClipboardMode::Copy => Change::Copied {
+                src: src.clone(),
+                dst: dst.to_path_buf(),
+            },
+            ClipboardMode::Move => Change::Moved {
+                from: src.clone(),
+                to: dst.to_path_buf(),
+            },
+        });
+    }
+
+    /// Takes back the newest file operation, or says why it cannot.
+    pub fn undo(&mut self, browser: &mut BrowserState, vfs: &dyn Vfs) -> Result<()> {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return Ok(());
+        }
+        let report = self.history.undo(vfs);
+        self.report_history(browser, vfs, "undo", "undid", report)
+    }
+
+    /// Does again what `undo` took back.
+    pub fn redo(&mut self, browser: &mut BrowserState, vfs: &dyn Vfs) -> Result<()> {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return Ok(());
+        }
+        let report = self.history.redo(vfs);
+        self.report_history(browser, vfs, "redo", "redid", report)
+    }
+
+    fn report_history(
+        &mut self,
+        browser: &mut BrowserState,
+        vfs: &dyn Vfs,
+        verb: &str,
+        past: &str,
+        report: Report,
+    ) -> Result<()> {
+        self.status = Some(match report {
+            Report::Empty => format!("nothing to {verb}"),
+            Report::Done { label } => format!("{past} {label}"),
+            Report::Failed { label, error } => format!("{verb} {label} failed: {error}"),
+        });
+        browser.reload(vfs)?;
+        browser.prune_marks(vfs);
+        Ok(())
+    }
+
+    /// Ends the batch being recorded and starts a fresh one: each user-started operation is its
+    /// own undo step.
+    fn start_history_batch(&mut self) {
+        self.history.commit();
+    }
+
     fn finish_rename(
         &mut self,
         vfs: &dyn Vfs,
@@ -1829,6 +1974,15 @@ impl App {
     ) -> Result<()> {
         match file_ops::rename(vfs, &target, &new_name, policy) {
             Ok(Outcome::Completed) => {
+                self.start_history_batch();
+                if policy != ConflictPolicy::Overwrite
+                    && let Some(parent) = target.parent()
+                {
+                    self.history.record(Change::Moved {
+                        from: target.clone(),
+                        to: parent.join(&new_name),
+                    });
+                }
                 browser.reload(vfs)?;
                 self.status = Some(format!("renamed to {new_name}"));
             }
@@ -1866,6 +2020,8 @@ impl App {
 
         match result {
             Ok(()) => {
+                self.start_history_batch();
+                self.history.record(Change::Created { path, is_dir });
                 browser.reload(vfs)?;
                 self.status = Some(format!("created {trimmed}"));
             }
@@ -2991,6 +3147,89 @@ mod tests {
 
         f.browser.toggle_mark();
         assert!(f.app.require_marks(&f.browser));
+    }
+
+    #[test]
+    fn a_mkdir_of_several_names_is_one_undo_step_and_redo_makes_them_again() {
+        let mut f = Fixture::new("undo-mkdir");
+        f.run("mkdir one two");
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+
+        assert!(f.listed().is_empty());
+        assert_eq!(f.app.status.as_deref(), Some("undid create 2 items"));
+        f.app.redo(&mut f.browser, &LocalVfs).unwrap();
+        assert_eq!(f.listed(), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn a_rename_is_undone_by_the_undo_key() {
+        let mut f = Fixture::new("undo-rename");
+        std::fs::write(f.root.join("old.txt"), b"x").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        f.app.begin_rename(&f.browser);
+        for _ in 0..7 {
+            f.press(KeyCode::Backspace);
+        }
+        f.type_text("new.txt");
+        f.press(KeyCode::Enter);
+        assert!(f.root.join("new.txt").exists());
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+
+        assert!(f.root.join("old.txt").exists());
+        assert!(!f.root.join("new.txt").exists());
+    }
+
+    #[test]
+    fn a_dropped_batch_of_moves_is_undone_in_one_step() {
+        let mut f = Fixture::new("undo-drop");
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(f.root.join(name), name).unwrap();
+        }
+        std::fs::create_dir(f.root.join("dest")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        f.app.begin_drop(
+            vec![f.root.join("a.txt"), f.root.join("b.txt")],
+            ClipboardMode::Move,
+            f.root.join("dest"),
+        );
+        f.wait_for_idle();
+        assert!(f.root.join("dest/a.txt").exists() && f.root.join("dest/b.txt").exists());
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+
+        assert!(f.root.join("a.txt").exists() && f.root.join("b.txt").exists());
+        assert!(!f.root.join("dest/a.txt").exists());
+    }
+
+    #[test]
+    fn a_trashed_batch_is_restored_by_one_undo() {
+        let mut f = Fixture::new("undo-trash");
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(f.root.join(name), name).unwrap();
+        }
+        f.app
+            .spawn_trash(vec![f.root.join("a.txt"), f.root.join("b.txt")]);
+        f.wait_for_idle();
+        assert!(!f.root.join("a.txt").exists() && !f.root.join("b.txt").exists());
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+
+        assert_eq!(std::fs::read(f.root.join("a.txt")).unwrap(), b"a.txt");
+        assert_eq!(std::fs::read(f.root.join("b.txt")).unwrap(), b"b.txt");
+    }
+
+    #[test]
+    fn a_permanent_delete_is_not_recorded_so_undo_says_there_is_nothing() {
+        let mut f = Fixture::new("undo-delete");
+        std::fs::write(f.root.join("x.txt"), b"x").unwrap();
+        f.app.spawn_delete(vec![f.root.join("x.txt")]);
+        f.wait_for_idle();
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+
+        assert_eq!(f.app.status.as_deref(), Some("nothing to undo"));
     }
 
     #[test]

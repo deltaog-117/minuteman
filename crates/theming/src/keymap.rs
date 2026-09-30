@@ -35,6 +35,10 @@ pub enum Action {
     /// Mark the selection to be relocated on the next `Paste`.
     Cut,
     Paste,
+    /// Takes back the newest file operation (create, rename, move, copy, trash).
+    Undo,
+    /// Does again what `Undo` took back.
+    Redo,
     /// Sends the selection to the desktop trash (asks for confirmation first, but `Enter` accepts
     /// it as well as `y` since this is reversible — see `DeletePermanently` for the destructive
     /// version).
@@ -100,6 +104,8 @@ pub struct RawKeyMap {
     pub yank: Vec<String>,
     pub cut: Vec<String>,
     pub paste: Vec<String>,
+    pub undo: Vec<String>,
+    pub redo: Vec<String>,
     pub delete: Vec<String>,
     pub delete_permanently: Vec<String>,
     pub rename: Vec<String>,
@@ -131,6 +137,8 @@ impl Default for RawKeyMap {
             yank: vec!["y".into()],
             cut: vec!["d".into()],
             paste: vec!["p".into()],
+            undo: vec!["z".into()],
+            redo: vec!["Z".into()],
             delete: vec!["x".into()],
             delete_permanently: vec!["X".into()],
             rename: vec!["r".into()],
@@ -196,6 +204,8 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.yank, Action::Yank);
         bind_all(&raw.cut, Action::Cut);
         bind_all(&raw.paste, Action::Paste);
+        bind_all(&raw.undo, Action::Undo);
+        bind_all(&raw.redo, Action::Redo);
         bind_all(&raw.delete, Action::Delete);
         bind_all(&raw.delete_permanently, Action::DeletePermanently);
         bind_all(&raw.rename, Action::Rename);
@@ -265,6 +275,8 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('y')), Some(Action::Yank));
         assert_eq!(keymap.resolve(KeyCode::Char('d')), Some(Action::Cut));
         assert_eq!(keymap.resolve(KeyCode::Char('p')), Some(Action::Paste));
+        assert_eq!(keymap.resolve(KeyCode::Char('z')), Some(Action::Undo));
+        assert_eq!(keymap.resolve(KeyCode::Char('Z')), Some(Action::Redo));
         assert_eq!(keymap.resolve(KeyCode::Char('x')), Some(Action::Delete));
         assert_eq!(
             keymap.resolve(KeyCode::Char('X')),
@@ -306,7 +318,7 @@ mod tests {
         ] {
             assert_eq!(keymap.resolve(freed), None);
         }
-        assert_eq!(keymap.resolve(KeyCode::Char('z')), None);
+        assert_eq!(keymap.resolve(KeyCode::Char('w')), None);
     }
 
     #[test]

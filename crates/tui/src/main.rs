@@ -2474,6 +2474,8 @@ fn run(
                     Some(Action::Yank) if app.require_marks(browser) => app.yank(browser),
                     Some(Action::Cut) if app.require_marks(browser) => app.cut(browser),
                     Some(Action::Paste) => app.begin_paste(browser),
+                    Some(Action::Undo) => app.undo(browser, vfs)?,
+                    Some(Action::Redo) => app.redo(browser, vfs)?,
                     Some(Action::Delete) if app.require_marks(browser) => app.begin_trash(browser),
                     Some(Action::DeletePermanently) if app.require_marks(browser) => {
                         app.begin_delete_permanently(browser)
