@@ -1486,6 +1486,7 @@ fn run(
                             overlay_view::CompressHit::Row(row) => {
                                 popup.focus(row);
                                 popup.cycle(true);
+                                App::refresh_compress_warning(popup);
                             }
                             overlay_view::CompressHit::Panel => {}
                             overlay_view::CompressHit::Outside => compress = None,
@@ -1500,6 +1501,7 @@ fn run(
                             overlay_view::ExtractHit::Row(row) => {
                                 popup.focus(row);
                                 popup.cycle(true);
+                                App::refresh_extract_warning(popup);
                             }
                             overlay_view::ExtractHit::Panel => {}
                             overlay_view::ExtractHit::Outside => extract = None,
@@ -2147,7 +2149,7 @@ fn run(
                 }
                 if let Some(popup) = compress.as_mut() {
                     match popup.key(key.code) {
-                        compress_popup::Key::Stay => {}
+                        compress_popup::Key::Stay => App::refresh_compress_warning(popup),
                         compress_popup::Key::Close => compress = None,
                         compress_popup::Key::Submit(request) => match app.start_compress(request) {
                             Ok(()) => compress = None,
@@ -2158,7 +2160,7 @@ fn run(
                 }
                 if let Some(popup) = extract.as_mut() {
                     match popup.key(key.code) {
-                        extract_popup::Key::Stay => {}
+                        extract_popup::Key::Stay => App::refresh_extract_warning(popup),
                         extract_popup::Key::Close => extract = None,
                         extract_popup::Key::Submit(request) => match app.start_extract(request) {
                             Ok(()) => extract = None,
@@ -2474,6 +2476,12 @@ fn run(
                     Some(Action::Yank) if app.require_marks(browser) => app.yank(browser),
                     Some(Action::Cut) if app.require_marks(browser) => app.cut(browser),
                     Some(Action::Paste) => app.begin_paste(browser),
+                    Some(Action::Compress) if app.require_marks(browser) => {
+                        compress = app.begin_compress_form(browser);
+                    }
+                    Some(Action::Extract) if app.require_marks(browser) => {
+                        extract = app.begin_extract_form(browser);
+                    }
                     Some(Action::Undo) => app.undo(browser, vfs)?,
                     Some(Action::Redo) => app.redo(browser, vfs)?,
                     Some(Action::Delete) if app.require_marks(browser) => app.begin_trash(browser),
@@ -2538,7 +2546,12 @@ fn run(
                         }
                     }
                     Some(
-                        Action::Yank | Action::Cut | Action::Delete | Action::DeletePermanently,
+                        Action::Yank
+                        | Action::Cut
+                        | Action::Delete
+                        | Action::DeletePermanently
+                        | Action::Compress
+                        | Action::Extract,
                     ) => {}
                     Some(Action::Shell) => {}
                     None => {

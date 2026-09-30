@@ -63,6 +63,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-29 | Mouse Stage 2 | `Ctrl`-click toggles, a configurable range modifier (`Shift` or `Alt`, both by default) marks a span, header path segments and middle-click navigate (COA B), over the roadmap's `Shift` only (A) or a two-cycle split (C) | ✅ Confirmed |
 | 2026-09-29 | Mouse Stage 3 | Drag and drop with a pure state machine, a pointer label and lit target, drops on both file columns, up a level, and shell panes, plus edge auto-scroll (COA C), over a release-only drop (A) or feedback without shell and scroll (B) | ✅ Confirmed |
 | 2026-09-29 | Open With | Read the shared MIME database, `mimeapps.list`, `mimeinfo.cache` and `.desktop` files in-process, with `[[open_rule]]`, `enter`-to-open and "Other…" (COA A), over shelling out to `xdg-mime`/`gio` (B) or a hybrid launching through `gio` (C) | ✅ Confirmed |
+| 2026-09-30 | Archives Remainder | Keys, save-in folder, live warnings, `:` conflict prompts and `-p`, zip mtime, directory bound, all without new dependencies (COA A), over extra codecs (B) or browsing inside archives (C) | ✅ Confirmed |
 | 2026-09-30 | Encrypted Archives | Zip AES-256 through the `zip` crate, a password prompt on extract, a wiped-on-drop `Password` type (COA A), over 7z with header encryption (B) or a standalone `age` action (C) | ✅ Confirmed |
 | 2026-09-30 | Undo History | Inverse-operation journal in `file_ops::history`, batches as one step, conservative reverts, trash restored through the `trash` crate (COA A), over a holding area for deleted data (B) or a reverse-only popup (C) | ✅ Confirmed |
 | 2026-09-30 | Default Key Remap | `d` cut, `x`/`X` delete, `s` unbound, `y`/`d`/`x`/`X` act on marks only | ✅ Confirmed |
@@ -4535,6 +4536,72 @@ order, and "Other…" running or cancelling. Driven against the real binary in a
 `pyte`, on a scratch desktop with its own globs, applications and cache: every behaviour in the
 ROADMAP entry, including a real `Terminal=true` program taking the screen and returning to the
 browser. Not tried against a full real desktop's application set.
+
+---
+
+### Archives Remainder: UX and Robustness (COA A)
+
+**Date:** 2026-09-30
+**Status:** Confirmed
+
+#### Context / Background
+
+What was left of the archive work was a set of small pieces: no key for the forms, no folder to
+save into, no warning as you type a taken name, `:compress` and `:extract` erroring where a paste
+asks, no password for `:compress`, zip entries without times, and a zip's whole central directory
+read into memory with no bound.
+
+#### Options Considered
+
+**Option A: these pieces, no new dependencies.** Finishes what users hit; each is small and
+testable alone.
+
+**Option B: A plus `xz`, `zstd`, `bzip2`, `7z`, `rar`.** Opens more archives, but the format matrix
+(form rows, preview, tests per codec) and C-backed dependencies are a cycle of their own.
+
+**Option C: A plus browsing an archive as a directory.** The biggest win, but it needs the VFS
+hardening item first.
+
+#### Decision
+
+Option A. Three choices worth recording.
+
+The live warning needed to know what is on disk, and the forms are deliberately pure (no `Frame`,
+no filesystem). Rather than give them a filesystem handle, each form exposes `build()`, which
+returns the request it would submit or why it cannot, and changes nothing; `App` runs the same
+`compress_problem` / `extract_problem` check on that request after every key, and again when Enter
+is pressed. One function answers both "warn now" and "refuse on submit", so they cannot disagree.
+
+`:compress` and `:extract` reuse the conflict prompt instead of growing a new one. A fresh request
+carries `Abort`, which here means "not asked yet"; the prompt's answer becomes the request's policy
+and the request is continued, and an abort answer simply ends it. Extract's "overwrite" and "skip"
+apply to the files inside the existing folder, which is what the extract form's Existing files row
+already meant, so the prompt says "replace files / skip existing". Compress's skip cancels, since
+there is only one archive, and originals are never trashed for a skipped archive. `-p` goes through
+a two-step masked prompt after any conflict question, so a password is never typed on the command
+line where it would show in the status line or history.
+
+The central-directory bound is the preview's check made suitable for extraction: extraction must
+still open zip64 archives, so a zip64 record is followed to the real counts instead of being turned
+away. Every record in the last 64 KiB is checked, since a reader may skip a bogus one, which means a
+hand-made comment holding a look-alike record can make an honest archive be refused; that cost is
+accepted and logged. Modified times are written as UTC because the standard library has no time
+zone database, and extraction does not restore them yet.
+
+Three existing tests asserted the old behaviour (an existing destination was an error) and were
+updated to the new one rather than weakened: each now checks the prompt opens and what each answer
+does.
+
+**Verification.** `scripts/check` passes. New tests cover the keys in the default map, the Save in
+row (relative, absolute, typing `j` and `/`), `build` leaving no error behind, the live warning for
+a taken name, a missing folder and a taken extract folder until skip or replace is chosen, saving
+into another folder and refusing one that is not there, overwrite, skip and abort for `:compress`
+and `:extract` (skip keeping the file already there), `-p` asking twice and making an encrypted zip,
+a mismatch starting over, a tar name and Esc, the command parser for `-p`, a known instant becoming
+the expected zip date, dates outside 1980-2107 left off, a zipped file keeping its time, a property
+test that every day from 1970 to 2150 round-trips, and a zip claiming a huge directory, too many
+entries, a hidden bogus record before an honest one, and a zip64 claim all being refused before
+anything is written. Not tried in a real terminal.
 
 ---
 

@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `file_ops`, `theming`: the rest of the archive work. `C` and `E` open the compress and
+  extract forms for the marked entries. The compress form has a "Save in" folder, and both forms
+  warn as you type when the name or folder they would create is already taken. `:compress` and
+  `:extract` ask overwrite / skip / abort instead of failing on an existing destination, and
+  `:compress -p name.zip` seals a zip with a password asked for in a masked prompt. A zip entry
+  records its file's modified time (UTC), and extracting a zip whose end-of-central-directory
+  record claims too many entries or too large a directory is refused before it is read into
+  memory.
 - `file_ops`, `tui`: encrypted zip archives. The compress form has Password and Confirm password
   rows (zip only) that seal the archive with AES-256; the legacy ZipCrypto scheme is never written.
   Extracting an encrypted zip, through `:extract` or the extract form, asks for the password in a

@@ -1009,6 +1009,25 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ---
 
+- ✅ **Archives, remainder (COA A: UX and robustness, no new dependencies)** – `C` opens the
+  compress form and `E` the extract form for the marked entries (`compress`/`extract` under
+  `[keys]`, marks-only like yank and delete). The compress form has a **Save in** row, a folder
+  relative to the browsed one or an absolute path that must already exist, with the name and
+  folder checked live: as you type, a line under the rows warns when the archive (or any per-item
+  archive) is already there or the folder is not, and the extract form warns about a folder that
+  is already there unless Existing files is set to skip or replace. `:compress` and `:extract` no
+  longer fail on an existing destination; they ask overwrite / skip / abort (`o`/`s`/`a`) the way a
+  paste does, and `:compress -p name.zip` (or `--password`) seals the zip with a password asked
+  for twice in a masked prompt, never typed on the command line. A zip entry now records its
+  file's modified time (UTC, within a zip's 1980-2107 range). Extraction refuses a zip whose
+  end-of-central-directory record claims more entries than the limit or a directory over 256 MiB,
+  following zip64 records and checking every record in the file's tail, before the `zip` crate
+  reads the whole directory into memory. `Prompt::Conflict` gained compress and extract sources and
+  the form-building code a pure `build`, so the warning and the submit share one check. Property
+  tested: every day from 1970 to 2150 converts to a date that converts back.
+
+---
+
 - ✅ **Encrypted archives (COA A: zip AES-256)** – the compress form has **Password** and
   **Confirm password** rows (typed as dots; greyed for tar; a note under the form says the names
   stay visible), and an encrypted zip is sealed with AES-256 through the `zip` crate's `aes-crypto`
@@ -1056,18 +1075,16 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟡 Medium Priority (Important)
 
-- **Archives, remainder** – there is no key binding for the compress form (only the right-click
-  menu, `:compress` and `:extract`); the compress form has no destination folder (archives go
-  beside the originals) and neither form warns live as you type a name that exists; `:compress` and
-  `:extract` still treat an existing destination as an error rather than the overwrite/skip/abort
-  choice the extract form offers; `rar`
-  (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2` compression are not supported, the
-  codecs being opt-in cargo features if wanted; zip entries carry no modification time; a `zip`
-  central directory is read whole into memory on extraction (the preview refuses oversized ones,
-  extraction does not yet); extracting from inside an archive (browsing it as a directory) is not
-  done.
-- **Encrypted archives, follow-ups** – `:compress` has no way to take a password (only the form
-  does); hiding file names needs 7z, which is not supported; an encrypted zip that uses a method
+- **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
+  compression are not supported, the codecs being opt-in cargo features if wanted; extracting from
+  inside an archive (browsing it as a directory) is not done, and needs the VFS hardening item
+  first; extraction does not restore modified times (only writing a zip records them, as UTC, since
+  the standard library has no time zone database); the compress form's "Save in" folder must
+  already exist and the form never overwrites (only `:compress` and `:extract` ask); the
+  central-directory check refuses any zip whose last 64 KiB holds a record that claims too much,
+  which a hand-made comment can trigger on an otherwise fine archive; and a per-item compress
+  (one archive for each) warns about the first name already taken, not all of them.
+- **Encrypted archives, follow-ups** – hiding file names needs 7z, which is not supported; an encrypted zip that uses a method
   this build cannot read is reported as damaged rather than as unsupported encryption; one password
   is checked for a whole batch (by the first encrypted entry of each archive), so an archive made
   elsewhere with a different password per entry fails on that entry during extraction; the password
@@ -1143,7 +1160,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   rather than showing its start; a scrolled 1 MiB text re-wraps everything above the visible rows on
   each frame (about 43 ms at the far end), which caching wrapped lines would remove; and the
   scroll position is not remembered per file.
-- **Disk usage, follow-ups** – delete or mark from inside the view (the `d` and `v` flows exist
+- **Disk usage, follow-ups** – delete or mark from inside the view (the `x` and `v` flows exist
   but the view has no way to hand a selection to them); keep the scanned tree so opening a folder is
   instant instead of a rescan; sort by name or entry count; show modified times and the owner; an
   option for the starting measure; key hints that follow rebound keys (they are fixed text, and
@@ -1192,7 +1209,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    adaptive theme are the default (`COLORTERM=truecolor` for full color; the theme now follows
    your terminal's own background — Catppuccin Mocha or Latte — unless `[theme]` is set in
    `appearance.toml`, e.g. `name = "neon"` for the original cyberpunk look or `name = "classic"`
-   for the old plain one). Press `s` to open a shell and type in it (`Tab` completes, spaces work).
+   for the old plain one). Press `Alt+n` to open a shell and type in it (`Tab` completes, spaces work).
    `Alt` (tap) stops typing; then `space |` splits it side by side, `space h`/`l` moves between panes,
    `space space` goes back to typing, `space x` closes a pane. `space t` flips a split, and
    `space r`/`space m` plus `hjkl` resize/move (`Esc` leaves either mode).
@@ -1233,7 +1250,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Before that, the git segment: open a repository (the status bar shows the branch, and `v` a
    few files for the header's total size; `git_status = false` turns the git segment off).
    Before that, four earlier ones: `/` plus the start of a name a few directories down (`Esc` returns,
-   `Enter` stays); the arrow keys; `v` two files, `m`, go to another directory, `c` drops the cut
+   `Enter` stays); the arrow keys; `v` two files, `d`, go to another directory, `c` drops the cut
    and the marks; and `:nvim ROADMAP.md` (`:!cmd` for a program not in `interactive_commands`).
    Then: select a `.rs`, `.py`, `.toml` or other recognized source/config file — the preview now
    colors keywords, strings, comments, numbers, functions and types instead of one flat color,
@@ -1243,7 +1260,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    `pdftoppm`/`ffmpegthumbnailer` example) and select a file with that extension — it thumbnails
    or extracts text through your own command instead of falling back to a hex dump; a missing
    tool, a failing command or a timeout just shows the file's name, quietly.
-   Then: press `s` to open a shell, then `Alt+n` to split it — the new pane's border fades in from
+   Then: press `Alt+n` to open a shell, then `Alt+n` again to split it — the new pane's border fades in from
    the dim frame color while the one that just lost focus fades back out, instead of either one
    snapping instantly; `Alt+z`/`x`/`c`/`v` moves focus between panes with the same fade each time.
    Then: on launch, a brief splash names the app over the browser — press any key to
@@ -1287,6 +1304,5 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: pick from Medium Priority — *Archives, remainder* has several small independent
-   pieces (a key for the compress form, a destination folder, the overwrite/skip/abort choice for
-   `:compress`).
+4. Next cycle: pick from Medium Priority — *VFS abstraction hardening* is the groundwork for the
+   SSH/SFTP backend and for browsing inside archives.

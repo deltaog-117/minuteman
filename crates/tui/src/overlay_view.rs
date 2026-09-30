@@ -313,6 +313,22 @@ pub fn render_compress(frame: &mut Frame<'_>, popup: &CompressPopup, config: &Co
                 spans.push(Span::styled("▏", value_style.patch(base)));
             }
             spans.push(Span::styled(extension, dim_style.patch(base)));
+        } else if row == CompressRow::Folder {
+            // A bar after the text marks where typing goes; an empty folder says what that means.
+            let note = if popup.folder().is_empty() && i != popup.cursor() {
+                "(here)"
+            } else {
+                ""
+            };
+            let room = value_width.saturating_sub(text_width(note) + 1);
+            spans.push(Span::styled(
+                fit_tail(popup.folder(), room),
+                value_style.patch(base),
+            ));
+            if i == popup.cursor() {
+                spans.push(Span::styled("▏", value_style.patch(base)));
+            }
+            spans.push(Span::styled(note, dim_style.patch(base)));
         } else {
             let style = if inert { dim_style } else { value_style };
             spans.push(Span::styled(
@@ -322,13 +338,12 @@ pub fn render_compress(frame: &mut Frame<'_>, popup: &CompressPopup, config: &Co
         }
         Line::from(spans)
     }));
-    lines.push(match popup.error() {
-        Some(message) => Line::styled(
-            fit_width(message, usize::from(inner.width)),
-            Style::default().fg(style::color(&theme.danger_fg)),
-        ),
-        None => Line::raw(""),
-    });
+    lines.push(feedback_line(
+        popup.error(),
+        popup.warning(),
+        usize::from(inner.width),
+        theme,
+    ));
     lines.push(Line::styled(
         fit_width(
             popup
@@ -436,18 +451,38 @@ pub fn render_extract(frame: &mut Frame<'_>, popup: &ExtractPopup, config: &Conf
         }
         Line::from(spans)
     }));
-    lines.push(match popup.error() {
-        Some(message) => Line::styled(
-            fit_width(message, usize::from(inner.width)),
-            Style::default().fg(style::color(&theme.danger_fg)),
-        ),
-        None => Line::raw(""),
-    });
+    lines.push(feedback_line(
+        popup.error(),
+        popup.warning(),
+        usize::from(inner.width),
+        theme,
+    ));
     lines.push(Line::styled(
         "↑/↓ move, ←/→ or Space change, Enter extract, Esc cancel",
         dim_style,
     ));
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The line under a form's rows: its error in the danger color, else its warning in the accent
+/// color, else blank.
+fn feedback_line(
+    error: Option<&str>,
+    warning: Option<&str>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    match (error, warning) {
+        (Some(message), _) => Line::styled(
+            fit_width(message, width),
+            Style::default().fg(style::color(&theme.danger_fg)),
+        ),
+        (None, Some(message)) => Line::styled(
+            fit_width(message, width),
+            Style::default().fg(style::color(&theme.accent_fg)),
+        ),
+        (None, None) => Line::raw(""),
+    }
 }
 
 /// The end of `text` that fits in `width` cells, with a leading `…` when the start is cut, since

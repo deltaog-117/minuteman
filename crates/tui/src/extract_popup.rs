@@ -89,6 +89,8 @@ pub struct ExtractPopup {
     policy: ConflictPolicy,
     delete_archives: bool,
     error: Option<String>,
+    /// A heads-up that does not stop the job from being asked for, such as a folder already there.
+    warning: Option<String>,
 }
 
 const ROWS: [Row; 3] = [Row::Folder, Row::Existing, Row::DeleteArchives];
@@ -107,6 +109,7 @@ impl ExtractPopup {
             policy: ConflictPolicy::Abort,
             delete_archives: false,
             error: None,
+            warning: None,
         })
     }
 
@@ -129,6 +132,16 @@ impl ExtractPopup {
     /// Shows `message` under the form until the next keystroke.
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.error = Some(message.into());
+    }
+
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+
+    /// Sets (or clears) the heads-up shown under the form while there is no error. The caller
+    /// works it out from the disk, which this form never touches, after each keystroke.
+    pub fn set_warning(&mut self, warning: Option<String>) {
+        self.warning = warning;
     }
 
     /// The panel's title.
@@ -235,22 +248,32 @@ impl ExtractPopup {
     }
 
     fn submit(&mut self) -> Key {
+        match self.build() {
+            Ok(request) => Key::Submit(request),
+            Err(message) => {
+                self.error = Some(message);
+                Key::Stay
+            }
+        }
+    }
+
+    /// The job the form currently describes, or why it cannot be asked for yet. Changes nothing,
+    /// so the caller can also use it to look ahead (for a folder that is already there).
+    pub fn build(&self) -> Result<Request, String> {
         let destination = if self.folder_applies() {
             // An empty name is a deliberate "extract here", not a mistake, so it skips the
             // check that would reject it as a folder name.
             let typed = self.folder.trim();
             if typed.is_empty() {
                 Destination::Here
-            } else if let Err(message) = check_name(typed) {
-                self.error = Some(message.into());
-                return Key::Stay;
             } else {
+                check_name(typed).map_err(str::to_owned)?;
                 Destination::Folder(typed.to_owned())
             }
         } else {
             Destination::PerArchive
         };
-        Key::Submit(Request {
+        Ok(Request {
             archives: self.archives.clone(),
             dir: self.dir.clone(),
             destination,

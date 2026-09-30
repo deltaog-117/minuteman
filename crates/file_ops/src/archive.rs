@@ -37,7 +37,8 @@
 //!
 //! Writing an archive goes to a hidden sibling file that replaces the target only once complete,
 //! so a cancelled or failed run never leaves a half-written archive under the real name.
-//! Symlinks are stored as links, never followed. Zip entries carry no modification time.
+//! Symlinks are stored as links, never followed. A zip entry carries its file's modified time, as
+//! UTC (the standard library has no time zone database), when it falls in a zip's 1980-2107 range.
 //!
 //! A zip can be encrypted with a [`Password`]: every file in it (and every symlink's target) is
 //! sealed with AES-256, the strong WinZip-style scheme. The legacy ZipCrypto scheme is never
@@ -45,7 +46,7 @@
 //! called: anyone can still list an encrypted zip's names and sizes. A tar cannot be encrypted.
 
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 use flate2::Compression;
@@ -61,6 +62,11 @@ use crate::{
 /// The most characters a [`Password`] holds. The buffer is reserved at this size up front, so it
 /// never reallocates and leaves an old, unwiped copy of the password behind as it grows.
 const MAX_PASSWORD_CHARS: usize = 256;
+
+/// The largest central directory a zip may declare before extraction refuses it: the `zip` crate
+/// reads the whole directory into memory when it opens a file, so this bounds what a hostile
+/// archive can make it allocate.
+const MAX_ZIP_DIRECTORY: u64 = 256 << 20;
 
 /// A password for an encrypted archive. It is wiped from memory when dropped, never shown by
 /// `Debug`, and capped at [`MAX_PASSWORD_CHARS`] characters.
@@ -409,12 +415,88 @@ fn zip_error(error: zip::result::ZipError, archive: &Path) -> FileOpsError {
     }
 }
 
+/// Refuses a zip whose end-of-central-directory record claims more entries or a bigger directory
+/// than `limits` allow, before the `zip` crate reads it all into memory. Zip64 records are
+/// followed. Every record in the file's tail is checked, since a reader may skip one that turns out
+/// to be bogus and use an earlier one, so a small fake at the very end must not hide a large one.
+/// A record that cannot be made sense of is left for the `zip` crate to reject, which it does
+/// without allocating for it.
+fn check_zip_directory(file: &mut File, limits: ExtractLimits) -> Result<(), FileOpsError> {
+    const EOCD: &[u8] = b"PK\x05\x06";
+    const EOCD_LEN: usize = 22;
+    let len = file.metadata().map_err(damaged)?.len();
+    // The record plus a comment of at most 65,535 bytes.
+    let tail_len = len.min(EOCD_LEN as u64 + 65_535);
+    let tail_start = len - tail_len;
+    file.seek(SeekFrom::Start(tail_start)).map_err(damaged)?;
+    let mut tail = Vec::new();
+    file.take(tail_len)
+        .read_to_end(&mut tail)
+        .map_err(damaged)?;
+
+    for at in 0..tail.len().saturating_sub(EOCD_LEN - 1) {
+        if !tail[at..].starts_with(EOCD) {
+            continue;
+        }
+        let entries = u64::from(u16::from_le_bytes([tail[at + 10], tail[at + 11]]));
+        let size = u64::from(u32::from_le_bytes([
+            tail[at + 12],
+            tail[at + 13],
+            tail[at + 14],
+            tail[at + 15],
+        ]));
+        let (entries, size) = if entries == u64::from(u16::MAX) || size == u64::from(u32::MAX) {
+            match zip64_counts(file, len, tail_start + at as u64) {
+                Some(counts) => counts,
+                None => continue,
+            }
+        } else {
+            (entries, size)
+        };
+        if entries > limits.max_entries {
+            return Err(FileOpsError::ArchiveLimit {
+                what: "entry count",
+                limit: limits.max_entries,
+            });
+        }
+        if size > MAX_ZIP_DIRECTORY {
+            return Err(FileOpsError::ArchiveLimit {
+                what: "central directory size",
+                limit: MAX_ZIP_DIRECTORY,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The entry count and directory size a zip64 record claims, for the ordinary end record at
+/// `eocd_at`: that record is preceded by a 20-byte locator pointing at the zip64 record.
+fn zip64_counts(file: &mut File, len: u64, eocd_at: u64) -> Option<(u64, u64)> {
+    let le = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().expect("eight bytes"));
+    let mut locator = [0u8; 20];
+    file.seek(SeekFrom::Start(eocd_at.checked_sub(20)?)).ok()?;
+    file.read_exact(&mut locator).ok()?;
+    if &locator[..4] != b"PK\x06\x07" {
+        return None;
+    }
+    let record_at = le(&locator[8..16]);
+    if record_at.checked_add(56)? > len {
+        return None;
+    }
+    let mut record = [0u8; 56];
+    file.seek(SeekFrom::Start(record_at)).ok()?;
+    file.read_exact(&mut record).ok()?;
+    (&record[..4] == b"PK\x06\x06").then(|| (le(&record[32..40]), le(&record[40..48])))
+}
+
 fn extract_zip(
-    file: File,
+    mut file: File,
     path: &Path,
     password: Option<&Password>,
     sink: &mut Sink<'_>,
 ) -> Result<(), FileOpsError> {
+    check_zip_directory(&mut file, sink.limits)?;
+    file.seek(SeekFrom::Start(0)).map_err(damaged)?;
     let mut archive = zip::ZipArchive::new(BufReader::new(file)).map_err(damaged)?;
     for index in 0..archive.len() {
         let mut entry = archive
@@ -908,11 +990,14 @@ struct ZipPacker<'p, W: Write + io::Seek>(zip::ZipWriter<W>, Level, Option<&'p P
 impl<W: Write + io::Seek> Packer for ZipPacker<'_, W> {
     fn add(&mut self, real: &Path, name: &Path, meta: &Metadata) -> Result<(), FileOpsError> {
         let stored = zip_name(name)?;
-        let options = zip::write::SimpleFileOptions::default()
+        let mut options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .compression_level(Some(i64::from(self.1.deflate())))
             .unix_permissions(mode_of(meta))
             .large_file(meta.len() > u64::from(u32::MAX));
+        if let Some(time) = meta.modified().ok().and_then(zip_time) {
+            options = options.last_modified_time(time);
+        }
         let kind = meta.file_type();
         if kind.is_dir() {
             // A folder's entry holds no data, so there is nothing in it to seal.
@@ -936,6 +1021,45 @@ impl<W: Write + io::Seek> Packer for ZipPacker<'_, W> {
                 .map_err(io_error(real))
         }
     }
+}
+
+/// The zip timestamp for `modified`, read as UTC, or `None` when it falls outside the 1980-2107
+/// span a zip can hold (the entry then carries no time, as before).
+fn zip_time(modified: std::time::SystemTime) -> Option<zip::DateTime> {
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let (year, month, day) = civil_from_days(i64::try_from(secs / 86_400).ok()?);
+    let of_day = secs % 86_400;
+    zip::DateTime::from_date_and_time(
+        u16::try_from(year).ok()?,
+        month,
+        day,
+        u8::try_from(of_day / 3_600).ok()?,
+        u8::try_from(of_day % 3_600 / 60).ok()?,
+        u8::try_from(of_day % 60).ok()?,
+    )
+    .ok()
+}
+
+/// The calendar date of `days` since 1970-01-01 (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, u8, u8) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month as u8, day as u8)
 }
 
 /// `name` as a zip stores it: UTF-8, `/`-separated.
@@ -1505,6 +1629,191 @@ mod tests {
         );
     }
 
+    // ---- central directory bounds ----
+
+    /// An end-of-central-directory record claiming `entries` entries and a directory of `size`
+    /// bytes, followed by `comment`.
+    fn eocd(entries: u16, size: u32, comment: &[u8]) -> Vec<u8> {
+        let mut record = b"PK\x05\x06".to_vec();
+        record.extend_from_slice(&[0; 4]);
+        record.extend_from_slice(&entries.to_le_bytes());
+        record.extend_from_slice(&entries.to_le_bytes());
+        record.extend_from_slice(&size.to_le_bytes());
+        record.extend_from_slice(&[0; 4]);
+        record.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+        record.extend_from_slice(comment);
+        record
+    }
+
+    fn two_file_zip(dir: &Path) -> PathBuf {
+        let files = [dir.join("a.txt"), dir.join("b.txt")];
+        for file in &files {
+            fs::write(file, "x").unwrap();
+        }
+        let out = dir.join("two.zip");
+        pack_with(&files, &out, Format::Zip, None);
+        out
+    }
+
+    #[test]
+    fn a_zip_claiming_a_huge_directory_is_refused_before_anything_is_read() {
+        let dir = scratch("dir-huge");
+        let zip = two_file_zip(&dir);
+        let mut bytes = fs::read(&zip).unwrap();
+        let at = bytes.len() - 22;
+        bytes[at + 12..at + 16].copy_from_slice(&(MAX_ZIP_DIRECTORY as u32 + 1).to_le_bytes());
+        fs::write(&zip, bytes).unwrap();
+
+        let dest = dir.join("out");
+        let result = unpack(&zip, &dest, ConflictPolicy::Abort);
+
+        assert!(matches!(
+            result,
+            Err(FileOpsError::ArchiveLimit {
+                what: "central directory size",
+                ..
+            })
+        ));
+        assert!(!dest.join("a.txt").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_zip_with_more_entries_than_the_limit_is_refused_up_front() {
+        let dir = scratch("dir-count");
+        let zip = two_file_zip(&dir);
+        let dest = dir.join("out");
+
+        let result = extract(
+            &zip,
+            &dest,
+            ConflictPolicy::Abort,
+            ExtractLimits {
+                max_entries: 1,
+                ..ExtractLimits::default()
+            },
+            &mut go,
+        );
+
+        assert!(matches!(
+            result,
+            Err(FileOpsError::ArchiveLimit {
+                what: "entry count",
+                ..
+            })
+        ));
+        assert!(
+            !dest.join("a.txt").exists(),
+            "refused before writing anything"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bogus_huge_record_hidden_before_a_small_one_still_refuses() {
+        let dir = scratch("dir-hidden");
+        // A real-looking record claiming far too much, then an honest-looking one at the end.
+        let mut bytes = eocd(1, u32::MAX - 1, b"");
+        bytes.extend_from_slice(&eocd(1, 46, b""));
+        let zip = dir.join("lying.zip");
+        fs::write(&zip, bytes).unwrap();
+
+        let result = unpack(&zip, &dir.join("out"), ConflictPolicy::Abort);
+
+        assert!(matches!(result, Err(FileOpsError::ArchiveLimit { .. })));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_zip64_record_claiming_too_much_is_followed_and_refused() {
+        let dir = scratch("dir-zip64");
+        let mut record64 = b"PK\x06\x06".to_vec();
+        record64.resize(56, 0);
+        record64[32..40].copy_from_slice(&(1u64 << 40).to_le_bytes());
+        record64[40..48].copy_from_slice(&1_000u64.to_le_bytes());
+        let mut locator = b"PK\x06\x07".to_vec();
+        locator.resize(20, 0);
+        locator[8..16].copy_from_slice(&0u64.to_le_bytes());
+        let mut bytes = record64;
+        bytes.extend_from_slice(&locator);
+        bytes.extend_from_slice(&eocd(u16::MAX, u32::MAX, b""));
+        let zip = dir.join("big.zip");
+        fs::write(&zip, bytes).unwrap();
+
+        let result = unpack(&zip, &dir.join("out"), ConflictPolicy::Abort);
+
+        assert!(matches!(
+            result,
+            Err(FileOpsError::ArchiveLimit {
+                what: "entry count",
+                ..
+            })
+        ));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_ordinary_zip_passes_the_directory_check() {
+        let dir = scratch("dir-ok");
+        let zip = two_file_zip(&dir);
+        let mut file = File::open(&zip).unwrap();
+        check_zip_directory(&mut file, ExtractLimits::default()).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- modified times ----
+
+    #[test]
+    fn a_known_instant_becomes_the_expected_zip_date() {
+        // 2023-11-14 22:13:20 UTC; a zip's seconds are even, and this one already is.
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let time = zip_time(at).unwrap();
+        assert_eq!((time.year(), time.month(), time.day()), (2023, 11, 14));
+        assert_eq!((time.hour(), time.minute(), time.second()), (22, 13, 20));
+    }
+
+    #[test]
+    fn a_time_outside_what_a_zip_holds_is_left_off() {
+        assert!(
+            zip_time(std::time::UNIX_EPOCH).is_none(),
+            "1970 is before 1980"
+        );
+        let far = std::time::UNIX_EPOCH + std::time::Duration::from_secs(5_000_000_000);
+        assert!(zip_time(far).is_none(), "2128 is after 2107");
+    }
+
+    #[test]
+    fn a_zipped_file_keeps_its_modified_time() {
+        let dir = scratch("mtime");
+        let file = dir.join("f.txt");
+        fs::write(&file, "x").unwrap();
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        let out = dir.join("a.zip");
+
+        compress(
+            std::slice::from_ref(&file),
+            &out,
+            Format::Zip,
+            ConflictPolicy::Abort,
+            &mut go,
+        )
+        .unwrap();
+
+        let mut zip = zip::ZipArchive::new(File::open(&out).unwrap()).unwrap();
+        let stored = zip.by_index(0).unwrap().last_modified().unwrap();
+        assert_eq!(
+            (stored.year(), stored.month(), stored.day()),
+            (2023, 11, 14)
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     // ---- encryption ----
 
     fn secret(text: &str) -> Password {
@@ -1732,6 +2041,27 @@ mod tests {
                 prop_assert!(unpack_with(&out, &dir.join("no"), Some(&secret(&other))).is_err());
             }
             fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// The inverse of `civil_from_days`, written the obvious way, to check it against.
+    fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
+        let y = year - i64::from(month <= 2);
+        let era = y.div_euclid(400);
+        let year_of_era = y.rem_euclid(400);
+        let month_index = (i64::from(month) + 9) % 12;
+        let day_of_year = (153 * month_index + 2) / 5 + i64::from(day) - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        era * 146_097 + day_of_era - 719_468
+    }
+
+    proptest! {
+        /// Every day from 1970 through 2150 converts to a real date that converts back to it.
+        #[test]
+        fn civil_dates_round_trip(days in 0i64..66_000) {
+            let (year, month, day) = civil_from_days(days);
+            prop_assert!((1..=12).contains(&month) && (1..=31).contains(&day));
+            prop_assert_eq!(days_from_civil(year, month, day), days);
         }
     }
 

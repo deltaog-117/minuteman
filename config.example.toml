@@ -168,6 +168,11 @@ paste = ["p"]
 # as a paste of several marked files, is one step). Redo does it again. Permanent deletes,
 # overwrites, compress/extract and what a `:` shell command does cannot be undone. A created file
 # is only removed while it is still empty, and an undone copy goes to the trash.
+# Open the compress form (name, where to save it, format, level, an optional password for a zip)
+# for the marked entries, and the extract form for the marked archives. Like yank and delete they
+# act on marks only. Right-click and the `:compress` / `:extract` commands do the same.
+compress = ["C"]
+extract = ["E"]
 undo = ["z"]
 redo = ["Z"]
 # Sends every marked entry (see `select` below) to the desktop trash if any are marked, else the

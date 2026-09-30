@@ -35,6 +35,10 @@ pub enum Action {
     /// Mark the selection to be relocated on the next `Paste`.
     Cut,
     Paste,
+    /// Opens the compress form for the marked entries.
+    Compress,
+    /// Opens the extract form for the marked archives.
+    Extract,
     /// Takes back the newest file operation (create, rename, move, copy, trash).
     Undo,
     /// Does again what `Undo` took back.
@@ -104,6 +108,8 @@ pub struct RawKeyMap {
     pub yank: Vec<String>,
     pub cut: Vec<String>,
     pub paste: Vec<String>,
+    pub compress: Vec<String>,
+    pub extract: Vec<String>,
     pub undo: Vec<String>,
     pub redo: Vec<String>,
     pub delete: Vec<String>,
@@ -137,6 +143,8 @@ impl Default for RawKeyMap {
             yank: vec!["y".into()],
             cut: vec!["d".into()],
             paste: vec!["p".into()],
+            compress: vec!["C".into()],
+            extract: vec!["E".into()],
             undo: vec!["z".into()],
             redo: vec!["Z".into()],
             delete: vec!["x".into()],
@@ -204,6 +212,8 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.yank, Action::Yank);
         bind_all(&raw.cut, Action::Cut);
         bind_all(&raw.paste, Action::Paste);
+        bind_all(&raw.compress, Action::Compress);
+        bind_all(&raw.extract, Action::Extract);
         bind_all(&raw.undo, Action::Undo);
         bind_all(&raw.redo, Action::Redo);
         bind_all(&raw.delete, Action::Delete);
@@ -275,6 +285,8 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('y')), Some(Action::Yank));
         assert_eq!(keymap.resolve(KeyCode::Char('d')), Some(Action::Cut));
         assert_eq!(keymap.resolve(KeyCode::Char('p')), Some(Action::Paste));
+        assert_eq!(keymap.resolve(KeyCode::Char('C')), Some(Action::Compress));
+        assert_eq!(keymap.resolve(KeyCode::Char('E')), Some(Action::Extract));
         assert_eq!(keymap.resolve(KeyCode::Char('z')), Some(Action::Undo));
         assert_eq!(keymap.resolve(KeyCode::Char('Z')), Some(Action::Redo));
         assert_eq!(keymap.resolve(KeyCode::Char('x')), Some(Action::Delete));

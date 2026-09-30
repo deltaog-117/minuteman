@@ -36,6 +36,8 @@ const MAX_NAME_CHARS: usize = 100;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
     Name,
+    /// Where the archive is written, relative to the browsed folder; empty means right there.
+    Folder,
     Format,
     Level,
     /// Seals a zip with this password; empty means no encryption.
@@ -51,6 +53,7 @@ impl Row {
     pub fn label(self) -> &'static str {
         match self {
             Row::Name => "Name",
+            Row::Folder => "Save in",
             Row::Format => "Format",
             Row::Level => "Level",
             Row::Password => "Password",
@@ -100,6 +103,8 @@ pub struct CompressPopup {
     cursor: usize,
     /// The typed name, without the extension the format adds.
     name: String,
+    /// The typed folder to save in, empty for the browsed one.
+    folder: String,
     format: Format,
     level: Level,
     password: Password,
@@ -107,6 +112,8 @@ pub struct CompressPopup {
     per_item: bool,
     delete_originals: bool,
     error: Option<String>,
+    /// A heads-up that does not stop the job from being asked for, such as a name already taken.
+    warning: Option<String>,
 }
 
 impl CompressPopup {
@@ -117,6 +124,7 @@ impl CompressPopup {
         }
         let mut rows = vec![
             Row::Name,
+            Row::Folder,
             Row::Format,
             Row::Level,
             Row::Password,
@@ -128,6 +136,7 @@ impl CompressPopup {
         rows.push(Row::DeleteOriginals);
         Some(Self {
             name: default_name(&sources),
+            folder: String::new(),
             sources,
             dir,
             rows,
@@ -139,6 +148,7 @@ impl CompressPopup {
             per_item: false,
             delete_originals: false,
             error: None,
+            warning: None,
         })
     }
 
@@ -154,6 +164,10 @@ impl CompressPopup {
         &self.name
     }
 
+    pub fn folder(&self) -> &str {
+        &self.folder
+    }
+
     pub fn format(&self) -> Format {
         self.format
     }
@@ -165,6 +179,16 @@ impl CompressPopup {
     /// Shows `message` under the form until the next keystroke.
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.error = Some(message.into());
+    }
+
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+
+    /// Sets (or clears) the heads-up shown under the form while there is no error. The caller
+    /// works it out from the disk, which this form never touches, after each keystroke.
+    pub fn set_warning(&mut self, warning: Option<String>) {
+        self.warning = warning;
     }
 
     /// The panel's title.
@@ -207,6 +231,7 @@ impl CompressPopup {
         match row {
             Row::Name if !self.name_applies() => "(each is named after its item)".into(),
             Row::Name => self.name.clone(),
+            Row::Folder => self.folder.clone(),
             Row::Format => match self.format {
                 Format::Zip => "zip",
                 Format::TarGz => "tar.gz",
@@ -243,7 +268,7 @@ impl CompressPopup {
     pub fn cycle(&mut self, forward: bool) {
         self.error = None;
         match self.rows[self.cursor] {
-            Row::Name => {}
+            Row::Name | Row::Folder => {}
             Row::Format => {
                 self.format = match (self.format, forward) {
                     (Format::Zip, true) | (Format::Tar, false) => Format::TarGz,
@@ -270,6 +295,7 @@ impl CompressPopup {
     pub fn key(&mut self, code: KeyCode) -> Key {
         let row = self.rows[self.cursor];
         let on_name = row == Row::Name;
+        let on_folder = row == Row::Folder;
         let on_password = matches!(row, Row::Password | Row::Confirm) && self.password_applies();
         match code {
             KeyCode::Esc => return Key::Close,
@@ -284,6 +310,16 @@ impl CompressPopup {
             }
             KeyCode::Backspace if on_name => {
                 self.name.pop();
+                self.error = None;
+            }
+            KeyCode::Char(c) if on_folder => {
+                if !c.is_control() {
+                    self.folder.push(c);
+                }
+                self.error = None;
+            }
+            KeyCode::Backspace if on_folder => {
+                self.folder.pop();
                 self.error = None;
             }
             KeyCode::Char(c) if on_password => {
@@ -316,6 +352,18 @@ impl CompressPopup {
     }
 
     fn submit(&mut self) -> Key {
+        match self.build() {
+            Ok(request) => Key::Submit(request),
+            Err(message) => {
+                self.error = Some(message);
+                Key::Stay
+            }
+        }
+    }
+
+    /// The job the form currently describes, or why it cannot be asked for yet. Changes nothing,
+    /// so the caller can also use it to look ahead (for a name that is already taken).
+    pub fn build(&self) -> Result<Request, String> {
         let mut format = self.format;
         let layout = if self.per_item {
             Layout::PerItem
@@ -330,10 +378,7 @@ impl CompressPopup {
                 }
                 None => typed.to_owned(),
             };
-            if let Err(message) = check_name(&base) {
-                self.error = Some(message.into());
-                return Key::Stay;
-            }
+            check_name(&base).map_err(str::to_owned)?;
             Layout::One {
                 file_name: format!("{base}.{}", format.extension()),
             }
@@ -343,17 +388,15 @@ impl CompressPopup {
         let password = if self.password.is_empty() && self.confirm.is_empty() {
             None
         } else if self.password != self.confirm {
-            self.error = Some("the passwords do not match".into());
-            return Key::Stay;
+            return Err("the passwords do not match".into());
         } else if format != Format::Zip {
-            self.error = Some("only a zip can be encrypted: pick zip or clear the password".into());
-            return Key::Stay;
+            return Err("only a zip can be encrypted: pick zip or clear the password".into());
         } else {
             Some(self.password.clone())
         };
-        Key::Submit(Request {
+        Ok(Request {
             sources: self.sources.clone(),
-            dir: self.dir.clone(),
+            dir: self.dir.join(self.folder.trim()),
             format,
             level: self.level,
             password,
@@ -513,6 +556,8 @@ mod tests {
     #[test]
     fn off_the_name_row_j_and_k_move_and_h_and_l_change_the_value() {
         let mut p = popup(&["x"]);
+        p.key(KeyCode::Down);
+        assert_eq!(p.rows()[p.cursor()], Row::Folder);
         p.key(KeyCode::Down);
         assert_eq!(p.rows()[p.cursor()], Row::Format);
         p.key(KeyCode::Char('l'));
@@ -699,6 +744,46 @@ mod tests {
         assert!(p.note().is_none());
         focus_row(&mut p, Row::Password);
         assert!(p.note().unwrap().contains("File names stay visible"));
+    }
+
+    #[test]
+    fn the_save_in_folder_starts_empty_and_is_joined_to_the_browsed_directory() {
+        let mut p = popup(&["x"]);
+        assert_eq!(p.folder(), "");
+        assert_eq!(submitted(p.key(KeyCode::Enter)).dir, PathBuf::from("/w"));
+
+        focus_row(&mut p, Row::Folder);
+        type_text(&mut p, "backups/2026 j");
+        assert_eq!(p.folder(), "backups/2026 j");
+        assert_eq!(
+            submitted(p.key(KeyCode::Enter)).dir,
+            PathBuf::from("/w/backups/2026 j")
+        );
+        p.key(KeyCode::Backspace);
+        assert_eq!(p.folder(), "backups/2026 ");
+    }
+
+    #[test]
+    fn an_absolute_save_in_folder_replaces_the_browsed_one() {
+        let mut p = popup(&["x"]);
+        focus_row(&mut p, Row::Folder);
+        type_text(&mut p, "/srv/archive");
+        assert_eq!(
+            submitted(p.key(KeyCode::Enter)).dir,
+            PathBuf::from("/srv/archive")
+        );
+    }
+
+    #[test]
+    fn looking_ahead_with_build_changes_nothing() {
+        let mut p = popup(&["x"]);
+        clear_name(&mut p);
+        assert!(p.build().is_err());
+        assert!(p.error().is_none(), "only a submit shows an error");
+        p.set_warning(Some("a.zip already exists".into()));
+        assert_eq!(p.warning(), Some("a.zip already exists"));
+        p.set_warning(None);
+        assert_eq!(p.warning(), None);
     }
 
     #[test]

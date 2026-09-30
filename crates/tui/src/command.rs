@@ -46,9 +46,11 @@ pub enum Command {
     /// the browsed directory.
     Extract,
     /// Packs every marked entry (or the selected one) into the named archive; its extension
-    /// (`.zip`, `.tar`, `.tar.gz`) picks the format.
+    /// (`.zip`, `.tar`, `.tar.gz`) picks the format. With `-p` (`--password`) a zip is sealed with
+    /// a password asked for in a prompt, never typed on the command line where it would show.
     Compress {
         name: String,
+        password: bool,
     },
     /// A command line for `sh -c`, run in the browsed directory.
     Shell(String),
@@ -97,7 +99,16 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
         "compress" => match split_words(line[name.len()..].trim())?.as_slice() {
             [archive] if !archive.starts_with('-') => Ok(Some(Command::Compress {
                 name: archive.clone(),
+                password: false,
             })),
+            [flag, archive]
+                if matches!(flag.as_str(), "-p" | "--password") && !archive.starts_with('-') =>
+            {
+                Ok(Some(Command::Compress {
+                    name: archive.clone(),
+                    password: true,
+                }))
+            }
             [] => Err("compress: missing archive name".into()),
             _ => Ok(Some(Command::Shell(line.into()))),
         },
@@ -267,14 +278,34 @@ mod tests {
         assert_eq!(
             parse("compress out.tar.gz"),
             Ok(Some(Command::Compress {
-                name: "out.tar.gz".into()
+                name: "out.tar.gz".into(),
+                password: false
             }))
         );
         assert_eq!(
             parse("compress 'my files.zip'"),
             Ok(Some(Command::Compress {
-                name: "my files.zip".into()
+                name: "my files.zip".into(),
+                password: false
             }))
+        );
+        assert_eq!(
+            parse("compress -p secret.zip"),
+            Ok(Some(Command::Compress {
+                name: "secret.zip".into(),
+                password: true
+            }))
+        );
+        assert_eq!(
+            parse("compress --password 'a b.zip'"),
+            Ok(Some(Command::Compress {
+                name: "a b.zip".into(),
+                password: true
+            }))
+        );
+        assert_eq!(
+            parse("compress -p -r a.zip"),
+            Ok(shell("compress -p -r a.zip"))
         );
         assert!(parse("compress").is_err());
         assert_eq!(parse("compress -r a.zip"), Ok(shell("compress -r a.zip")));

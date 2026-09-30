@@ -85,6 +85,16 @@ pub enum ConflictSource {
         target: PathBuf,
         new_name: String,
     },
+    /// `:compress` found `out` already there.
+    Compress {
+        pending: PendingCompress,
+        out: PathBuf,
+    },
+    /// `:extract` found the folder `dest` already there.
+    Extract {
+        pending: PendingExtract,
+        dest: PathBuf,
+    },
 }
 
 /// Where a `/` search started, so `Esc` (or an emptied query) can put the browser back: the
@@ -147,6 +157,15 @@ pub enum Prompt {
         buffer: Password,
         error: Option<String>,
     },
+    /// The password to seal `archive` with (`:compress -p`): asked once, then again to confirm.
+    /// `first` holds the first answer while the second is being typed.
+    CompressPassword {
+        pending: PendingCompress,
+        archive: PathBuf,
+        first: Option<Password>,
+        buffer: Password,
+        error: Option<String>,
+    },
 }
 
 impl Prompt {
@@ -161,7 +180,7 @@ impl Prompt {
             Prompt::SearchInput { .. } => "SEARCH",
             Prompt::CommandInput { .. } => "COMMAND",
             Prompt::OpenOther { .. } => "OPEN WITH",
-            Prompt::ExtractPassword { .. } => "PASSWORD",
+            Prompt::ExtractPassword { .. } | Prompt::CompressPassword { .. } => "PASSWORD",
         }
     }
 
@@ -176,6 +195,7 @@ impl Prompt {
                 | Prompt::CommandInput { .. }
                 | Prompt::OpenOther { .. }
                 | Prompt::ExtractPassword { .. }
+                | Prompt::CompressPassword { .. }
         )
     }
 
@@ -209,10 +229,37 @@ impl Prompt {
             Prompt::Conflict(ConflictSource::Rename { new_name, .. }) => {
                 format!("'{new_name}' already exists — overwrite / skip / abort? (o/s/a)")
             }
+            Prompt::Conflict(ConflictSource::Compress { out, .. }) => format!(
+                "'{}' already exists — overwrite / skip / abort? (o/s/a)",
+                display_name(out)
+            ),
+            Prompt::Conflict(ConflictSource::Extract { dest, .. }) => format!(
+                "'{}' already exists — replace files / skip existing / abort? (o/s/a)",
+                display_name(dest)
+            ),
             Prompt::SearchInput { buffer, .. } => format!("/{buffer}"),
             Prompt::CommandInput { buffer } => format!(":{buffer}"),
             Prompt::OpenOther { path, buffer } => {
                 format!("open {} with: {buffer}", display_name(path))
+            }
+            Prompt::CompressPassword {
+                archive,
+                first,
+                buffer,
+                error,
+                ..
+            } => {
+                let dots = "•".repeat(buffer.char_count());
+                let ask = match first {
+                    None => "password",
+                    Some(_) => "confirm password",
+                };
+                match error {
+                    Some(error) => {
+                        format!("{error} — {ask} for {}: {dots}", display_name(archive))
+                    }
+                    None => format!("{ask} for {}: {dots}", display_name(archive)),
+                }
             }
             Prompt::ExtractPassword {
                 archive,
@@ -297,9 +344,23 @@ impl BulkKind {
 }
 
 /// One archive to write: `sources` packed into `out`.
+#[derive(Debug)]
 struct CompressJob {
     sources: Vec<PathBuf>,
     out: PathBuf,
+}
+
+/// A compress waiting on an answer from the user: whether to replace an archive already there, or
+/// the password to seal it with (`:compress -p`).
+#[derive(Debug)]
+pub struct PendingCompress {
+    jobs: Vec<CompressJob>,
+    format: Format,
+    level: Level,
+    /// `Abort` until the user has been asked about an archive already in the way.
+    policy: ConflictPolicy,
+    delete_originals: bool,
+    ask_password: bool,
 }
 
 /// An extract waiting for the password its archive needs.
@@ -1196,6 +1257,39 @@ impl App {
                 }
                 _ => self.prompt = Some(Prompt::OpenOther { path, buffer }),
             },
+            Prompt::CompressPassword {
+                pending,
+                archive,
+                first,
+                mut buffer,
+                ..
+            } => match code {
+                KeyCode::Esc => self.status = Some("compress cancelled".into()),
+                KeyCode::Enter => self.submit_compress_password(pending, archive, first, buffer),
+                code @ (KeyCode::Backspace | KeyCode::Char(_)) => {
+                    match code {
+                        KeyCode::Backspace => buffer.pop(),
+                        KeyCode::Char(c) => buffer.push(c),
+                        _ => {}
+                    }
+                    self.prompt = Some(Prompt::CompressPassword {
+                        pending,
+                        archive,
+                        first,
+                        buffer,
+                        error: None,
+                    });
+                }
+                _ => {
+                    self.prompt = Some(Prompt::CompressPassword {
+                        pending,
+                        archive,
+                        first,
+                        buffer,
+                        error: None,
+                    });
+                }
+            },
             Prompt::ExtractPassword {
                 pending,
                 archive,
@@ -1382,7 +1476,9 @@ impl App {
             }
             Ok(Some(Command::Trash)) => self.begin_trash(browser),
             Ok(Some(Command::Extract)) => self.begin_extract(browser),
-            Ok(Some(Command::Compress { name })) => self.begin_compress(browser, &name),
+            Ok(Some(Command::Compress { name, password })) => {
+                self.begin_compress(browser, &name, password);
+            }
             Ok(Some(Command::Shell(line))) => self.spawn_shell_command(browser, line),
             Ok(Some(Command::Interactive(line))) if self.is_busy() => {
                 self.status = Some(format!("an operation is already in progress: {line}"));
@@ -1497,6 +1593,20 @@ impl App {
             }
             ConflictSource::Rename { target, new_name } => {
                 self.finish_rename(vfs, browser, target, new_name, policy)
+            }
+            ConflictSource::Compress { mut pending, .. } => {
+                if policy == ConflictPolicy::Skip {
+                    self.status = Some("compress skipped".into());
+                } else {
+                    pending.policy = policy;
+                    self.continue_compress(pending);
+                }
+                Ok(())
+            }
+            ConflictSource::Extract { mut pending, .. } => {
+                pending.policy = policy;
+                self.continue_extract(pending);
+                Ok(())
             }
         }
     }
@@ -1639,9 +1749,30 @@ impl App {
             true => self.status = Some("extract: no zip, tar or tar.gz selected".into()),
             false => {
                 let jobs = Self::extract_jobs_per_archive(browser.current_dir(), archives);
-                self.request_extract(jobs, ConflictPolicy::Abort, false);
+                self.continue_extract(PendingExtract {
+                    jobs,
+                    policy: ConflictPolicy::Abort,
+                    delete_archives: false,
+                });
             }
         }
+    }
+
+    /// Starts `pending`, first asking what to do about a folder that is already there, the way a
+    /// paste asks about a file. `Abort` is what a fresh extract carries, so it means "not asked
+    /// yet"; answering abort ends the extract instead of coming back here.
+    fn continue_extract(&mut self, pending: PendingExtract) {
+        if pending.policy == ConflictPolicy::Abort
+            && let Some(job) = pending
+                .jobs
+                .iter()
+                .find(|job| std::fs::symlink_metadata(&job.dest).is_ok())
+        {
+            let dest = job.dest.clone();
+            self.prompt = Some(Prompt::Conflict(ConflictSource::Extract { pending, dest }));
+            return;
+        }
+        self.request_extract(pending.jobs, pending.policy, pending.delete_archives);
     }
 
     /// One job per archive, each into a folder of `dir` named after it.
@@ -1664,9 +1795,10 @@ impl App {
             .into_iter()
             .filter(|path| Format::of(path).is_some())
             .collect();
-        let form = ExtractPopup::new(archives, browser.current_dir().to_path_buf());
-        if form.is_none() {
-            self.status = Some("extract: no zip, tar or tar.gz selected".into());
+        let mut form = ExtractPopup::new(archives, browser.current_dir().to_path_buf());
+        match form.as_mut() {
+            Some(form) => Self::refresh_extract_warning(form),
+            None => self.status = Some("extract: no zip, tar or tar.gz selected".into()),
         }
         form
     }
@@ -1681,59 +1813,162 @@ impl App {
         if self.is_busy() {
             return Err("an operation is already in progress".into());
         }
-        let jobs = match request.destination {
+        if let Some(problem) = Self::extract_problem(&request) {
+            return Err(problem);
+        }
+        let jobs = Self::extract_jobs(&request);
+        self.request_extract(jobs, request.policy, request.delete_archives);
+        Ok(())
+    }
+
+    /// The jobs an extract form's request describes.
+    fn extract_jobs(request: &extract_popup::Request) -> Vec<ExtractJob> {
+        match &request.destination {
             extract_popup::Destination::Here => request
                 .archives
-                .into_iter()
+                .iter()
                 .map(|archive| ExtractJob {
-                    archive,
+                    archive: archive.clone(),
                     dest: request.dir.clone(),
                 })
                 .collect(),
             extract_popup::Destination::Folder(name) => request
                 .archives
-                .into_iter()
+                .iter()
                 .map(|archive| ExtractJob {
-                    archive,
-                    dest: request.dir.join(&name),
+                    archive: archive.clone(),
+                    dest: request.dir.join(name),
                 })
                 .collect(),
             extract_popup::Destination::PerArchive => {
-                Self::extract_jobs_per_archive(&request.dir, request.archives)
+                Self::extract_jobs_per_archive(&request.dir, request.archives.clone())
             }
-        };
-        // Extracting into a folder that is already there is what "skip" and "replace" are for;
-        // with "stop" it would only fail on the first clashing file, after writing the others.
-        if request.policy == ConflictPolicy::Abort
-            && let Some(taken) = jobs
-                .iter()
-                .find(|job| job.dest != request.dir && std::fs::symlink_metadata(&job.dest).is_ok())
-        {
-            return Err(format!("{} already exists", display_name(&taken.dest)));
         }
-        self.request_extract(jobs, request.policy, request.delete_archives);
-        Ok(())
     }
 
-    /// Starts packing the marked (or selected) entries into `name` in the browsed directory.
-    fn begin_compress(&mut self, browser: &BrowserState, name: &str) {
+    /// Why an extract form's request would be refused, if it would. Extracting into a folder that
+    /// is already there is what "skip" and "replace" are for; with "stop" it would only fail on the
+    /// first clashing file, after writing the others. Shown live as a warning and again on Enter.
+    pub fn extract_problem(request: &extract_popup::Request) -> Option<String> {
+        if request.policy != ConflictPolicy::Abort {
+            return None;
+        }
+        Self::extract_jobs(request)
+            .iter()
+            .find(|job| job.dest != request.dir && std::fs::symlink_metadata(&job.dest).is_ok())
+            .map(|taken| {
+                format!(
+                    "{} already exists: set Existing files to skip or replace",
+                    display_name(&taken.dest)
+                )
+            })
+    }
+
+    /// Starts packing the marked (or selected) entries into `name` in the browsed directory. With
+    /// `ask_password` (`:compress -p`) a zip is sealed with a password asked for in a prompt.
+    fn begin_compress(&mut self, browser: &BrowserState, name: &str, ask_password: bool) {
         let Some(format) = Format::of(Path::new(name)) else {
             self.status = Some("compress: name must end in .zip, .tar or .tar.gz".into());
             return;
         };
+        if ask_password && format != Format::Zip {
+            self.status = Some("compress: only a zip can be encrypted".into());
+            return;
+        }
         let sources = Self::marked_or_selected(browser);
         if sources.is_empty() {
             self.status = Some("compress: nothing selected".into());
             return;
         }
         let out = browser.current_dir().join(name);
-        self.spawn_compress(
-            vec![CompressJob { sources, out }],
+        self.continue_compress(PendingCompress {
+            jobs: vec![CompressJob { sources, out }],
             format,
-            Level::default(),
+            level: Level::default(),
+            policy: ConflictPolicy::Abort,
+            delete_originals: false,
+            ask_password,
+        });
+    }
+
+    /// Takes `pending` to its next step: asking about an archive already in the way, then for the
+    /// password, then running. `Abort` is what a fresh compress carries, so it means "not asked
+    /// yet"; answering abort ends the compress instead of coming back here.
+    fn continue_compress(&mut self, pending: PendingCompress) {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
+        if pending.policy == ConflictPolicy::Abort
+            && let Some(job) = pending
+                .jobs
+                .iter()
+                .find(|job| std::fs::symlink_metadata(&job.out).is_ok())
+        {
+            let out = job.out.clone();
+            self.prompt = Some(Prompt::Conflict(ConflictSource::Compress { pending, out }));
+            return;
+        }
+        if pending.ask_password {
+            let archive = pending.jobs[0].out.clone();
+            self.prompt = Some(Prompt::CompressPassword {
+                pending,
+                archive,
+                first: None,
+                buffer: Password::new(),
+                error: None,
+            });
+            return;
+        }
+        self.spawn_compress(
+            pending.jobs,
+            pending.format,
+            pending.level,
             None,
-            false,
+            pending.policy,
+            pending.delete_originals,
         );
+    }
+
+    /// Takes one answer to the password prompt: the first is kept and asked for again, the second
+    /// must match it, and only then does the compress start.
+    fn submit_compress_password(
+        &mut self,
+        pending: PendingCompress,
+        archive: PathBuf,
+        first: Option<Password>,
+        buffer: Password,
+    ) {
+        let ask = |pending, archive, first, error: Option<&str>| Prompt::CompressPassword {
+            pending,
+            archive,
+            first,
+            buffer: Password::new(),
+            error: error.map(str::to_string),
+        };
+        if buffer.is_empty() {
+            self.prompt = Some(ask(pending, archive, first, Some("type the password")));
+            return;
+        }
+        match first {
+            None => self.prompt = Some(ask(pending, archive, Some(buffer), None)),
+            Some(first) if first == buffer => self.spawn_compress(
+                pending.jobs,
+                pending.format,
+                pending.level,
+                Some(first),
+                pending.policy,
+                pending.delete_originals,
+            ),
+            Some(_) => {
+                self.prompt = Some(ask(
+                    pending,
+                    archive,
+                    None,
+                    Some("the passwords do not match"),
+                ));
+            }
+        }
     }
 
     /// The channel and cancel flag every archive job reports through. The callback is what
@@ -1888,6 +2123,7 @@ impl App {
         format: Format,
         level: Level,
         password: Option<Password>,
+        policy: ConflictPolicy,
         delete_originals: bool,
     ) {
         if self.is_busy() {
@@ -1910,17 +2146,22 @@ impl App {
             };
             let mut result = Ok(Outcome::Completed);
             'jobs: for job in &jobs {
-                if let Err(e) = archive::compress_with_options(
+                match archive::compress_with_options(
                     &job.sources,
                     &job.out,
                     format,
                     level,
                     password.as_ref(),
-                    ConflictPolicy::Abort,
+                    policy,
                     &mut on_progress,
                 ) {
-                    result = Err(e);
-                    break;
+                    Ok(Outcome::Completed) => {}
+                    // Nothing was written, so the originals must not be trashed either.
+                    Ok(Outcome::Skipped) => continue,
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
                 }
                 if delete_originals {
                     for source in &job.sources {
@@ -1945,12 +2186,13 @@ impl App {
 
     /// The compress form for the marked (or selected) entries, or `None` if there are none.
     pub fn begin_compress_form(&mut self, browser: &BrowserState) -> Option<CompressPopup> {
-        let form = CompressPopup::new(
+        let mut form = CompressPopup::new(
             Self::marked_or_selected(browser),
             browser.current_dir().to_path_buf(),
         );
-        if form.is_none() {
-            self.status = Some("compress: nothing selected".into());
+        match form.as_mut() {
+            Some(form) => Self::refresh_compress_warning(form),
+            None => self.status = Some("compress: nothing selected".into()),
         }
         form
     }
@@ -1965,40 +2207,76 @@ impl App {
         if self.is_busy() {
             return Err("an operation is already in progress".into());
         }
-        let extension = request.format.extension();
-        let jobs: Vec<CompressJob> = match request.layout {
-            compress_popup::Layout::One { file_name } => vec![CompressJob {
-                sources: request.sources,
-                out: request.dir.join(file_name),
-            }],
-            compress_popup::Layout::PerItem => request
-                .sources
-                .into_iter()
-                .filter_map(|source| {
-                    // `a.txt` becomes `a.txt.zip`, so `a.txt` and `a.pdf` cannot collide.
-                    let mut name = source.file_name()?.to_os_string();
-                    name.push(format!(".{extension}"));
-                    Some(CompressJob {
-                        out: request.dir.join(name),
-                        sources: vec![source],
-                    })
-                })
-                .collect(),
-        };
-        if let Some(taken) = jobs
-            .iter()
-            .find(|job| std::fs::symlink_metadata(&job.out).is_ok())
-        {
-            return Err(format!("{} already exists", display_name(&taken.out)));
+        if let Some(problem) = Self::compress_problem(&request) {
+            return Err(problem);
         }
+        let jobs = Self::compress_jobs(&request);
         self.spawn_compress(
             jobs,
             request.format,
             request.level,
             request.password,
+            ConflictPolicy::Abort,
             request.delete_originals,
         );
         Ok(())
+    }
+
+    /// Re-works the form's heads-up from the disk: call after every change to the form.
+    pub fn refresh_compress_warning(popup: &mut CompressPopup) {
+        let warning = popup
+            .build()
+            .ok()
+            .and_then(|request| Self::compress_problem(&request));
+        popup.set_warning(warning);
+    }
+
+    /// Re-works the form's heads-up from the disk: call after every change to the form.
+    pub fn refresh_extract_warning(popup: &mut ExtractPopup) {
+        let warning = popup
+            .build()
+            .ok()
+            .and_then(|request| Self::extract_problem(&request));
+        popup.set_warning(warning);
+    }
+
+    /// The jobs a compress form's request describes.
+    fn compress_jobs(request: &compress_popup::Request) -> Vec<CompressJob> {
+        match &request.layout {
+            compress_popup::Layout::One { file_name } => vec![CompressJob {
+                sources: request.sources.clone(),
+                out: request.dir.join(file_name),
+            }],
+            compress_popup::Layout::PerItem => {
+                let extension = request.format.extension();
+                request
+                    .sources
+                    .iter()
+                    .filter_map(|source| {
+                        // `a.txt` becomes `a.txt.zip`, so `a.txt` and `a.pdf` cannot collide.
+                        let mut name = source.file_name()?.to_os_string();
+                        name.push(format!(".{extension}"));
+                        Some(CompressJob {
+                            out: request.dir.join(name),
+                            sources: vec![source.clone()],
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Why a compress form's request would be refused, if it would: the folder to save in is not
+    /// there, or a file the job would create already exists (the form never overwrites). Shown
+    /// live as a warning and again on Enter.
+    pub fn compress_problem(request: &compress_popup::Request) -> Option<String> {
+        if !request.dir.is_dir() {
+            return Some(format!("{} is not a folder", request.dir.display()));
+        }
+        Self::compress_jobs(request)
+            .iter()
+            .find(|job| std::fs::symlink_metadata(&job.out).is_ok())
+            .map(|taken| format!("{} already exists", display_name(&taken.out)))
     }
 
     /// Same shape as `spawn_delete`, but sends each target to the desktop trash
@@ -2405,6 +2683,12 @@ mod tests {
 
         select_named(&mut f, "proj.tar.gz");
         f.run("extract");
+        // The folder the archive would go into is the original `proj`, which is still there.
+        assert!(matches!(
+            f.app.prompt,
+            Some(Prompt::Conflict(ConflictSource::Extract { .. }))
+        ));
+        f.press(KeyCode::Char('o'));
         f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("extract complete"));
         assert_eq!(
@@ -2433,22 +2717,221 @@ mod tests {
     }
 
     #[test]
-    fn compress_will_not_replace_an_existing_archive() {
+    fn compress_asks_before_replacing_an_existing_archive_and_abort_leaves_it() {
         let mut f = Fixture::new("archive-exists");
         f.run("touch a.txt out.zip");
         select_named(&mut f, "a.txt");
 
         f.run("compress out.zip");
-        f.wait_for_idle();
+        assert!(matches!(
+            f.app.prompt,
+            Some(Prompt::Conflict(ConflictSource::Compress { .. }))
+        ));
         assert!(
-            f.app
-                .status
-                .as_deref()
-                .is_some_and(|s| s.starts_with("compress failed:") && s.ends_with("already exists")),
-            "{:?}",
-            f.app.status
+            !f.app.is_busy(),
+            "nothing runs until the question is answered"
         );
+        f.press(KeyCode::Char('a'));
+
+        assert_eq!(f.app.status.as_deref(), Some("aborted"));
         assert_eq!(std::fs::read(f.root.join("out.zip")).unwrap(), b"");
+    }
+
+    #[test]
+    fn answering_overwrite_replaces_the_existing_archive() {
+        let mut f = Fixture::new("archive-overwrite");
+        f.run("touch a.txt out.zip");
+        select_named(&mut f, "a.txt");
+
+        f.run("compress out.zip");
+        f.press(KeyCode::Char('o'));
+        f.wait_for_idle();
+
+        assert_eq!(f.app.status.as_deref(), Some("compress complete"));
+        let bytes = std::fs::read(f.root.join("out.zip")).unwrap();
+        assert!(bytes.starts_with(b"PK"), "the empty file became a real zip");
+    }
+
+    #[test]
+    fn answering_skip_keeps_the_existing_archive_and_the_originals() {
+        let mut f = Fixture::new("archive-skip");
+        f.run("touch a.txt out.zip");
+        select_named(&mut f, "a.txt");
+
+        f.run("compress out.zip");
+        f.press(KeyCode::Char('s'));
+
+        assert_eq!(f.app.status.as_deref(), Some("compress skipped"));
+        assert!(!f.app.is_busy());
+        assert_eq!(std::fs::read(f.root.join("out.zip")).unwrap(), b"");
+        assert!(f.root.join("a.txt").exists());
+    }
+
+    #[test]
+    fn extracting_into_a_folder_that_is_there_asks_and_skip_keeps_what_is_in_it() {
+        let mut f = fixture_with_archive("extract-ask-skip");
+        // The archive holds `proj/inner/a.txt` and goes into the folder `proj`, so this is the
+        // file it would clash with.
+        std::fs::create_dir_all(f.root.join("proj/proj/inner")).unwrap();
+        std::fs::write(f.root.join("proj/proj/inner/a.txt"), b"mine").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "proj.tar.gz");
+
+        f.run("extract");
+        assert!(matches!(
+            f.app.prompt,
+            Some(Prompt::Conflict(ConflictSource::Extract { .. }))
+        ));
+        f.press(KeyCode::Char('s'));
+        f.wait_for_idle();
+
+        assert_eq!(
+            std::fs::read(f.root.join("proj/proj/inner/a.txt")).unwrap(),
+            b"mine",
+            "skip keeps the file that was already there"
+        );
+    }
+
+    #[test]
+    fn extracting_into_a_folder_that_is_there_and_aborting_writes_nothing() {
+        let mut f = fixture_with_archive("extract-ask-abort");
+        std::fs::create_dir(f.root.join("proj")).unwrap();
+
+        f.run("extract");
+        f.press(KeyCode::Char('a'));
+
+        assert_eq!(f.app.status.as_deref(), Some("aborted"));
+        assert!(!f.app.is_busy());
+        assert!(!f.root.join("proj/inner").exists());
+    }
+
+    #[test]
+    fn compress_with_p_asks_twice_and_makes_an_encrypted_zip() {
+        let mut f = Fixture::new("compress-p");
+        f.run("touch a.txt");
+        select_named(&mut f, "a.txt");
+
+        f.run("compress -p sealed.zip");
+        assert!(matches!(
+            f.app.prompt,
+            Some(Prompt::CompressPassword { .. })
+        ));
+        f.type_text("hunter2");
+        f.press(KeyCode::Enter);
+        let shown = f.app.prompt.as_ref().unwrap().display();
+        assert!(shown.starts_with("confirm password"), "{shown}");
+        f.type_text("hunter2");
+        f.press(KeyCode::Enter);
+        f.wait_for_idle();
+
+        assert_eq!(f.app.status.as_deref(), Some("compress complete"));
+        assert!(archive::needs_password(&f.root.join("sealed.zip")).unwrap());
+    }
+
+    #[test]
+    fn a_mismatched_confirmation_starts_the_password_over_and_writes_nothing() {
+        let mut f = Fixture::new("compress-p-mismatch");
+        f.run("touch a.txt");
+        select_named(&mut f, "a.txt");
+
+        f.run("compress -p sealed.zip");
+        f.type_text("one");
+        f.press(KeyCode::Enter);
+        f.type_text("two");
+        f.press(KeyCode::Enter);
+
+        let Some(Prompt::CompressPassword { first, error, .. }) = &f.app.prompt else {
+            panic!("the prompt stays open");
+        };
+        assert!(first.is_none(), "it starts over from the first password");
+        assert_eq!(error.as_deref(), Some("the passwords do not match"));
+        assert!(!f.app.is_busy());
+        assert!(!f.root.join("sealed.zip").exists());
+    }
+
+    #[test]
+    fn compress_with_p_refuses_a_tar_name_and_escape_cancels_the_prompt() {
+        let mut f = Fixture::new("compress-p-tar");
+        f.run("touch a.txt");
+        select_named(&mut f, "a.txt");
+
+        f.run("compress -p out.tar.gz");
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("compress: only a zip can be encrypted")
+        );
+        assert!(f.app.prompt.is_none());
+
+        f.run("compress -p out.zip");
+        f.press(KeyCode::Esc);
+        assert_eq!(f.app.status.as_deref(), Some("compress cancelled"));
+        assert!(!f.root.join("out.zip").exists());
+    }
+
+    #[test]
+    fn the_compress_form_can_save_into_another_folder_and_refuses_one_that_is_not_there() {
+        let mut f = Fixture::new("compress-save-in");
+        std::fs::create_dir(f.root.join("backups")).unwrap();
+        std::fs::write(f.root.join("a.txt"), b"a").unwrap();
+        let mut req = request(
+            &f,
+            &["a.txt"],
+            compress_popup::Layout::One {
+                file_name: "a.tar.gz".into(),
+            },
+        );
+        req.dir = f.root.join("backups");
+
+        f.app.start_compress(req).unwrap();
+        f.wait_for_idle();
+
+        assert!(f.root.join("backups/a.tar.gz").exists());
+        assert!(!f.root.join("a.tar.gz").exists());
+
+        let mut missing = request(
+            &f,
+            &["a.txt"],
+            compress_popup::Layout::One {
+                file_name: "b.tar.gz".into(),
+            },
+        );
+        missing.dir = f.root.join("nowhere");
+        let error = f.app.start_compress(missing).unwrap_err();
+        assert!(error.ends_with("nowhere is not a folder"), "{error}");
+    }
+
+    #[test]
+    fn the_compress_form_warns_live_about_a_name_already_taken_and_a_missing_folder() {
+        let mut f = Fixture::new("compress-warn");
+        f.run("touch a.txt a.zip");
+        select_named(&mut f, "a.txt");
+        let mut form = f.app.begin_compress_form(&f.browser).unwrap();
+        assert_eq!(form.warning(), Some("a.zip already exists"));
+
+        // A different name clears it; a folder that is not there is reported instead.
+        form.key(KeyCode::Char('2'));
+        App::refresh_compress_warning(&mut form);
+        assert_eq!(form.warning(), None);
+        form.key(KeyCode::Down);
+        for c in "nope".chars() {
+            form.key(KeyCode::Char(c));
+        }
+        App::refresh_compress_warning(&mut form);
+        assert!(form.warning().unwrap().ends_with("nope is not a folder"));
+    }
+
+    #[test]
+    fn the_extract_form_warns_live_about_a_folder_that_is_there_until_existing_files_are_handled() {
+        let mut f = fixture_with_archive("extract-warn");
+        std::fs::create_dir(f.root.join("proj")).unwrap();
+        let mut form = f.app.begin_extract_form(&f.browser).unwrap();
+        assert!(form.warning().unwrap().starts_with("proj already exists"));
+
+        // Existing files -> skip: merging is now what is asked for, so nothing to warn about.
+        form.key(KeyCode::Down);
+        form.key(KeyCode::Right);
+        App::refresh_extract_warning(&mut form);
+        assert_eq!(form.warning(), None);
     }
 
     fn request(
@@ -2560,7 +3043,7 @@ mod tests {
         );
         assert_eq!(
             f.app.start_extract(request),
-            Err("out already exists".into())
+            Err("out already exists: set Existing files to skip or replace".into())
         );
         assert!(!f.app.is_busy());
 
