@@ -16,7 +16,8 @@ This is early — v0.1.0 established the project's architecture, and every High 
 item (core file operations, async bulk ops with progress, the interactive shell overlay, the full
 theme system, and inline image preview) is now built. It is **not yet** a daily-driver
 replacement for Ranger or Yazi. See [ROADMAP.md](ROADMAP.md) for what's still ahead (built-in
-trash, native SSH/SFTP browsing, and a stable multi-language sandboxed plugin system).
+trash, and a stable multi-language sandboxed plugin system). Native SSH/SFTP browsing works
+(`:cd ssh://host/path`); see the roadmap for what it does not do yet.
 
 ---
 
@@ -133,7 +134,7 @@ named `init` must be passed as `./init`.
 | `r`         | rename selection                              |
 | `n`         | create — trailing `/` makes a directory       |
 | `/`         | search — jump to the nearest entry whose name contains what you type, in this directory or any below it (`Enter` stays, `Esc` goes back) |
-| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory, `:mkdir [-p] <name>...`, `:touch <name>...`, `:extract` (marked or selected `.zip`/`.tar`/`.tar.gz` into a directory named after each), `:compress [-p] <name.zip|.tar|.tar.gz>` (marked or selected entries into one archive, `-p` asks for a password for a zip, and an existing archive asks overwrite / skip / abort; or right-click an entry and choose *Compress…* for a form with name, save-in folder, format, level, an optional password (zip only, AES-256; file names stay visible) and options; right-click an archive and choose *Extract…* for a form with the destination folder (an encrypted zip asks for its password first), what to do with existing files and whether to delete the archive); an editor or other full-screen program (`:nvim ROADMAP.md`, or any command after a `!`, as in `:!python3`) gets the whole terminal until it exits; anything else runs in `sh` in the current directory (`Esc` cancels) |
+| `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory (`:cd ssh://[user@]host[:port][/path]` for one on another machine, over your own `ssh` setup; connect once with `ssh host` first so the host key is trusted), `:mkdir [-p] <name>...`, `:touch <name>...`, `:extract` (marked or selected `.zip`/`.tar`/`.tar.gz` into a directory named after each), `:compress [-p] <name.zip|.tar|.tar.gz>` (marked or selected entries into one archive, `-p` asks for a password for a zip, and an existing archive asks overwrite / skip / abort; or right-click an entry and choose *Compress…* for a form with name, save-in folder, format, level, an optional password (zip only, AES-256; file names stay visible) and options; right-click an archive and choose *Extract…* for a form with the destination folder (an encrypted zip asks for its password first), what to do with existing files and whether to delete the archive); an editor or other full-screen program (`:nvim ROADMAP.md`, or any command after a `!`, as in `:!python3`) gets the whole terminal until it exits; anything else runs in `sh` in the current directory (`Esc` cancels) |
 | `c`         | cancel everything pending — the yank/cut clipboard, every mark, and a running copy/move/command — from any directory |
 | `.`         | show or hide dot-files (hidden by default; `show_hidden = true` in `config.toml` starts them shown) |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
@@ -398,7 +399,7 @@ crates/
 ├── preview/            # detects + decodes image files (terminal-agnostic; text preview: WIP)
 ├── trash/              # (stub, WIP) trash + undo history
 ├── plugins/            # out-of-process, any-language plugin host (JSON-RPC over stdio); WASM tier: WIP
-└── vfs_ssh/             # (stub, WIP) native SSH/SFTP remote browsing
+└── vfs_ssh/            # native SSH/SFTP remote browsing, through the system `ssh`
 ```
 
 ---

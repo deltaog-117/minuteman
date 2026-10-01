@@ -230,16 +230,17 @@ impl BrowserState {
             .position(|e| e.name.to_lowercase().contains(&needle))
     }
 
-    /// Jumps directly to `path` (resolved relative to the current directory if not absolute),
+    /// Jumps directly to `path` (resolved by `Vfs::resolve_typed`, so a relative one is taken from the
+    /// current directory),
     /// as if the user had navigated there via repeated `enter`/`leave`. Backs the `:cd` command.
     pub fn goto(&mut self, vfs: &dyn Vfs, path: &Path) -> Result<(), VfsError> {
-        let target = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.current_dir.join(path)
-        };
-        if !vfs.is_dir(&target) {
-            return Err(VfsError::NotADirectory(target));
+        let target = vfs.resolve_typed(path, &self.current_dir);
+        // `metadata` rather than `is_dir`, whose plain yes or no would turn "cannot reach that
+        // machine" into "not a directory".
+        match vfs.metadata(&target) {
+            Ok(meta) if meta.kind == shared::FileKind::Dir => {}
+            Ok(_) | Err(VfsError::NotFound(_)) => return Err(VfsError::NotADirectory(target)),
+            Err(other) => return Err(other),
         }
 
         self.current_dir = target;
@@ -283,9 +284,21 @@ impl BrowserState {
             return Ok(());
         }
 
-        self.current_dir = entry.path.clone();
+        self.move_to(vfs, entry.path.clone())?;
         self.selected = 0;
-        self.refresh(vfs)
+        Ok(())
+    }
+
+    /// Makes `dir` the current directory if it can be listed; otherwise leaves everything as it
+    /// was, so a folder that cannot be read (or a parent that is not a folder at all, like the
+    /// step above a remote machine's root) never strands the browser on it.
+    fn move_to(&mut self, vfs: &dyn Vfs, dir: PathBuf) -> Result<(), VfsError> {
+        let before = std::mem::replace(&mut self.current_dir, dir);
+        let moved = self.refresh(vfs);
+        if moved.is_err() {
+            self.current_dir = before;
+        }
+        moved
     }
 
     /// Move up to the parent directory, restoring the selection to the directory we came from.
@@ -295,8 +308,7 @@ impl BrowserState {
         };
         let came_from = self.current_dir.clone();
 
-        self.current_dir = parent;
-        self.refresh(vfs)?;
+        self.move_to(vfs, parent)?;
 
         self.selected = self
             .current_entries
@@ -400,6 +412,57 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub").join("file.txt"), b"hi").unwrap();
         root
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn leaving_into_an_unlistable_parent_stays_where_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = make_tree();
+        let mut browser = BrowserState::new(&LocalVfs, root.join("sub")).unwrap();
+        // Searchable but not listable: the child can be read, the parent cannot.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let listable = LocalVfs.list_dir(&root).is_ok();
+
+        let left = browser.leave(&LocalVfs);
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if listable {
+            // Permissions do not bind this user (root), so there is nothing to observe.
+            return;
+        }
+        assert!(left.is_err());
+        assert_eq!(browser.current_dir(), root.join("sub"));
+        assert_eq!(
+            browser
+                .current_entries()
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["file.txt"]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn entering_an_unreadable_folder_stays_where_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = make_tree();
+        let mut browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        let sub = root.join("sub");
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let listable = LocalVfs.list_dir(&sub).is_ok();
+
+        let entered = browser.enter(&LocalVfs);
+
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if listable {
+            return;
+        }
+        assert!(entered.is_err());
+        assert_eq!(browser.current_dir(), root);
     }
 
     #[test]

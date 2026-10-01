@@ -69,6 +69,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-30 | Undo History | Inverse-operation journal in `file_ops::history`, batches as one step, conservative reverts, trash restored through the `trash` crate (COA A), over a holding area for deleted data (B) or a reverse-only popup (C) | ✅ Confirmed |
 | 2026-09-30 | Default Key Remap | `d` cut, `x`/`X` delete, `s` unbound, `y`/`d`/`x`/`X` act on marks only | ✅ Confirmed |
 | 2026-10-01 | Archives Through Vfs | Four write primitives on `Vfs` (`create_write`, `create_symlink`, `set_mode`, `replace`) and archives read and written through them, with a conformance suite for each | ✅ Confirmed |
+| 2026-10-01 | Remote Browsing | Drive the system `ssh -s sftp` through `openssh` and `openssh-sftp-client`, route by a path prefix in one `Vfs`, and stream copies between backends (COA C), over `ssh2` and libssh2 (A) or `russh` (B) | ✅ Confirmed |
 
 ---
 
@@ -4846,6 +4847,100 @@ because zip's own `entry.is_dir()` matched the gate's pattern. Those few lines n
 real disk call. Copying between two different backends is still missing.
 
 **Verification.** `scripts/check` passes. Not tried in a real terminal.
+
+---
+
+### Remote Browsing: The System `ssh`, Routed by Path Prefix (COA C)
+
+**Date:** 2026-10-01
+**Status:** Confirmed
+
+#### Context / Background
+
+The two `Vfs` cycles before this one existed to make a remote backend possible: every reader and
+writer, archives included, now goes through the trait. `vfs_ssh` was an empty crate.
+
+#### Options Considered
+
+**Option A: `ssh2` (libssh2 bindings), synchronous.** Fits the synchronous trait, but pulls in a C
+library and OpenSSL, serialises calls on one session, and leaves `~/.ssh/config`, `ProxyJump` and
+host-key prompts to be rebuilt by hand.
+
+**Option B: `russh` and `russh-sftp`, pure Rust.** No C, but the largest dependency tree, an
+async-to-sync bridge under every call, and known-hosts checking to write ourselves, where a mistake
+is a security hole.
+
+**Option C: the system `ssh -s sftp`, speaking SFTP over its pipes.** OpenSSH keeps the hard parts.
+The cost is needing the `ssh` program and having no password prompt.
+
+#### Decision
+
+Option C, at the user's direction after the three were compared. The design choices worth keeping:
+
+*A remote place is an ordinary path.* `ssh://[user@]host[:port]/path` is carried as the `PathBuf`
+the rest of the program already passes around, so the browser, marks, clipboard and file
+operations needed no new types. `Remote::locate` is the only parser. Its pieces are newtypes built
+by validators (`Host`, `User`, a non-zero port), a host or user cannot begin with `-`, and the
+connection is always requested as an `ssh://` URI, so nothing a user types can become an `ssh`
+option. Stepping up from a machine's root lands on the bare scheme, which names nothing and is
+reported as not found.
+
+*One `Vfs` routes.* `RoutedVfs` replaces `LocalVfs` as the application's filesystem. A path goes to
+the disk or to the `Link` for its machine, and the `Link` returns the full `ssh://` paths itself, so
+no caller translates. A copy between two places that are not on one machine is streamed through
+`open_read` and `create_write`, and a move there reports `CrossesDevices`, which `file_ops::mv`
+already answers by copying and deleting. That is why yank and paste work across them with no new
+code in `file_ops`.
+
+*The asynchronous client stays behind the synchronous trait.* The SFTP client lives on a small
+runtime of its own, and a caller waits on a standard channel, so it works from the render thread,
+a plain thread or inside another runtime. File streams are blocking `Read`/`Write`/`Seek`; a seek
+from the end is turned into an absolute one because the client cannot do it, and a writer counts
+its own length because the server will not describe a handle opened for writing.
+
+*Connection model* (shared state across threads, so written down). A `Link` is in one of two
+states, `Idle` (no session) or `Live(session)`. A call in `Idle` connects under the lock, so callers
+arriving meanwhile wait for that one attempt instead of each making their own. A call that fails
+with a transport error moves `Live` back to `Idle`, but only if the session it used is still the
+current one, so a late failure cannot discard a newer session. A read is then repeated once, since
+asking twice cannot do harm; anything that changes something is not, because the first attempt may
+have happened. Invariants: at most one session per machine; a session is dropped once and by the
+call that saw it fail; a server's refusal never drops the session. There is no model checker run on
+this, only the tests below.
+
+*Safe by default.* An unknown host key is refused (`StrictHostKeyChecking=yes`), the reason is shown
+in the status line, and the user connects once with `ssh` to trust it. `BatchMode` means no password
+prompt, only keys and the agent. The control socket is kept in the per-user runtime folder rather
+than under `$HOME`, because a Unix socket path is limited to about 100 bytes and a long home folder
+overflowed it, which a trial run showed. The control process closes ten seconds after the
+application stops using it, because a trial showed that an application killed mid-run left one
+running for good.
+
+*Local-only actions are refused, not redirected.* A shell pane, a `:` command and opening with a
+local program would act on this machine's files while the screen shows another's, so each says why
+it will not run. The trash is refused too. The trash decision above recorded that a non-local
+backend should fall back to a permanent delete; that was reconsidered, because a key that promises
+a recoverable delete should not delete for good, so `x` refuses and `X` stays the permanent one.
+
+**Two test-suite changes.** Both are on the `Seed` the backend supplies, not on an assertion. SFTP
+v3 stores times in whole seconds, so the scenario that checks `touch` moved the time waited 20 ms
+and could not pass; `time_resolution` lets a backend say how long to wait. A link's text is in the
+store's own namespace, so a link seeded to point at `ssh://host/x/file` reads back `/x/file`;
+`link_text` says what a backend reads back.
+
+**Found while testing.** `BrowserState::leave` and `enter` set the current folder before listing
+it, so stepping up from a remote root (whose parent is the bare scheme) left the browser pointing
+at it. Both now keep their place on failure; local unreadable folders had the same flaw. `:cd`
+used `is_dir`, which turned "cannot connect" into "not a directory"; it uses `metadata` now.
+
+**Verification.** `scripts/check` passes. The remote backend passes the conformance suite against a
+real `sshd` on a loopback port (started by the test, skipped where `sshd` is missing), along with
+copying a tree both ways, a move between the disk and a machine, a refused unknown host, a trusted
+one under strict checking, the home folder, browsing to and stopping at a machine's root, and a
+writer that is only dropped. The real binary was driven in a terminal against that `sshd` with
+strict host keys: a remote `:cd`, a preview, and a paste to the local disk worked. Not tried: a
+real network, a password or passphrase login, `ProxyJump`, an agent, Windows, or a server other
+than OpenSSH.
 
 ---
 

@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clipboard when it still holds the cut that was just pasted.
 
 ### Fixed
+- `browser`: going up or into a folder that cannot be listed (a parent with no read permission, or
+  the step above a remote machine's root) left the browser pointing at it with the old listing on
+  screen. It now stays where it was and reports the error. `:cd` also reports why a path cannot be
+  reached, such as a refused connection, instead of "not a directory".
+- `tui`: in a folder on another machine, the actions that would run on this one are refused with a
+  reason instead of acting on the wrong files: shell panes, `:` shell commands, opening a file
+  with a local program, and sending to the trash (a remote machine has none; the permanent delete
+  works). `Q` no longer writes an `ssh://` folder for the shell to `cd` into.
 - `preview`: the archive round-trip proptest could generate two entries with the same name,
   which a zip archive rejects outright and which made a tar's read-back order for the duplicate
   an untested implementation detail rather than something the test meant to pin down; the
@@ -46,6 +54,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `vfs_ssh`, `tui`, `browser`, `shared`: native remote browsing over SSH, with no mounted
+  filesystem. `:cd ssh://[user@]host[:port]/path` opens a folder on another machine; with no path
+  (`:cd ssh://host`) it opens the login's home folder, and `sftp://` is accepted as the same
+  thing. The header shows the machine as the first segment, and clicking a segment stays on it.
+  Listing, previews, marks, mkdir, touch, rename and delete work there, and copying or moving
+  between this machine's disk and a remote one (or two remote ones) streams the file through the
+  application, so yank and paste work across them. The connection is the system `ssh`'s own
+  (`ssh -s sftp`), so `~/.ssh/config` aliases, keys, the agent and `ProxyJump` behave as in a
+  terminal. A host not already in `known_hosts` is refused, with the reason shown, so connect once
+  with `ssh host` to trust it; there is no password prompt, only keys and the agent. A host or user
+  name that could be read as an `ssh` option is refused before `ssh` is run. A dropped connection
+  is re-made on the next action, and a read is retried once at once. `Vfs` gained
+  `resolve_typed`, the rule that turns a typed location into the folder to open. A remote folder
+  is re-read every five seconds instead of every half second.
+- `shared`: the conformance suite's `Seed` can declare a store's time resolution and how a seeded
+  link's text reads back, which a backend with whole-second times or its own path prefix needs.
+  The remote backend is held to the same sixteen scenarios as the disk and memory.
 - `tui`, `file_ops`, `theming`: the rest of the archive work. `C` and `E` open the compress and
   extract forms for the marked entries. The compress form has a "Save in" folder, and both forms
   warn as you type when the name or folder they would create is already taken. `:compress` and

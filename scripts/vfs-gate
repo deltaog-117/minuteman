@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 
 declare -A allowed=(
   [crates/shared/src/vfs.rs]="the local disk backend itself"
+  [crates/vfs_ssh/src/link.rs]="the SFTP backend: its is_dir and metadata calls describe a remote file, never this disk"
   [crates/trash/src/lib.rs]="the desktop trash is a local-disk concept"
   [crates/theming/src/config.rs]="the app's own config and appearance files"
   [crates/tui/src/cli.rs]="writes the --cwd-file the shell wrapper reads"

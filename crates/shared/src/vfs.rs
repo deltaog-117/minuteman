@@ -126,6 +126,17 @@ pub trait Vfs: Send + Sync {
     /// `None`, so a remote backend degrades to "not available" instead of failing oddly.
     fn local_path(&self, path: &Path) -> Option<PathBuf>;
 
+    /// Turns a location the user typed into the folder to open, `current` being the folder being
+    /// browsed. A relative path is taken from `current`; a backend with another way of naming
+    /// places (a remote machine's `ssh://host`, which opens at the login's home) says so here.
+    fn resolve_typed(&self, typed: &Path, current: &Path) -> PathBuf {
+        if typed.is_absolute() {
+            typed.to_path_buf()
+        } else {
+            current.join(typed)
+        }
+    }
+
     /// Creates a new file at `path` and opens it for writing. Fails with
     /// `VfsError::AlreadyExists` if anything is there, a symlink (even a dangling one) included,
     /// which is never followed, and never truncates or replaces what is there. It does not create

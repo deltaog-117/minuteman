@@ -1029,6 +1029,23 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   touches the disk directly, and when a listed file stops doing so. Chosen over also moving
   archives onto the trait (B) and a guardrails-only change (C).
 
+- ✅ **Native remote browsing over SSH/SFTP (COA C: the system `ssh`)** – a path beginning
+  `ssh://[user@]host[:port]/` is a place on another machine, handled by the `vfs_ssh` crate:
+  `Remote::locate` parses it into validated `Host`, `User` and `Target` types (nothing that could
+  be read as an `ssh` option gets through), `RoutedVfs` is the `Vfs` the application is built with
+  and sends a path to the disk or to that machine's `Link`, and a `Link` runs `ssh -s sftp` through
+  the `openssh` and `openssh-sftp-client` crates, so host keys, `~/.ssh/config`, agents and
+  `ProxyJump` stay OpenSSH's. A `Link` connects on first use, keeps one session for every thread,
+  re-makes it after a failure, and retries a read once; its control process exits ten seconds after
+  the application stops using it, so a crash leaves nothing running. `:cd ssh://host` opens the
+  login's home. Reads and writes are blocking `Read`/`Write`/`Seek` streams, so zip listing seeks
+  over the network. A copy between the disk and a machine is streamed and a move falls back to
+  copy and delete, so yank and paste work across them. The backend passes the same sixteen
+  conformance scenarios as the disk and memory, against a real `sshd` started on a loopback port
+  for the test. Shell panes, `:` commands, opening with a local program and the trash are refused
+  in a remote folder, and the live refresh slows to five seconds there. Chosen over `ssh2`
+  (libssh2, a C dependency) and `russh` (a second SSH implementation to keep correct).
+
 - ✅ **Archives through `Vfs`** – creating, extracting, checking the password of and listing an
   archive now go through the trait, so none of it needs the local disk. `Vfs` gained
   `create_write` (a seekable writer that creates new files only and never follows a link),
@@ -1161,8 +1178,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   "Open with" cannot set the default (writing `mimeapps.list`) or remember the last choice; the
   associations are read once per session, so an app installed while it runs is not seen; `l` and
   `→` on a file now open it, which someone used to browsing with them may find eager.
-- **Native remote filesystem browsing (SSH/SFTP)** – browse and operate on `ssh://`/`sftp://`
-  paths directly through the VFS abstraction, no FUSE mount required.
+- **Remote browsing, follow-ups** – a connection or a listing blocks the interface while it runs
+  (the `Vfs` is synchronous and the browser lists on the render thread), up to the 10 second
+  connect timeout; there is no password or key-passphrase prompt (keys and the agent only, run
+  through `BatchMode`), no prompt to trust a new host key (run `ssh host` once), no bookmarks or
+  history of machines, and no way to open a remote file with a local program except copying it
+  first. A shell pane, a `:` command and the trash are refused in a remote folder. A copy passes
+  through this machine even between two folders on one remote (the server's `copy-data` extension
+  is not used), and the disk usage view and recursive delete cost one round trip per folder.
+  SFTP v3 gives times in whole seconds and no inode, link count or allocated size, so Inspect
+  leaves those out. `ssh://host/~` is not expanded. The `openssh` crate is Unix only, and this was
+  not built or tried on Windows.
 - **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed** – a second, sandboxed plugin
   tier alongside the stage-1 out-of-process JSON-RPC host (see Completed): a plugin compiled to
   WASM gets no ambient filesystem/network/process access by default, only what a versioned host
@@ -1338,5 +1364,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: Medium Priority is empty. The VFS work unblocks *Native remote filesystem browsing
-   (SSH/SFTP)*; archives already go through `Vfs`, so extraction on a remote backend only needs its write support.
+4. Next cycle: Medium Priority holds the follow-ups to remote browsing and the other features
+   listed there. The biggest gap in remote browsing is that a connection or listing blocks the
+   interface; moving the browser's listing onto a background job fixes that for every backend.

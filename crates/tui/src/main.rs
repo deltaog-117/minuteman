@@ -107,6 +107,7 @@ use theming::{
     Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, PreviewHook, RawFont,
     RawLocal, RawPanels, RawStyles, RawTheme, RawUi, Styles, Theme, Ui,
 };
+use vfs_ssh::RoutedVfs;
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -489,10 +490,17 @@ fn fresh_shell_box(
     shell_offset: &mut (i32, i32),
     shell_size: &mut (i32, i32),
 ) -> Result<ShellPanes> {
+    if vfs_ssh::is_remote(cwd) {
+        anyhow::bail!("{REMOTE_SHELL}");
+    }
     *shell_offset = (0, 0);
     *shell_size = (0, 0);
     ShellPanes::open(cwd, shell_area(frame_area, *shell_offset, *shell_size))
 }
+
+/// Why a shell cannot be opened in a folder on another machine: it would run here, on files that
+/// are not the ones in view.
+const REMOTE_SHELL: &str = "shells run on this machine; leave the remote folder first";
 
 /// Carries out one `Alt` command (see `alt_keys`) against the shell box, returning a status
 /// message when there is something worth telling the user. Works the same whether the shell has
@@ -566,6 +574,10 @@ fn apply_alt_command(
             } else {
                 SplitDirection::Vertical
             };
+            if vfs_ssh::is_remote(cwd) {
+                *shells = Some(panes);
+                return Ok(Some(REMOTE_SHELL.into()));
+            }
             panes = panes.split(direction, cwd, area)?;
             None
         }
@@ -680,8 +692,9 @@ fn main() -> Result<()> {
 
     let mut config = Config::load();
     // The one filesystem this session browses: everything below reaches a path through it, and
-    // the background jobs and previews are handed clones.
-    let vfs: Arc<dyn Vfs> = Arc::new(LocalVfs);
+    // the background jobs and previews are handed clones. A path under `ssh://` goes to that
+    // machine and every other path to the local disk.
+    let vfs: Arc<dyn Vfs> = Arc::new(RoutedVfs::new(Arc::new(LocalVfs))?);
     let mut browser = BrowserState::with_show_hidden(vfs.as_ref(), start_dir, config.show_hidden)?;
 
     // Backs the blocking thread pool that copy/move/delete run on so a large operation never
@@ -2265,16 +2278,21 @@ fn run(
                                     } else {
                                         SplitDirection::Vertical
                                     };
-                                    let panes =
-                                        shells.take().expect("`shells.is_some()` checked above");
-                                    shells = Some(panes.split(
-                                        direction,
-                                        browser.current_dir(),
-                                        area,
-                                    )?);
-                                    // The new pane is where you'd want to type, so hand it the
-                                    // keyboard straight away.
-                                    shell_focused = true;
+                                    if vfs_ssh::is_remote(browser.current_dir()) {
+                                        app.status = Some(REMOTE_SHELL.into());
+                                    } else {
+                                        let panes = shells
+                                            .take()
+                                            .expect("`shells.is_some()` checked above");
+                                        shells = Some(panes.split(
+                                            direction,
+                                            browser.current_dir(),
+                                            area,
+                                        )?);
+                                        // The new pane is where you'd want to type, so hand it
+                                        // the keyboard straight away.
+                                        shell_focused = true;
+                                    }
                                 }
                                 KeyCode::Char('x') => {
                                     let panes =
@@ -2460,7 +2478,10 @@ fn run(
                     // Without `--cwd-file` (a bare `minuteman` run) there's nobody to hand the
                     // directory to, so this degrades to a plain quit rather than doing nothing.
                     Some(Action::QuitToCwd) => {
-                        if let Some(file) = cwd_file {
+                        // A folder on another machine is not one the shell can `cd` into.
+                        if let Some(file) = cwd_file
+                            && !vfs_ssh::is_remote(browser.current_dir())
+                        {
                             cli::write_cwd_file(file, browser.current_dir())?;
                         }
                         return Ok(());

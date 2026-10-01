@@ -37,6 +37,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 /// `readdir` + per-entry `stat` is negligible even in a large directory, short enough that a
 /// change shows up before the user has looked away.
 const INTERVAL: Duration = Duration::from_millis(500);
+/// A folder on another machine is re-read far less often: each look costs several round trips.
+const REMOTE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// One background listing: the directory it was taken from, and its parent. `None` when the
 /// directory could not be read (e.g. it was just deleted) — the screen keeps what it has.
@@ -86,9 +88,14 @@ impl LiveRefresh {
             }
         }
 
+        let interval = if vfs_ssh::is_remote(browser.current_dir()) {
+            REMOTE_INTERVAL
+        } else {
+            INTERVAL
+        };
         let due = self
             .last_started
-            .is_none_or(|started| now.duration_since(started) >= INTERVAL);
+            .is_none_or(|started| now.duration_since(started) >= interval);
         if due && !self.in_flight {
             self.in_flight = true;
             self.last_started = Some(now);

@@ -6,3 +6,16 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+shared = { path = "../shared" }
+thiserror = "2.0.20"
+futures-core = "0.3"
+# Both crates drive the system `ssh` program, which keeps host-key checking, `~/.ssh/config`,
+# agents and `ProxyJump` in OpenSSH's hands instead of in a second implementation here.
+openssh = { version = "0.11.6", features = ["process-mux"] }
+openssh-sftp-client = { version = "0.15.10", features = ["openssh"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "io-util"] }
+
+[dev-dependencies]
+proptest = "1.11"
+file_ops = { path = "../file_ops" }
+browser = { path = "../browser" }

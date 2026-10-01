@@ -169,13 +169,22 @@ pub fn crumbs(path: &Path, home: Option<&Path>, max_width: usize) -> Vec<Crumb> 
             .collect()
     };
     let (root_label, root_dir, rest) =
-        match home.and_then(|h| path.strip_prefix(h).ok().map(|r| (h, r))) {
-            Some((h, rest)) => ("~", h.to_path_buf(), names(rest)),
-            None => ("/", PathBuf::from("/"), names(path)),
+        if let Ok(vfs_ssh::Location::Remote(remote)) = vfs_ssh::Remote::locate(path) {
+            // The machine is the root, so a click on a segment stays on it and the host is on screen.
+            (
+                format!("ssh://{}", remote.target()),
+                remote.at(PathBuf::from("/")).to_path_buf(),
+                names(remote.path()),
+            )
+        } else {
+            match home.and_then(|h| path.strip_prefix(h).ok().map(|r| (h, r))) {
+                Some((h, rest)) => ("~".to_string(), h.to_path_buf(), names(rest)),
+                None => ("/".to_string(), PathBuf::from("/"), names(path)),
+            }
         };
     let mut dir = root_dir.clone();
     let mut segments = vec![Crumb {
-        label: root_label.to_string(),
+        label: root_label,
         target: Some(root_dir),
     }];
     for name in rest {
@@ -1059,6 +1068,25 @@ mod tests {
             ["/", "usr", "lib"]
         );
         assert_eq!(breadcrumb(Path::new("/"), None, 80), ["/"]);
+    }
+
+    #[test]
+    fn a_remote_path_shows_its_machine_as_the_root_and_its_crumbs_stay_there() {
+        let path = Path::new("ssh://me@box:2222/var/log");
+
+        let crumbs = crumbs(path, Some(Path::new("/home/me")), 80);
+
+        let labels: Vec<_> = crumbs.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["ssh://me@box:2222", "var", "log"]);
+        let targets: Vec<_> = crumbs.iter().map(|c| c.target.clone().unwrap()).collect();
+        assert_eq!(
+            targets,
+            [
+                PathBuf::from("ssh://me@box:2222/"),
+                PathBuf::from("ssh://me@box:2222/var"),
+                PathBuf::from("ssh://me@box:2222/var/log"),
+            ]
+        );
     }
 
     #[test]

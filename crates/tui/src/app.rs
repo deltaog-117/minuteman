@@ -345,6 +345,14 @@ impl BulkKind {
 
 /// Whether anything is at `path`, a dangling symlink included (`exists` follows links and would
 /// call one missing).
+/// Sends a file to this machine's trash, or says why it cannot: a remote machine has none.
+fn trash_here(path: &Path) -> Result<(), file_ops::FileOpsError> {
+    if vfs_ssh::is_remote(path) {
+        return Err(VfsError::Unsupported("a trash on a remote machine").into());
+    }
+    file_ops::trash(path)
+}
+
 fn lexists(vfs: &dyn Vfs, path: &Path) -> bool {
     vfs.symlink_metadata(path).is_ok()
 }
@@ -1128,6 +1136,13 @@ impl App {
     /// The one place a file is handed to a program. `terminal` forces the terminal handover for a
     /// program that needs it whatever its name (a `Terminal=true` desktop entry).
     fn launch(&mut self, browser: &BrowserState, command: &str, path: &Path, terminal: bool) {
+        if vfs_ssh::is_remote(path) {
+            self.status = Some(format!(
+                "cannot open {}: it is on a remote machine, copy it here first",
+                display_name(path)
+            ));
+            return;
+        }
         let Some(program) = open::program_word(command) else {
             self.status = Some("open with: the command is empty".into());
             return;
@@ -1567,6 +1582,12 @@ impl App {
     /// Runs `line` under `sh -c` in the browsed directory on the blocking pool, so a slow
     /// command never freezes the render loop. `Esc` kills it (see `cancel_bulk`).
     fn spawn_shell_command(&mut self, browser: &BrowserState, line: String) {
+        // Run here, it would act on this machine's files, not the ones in view.
+        if vfs_ssh::is_remote(browser.current_dir()) {
+            self.status =
+                Some("commands run on this machine; leave the remote folder first".into());
+            return;
+        }
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
             return;
@@ -2131,7 +2152,7 @@ impl App {
                     result = Err(e);
                     break;
                 }
-                if delete_archives && let Err(e) = file_ops::trash(&job.archive) {
+                if delete_archives && let Err(e) = trash_here(&job.archive) {
                     result = Err(e);
                     break;
                 }
@@ -2204,7 +2225,7 @@ impl App {
                 }
                 if delete_originals {
                     for source in &job.sources {
-                        if let Err(e) = file_ops::trash(source) {
+                        if let Err(e) = trash_here(source) {
                             result = Err(e);
                             break 'jobs;
                         }
@@ -2335,6 +2356,12 @@ impl App {
     /// Same shape as `spawn_delete`, but sends each target to the desktop trash
     /// (`file_ops::trash`) instead of deleting it — no `Vfs` involved (see that function's docs).
     fn spawn_trash(&mut self, targets: Vec<PathBuf>) {
+        // Only this machine has a trash; sending the files to it would not find them, and
+        // deleting them for good instead is not what a trash key promises.
+        if targets.iter().any(|target| vfs_ssh::is_remote(target)) {
+            self.status = Some("a remote machine has no trash; use the permanent delete".into());
+            return;
+        }
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
             return;
@@ -3780,6 +3807,36 @@ mod tests {
             Some("minuteman-no-such-program: command not found")
         );
         assert_eq!(f.app.take_handover(), None);
+    }
+
+    #[test]
+    fn a_file_on_a_remote_machine_is_not_opened_by_a_local_program() {
+        let mut f = Fixture::new("open-remote");
+
+        f.app
+            .open_with(&f.browser, "cat", Path::new("ssh://box/etc/hosts"));
+
+        let status = f.app.status.as_deref().unwrap_or_default();
+        assert!(status.contains("remote machine"), "{status}");
+        assert_eq!(f.app.take_handover(), None);
+    }
+
+    #[test]
+    fn a_remote_path_is_never_sent_to_the_local_trash() {
+        let mut f = Fixture::new("trash-remote");
+        let local = f.root.join("keep.txt");
+        std::fs::write(&local, b"x").unwrap();
+
+        f.app
+            .spawn_trash(vec![local.clone(), PathBuf::from("ssh://box/etc/hosts")]);
+
+        let status = f.app.status.as_deref().unwrap_or_default();
+        assert!(status.contains("no trash"), "{status}");
+        assert!(!f.app.is_busy());
+        assert!(
+            local.exists(),
+            "nothing at all is trashed when one target cannot be"
+        );
     }
 
     #[test]

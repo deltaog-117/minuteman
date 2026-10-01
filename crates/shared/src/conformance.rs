@@ -47,6 +47,17 @@ pub trait Seed {
     fn file(&self, path: &Path, bytes: &[u8]);
     /// Makes the symlink `link` pointing at `target`, which need not exist.
     fn symlink(&self, link: &Path, target: &Path);
+    /// The shortest gap between two writes the store can tell apart by modified time. A store that
+    /// keeps whole seconds (SFTP does) must say so, or a refreshed time looks unchanged.
+    fn time_resolution(&self) -> Duration {
+        Duration::from_millis(20)
+    }
+    /// What a link seeded to point at `target` reads back as. A link's text is in the store's own
+    /// namespace, so on a backend whose paths carry a prefix (`ssh://host/...`) it is the same
+    /// path without that prefix; everywhere else it is `target` unchanged.
+    fn link_text(&self, target: &Path) -> PathBuf {
+        target.to_path_buf()
+    }
 }
 
 /// One scenario: what to check about a backend, in a folder of its own.
@@ -183,7 +194,7 @@ fn touch_creates_then_refreshes(vfs: &dyn Vfs, seed: &dyn Seed, dir: &Path) {
 
     seed.file(&dir.join("old"), b"content");
     let before = vfs.metadata(&dir.join("old")).unwrap().modified.unwrap();
-    std::thread::sleep(Duration::from_millis(20));
+    std::thread::sleep(seed.time_resolution());
     vfs.touch(&dir.join("old")).unwrap();
     let after = vfs.metadata(&dir.join("old")).unwrap();
 
@@ -332,7 +343,10 @@ fn reading_links(vfs: &dyn Vfs, seed: &dyn Seed, dir: &Path) {
         vfs.read_link(&dir.join("rel")).unwrap(),
         PathBuf::from("file")
     );
-    assert_eq!(vfs.read_link(&dir.join("abs")).unwrap(), dir.join("file"));
+    assert_eq!(
+        vfs.read_link(&dir.join("abs")).unwrap(),
+        seed.link_text(&dir.join("file"))
+    );
     assert_eq!(
         vfs.read_link(&dir.join("dangling")).unwrap(),
         PathBuf::from("missing"),
