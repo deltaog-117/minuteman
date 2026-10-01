@@ -199,6 +199,18 @@ mod tests {
         fn local_path(&self, _: &Path) -> Option<PathBuf> {
             None
         }
+        fn create_write(&self, _: &Path) -> Result<Box<dyn shared::WriteSeek>, VfsError> {
+            unimplemented!("a search only lists")
+        }
+        fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), VfsError> {
+            unimplemented!("a search only lists")
+        }
+        fn set_mode(&self, _: &Path, _: u32) -> Result<(), VfsError> {
+            unimplemented!("a search only lists")
+        }
+        fn replace(&self, _: &Path, _: &Path) -> Result<(), VfsError> {
+            unimplemented!("a search only lists")
+        }
         fn is_dir(&self, _: &Path) -> bool {
             unimplemented!("a search only lists")
         }

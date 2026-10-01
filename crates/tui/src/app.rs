@@ -2029,7 +2029,7 @@ impl App {
         // An archive that cannot even be opened is left for the extraction to report.
         let asking = jobs
             .iter()
-            .find(|job| archive::needs_password(&job.archive).unwrap_or(false))
+            .find(|job| archive::needs_password(self.vfs.as_ref(), &job.archive).unwrap_or(false))
             .map(|job| job.archive.clone());
         match asking {
             None => self.spawn_extract(jobs, policy, delete_archives, None),
@@ -2067,7 +2067,7 @@ impl App {
             return;
         }
         for job in &pending.jobs {
-            match archive::check_password(&job.archive, &buffer) {
+            match archive::check_password(self.vfs.as_ref(), &job.archive, &buffer) {
                 Ok(()) => {}
                 Err(FileOpsError::WrongPassword) => {
                     let error = format!("wrong password for {}", display_name(&job.archive));
@@ -2104,6 +2104,7 @@ impl App {
         }
         let (tx, rx, cancel) = Self::archive_channel();
         let cancel_bg = Arc::clone(&cancel);
+        let vfs = Arc::clone(&self.vfs);
 
         self.handle.spawn_blocking(move || {
             let progress_tx = tx.clone();
@@ -2119,6 +2120,7 @@ impl App {
             let mut result = Ok(Outcome::Completed);
             for job in &jobs {
                 if let Err(e) = archive::extract_with_password(
+                    vfs.as_ref(),
                     &job.archive,
                     &job.dest,
                     policy,
@@ -2164,6 +2166,7 @@ impl App {
         }
         let (tx, rx, cancel) = Self::archive_channel();
         let cancel_bg = Arc::clone(&cancel);
+        let vfs = Arc::clone(&self.vfs);
 
         self.handle.spawn_blocking(move || {
             let progress_tx = tx.clone();
@@ -2178,13 +2181,17 @@ impl App {
             };
             let mut result = Ok(Outcome::Completed);
             'jobs: for job in &jobs {
-                match archive::compress_with_options(
-                    &job.sources,
-                    &job.out,
+                let options = archive::CompressOptions {
                     format,
                     level,
-                    password.as_ref(),
+                    password: password.as_ref(),
                     policy,
+                };
+                match archive::compress_with_options(
+                    vfs.as_ref(),
+                    &job.sources,
+                    &job.out,
+                    &options,
                     &mut on_progress,
                 ) {
                     Ok(Outcome::Completed) => {}
@@ -2871,7 +2878,7 @@ mod tests {
         f.wait_for_idle();
 
         assert_eq!(f.app.status.as_deref(), Some("compress complete"));
-        assert!(archive::needs_password(&f.root.join("sealed.zip")).unwrap());
+        assert!(archive::needs_password(&LocalVfs, &f.root.join("sealed.zip")).unwrap());
     }
 
     #[test]
@@ -3122,7 +3129,7 @@ mod tests {
         f.wait_for_idle();
 
         assert_eq!(f.app.status.as_deref(), Some("compress complete"));
-        let listing = preview::archive::list(&f.root.join("both.tar.gz")).unwrap();
+        let listing = preview::archive::list(&LocalVfs, &f.root.join("both.tar.gz")).unwrap();
         let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["a.txt", "b.txt"]);
         // Nothing was deleted: the originals stay unless asked otherwise.
@@ -3859,7 +3866,7 @@ mod tests {
     #[test]
     fn a_compress_with_a_password_makes_an_encrypted_zip() {
         let f = fixture_with_sealed_zip("seal-compress");
-        assert!(archive::needs_password(&f.root.join("sealed.zip")).unwrap());
+        assert!(archive::needs_password(&LocalVfs, &f.root.join("sealed.zip")).unwrap());
     }
 
     #[test]

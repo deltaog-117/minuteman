@@ -1029,6 +1029,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   touches the disk directly, and when a listed file stops doing so. Chosen over also moving
   archives onto the trait (B) and a guardrails-only change (C).
 
+- ✅ **Archives through `Vfs`** – creating, extracting, checking the password of and listing an
+  archive now go through the trait, so none of it needs the local disk. `Vfs` gained
+  `create_write` (a seekable writer that creates new files only and never follows a link),
+  `create_symlink`, `set_mode` (a backend without permissions declines, which extraction accepts)
+  and `replace` (a finished archive appears under its name in one step); each has a conformance
+  scenario, and `MemVfs` implements them. The extraction safeguards are unchanged.
+
 ---
 
 - ✅ **Archives, remainder (COA A: UX and robustness, no new dependencies)** – `C` opens the
@@ -1099,8 +1106,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
   compression are not supported, the codecs being opt-in cargo features if wanted; extracting from
-  inside an archive (browsing it as a directory) is not done, and needs the VFS hardening item
-  first; extraction does not restore modified times (only writing a zip records them, as UTC, since
+  inside an archive (browsing it as a directory) is not done, and needs the VFS work
+  (now done) as a base; extraction does not restore modified times (only writing a zip records them, as UTC, since
   the standard library has no time zone database); the compress form's "Save in" folder must
   already exist and the form never overwrites (only `:compress` and `:extract` ask); the
   central-directory check refuses any zip whose last 64 KiB holds a record that claims too much,
@@ -1122,12 +1129,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   still records it, but one interrupted mid-item records nothing for that item; on platforms
   whose trash cannot be read back (macOS) a trash is not undoable; and the history is not kept
   between sessions.
-- **VFS, follow-ups** – archives (`file_ops::archive`, `preview::archive`) are still read and
-  written through `std::fs`, because zip and tar want seekable streams; moving them onto
-  `Vfs::open_read` (and a matching write) is what remote extraction and browsing inside an archive
-  need, and is the largest piece left. The trait has no way to write bytes, make a symlink or
-  change permissions, so those are not yet possible on another backend, and there is no copy
-  between two different backends. The remaining direct users of the disk are listed, each with its
+- **VFS, follow-ups** – archives are now read and written through `Vfs`, but browsing inside an
+  archive as a directory is not built, and there is no copy between two different backends.
+  `scripts/vfs-gate` still lists both archive files as allowed to touch the disk, though they no
+  longer do; the entries pass only because zip's `entry.is_dir()` matches the gate's pattern, so
+  drop them and narrow the pattern. The remaining direct users of the disk are listed, each with its
   reason, in `scripts/vfs-gate`: the desktop trash, git, launching programs, the desktop's MIME
   and application files, this machine's `/proc`, the app's own config and the start directory.
   Owner names are looked up in this machine's `passwd` only for a path on its disk, so another
@@ -1333,4 +1339,4 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: Medium Priority is empty. The VFS work unblocks *Native remote filesystem browsing
-   (SSH/SFTP)*; archive browsing needs archives moved onto `Vfs` first (see *VFS, follow-ups*).
+   (SSH/SFTP)*; archives already go through `Vfs`, so extraction on a remote backend only needs its write support.

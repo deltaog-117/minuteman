@@ -170,11 +170,7 @@ pub fn load(vfs: &dyn Vfs, path: &Path) -> Loaded {
             _ => Loaded::Unsupported,
         };
     };
-    // A listing reads the archive by seeking through its own directory structure, which needs a
-    // file on this machine's disk; on any other backend the archive is shown as bytes instead.
-    if let Some(local) = vfs.local_path(path)
-        && let Some(listing) = archive::list(&local)
-    {
+    if let Some(listing) = archive::list(vfs, path) {
         return Loaded::Archive(listing);
     }
     let named_text = is_text(path);
@@ -404,8 +400,9 @@ mod tests {
     }
 
     #[test]
-    fn an_archive_off_the_local_disk_is_shown_as_bytes_not_listed() {
-        // A real zip, but the backend cannot hand back a local file to read its directory from.
+    fn an_archive_off_the_local_disk_is_listed_through_the_backend() {
+        // A real zip, in a backend that has no local file to hand out: the listing seeks through
+        // it by `open_read` all the same.
         let dir = scratch_dir("mem-zip");
         let zip = dir.join("a.zip");
         let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
@@ -419,7 +416,10 @@ mod tests {
         mem.add_file("/a.zip", bytes);
 
         assert!(matches!(load(&shared::LocalVfs, &zip), Loaded::Archive(_)));
-        assert!(matches!(load(&mem, Path::new("/a.zip")), Loaded::Bytes(_)));
+        assert!(matches!(
+            load(&mem, Path::new("/a.zip")),
+            Loaded::Archive(_)
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

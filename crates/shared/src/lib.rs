@@ -26,4 +26,4 @@ pub mod vfs;
 
 pub use error::VfsError;
 pub use memory::MemVfs;
-pub use vfs::{DirEntryInfo, FileKind, LocalVfs, Metadata, ReadSeek, ScanEntry, Vfs};
+pub use vfs::{DirEntryInfo, FileKind, LocalVfs, Metadata, ReadSeek, ScanEntry, Vfs, WriteSeek};

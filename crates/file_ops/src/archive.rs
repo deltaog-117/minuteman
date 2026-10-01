@@ -45,14 +45,14 @@
 //! written, because it is broken. Encryption hides what is in the files, not what they are
 //! called: anyone can still list an encrypted zip's names and sizes. A tar cannot be encrypted.
 
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::collections::HashSet;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use shared::VfsError;
+use shared::{FileKind, Metadata, ReadSeek, Vfs, VfsError};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -311,13 +311,14 @@ struct Incoming {
 /// [`FileOpsError::Archive`] for a damaged archive, and [`FileOpsError::Cancelled`] when
 /// `on_progress` asks to stop.
 pub fn extract(
+    vfs: &dyn Vfs,
     archive: &Path,
     dest: &Path,
     policy: ConflictPolicy,
     limits: ExtractLimits,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<ExtractSummary, FileOpsError> {
-    extract_with_password(archive, dest, policy, limits, None, on_progress)
+    extract_with_password(vfs, archive, dest, policy, limits, None, on_progress)
 }
 
 /// [`extract`] for an archive that may be encrypted. `password` is used for the entries that need
@@ -326,6 +327,7 @@ pub fn extract(
 /// [`FileOpsError::WrongPassword`]; call [`check_password`] first to find out before anything is
 /// written.
 pub fn extract_with_password(
+    vfs: &dyn Vfs,
     archive: &Path,
     dest: &Path,
     policy: ConflictPolicy,
@@ -335,10 +337,11 @@ pub fn extract_with_password(
 ) -> Result<ExtractSummary, FileOpsError> {
     let format = Format::of(archive)
         .ok_or_else(|| FileOpsError::UnsupportedArchive(archive.to_path_buf()))?;
-    let file = File::open(archive).map_err(io_error(archive))?;
-    fs::create_dir_all(dest).map_err(io_error(dest))?;
+    let file = vfs.open_read(archive)?;
+    crate::create_directory_all(vfs, dest)?;
 
     let mut sink = Sink {
+        vfs,
         dest,
         policy,
         limits,
@@ -346,6 +349,7 @@ pub fn extract_with_password(
         summary: ExtractSummary::default(),
         entries: 0,
         bytes: 0,
+        verified: HashSet::new(),
     };
     match format {
         Format::Zip => extract_zip(file, archive, password, &mut sink)?,
@@ -364,19 +368,23 @@ pub fn extract_with_password(
 
 /// Whether any entry of `archive` is encrypted, so a password has to be asked for before it is
 /// extracted. Only a zip can be.
-pub fn needs_password(archive: &Path) -> Result<bool, FileOpsError> {
-    Ok(first_encrypted(archive)?.is_some())
+pub fn needs_password(vfs: &dyn Vfs, archive: &Path) -> Result<bool, FileOpsError> {
+    Ok(first_encrypted(vfs, archive)?.is_some())
 }
 
 /// Checks `password` against `archive` without extracting anything: `Ok` if nothing in it is
 /// encrypted or the password opens the first encrypted entry, [`FileOpsError::WrongPassword`] if
 /// it does not. (Every entry of an archive made here shares one password; one assembled by another
 /// tool may not, and then the extraction itself reports the entry that fails.)
-pub fn check_password(archive: &Path, password: &Password) -> Result<(), FileOpsError> {
-    let Some(index) = first_encrypted(archive)? else {
+pub fn check_password(
+    vfs: &dyn Vfs,
+    archive: &Path,
+    password: &Password,
+) -> Result<(), FileOpsError> {
+    let Some(index) = first_encrypted(vfs, archive)? else {
         return Ok(());
     };
-    let file = File::open(archive).map_err(io_error(archive))?;
+    let file = vfs.open_read(archive)?;
     let mut zip = zip::ZipArchive::new(BufReader::new(file)).map_err(damaged)?;
     zip.by_index_with_options(index, read_options(Some(password)))
         .map(drop)
@@ -385,11 +393,11 @@ pub fn check_password(archive: &Path, password: &Password) -> Result<(), FileOps
 
 /// The index of the first encrypted entry of a zip, or `None` for one with none and for any
 /// other format.
-fn first_encrypted(archive: &Path) -> Result<Option<usize>, FileOpsError> {
+fn first_encrypted(vfs: &dyn Vfs, archive: &Path) -> Result<Option<usize>, FileOpsError> {
     if Format::of(archive) != Some(Format::Zip) {
         return Ok(None);
     }
-    let file = File::open(archive).map_err(io_error(archive))?;
+    let file = vfs.open_read(archive)?;
     let mut zip = zip::ZipArchive::new(BufReader::new(file)).map_err(damaged)?;
     for index in 0..zip.len() {
         if zip.by_index_raw(index).map_err(damaged)?.encrypted() {
@@ -421,16 +429,17 @@ fn zip_error(error: zip::result::ZipError, archive: &Path) -> FileOpsError {
 /// to be bogus and use an earlier one, so a small fake at the very end must not hide a large one.
 /// A record that cannot be made sense of is left for the `zip` crate to reject, which it does
 /// without allocating for it.
-fn check_zip_directory(file: &mut File, limits: ExtractLimits) -> Result<(), FileOpsError> {
+fn check_zip_directory(file: &mut dyn ReadSeek, limits: ExtractLimits) -> Result<(), FileOpsError> {
     const EOCD: &[u8] = b"PK\x05\x06";
     const EOCD_LEN: usize = 22;
-    let len = file.metadata().map_err(damaged)?.len();
+    let len = file.seek(SeekFrom::End(0)).map_err(damaged)?;
     // The record plus a comment of at most 65,535 bytes.
     let tail_len = len.min(EOCD_LEN as u64 + 65_535);
     let tail_start = len - tail_len;
     file.seek(SeekFrom::Start(tail_start)).map_err(damaged)?;
     let mut tail = Vec::new();
-    file.take(tail_len)
+    (&mut *file)
+        .take(tail_len)
         .read_to_end(&mut tail)
         .map_err(damaged)?;
 
@@ -471,7 +480,7 @@ fn check_zip_directory(file: &mut File, limits: ExtractLimits) -> Result<(), Fil
 
 /// The entry count and directory size a zip64 record claims, for the ordinary end record at
 /// `eocd_at`: that record is preceded by a 20-byte locator pointing at the zip64 record.
-fn zip64_counts(file: &mut File, len: u64, eocd_at: u64) -> Option<(u64, u64)> {
+fn zip64_counts(file: &mut dyn ReadSeek, len: u64, eocd_at: u64) -> Option<(u64, u64)> {
     let le = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().expect("eight bytes"));
     let mut locator = [0u8; 20];
     file.seek(SeekFrom::Start(eocd_at.checked_sub(20)?)).ok()?;
@@ -490,12 +499,12 @@ fn zip64_counts(file: &mut File, len: u64, eocd_at: u64) -> Option<(u64, u64)> {
 }
 
 fn extract_zip(
-    mut file: File,
+    mut file: Box<dyn ReadSeek>,
     path: &Path,
     password: Option<&Password>,
     sink: &mut Sink<'_>,
 ) -> Result<(), FileOpsError> {
-    check_zip_directory(&mut file, sink.limits)?;
+    check_zip_directory(file.as_mut(), sink.limits)?;
     file.seek(SeekFrom::Start(0)).map_err(damaged)?;
     let mut archive = zip::ZipArchive::new(BufReader::new(file)).map_err(damaged)?;
     for index in 0..archive.len() {
@@ -548,6 +557,7 @@ fn extract_tar(reader: impl Read, sink: &mut Sink<'_>) -> Result<(), FileOpsErro
 }
 
 struct Sink<'a> {
+    vfs: &'a dyn Vfs,
     dest: &'a Path,
     policy: ConflictPolicy,
     limits: ExtractLimits,
@@ -555,6 +565,9 @@ struct Sink<'a> {
     summary: ExtractSummary,
     entries: u64,
     bytes: u64,
+    /// Folders already known to be real folders (not links) with only real folders above them, so
+    /// an archive of many files in one folder checks its ancestors once instead of once per file.
+    verified: HashSet<PathBuf>,
 }
 
 impl Sink<'_> {
@@ -569,13 +582,13 @@ impl Sink<'_> {
         let Some(safe) = SafePath::try_new(&incoming.name)? else {
             return Ok(());
         };
-        refuse_symlinked_ancestors(self.dest, &safe)?;
+        refuse_symlinked_ancestors(self.vfs, self.dest, &safe, &mut self.verified)?;
         let target = self.dest.join(safe.as_path());
 
         match incoming.kind {
             Kind::Dir => {
-                fs::create_dir_all(&target).map_err(io_error(&target))?;
-                set_mode(&target, incoming.mode, 0o700).map_err(io_error(&target))?;
+                crate::create_directory_all(self.vfs, &target)?;
+                set_mode(self.vfs, &target, incoming.mode, 0o700)?;
                 self.summary.dirs += 1;
             }
             Kind::File => {
@@ -605,11 +618,9 @@ impl Sink<'_> {
         mode: Option<u32>,
         data: &mut dyn Read,
     ) -> Result<bool, FileOpsError> {
-        ensure_parent(target)?;
-        let Some(mut file) = self.create(target, |path| {
-            OpenOptions::new().write(true).create_new(true).open(path)
-        })?
-        else {
+        ensure_parent(self.vfs, target, &mut self.verified)?;
+        let vfs = self.vfs;
+        let Some(mut file) = self.create(target, |path| vfs.create_write(path))? else {
             return Ok(false);
         };
 
@@ -618,7 +629,7 @@ impl Sink<'_> {
             Err(e) => {
                 // A file cut short by a limit or a read error is not the file the archive holds.
                 drop(file);
-                let _ = fs::remove_file(target);
+                let _ = self.vfs.remove_file(target);
                 return Err(match e.kind() {
                     io::ErrorKind::FileTooLarge => FileOpsError::ArchiveLimit {
                         what: "extracted size",
@@ -628,15 +639,17 @@ impl Sink<'_> {
                 });
             }
         }
+        file.flush().map_err(io_error(target))?;
         drop(file);
-        set_mode(target, mode, 0o600).map_err(io_error(target))?;
+        set_mode(self.vfs, target, mode, 0o600)?;
         Ok(true)
     }
 
     fn write_symlink(&mut self, target: &Path, link: &Path) -> Result<bool, FileOpsError> {
-        ensure_parent(target)?;
+        ensure_parent(self.vfs, target, &mut self.verified)?;
+        let vfs = self.vfs;
         Ok(self
-            .create(target, |path| make_symlink(link, path))?
+            .create(target, |path| vfs.create_symlink(link, path))?
             .is_some())
     }
 
@@ -645,11 +658,11 @@ impl Sink<'_> {
     fn create<T>(
         &mut self,
         target: &Path,
-        make: impl Fn(&Path) -> io::Result<T>,
+        make: impl Fn(&Path) -> Result<T, VfsError>,
     ) -> Result<Option<T>, FileOpsError> {
         match make(target) {
             Ok(made) => Ok(Some(made)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match self.policy {
+            Err(VfsError::AlreadyExists(_)) => match self.policy {
                 ConflictPolicy::Abort => Err(FileOpsError::Vfs(VfsError::AlreadyExists(
                     target.to_path_buf(),
                 ))),
@@ -660,38 +673,65 @@ impl Sink<'_> {
                 ConflictPolicy::Overwrite => {
                     // `remove_file` unlinks a symlink itself and refuses a directory, so an
                     // archive can neither redirect the write nor delete a tree.
-                    fs::remove_file(target).map_err(io_error(target))?;
-                    make(target).map(Some).map_err(io_error(target))
+                    self.vfs.remove_file(target)?;
+                    Ok(Some(make(target)?))
                 }
             },
-            Err(e) => Err(io_error(target)(e)),
+            Err(e) => Err(e.into()),
         }
     }
 }
 
-fn ensure_parent(target: &Path) -> Result<(), FileOpsError> {
-    match target.parent() {
-        Some(parent) => fs::create_dir_all(parent).map_err(io_error(parent)),
-        None => Ok(()),
+fn ensure_parent(
+    vfs: &dyn Vfs,
+    target: &Path,
+    verified: &mut HashSet<PathBuf>,
+) -> Result<(), FileOpsError> {
+    if let Some(parent) = target.parent()
+        && !verified.contains(parent)
+    {
+        crate::create_directory_all(vfs, parent)?;
+        // Folders this run just made are real folders, and the ancestors were checked already.
+        verified.insert(parent.to_path_buf());
     }
+    Ok(())
 }
 
 /// Refuses an entry when a directory between `dest` and it is a symlink, since writing there
 /// would land wherever the link points.
-fn refuse_symlinked_ancestors(dest: &Path, safe: &SafePath) -> Result<(), FileOpsError> {
+fn refuse_symlinked_ancestors(
+    vfs: &dyn Vfs,
+    dest: &Path,
+    safe: &SafePath,
+    verified: &mut HashSet<PathBuf>,
+) -> Result<(), FileOpsError> {
     let components: Vec<_> = safe.as_path().components().collect();
     let mut walked = dest.to_path_buf();
+    let mut all_checked = true;
+    let parent = safe
+        .as_path()
+        .parent()
+        .map_or_else(|| dest.to_path_buf(), |rel| dest.join(rel));
+    if verified.contains(&parent) {
+        return Ok(());
+    }
     for component in &components[..components.len() - 1] {
         walked.push(component);
-        match fs::symlink_metadata(&walked) {
-            Ok(meta) if meta.file_type().is_symlink() => {
+        match vfs.symlink_metadata(&walked) {
+            Ok(meta) if meta.kind == FileKind::Symlink => {
                 return Err(unsafe_entry(safe.as_path()));
             }
             Ok(_) => {}
             // Nothing exists from here down, so nothing below can be a link.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
-            Err(e) => return Err(io_error(&walked)(e)),
+            Err(VfsError::NotFound(_)) => {
+                all_checked = false;
+                break;
+            }
+            Err(e) => return Err(e.into()),
         }
+    }
+    if all_checked {
+        verified.insert(parent);
     }
     Ok(())
 }
@@ -710,29 +750,16 @@ fn descends(link: &Path) -> bool {
     named
 }
 
-#[cfg(unix)]
-fn make_symlink(link: &Path, at: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(link, at)
-}
-
-#[cfg(not(unix))]
-fn make_symlink(_link: &Path, _at: &Path) -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
-}
-
 /// Applies an archive's permission bits, clamped: setuid, setgid, sticky and group/other write
 /// are dropped, and `floor` (owner read/write, or full owner access for a directory) is forced on.
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: Option<u32>, floor: u32) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+/// A backend with no permissions to set is not an error.
+fn set_mode(vfs: &dyn Vfs, path: &Path, mode: Option<u32>, floor: u32) -> Result<(), FileOpsError> {
     let Some(mode) = mode else { return Ok(()) };
     let clamped = (mode & 0o777 & !0o022) | floor;
-    fs::set_permissions(path, fs::Permissions::from_mode(clamped))
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: Option<u32>, _floor: u32) -> io::Result<()> {
-    Ok(())
+    match vfs.set_mode(path, clamped) {
+        Ok(()) | Err(VfsError::Unsupported(_)) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Copies `from` into `to`, failing with `FileTooLarge` if more than `room` bytes come. Reading
@@ -793,17 +820,27 @@ impl<R: Read> Read for Capped<R> {
 /// [`FileOpsError::UnarchivableName`] for a name a zip cannot hold (not UTF-8), and
 /// [`FileOpsError::Cancelled`] when `on_progress` asks to stop; on any error `out` is untouched.
 pub fn compress(
+    vfs: &dyn Vfs,
     sources: &[PathBuf],
     out: &Path,
     format: Format,
     policy: ConflictPolicy,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<Outcome, FileOpsError> {
-    compress_with_level(sources, out, format, Level::default(), policy, on_progress)
+    compress_with_level(
+        vfs,
+        sources,
+        out,
+        format,
+        Level::default(),
+        policy,
+        on_progress,
+    )
 }
 
 /// [`compress`] with a chosen [`Level`].
 pub fn compress_with_level(
+    vfs: &dyn Vfs,
     sources: &[PathBuf],
     out: &Path,
     format: Format,
@@ -811,7 +848,24 @@ pub fn compress_with_level(
     policy: ConflictPolicy,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<Outcome, FileOpsError> {
-    compress_with_options(sources, out, format, level, None, policy, on_progress)
+    let options = CompressOptions {
+        format,
+        level,
+        password: None,
+        policy,
+    };
+    compress_with_options(vfs, sources, out, &options, on_progress)
+}
+
+/// How an archive is to be made.
+#[derive(Debug, Clone, Copy)]
+pub struct CompressOptions<'a> {
+    pub format: Format,
+    pub level: Level,
+    /// Seals a zip (AES-256); never empty, and only for [`Format::Zip`].
+    pub password: Option<&'a Password>,
+    /// What to do when `out` already exists.
+    pub policy: ConflictPolicy,
 }
 
 /// [`compress_with_level`], optionally sealing a zip with `password` (AES-256).
@@ -821,14 +875,18 @@ pub fn compress_with_level(
 /// As [`compress`], plus [`FileOpsError::EmptyPassword`] for an empty password and
 /// [`FileOpsError::EncryptionNeedsZip`] for a password given with a tar format.
 pub fn compress_with_options(
+    vfs: &dyn Vfs,
     sources: &[PathBuf],
     out: &Path,
-    format: Format,
-    level: Level,
-    password: Option<&Password>,
-    policy: ConflictPolicy,
+    options: &CompressOptions<'_>,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<Outcome, FileOpsError> {
+    let CompressOptions {
+        format,
+        level,
+        password,
+        policy,
+    } = *options;
     if let Some(password) = password {
         if password.is_empty() {
             return Err(FileOpsError::EmptyPassword);
@@ -847,7 +905,7 @@ pub fn compress_with_options(
             .file_name()
             .ok_or_else(|| FileOpsError::NoParent(source.clone()))?;
     }
-    if fs::symlink_metadata(out).is_ok() {
+    if vfs.symlink_metadata(out).is_ok() {
         match policy {
             ConflictPolicy::Abort => {
                 return Err(FileOpsError::Vfs(VfsError::AlreadyExists(
@@ -860,10 +918,18 @@ pub fn compress_with_options(
     }
 
     let partial = partial_path(out)?;
-    let written = write_archive(sources, &partial, format, level, password, on_progress)
-        .and_then(|()| fs::rename(&partial, out).map_err(io_error(out)));
+    let written = write_archive(vfs, sources, &partial, format, level, password, on_progress)
+        .and_then(|()| {
+            // Replacing is only for an archive the user chose to overwrite; otherwise a file that
+            // appeared at `out` since the check above is a clash, not something to swap out.
+            match policy {
+                ConflictPolicy::Overwrite => vfs.replace(&partial, out),
+                _ => vfs.rename(&partial, out),
+            }
+            .map_err(FileOpsError::from)
+        });
     if written.is_err() {
-        let _ = fs::remove_file(&partial);
+        let _ = vfs.remove_file(&partial);
     }
     written.map(|()| Outcome::Completed)
 }
@@ -880,6 +946,7 @@ fn partial_path(out: &Path) -> Result<PathBuf, FileOpsError> {
 }
 
 fn write_archive(
+    vfs: &dyn Vfs,
     sources: &[PathBuf],
     partial: &Path,
     format: Format,
@@ -887,29 +954,25 @@ fn write_archive(
     password: Option<&Password>,
     on_progress: &mut ProgressFn<'_>,
 ) -> Result<(), FileOpsError> {
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(partial)
-        .map_err(io_error(partial))?;
+    let file = vfs.create_write(partial)?;
     let sink = BufWriter::new(file);
     match format {
         Format::Zip => {
             let mut packer = ZipPacker(zip::ZipWriter::new(sink), level, password);
-            walk(sources, &mut packer, on_progress)?;
+            walk(vfs, sources, &mut packer, on_progress)?;
             let mut sink = packer.0.finish().map_err(damaged)?;
             sink.flush().map_err(io_error(partial))
         }
         Format::Tar => {
             let mut packer = TarPacker::new(sink);
-            walk(sources, &mut packer, on_progress)?;
+            walk(vfs, sources, &mut packer, on_progress)?;
             let mut sink = packer.0.into_inner().map_err(io_error(partial))?;
             sink.flush().map_err(io_error(partial))
         }
         Format::TarGz => {
             let mut packer =
                 TarPacker::new(GzEncoder::new(sink, Compression::new(level.deflate())));
-            walk(sources, &mut packer, on_progress)?;
+            walk(vfs, sources, &mut packer, on_progress)?;
             let encoder = packer.0.into_inner().map_err(io_error(partial))?;
             let mut sink = encoder.finish().map_err(io_error(partial))?;
             sink.flush().map_err(io_error(partial))
@@ -919,12 +982,19 @@ fn write_archive(
 
 /// One archive being written. `real` is the file on disk, `name` what it is called inside.
 trait Packer {
-    fn add(&mut self, real: &Path, name: &Path, meta: &Metadata) -> Result<(), FileOpsError>;
+    fn add(
+        &mut self,
+        vfs: &dyn Vfs,
+        real: &Path,
+        name: &Path,
+        meta: &Metadata,
+    ) -> Result<(), FileOpsError>;
 }
 
 /// Adds every source, and everything under each directory, in name order so the same tree always
 /// makes the same archive. Anything that is not a file, directory or symlink is left out.
 fn walk(
+    vfs: &dyn Vfs,
     sources: &[PathBuf],
     packer: &mut dyn Packer,
     on_progress: &mut ProgressFn<'_>,
@@ -935,16 +1005,19 @@ fn walk(
         .filter_map(|s| Some((s.clone(), PathBuf::from(s.file_name()?))))
         .collect();
     while let Some((real, name)) = pending.pop() {
-        let meta = fs::symlink_metadata(&real).map_err(io_error(&real))?;
-        let kind = meta.file_type();
-        if !(kind.is_file() || kind.is_dir() || kind.is_symlink()) {
+        let meta = vfs.symlink_metadata(&real)?;
+        if meta.kind == FileKind::Other {
             continue;
         }
-        packer.add(&real, &name, &meta)?;
-        if kind.is_dir() {
-            let mut children: Vec<_> = fs::read_dir(&real)
-                .and_then(|entries| entries.map(|e| e.map(|e| e.file_name())).collect())
-                .map_err(io_error(&real))?;
+        packer.add(vfs, &real, &name, &meta)?;
+        if meta.kind == FileKind::Dir {
+            // The name is taken from the path, not the entry's (lossy) `name`, so a file whose
+            // name is not valid text is still found.
+            let mut children: Vec<_> = vfs
+                .scan_dir(&real)?
+                .into_iter()
+                .filter_map(|entry| entry.path.file_name().map(std::ffi::OsStr::to_os_string))
+                .collect();
             children.sort();
             for child in children.into_iter().rev() {
                 pending.push((real.join(&child), name.join(&child)));
@@ -955,51 +1028,96 @@ fn walk(
     Ok(())
 }
 
-#[cfg(unix)]
+/// The permission bits an entry is stored with: the file's own when the backend has them, else a
+/// usual default.
 fn mode_of(meta: &Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    meta.permissions().mode() & 0o777
-}
-
-#[cfg(not(unix))]
-fn mode_of(meta: &Metadata) -> u32 {
-    if meta.is_dir() { 0o755 } else { 0o644 }
+    meta.mode.map_or_else(
+        || {
+            if meta.kind == FileKind::Dir {
+                0o755
+            } else {
+                0o644
+            }
+        },
+        |mode| mode & 0o777,
+    )
 }
 
 struct TarPacker<W: Write>(tar::Builder<W>);
 
 impl<W: Write> TarPacker<W> {
     fn new(writer: W) -> Self {
-        let mut builder = tar::Builder::new(writer);
-        builder.follow_symlinks(false);
-        Self(builder)
+        Self(tar::Builder::new(writer))
     }
 }
 
 impl<W: Write> Packer for TarPacker<W> {
-    fn add(&mut self, real: &Path, name: &Path, _meta: &Metadata) -> Result<(), FileOpsError> {
-        // With links not followed this adds a file, a symlink, or just a directory's own entry.
-        self.0
-            .append_path_with_name(real, name)
-            .map_err(io_error(real))
+    fn add(
+        &mut self,
+        vfs: &dyn Vfs,
+        real: &Path,
+        name: &Path,
+        meta: &Metadata,
+    ) -> Result<(), FileOpsError> {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(meta.mode.map_or(0o644, |mode| mode & 0o7777));
+        header.set_uid(u64::from(meta.uid.unwrap_or(0)));
+        header.set_gid(u64::from(meta.gid.unwrap_or(0)));
+        header.set_mtime(
+            meta.modified
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_secs()),
+        );
+        match meta.kind {
+            FileKind::Dir => {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                self.0
+                    .append_data(&mut header, name, io::empty())
+                    .map_err(io_error(real))
+            }
+            FileKind::Symlink => {
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                let target = vfs.read_link(real)?;
+                self.0
+                    .append_link(&mut header, name, target)
+                    .map_err(io_error(real))
+            }
+            _ => {
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(meta.len);
+                // Never more than the length the header declares, so a file that grew while it
+                // was being read cannot shift every entry after it.
+                let source = vfs.open_read(real)?.take(meta.len);
+                self.0
+                    .append_data(&mut header, name, source)
+                    .map_err(io_error(real))
+            }
+        }
     }
 }
 
 struct ZipPacker<'p, W: Write + io::Seek>(zip::ZipWriter<W>, Level, Option<&'p Password>);
 
 impl<W: Write + io::Seek> Packer for ZipPacker<'_, W> {
-    fn add(&mut self, real: &Path, name: &Path, meta: &Metadata) -> Result<(), FileOpsError> {
+    fn add(
+        &mut self,
+        vfs: &dyn Vfs,
+        real: &Path,
+        name: &Path,
+        meta: &Metadata,
+    ) -> Result<(), FileOpsError> {
         let stored = zip_name(name)?;
         let mut options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .compression_level(Some(i64::from(self.1.deflate())))
             .unix_permissions(mode_of(meta))
-            .large_file(meta.len() > u64::from(u32::MAX));
-        if let Some(time) = meta.modified().ok().and_then(zip_time) {
+            .large_file(meta.len > u64::from(u32::MAX));
+        if let Some(time) = meta.modified.and_then(zip_time) {
             options = options.last_modified_time(time);
         }
-        let kind = meta.file_type();
-        if kind.is_dir() {
+        if meta.kind == FileKind::Dir {
             // A folder's entry holds no data, so there is nothing in it to seal.
             return self.0.add_directory(stored, options).map_err(damaged);
         }
@@ -1007,15 +1125,15 @@ impl<W: Write + io::Seek> Packer for ZipPacker<'_, W> {
             Some(password) => options.with_aes_encryption(zip::AesMode::Aes256, password.as_str()),
             None => options,
         };
-        if kind.is_symlink() {
-            let target = fs::read_link(real).map_err(io_error(real))?;
+        if meta.kind == FileKind::Symlink {
+            let target = vfs.read_link(real)?;
             let target = target
                 .to_str()
                 .ok_or_else(|| FileOpsError::UnarchivableName(target.clone()))?;
             self.0.add_symlink(stored, target, options).map_err(damaged)
         } else {
             self.0.start_file(stored, options).map_err(damaged)?;
-            let mut source = File::open(real).map_err(io_error(real))?;
+            let mut source = vfs.open_read(real)?;
             io::copy(&mut source, &mut self.0)
                 .map(drop)
                 .map_err(io_error(real))
@@ -1078,6 +1196,10 @@ fn zip_name(name: &Path) -> Result<String, FileOpsError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
+
+    use shared::LocalVfs;
+
     use super::*;
     use proptest::prelude::*;
     use std::ops::ControlFlow;
@@ -1104,7 +1226,14 @@ mod tests {
         dest: &Path,
         policy: ConflictPolicy,
     ) -> Result<ExtractSummary, FileOpsError> {
-        extract(archive, dest, policy, ExtractLimits::default(), &mut go)
+        extract(
+            &LocalVfs,
+            archive,
+            dest,
+            policy,
+            ExtractLimits::default(),
+            &mut go,
+        )
     }
 
     /// One 512-byte ustar header (checksum filled in) followed by the data, padded to a block.
@@ -1174,6 +1303,7 @@ mod tests {
             let out = dir.join(format!("packed.{}", format.extension()));
 
             let made = compress(
+                &LocalVfs,
                 &[dir.join("src/top")],
                 &out,
                 format,
@@ -1357,6 +1487,7 @@ mod tests {
             max_bytes: 4096,
         };
         let result = extract(
+            &LocalVfs,
             &archive,
             &dir.join("dest"),
             ConflictPolicy::Abort,
@@ -1381,6 +1512,7 @@ mod tests {
             max_bytes: 100,
         };
         extract(
+            &LocalVfs,
             &archive,
             &dir.join("dest"),
             ConflictPolicy::Abort,
@@ -1405,6 +1537,7 @@ mod tests {
             max_bytes: 1 << 20,
         };
         let result = extract(
+            &LocalVfs,
             &archive,
             &dir.join("dest"),
             ConflictPolicy::Abort,
@@ -1485,6 +1618,7 @@ mod tests {
             ],
         );
         let result = extract(
+            &LocalVfs,
             &archive,
             &dir.join("dest"),
             ConflictPolicy::Abort,
@@ -1501,6 +1635,7 @@ mod tests {
         let dir = scratch("recursive");
         sample_tree(&dir);
         let result = compress(
+            &LocalVfs,
             &[dir.join("top")],
             &dir.join("top/inside.zip"),
             Format::Zip,
@@ -1513,6 +1648,7 @@ mod tests {
         ));
         assert!(matches!(
             compress(
+                &LocalVfs,
                 &[],
                 &dir.join("x.zip"),
                 Format::Zip,
@@ -1533,16 +1669,32 @@ mod tests {
         let sources = [dir.join("f")];
 
         assert!(matches!(
-            compress(&sources, &out, Format::Tar, ConflictPolicy::Abort, &mut go),
+            compress(
+                &LocalVfs,
+                &sources,
+                &out,
+                Format::Tar,
+                ConflictPolicy::Abort,
+                &mut go
+            ),
             Err(FileOpsError::Vfs(VfsError::AlreadyExists(_)))
         ));
         assert_eq!(
-            compress(&sources, &out, Format::Tar, ConflictPolicy::Skip, &mut go).unwrap(),
+            compress(
+                &LocalVfs,
+                &sources,
+                &out,
+                Format::Tar,
+                ConflictPolicy::Skip,
+                &mut go
+            )
+            .unwrap(),
             Outcome::Skipped
         );
         assert_eq!(fs::read(&out).unwrap(), b"precious");
 
         compress(
+            &LocalVfs,
             &sources,
             &out,
             Format::Tar,
@@ -1560,6 +1712,7 @@ mod tests {
         sample_tree(&dir);
         let out = dir.join("out.zip");
         let result = compress(
+            &LocalVfs,
             &[dir.join("top")],
             &out,
             Format::Zip,
@@ -1586,6 +1739,7 @@ mod tests {
             let size = |level: Level| {
                 let out = dir.join(format!("{level:?}.{}", format.extension()));
                 compress_with_level(
+                    &LocalVfs,
                     &[dir.join("big.txt")],
                     &out,
                     format,
@@ -1685,6 +1839,7 @@ mod tests {
         let dest = dir.join("out");
 
         let result = extract(
+            &LocalVfs,
             &zip,
             &dest,
             ConflictPolicy::Abort,
@@ -1797,6 +1952,7 @@ mod tests {
         let out = dir.join("a.zip");
 
         compress(
+            &LocalVfs,
             std::slice::from_ref(&file),
             &out,
             Format::Zip,
@@ -1823,16 +1979,13 @@ mod tests {
     }
 
     fn pack_with(sources: &[PathBuf], out: &Path, format: Format, password: Option<&Password>) {
-        compress_with_options(
-            sources,
-            out,
+        let options = CompressOptions {
             format,
-            Level::default(),
+            level: Level::default(),
             password,
-            ConflictPolicy::Abort,
-            &mut go,
-        )
-        .unwrap();
+            policy: ConflictPolicy::Abort,
+        };
+        compress_with_options(&LocalVfs, sources, out, &options, &mut go).unwrap();
     }
 
     fn unpack_with(
@@ -1841,6 +1994,7 @@ mod tests {
         password: Option<&Password>,
     ) -> Result<ExtractSummary, FileOpsError> {
         extract_with_password(
+            &LocalVfs,
             archive,
             dest,
             ConflictPolicy::Abort,
@@ -1897,8 +2051,8 @@ mod tests {
 
         // Deflate bit-packs text, so looking for it in the bytes proves nothing either way; the
         // archive being marked encrypted, and refusing to open without a password, is the proof.
-        assert!(!needs_password(&plain).unwrap());
-        assert!(needs_password(&sealed).unwrap());
+        assert!(!needs_password(&LocalVfs, &plain).unwrap());
+        assert!(needs_password(&LocalVfs, &sealed).unwrap());
         let sealed_bytes = fs::read(&sealed).unwrap();
         // What encryption does not hide, and the form says so.
         assert!(contains(&sealed_bytes, b"docs/plan.txt"));
@@ -1913,7 +2067,7 @@ mod tests {
         pack_with(&[tree], &out, Format::Zip, Some(&secret("right")));
         let dest = dir.join("out");
 
-        assert!(needs_password(&out).unwrap());
+        assert!(needs_password(&LocalVfs, &out).unwrap());
         assert!(matches!(
             unpack_with(&out, &dest, None),
             Err(FileOpsError::PasswordRequired(_))
@@ -1923,10 +2077,10 @@ mod tests {
             Err(FileOpsError::WrongPassword)
         ));
         assert!(matches!(
-            check_password(&out, &secret("wrong")),
+            check_password(&LocalVfs, &out, &secret("wrong")),
             Err(FileOpsError::WrongPassword)
         ));
-        check_password(&out, &secret("right")).unwrap();
+        check_password(&LocalVfs, &out, &secret("right")).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1939,9 +2093,9 @@ mod tests {
         pack_with(std::slice::from_ref(&tree), &zip, Format::Zip, None);
         pack_with(&[tree], &tar, Format::Tar, None);
 
-        assert!(!needs_password(&zip).unwrap());
-        assert!(!needs_password(&tar).unwrap());
-        check_password(&zip, &secret("anything")).unwrap();
+        assert!(!needs_password(&LocalVfs, &zip).unwrap());
+        assert!(!needs_password(&LocalVfs, &tar).unwrap());
+        check_password(&LocalVfs, &zip, &secret("anything")).unwrap();
         unpack_with(&zip, &dir.join("z"), Some(&secret("anything"))).unwrap();
         unpack_with(&tar, &dir.join("t"), Some(&secret("anything"))).unwrap();
         assert!(dir.join("z/docs/plan.txt").exists() && dir.join("t/docs/plan.txt").exists());
@@ -1953,13 +2107,17 @@ mod tests {
         let dir = scratch("enc-refused");
         let tree = sealed_tree(&dir);
         let opts = |format, password: &Password| {
+            let options = CompressOptions {
+                format,
+                level: Level::default(),
+                password: Some(password),
+                policy: ConflictPolicy::Abort,
+            };
             compress_with_options(
+                &LocalVfs,
                 std::slice::from_ref(&tree),
                 &dir.join("x"),
-                format,
-                Level::default(),
-                Some(password),
-                ConflictPolicy::Abort,
+                &options,
                 &mut go,
             )
         };
@@ -2102,7 +2260,7 @@ mod tests {
                 fs::write(root.join(name), bytes).unwrap();
             }
             let out = dir.join("p.tar.gz");
-            compress(&[root], &out, Format::TarGz, ConflictPolicy::Abort, &mut go).unwrap();
+            compress(&LocalVfs, &[root], &out, Format::TarGz, ConflictPolicy::Abort, &mut go).unwrap();
             unpack(&out, &dir.join("out"), ConflictPolicy::Abort).unwrap();
             for (name, bytes) in &files {
                 prop_assert_eq!(&fs::read(dir.join("out/root").join(name)).unwrap(), bytes);

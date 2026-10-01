@@ -68,6 +68,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-30 | Encrypted Archives | Zip AES-256 through the `zip` crate, a password prompt on extract, a wiped-on-drop `Password` type (COA A), over 7z with header encryption (B) or a standalone `age` action (C) | ✅ Confirmed |
 | 2026-09-30 | Undo History | Inverse-operation journal in `file_ops::history`, batches as one step, conservative reverts, trash restored through the `trash` crate (COA A), over a holding area for deleted data (B) or a reverse-only popup (C) | ✅ Confirmed |
 | 2026-09-30 | Default Key Remap | `d` cut, `x`/`X` delete, `s` unbound, `y`/`d`/`x`/`X` act on marks only | ✅ Confirmed |
+| 2026-10-01 | Archives Through Vfs | Four write primitives on `Vfs` (`create_write`, `create_symlink`, `set_mode`, `replace`) and archives read and written through them, with a conformance suite for each | ✅ Confirmed |
 
 ---
 
@@ -4813,6 +4814,38 @@ the right-click menu and several tests rely on it; only the keys changed.
 
 **Verification.** `scripts/check` passes; the keymap tests pin the new defaults. Not tried in a
 real terminal.
+
+---
+
+### Archives Through Vfs: Write Primitives and Seekable Streams
+
+**Date:** 2026-10-01
+**Status:** Confirmed
+
+#### Context / Background
+
+The VFS hardening cycle moved the readers onto `Vfs` but left archives on `std::fs`, because zip and
+tar want seekable streams and the extraction code was hardened against writing through links. The
+roadmap named this the largest piece left: remote extraction and browsing inside an archive both
+need it.
+
+#### Decision
+
+The trait gained four methods rather than a general "write bytes" call, because each one carries a
+guarantee archive code relies on. `create_write` is create-new and never follows a link, so an
+entry cannot be written through one; its writer is seekable because a zip returns to patch an
+entry's header. `create_symlink` stores the target as written. `set_mode` lets a backend with no
+permissions answer `Unsupported`, which extraction treats as success. `replace` is what lets a
+finished archive appear under its real name at once. Archive creation, extraction, the password
+checks and the preview listing all take a `&dyn Vfs` now. Each new method has a conformance
+scenario, so a future backend is held to the same guarantees as the local disk and memory.
+
+**Not done.** `scripts/vfs-gate` still lists both archive files as allowed to touch the disk; they
+no longer do. The entries pass only because zip's own `entry.is_dir()` matches the gate's pattern,
+so they should be removed with a narrower pattern. Copying between two different backends is also
+still missing.
+
+**Verification.** `scripts/check` passes. Not tried in a real terminal.
 
 ---
 

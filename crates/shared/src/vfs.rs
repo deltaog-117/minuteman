@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -86,6 +86,12 @@ pub trait ReadSeek: Read + Seek + Send {}
 
 impl<T: Read + Seek + Send> ReadSeek for T {}
 
+/// A writable, seekable stream into a new file, as [`Vfs::create_write`] returns. Seekable because
+/// a zip goes back to patch an entry's header once its size is known.
+pub trait WriteSeek: Write + Seek + Send {}
+
+impl<T: Write + Seek + Send> WriteSeek for T {}
+
 /// A filesystem the file manager can browse: the local disk, and in time remote ones. Every
 /// feature that touches a browsed path goes through this, so a backend added here works with all
 /// of them. `Send + Sync` because background jobs (copies, scans, previews) share one.
@@ -119,6 +125,28 @@ pub trait Vfs: Send + Sync {
     /// program, reading an archive by seeking) asks this first and skips the file when it is
     /// `None`, so a remote backend degrades to "not available" instead of failing oddly.
     fn local_path(&self, path: &Path) -> Option<PathBuf>;
+
+    /// Creates a new file at `path` and opens it for writing. Fails with
+    /// `VfsError::AlreadyExists` if anything is there, a symlink (even a dangling one) included,
+    /// which is never followed, and never truncates or replaces what is there. It does not create
+    /// missing parents. This is `open(O_CREAT | O_EXCL)`: archive extraction relies on it so an
+    /// entry can never be written through a link.
+    fn create_write(&self, path: &Path) -> Result<Box<dyn WriteSeek>, VfsError>;
+
+    /// Makes a symlink at `link` pointing at `target`, which is stored as written and need not
+    /// exist. Fails with `VfsError::AlreadyExists` if anything is at `link`, and does not create
+    /// missing parents.
+    fn create_symlink(&self, target: &Path, link: &Path) -> Result<(), VfsError>;
+
+    /// Sets the permission bits (the low twelve bits of `st_mode`: rwx for owner, group and
+    /// other, and setuid, setgid and sticky) of the file or folder at `path`, following a
+    /// symlink. A backend with no permissions answers `VfsError::Unsupported`.
+    fn set_mode(&self, path: &Path, mode: u32) -> Result<(), VfsError>;
+
+    /// Moves `src` to `dst`, replacing a file or symlink already at `dst` (a folder in the way is
+    /// an error). Atomic where the backend can make it so, which is what lets a finished archive
+    /// appear under its real name all at once; otherwise the old file may briefly be missing.
+    fn replace(&self, src: &Path, dst: &Path) -> Result<(), VfsError>;
 
     /// Creates a single directory. Fails with `VfsError::AlreadyExists` if `path` already
     /// exists, and does not create missing parents (mirrors `std::fs::create_dir`).
@@ -303,6 +331,42 @@ impl Vfs for LocalVfs {
 
     fn local_path(&self, path: &Path) -> Option<PathBuf> {
         Some(path.to_path_buf())
+    }
+
+    fn create_write(&self, path: &Path) -> Result<Box<dyn WriteSeek>, VfsError> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map(|file| Box::new(file) as Box<dyn WriteSeek>)
+            .map_err(|source| map_io_err(path, source))
+    }
+
+    #[cfg(unix)]
+    fn create_symlink(&self, target: &Path, link: &Path) -> Result<(), VfsError> {
+        std::os::unix::fs::symlink(target, link).map_err(|source| map_io_err(link, source))
+    }
+
+    #[cfg(not(unix))]
+    fn create_symlink(&self, _target: &Path, _link: &Path) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported("symlinks"))
+    }
+
+    #[cfg(unix)]
+    fn set_mode(&self, path: &Path, mode: u32) -> Result<(), VfsError> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+            .map_err(|source| map_io_err(path, source))
+    }
+
+    #[cfg(not(unix))]
+    fn set_mode(&self, _path: &Path, _mode: u32) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported("permissions"))
+    }
+
+    fn replace(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
+        // `rename` replaces an existing file atomically on every platform `std` supports.
+        std::fs::rename(src, dst).map_err(|source| map_io_err(src, source))
     }
 
     fn create_dir(&self, path: &Path) -> Result<(), VfsError> {

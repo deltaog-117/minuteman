@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `shared`, `file_ops`, `preview`: archives are now made, extracted, checked for a password and
+  listed through the `Vfs` trait instead of the disk, so they work on any backend. `Vfs` gained
+  `create_write` (a seekable writer that only creates new files and never follows a link),
+  `create_symlink`, `set_mode` (a backend with no permissions answers `Unsupported`, which is not an
+  error for extraction) and `replace` (moves a finished archive over its name in one step). The
+  extraction safeguards are unchanged: nothing is written through a link, and folders already
+  checked are remembered so a large archive does not recheck them per file. There is no change on
+  the local disk. `file_ops::archive::needs_password`, `check_password` and
+  `preview::archive::list` and `list_within` now take the filesystem as their first argument.
 - `shared`, `preview`, `tui`: every feature that reads a browsed path now goes through the `Vfs`
   trait, which gained `metadata`, `symlink_metadata`, `read_link`, `open_read`, `scan_dir` and
   `local_path` and is `Send + Sync`. Preview, Inspect, disk usage, the marked-size pill and the

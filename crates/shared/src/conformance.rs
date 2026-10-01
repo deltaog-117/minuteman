@@ -23,12 +23,21 @@
 //! This is what keeps the trait honest: a method that quietly only makes sense for the local disk
 //! fails here against the in-memory backend, before a remote one is built on it.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::VfsError;
 use crate::vfs::{FileKind, Vfs};
+
+fn read_all(vfs: &dyn Vfs, path: &Path) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    vfs.open_read(path)
+        .expect("a file can be opened")
+        .read_to_end(&mut bytes)
+        .unwrap();
+    bytes
+}
 
 /// Puts fixtures on a backend's store directly, for what the trait cannot create.
 pub trait Seed {
@@ -50,7 +59,7 @@ type Scenario = fn(&dyn Vfs, &dyn Seed, &Path);
 /// On the first expectation a backend does not meet, naming it.
 pub fn check_backend(vfs: &dyn Vfs, seed: &dyn Seed, root: &Path) {
     seed.dir(root);
-    let scenarios: [(&str, Scenario); 12] = [
+    let scenarios: [(&str, Scenario); 16] = [
         ("listing", listing_is_sorted_with_folders_first),
         ("listing-links", listing_follows_links_for_display),
         (
@@ -66,6 +75,10 @@ pub fn check_backend(vfs: &dyn Vfs, seed: &dyn Seed, root: &Path) {
         ("read", reading_and_seeking),
         ("scan", scanning_reports_entries_themselves),
         ("walk", a_link_loop_is_reported_not_followed),
+        ("write", writers_create_new_files_and_never_follow_links),
+        ("symlinks", symlinks_are_made_as_written),
+        ("modes", modes_are_set_or_declined),
+        ("replace", replace_swaps_a_file_in),
     ];
     for (name, scenario) in scenarios {
         let case = root.join(name);
@@ -423,6 +436,155 @@ fn a_link_loop_is_reported_not_followed(vfs: &dyn Vfs, seed: &dyn Seed, dir: &Pa
         vfs.symlink_metadata(&dir.join("a")).unwrap().kind,
         FileKind::Symlink
     );
+}
+
+fn writers_create_new_files_and_never_follow_links(vfs: &dyn Vfs, seed: &dyn Seed, dir: &Path) {
+    let mut writer = vfs.create_write(&dir.join("new")).unwrap();
+    writer.write_all(b"hello").unwrap();
+    writer.flush().unwrap();
+    // A writer can seek, which a zip uses to patch an entry's header after the fact.
+    writer.seek(SeekFrom::Start(0)).unwrap();
+    writer.write_all(b"J").unwrap();
+    writer.seek(SeekFrom::End(0)).unwrap();
+    writer.write_all(b"!").unwrap();
+    drop(writer);
+    assert_eq!(read_all(vfs, &dir.join("new")), b"Jello!");
+    assert_eq!(vfs.metadata(&dir.join("new")).unwrap().len, 6);
+
+    seed.file(&dir.join("there"), b"keep");
+    assert!(
+        matches!(
+            vfs.create_write(&dir.join("there")),
+            Err(VfsError::AlreadyExists(_))
+        ),
+        "an existing file is never truncated"
+    );
+    assert_eq!(read_all(vfs, &dir.join("there")), b"keep");
+
+    // The link guarantee archive extraction leans on: nothing is ever written through one.
+    seed.file(&dir.join("target"), b"untouched");
+    seed.symlink(&dir.join("to_file"), &dir.join("target"));
+    seed.symlink(&dir.join("dangling"), &dir.join("missing"));
+    assert!(matches!(
+        vfs.create_write(&dir.join("to_file")),
+        Err(VfsError::AlreadyExists(_))
+    ));
+    assert!(matches!(
+        vfs.create_write(&dir.join("dangling")),
+        Err(VfsError::AlreadyExists(_))
+    ));
+    assert_eq!(read_all(vfs, &dir.join("target")), b"untouched");
+    assert!(
+        !vfs.exists(&dir.join("missing")),
+        "a dangling link is not followed to create its target"
+    );
+
+    assert!(matches!(
+        vfs.create_write(&dir.join("no/such/parent")),
+        Err(VfsError::NotFound(_))
+    ));
+}
+
+fn symlinks_are_made_as_written(vfs: &dyn Vfs, seed: &dyn Seed, dir: &Path) {
+    seed.file(&dir.join("file"), b"x");
+
+    vfs.create_symlink(Path::new("file"), &dir.join("rel"))
+        .unwrap();
+    vfs.create_symlink(&dir.join("file"), &dir.join("abs"))
+        .unwrap();
+    vfs.create_symlink(Path::new("missing"), &dir.join("dangling"))
+        .unwrap();
+
+    assert_eq!(
+        vfs.read_link(&dir.join("rel")).unwrap(),
+        PathBuf::from("file")
+    );
+    assert_eq!(vfs.read_link(&dir.join("abs")).unwrap(), dir.join("file"));
+    assert_eq!(
+        read_all(vfs, &dir.join("rel")),
+        b"x",
+        "a relative link resolves from its own folder"
+    );
+    assert_eq!(
+        vfs.symlink_metadata(&dir.join("dangling")).unwrap().kind,
+        FileKind::Symlink
+    );
+    assert!(matches!(
+        vfs.create_symlink(Path::new("x"), &dir.join("rel")),
+        Err(VfsError::AlreadyExists(_))
+    ));
+    assert!(matches!(
+        vfs.create_symlink(Path::new("x"), &dir.join("file")),
+        Err(VfsError::AlreadyExists(_))
+    ));
+    assert!(matches!(
+        vfs.create_symlink(Path::new("x"), &dir.join("no/such/parent")),
+        Err(VfsError::NotFound(_))
+    ));
+}
+
+fn modes_are_set_or_declined(vfs: &dyn Vfs, seed: &dyn Seed, dir: &Path) {
+    seed.file(&dir.join("file"), b"x");
+    seed.dir(&dir.join("folder"));
+
+    match vfs.set_mode(&dir.join("file"), 0o640) {
+        Ok(()) => {
+            let mode = vfs.metadata(&dir.join("file")).unwrap().mode;
+            // A backend with no mode to report may still accept the call.
+            if let Some(mode) = mode {
+                assert_eq!(mode & 0o7777, 0o640);
+                assert_eq!(mode & 0o170_000, 0o100_000, "the type bits are left alone");
+            }
+            vfs.set_mode(&dir.join("folder"), 0o750).unwrap();
+            if let Some(mode) = vfs.metadata(&dir.join("folder")).unwrap().mode {
+                assert_eq!(mode & 0o7777, 0o750);
+            }
+        }
+        Err(VfsError::Unsupported(_)) => {}
+        Err(other) => panic!("set_mode failed for an unexpected reason: {other}"),
+    }
+    assert!(matches!(
+        vfs.set_mode(&dir.join("absent"), 0o600),
+        Err(VfsError::NotFound(_) | VfsError::Unsupported(_))
+    ));
+}
+
+fn replace_swaps_a_file_in(vfs: &dyn Vfs, seed: &dyn Seed, dir: &Path) {
+    seed.file(&dir.join("new"), b"new content");
+    seed.file(&dir.join("old"), b"old content");
+    seed.dir(&dir.join("folder"));
+
+    vfs.replace(&dir.join("new"), &dir.join("old")).unwrap();
+
+    assert_eq!(read_all(vfs, &dir.join("old")), b"new content");
+    assert!(
+        !vfs.exists(&dir.join("new")),
+        "the source is moved, not copied"
+    );
+
+    seed.file(&dir.join("another"), b"another");
+    vfs.replace(&dir.join("another"), &dir.join("fresh"))
+        .unwrap();
+    assert_eq!(
+        read_all(vfs, &dir.join("fresh")),
+        b"another",
+        "replacing nothing is a plain move"
+    );
+
+    seed.file(&dir.join("third"), b"third");
+    assert!(
+        vfs.replace(&dir.join("third"), &dir.join("folder"))
+            .is_err(),
+        "a folder in the way is an error"
+    );
+    assert!(
+        vfs.exists(&dir.join("third")),
+        "a refused replace changes nothing"
+    );
+    assert!(matches!(
+        vfs.replace(&dir.join("nothing"), &dir.join("x")),
+        Err(VfsError::NotFound(_))
+    ));
 }
 
 #[cfg(test)]

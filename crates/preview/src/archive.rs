@@ -8,11 +8,11 @@
 //! outside memory. Entry names are attacker-chosen text headed for a terminal, so they are
 //! cleaned of control and direction-changing characters ([`clean_name`]) before anyone sees them.
 
-use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use flate2::read::GzDecoder;
+use shared::Vfs;
 
 /// The archive formats that can be listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,20 +142,20 @@ fn is_unsafe(c: char) -> bool {
 
 /// Lists `path` within the default [`Limits`]. `None` if it is not an archive of a known kind,
 /// or is damaged from its very first entry.
-pub fn list(path: &Path) -> Option<Listing> {
-    list_within(path, Limits::default())
+pub fn list(vfs: &dyn Vfs, path: &Path) -> Option<Listing> {
+    list_within(vfs, path, Limits::default())
 }
 
-pub fn list_within(path: &Path, limits: Limits) -> Option<Listing> {
+pub fn list_within(vfs: &dyn Vfs, path: &Path, limits: Limits) -> Option<Listing> {
     match kind_of(path)? {
-        Kind::Zip => list_zip(path, limits),
+        Kind::Zip => list_zip(vfs, path, limits),
         Kind::Tar => {
-            let mut archive = tar::Archive::new(BufReader::new(File::open(path).ok()?));
+            let mut archive = tar::Archive::new(BufReader::new(vfs.open_read(path).ok()?));
             // Seeking past each entry's data makes listing cost the headers, not the file's size.
             collect_tar(Kind::Tar, archive.entries_with_seek().ok()?, limits)
         }
         Kind::TarGz => {
-            let file = BufReader::new(File::open(path).ok()?);
+            let file = BufReader::new(vfs.open_read(path).ok()?);
             // A gzip stream cannot seek, so each entry's data is inflated and thrown away; the
             // cap bounds how much of that a small file full of zeros can make us do.
             let inflated = Capped::new(GzDecoder::new(file), limits.max_inflated);
@@ -230,9 +230,9 @@ fn directory_is_small(tail: &[u8]) -> bool {
     ends_at_the_end
 }
 
-fn list_zip(path: &Path, limits: Limits) -> Option<Listing> {
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
+fn list_zip(vfs: &dyn Vfs, path: &Path, limits: Limits) -> Option<Listing> {
+    let mut file = vfs.open_read(path).ok()?;
+    let len = file.seek(SeekFrom::End(0)).ok()?;
     // 22 bytes of record plus a comment of at most 65,535.
     let tail_len = len.min(22 + 65_535);
     file.seek(SeekFrom::Start(len - tail_len)).ok()?;
@@ -313,6 +313,8 @@ fn collect_tar<'a, R: Read + 'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+
     use super::*;
     use proptest::prelude::*;
     use std::io::{Cursor, Write};
@@ -429,7 +431,7 @@ mod tests {
                 ("a.zip", zip, Kind::Zip),
             ];
             for (name, bytes, kind) in cases {
-                let listing = list(&write(&dir, name, &bytes)).expect(name);
+                let listing = list(&shared::LocalVfs, &write(&dir, name, &bytes)).expect(name);
                 prop_assert_eq!(listing.kind, kind);
                 prop_assert_eq!(listing.hidden, Hidden::Nothing);
                 prop_assert_eq!(names_and_sizes(&listing), expected.clone(), "{}", name);
@@ -451,14 +453,14 @@ mod tests {
         let tar = write(&dir, "five.tar", &tar_bytes(&five));
         let zip = write(&dir, "five.zip", &zip_bytes(&five));
 
-        let tar_listing = list_within(&tar, limits).unwrap();
+        let tar_listing = list_within(&shared::LocalVfs, &tar, limits).unwrap();
         assert_eq!(tar_listing.entries.len(), 3);
         assert_eq!(
             tar_listing.hidden,
             Hidden::Unknown,
             "a tar cannot count without reading it"
         );
-        let zip_listing = list_within(&zip, limits).unwrap();
+        let zip_listing = list_within(&shared::LocalVfs, &zip, limits).unwrap();
         assert_eq!(zip_listing.entries.len(), 3);
         assert_eq!(zip_listing.hidden, Hidden::Count(2));
 
@@ -467,11 +469,15 @@ mod tests {
         let exact_tar = write(&dir, "three.tar", &tar_bytes(&three));
         let exact_zip = write(&dir, "three.zip", &zip_bytes(&three));
         assert_eq!(
-            list_within(&exact_tar, limits).unwrap().hidden,
+            list_within(&shared::LocalVfs, &exact_tar, limits)
+                .unwrap()
+                .hidden,
             Hidden::Nothing
         );
         assert_eq!(
-            list_within(&exact_zip, limits).unwrap().hidden,
+            list_within(&shared::LocalVfs, &exact_zip, limits)
+                .unwrap()
+                .hidden,
             Hidden::Nothing
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -489,7 +495,7 @@ mod tests {
             max_inflated: 64 * 1024,
             ..Limits::default()
         };
-        let listing = list_within(&path, capped).unwrap();
+        let listing = list_within(&shared::LocalVfs, &path, capped).unwrap();
         assert_eq!(
             names_and_sizes(&listing),
             vec![("big".to_string(), 1 << 20)]
@@ -500,7 +506,7 @@ mod tests {
             "a cut listing must not pass for a whole one"
         );
 
-        let whole = list(&path).unwrap();
+        let whole = list(&shared::LocalVfs, &path).unwrap();
         assert_eq!(whole.entries.len(), 2);
         assert_eq!(whole.hidden, Hidden::Nothing);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -525,7 +531,7 @@ mod tests {
         file.set_len(512 + (200 << 20) + 1024).unwrap();
 
         let started = std::time::Instant::now();
-        let listing = list(&path).unwrap();
+        let listing = list(&shared::LocalVfs, &path).unwrap();
         assert_eq!(
             names_and_sizes(&listing),
             vec![("huge".to_string(), 200 << 20)]
@@ -549,9 +555,12 @@ mod tests {
             } else {
                 b""
             };
-            assert!(list(&write(&dir, name, bytes)).is_none(), "{name}");
+            assert!(
+                list(&shared::LocalVfs, &write(&dir, name, bytes)).is_none(),
+                "{name}"
+            );
         }
-        assert!(list(&dir.join("missing.zip")).is_none());
+        assert!(list(&shared::LocalVfs, &dir.join("missing.zip")).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -560,7 +569,7 @@ mod tests {
         let dir = scratch("cut");
         let mut bytes = tar_bytes(&[("one".to_string(), 600), ("two".to_string(), 600)]);
         bytes.truncate(512 + 1024 + 200); // into the second entry's header
-        let listing = list(&write(&dir, "cut.tar", &bytes)).unwrap();
+        let listing = list(&shared::LocalVfs, &write(&dir, "cut.tar", &bytes)).unwrap();
         assert_eq!(listing.entries[0].name, "one");
         assert_eq!(listing.hidden, Hidden::Unknown);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -662,7 +671,7 @@ mod tests {
     fn a_hostile_name_in_a_real_archive_arrives_cleaned() {
         let dir = scratch("hostile");
         let items = vec![("ok\x1b[2Jname".to_string(), 1)];
-        let listing = list(&write(&dir, "h.tar", &tar_bytes(&items))).unwrap();
+        let listing = list(&shared::LocalVfs, &write(&dir, "h.tar", &tar_bytes(&items))).unwrap();
         assert_eq!(listing.entries[0].name, "ok?[2Jname");
         std::fs::remove_dir_all(&dir).unwrap();
     }

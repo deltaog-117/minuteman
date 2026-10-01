@@ -23,13 +23,13 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use crate::error::VfsError;
-use crate::vfs::{DirEntryInfo, FileKind, Metadata, ReadSeek, ScanEntry, Vfs};
+use crate::vfs::{DirEntryInfo, FileKind, Metadata, ReadSeek, ScanEntry, Vfs, WriteSeek};
 
 /// The size unit "allocated" is rounded up to, like a filesystem's block.
 const BLOCK: u64 = 4096;
@@ -37,18 +37,79 @@ const BLOCK: u64 = 4096;
 /// Symlinks followed before a path is called a loop.
 const MAX_LINK_HOPS: u32 = 40;
 
-#[derive(Debug, Clone)]
+/// A file's bytes, shared so a writer handed out by `create_write` keeps writing into the file it
+/// created after the call that made it has returned.
+type Bytes = Arc<Mutex<Vec<u8>>>;
+
+#[derive(Debug)]
 enum Content {
-    File(Vec<u8>),
+    File(Bytes),
     Dir,
     Symlink(PathBuf),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Node {
     content: Content,
     inode: u64,
     modified: SystemTime,
+    /// Permission bits set by `set_mode`; the kind's default when `None`.
+    permissions: Option<u32>,
+}
+
+fn new_file(data: Vec<u8>) -> Content {
+    Content::File(Arc::new(Mutex::new(data)))
+}
+
+fn lock(bytes: &Bytes) -> MutexGuard<'_, Vec<u8>> {
+    bytes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Writes into one file of a `MemVfs`, at a position that seeking moves, growing the file (and
+/// zero-filling any gap) as a real file does.
+struct MemWriter {
+    bytes: Bytes,
+    position: u64,
+}
+
+impl Write for MemWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut data = lock(&self.bytes);
+        let start = usize::try_from(self.position)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "position too large"))?;
+        if data.len() < start {
+            data.resize(start, 0);
+        }
+        let overlap = (data.len() - start).min(buf.len());
+        data[start..start + overlap].copy_from_slice(&buf[..overlap]);
+        data.extend_from_slice(&buf[overlap..]);
+        self.position += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for MemWriter {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let end = lock(&self.bytes).len() as u64;
+        let target = match to {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::End(delta) => end.checked_add_signed(delta),
+            SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
+        };
+        self.position = target.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before the start of the file",
+            )
+        })?;
+        Ok(self.position)
+    }
 }
 
 #[derive(Debug)]
@@ -170,9 +231,50 @@ impl State {
                 content,
                 inode,
                 modified: SystemTime::now(),
+                permissions: None,
             },
         );
         Ok(at)
+    }
+
+    /// Moves `src` (and everything under it) to `dst`. With `replace`, a file or symlink already at
+    /// `dst` is swapped out for it in the same step; without, anything there is an error.
+    fn relocate(&mut self, src: &Path, dst: &Path, replace: bool) -> Result<(), VfsError> {
+        let from = self.find(src, false)?.0;
+        let to = self.resolve(dst, false)?;
+        if let Some(existing) = self.nodes.get(&to) {
+            if !replace {
+                return Err(VfsError::AlreadyExists(dst.to_path_buf()));
+            }
+            if matches!(existing.content, Content::Dir) && to != from {
+                return Err(io_error(dst, io::ErrorKind::InvalidInput, "is a directory"));
+            }
+        }
+        if to.starts_with(&from) && to != from {
+            return Err(io_error(
+                src,
+                io::ErrorKind::InvalidInput,
+                "cannot move a folder into itself",
+            ));
+        }
+        let parent = to.parent().unwrap_or(Path::new("/"));
+        match self.nodes.get(parent) {
+            Some(Node {
+                content: Content::Dir,
+                ..
+            }) => {}
+            Some(_) => return Err(VfsError::NotADirectory(parent.to_path_buf())),
+            None => return Err(VfsError::NotFound(dst.to_path_buf())),
+        }
+        if to != from {
+            self.nodes.remove(&to);
+        }
+        for old in self.subtree(&from) {
+            let node = self.nodes.remove(&old).expect("listed a moment ago");
+            let rest = old.strip_prefix(&from).expect("under the moved path");
+            self.nodes.insert(to.join(rest), node);
+        }
+        Ok(())
     }
 
     /// The paths directly inside the folder at `dir`.
@@ -197,7 +299,7 @@ impl State {
 fn stat(node: &Node, sparse: bool) -> Metadata {
     let (kind, len, allocated, mode) = match &node.content {
         Content::File(data) => {
-            let len = data.len() as u64;
+            let len = lock(data).len() as u64;
             (FileKind::File, len, len.div_ceil(BLOCK) * BLOCK, 0o100_644)
         }
         Content::Dir => (FileKind::Dir, BLOCK, BLOCK, 0o040_755),
@@ -215,7 +317,11 @@ fn stat(node: &Node, sparse: bool) -> Metadata {
         kind,
         len,
         allocated: full(sparse, allocated),
-        mode: full(sparse, mode),
+        mode: full(
+            sparse,
+            node.permissions
+                .map_or(mode, |bits| (mode & !0o7777) | bits),
+        ),
         uid: full(sparse, 1000),
         gid: full(sparse, 1000),
         nlink: full(sparse, 1),
@@ -237,6 +343,7 @@ impl MemVfs {
                 content: Content::Dir,
                 inode: 1,
                 modified: SystemTime::now(),
+                permissions: None,
             },
         );
         Self {
@@ -314,7 +421,7 @@ impl MemVfs {
 
     /// Adds (or replaces) the file `path` holding `bytes`, making any folders above it.
     pub fn add_file(&self, path: impl AsRef<Path>, bytes: impl Into<Vec<u8>>) {
-        self.put(path.as_ref(), Content::File(bytes.into()));
+        self.put(path.as_ref(), new_file(bytes.into()));
     }
 
     /// Adds the symlink `link` pointing at `target` (which need not exist).
@@ -396,7 +503,7 @@ impl Vfs for MemVfs {
 
     fn open_read(&self, path: &Path) -> Result<Box<dyn ReadSeek>, VfsError> {
         match &self.state().find(path, true)?.1.content {
-            Content::File(data) => Ok(Box::new(Cursor::new(data.clone()))),
+            Content::File(data) => Ok(Box::new(Cursor::new(lock(data).clone()))),
             _ => Err(io_error(path, io::ErrorKind::InvalidInput, "not a file")),
         }
     }
@@ -430,7 +537,7 @@ impl Vfs for MemVfs {
 
     fn create_file(&self, path: &Path) -> Result<(), VfsError> {
         self.state()
-            .insert_new(path, Content::File(Vec::new()))
+            .insert_new(path, new_file(Vec::new()))
             .map(drop)
     }
 
@@ -447,49 +554,48 @@ impl Vfs for MemVfs {
                 io::ErrorKind::InvalidInput,
                 "is a directory",
             )),
-            None => state.insert_new(path, Content::File(Vec::new())).map(drop),
+            None => state.insert_new(path, new_file(Vec::new())).map(drop),
         }
     }
 
     fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
         let mut state = self.state();
         let data = match &state.find(src, true)?.1.content {
-            Content::File(data) => data.clone(),
+            Content::File(data) => lock(data).clone(),
             _ => return Err(io_error(src, io::ErrorKind::InvalidInput, "not a file")),
         };
         if state.exists(dst) {
             return Err(VfsError::AlreadyExists(dst.to_path_buf()));
         }
-        state.insert_new(dst, Content::File(data)).map(drop)
+        state.insert_new(dst, new_file(data)).map(drop)
     }
 
     fn rename(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
+        self.state().relocate(src, dst, false)
+    }
+
+    fn replace(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
+        self.state().relocate(src, dst, true)
+    }
+
+    fn create_write(&self, path: &Path) -> Result<Box<dyn WriteSeek>, VfsError> {
+        let bytes: Bytes = Arc::default();
+        self.state()
+            .insert_new(path, Content::File(Arc::clone(&bytes)))?;
+        Ok(Box::new(MemWriter { bytes, position: 0 }))
+    }
+
+    fn create_symlink(&self, target: &Path, link: &Path) -> Result<(), VfsError> {
+        self.state()
+            .insert_new(link, Content::Symlink(target.to_path_buf()))
+            .map(drop)
+    }
+
+    fn set_mode(&self, path: &Path, mode: u32) -> Result<(), VfsError> {
         let mut state = self.state();
-        let from = state.find(src, false)?.0;
-        if state.exists(dst) {
-            return Err(VfsError::AlreadyExists(dst.to_path_buf()));
-        }
-        let to = state.resolve(dst, false)?;
-        if to.starts_with(&from) {
-            return Err(io_error(
-                src,
-                io::ErrorKind::InvalidInput,
-                "cannot move a folder into itself",
-            ));
-        }
-        let parent = to.parent().unwrap_or(Path::new("/"));
-        match state.nodes.get(parent) {
-            Some(Node {
-                content: Content::Dir,
-                ..
-            }) => {}
-            Some(_) => return Err(VfsError::NotADirectory(parent.to_path_buf())),
-            None => return Err(VfsError::NotFound(dst.to_path_buf())),
-        }
-        for old in state.subtree(&from) {
-            let node = state.nodes.remove(&old).expect("listed a moment ago");
-            let rest = old.strip_prefix(&from).expect("under the moved path");
-            state.nodes.insert(to.join(rest), node);
+        let at = state.find(path, true)?.0;
+        if let Some(node) = state.nodes.get_mut(&at) {
+            node.permissions = Some(mode & 0o7777);
         }
         Ok(())
     }
