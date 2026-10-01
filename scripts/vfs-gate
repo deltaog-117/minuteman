@@ -5,13 +5,14 @@
 # Only non-test code is looked at (everything from a `#[cfg(test)]` module down is skipped, as are
 # comment lines). A file that is local by nature is listed below with the reason; the gate also
 # fails when a listed file no longer touches the disk directly, so the list cannot go stale.
+#
+# A line that only looks like disk access, such as asking an archive entry whether it is a folder,
+# ends with `// vfs-gate: archive entry` to be skipped.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 declare -A allowed=(
   [crates/shared/src/vfs.rs]="the local disk backend itself"
-  [crates/file_ops/src/archive.rs]="archives are read and written as seekable streams; moving them onto Vfs is its own change"
-  [crates/preview/src/archive.rs]="lists an archive by seeking through it; only reached for a path Vfs::local_path gives"
   [crates/trash/src/lib.rs]="the desktop trash is a local-disk concept"
   [crates/theming/src/config.rs]="the app's own config and appearance files"
   [crates/tui/src/cli.rs]="writes the --cwd-file the shell wrapper reads"
@@ -38,6 +39,7 @@ hits_in() {
       next
     }
     /^[[:space:]]*\/\// { next }
+    /\/\/ vfs-gate: archive entry$/ { next }
     { print FILENAME ":" NR ": " $0 }
   ' "$1" | grep -E "$pattern" || true
 }

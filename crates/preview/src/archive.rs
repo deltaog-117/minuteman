@@ -256,8 +256,8 @@ fn list_zip(vfs: &dyn Vfs, path: &Path, limits: Limits) -> Option<Listing> {
         };
         entries.push(Entry {
             name: clean_name(entry.name()),
-            size: if entry.is_dir() { 0 } else { entry.size() },
-            is_dir: entry.is_dir(),
+            size: if entry.is_dir() { 0 } else { entry.size() }, // vfs-gate: archive entry
+            is_dir: entry.is_dir(),                              // vfs-gate: archive entry
         });
     }
     let hidden = match total.saturating_sub(entries.len()) {
@@ -297,7 +297,7 @@ fn collect_tar<'a, R: Read + 'a>(
             continue;
         }
         let name = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
-        let is_dir = entry_type.is_dir() || name.ends_with('/');
+        let is_dir = entry_type.is_dir() || name.ends_with('/'); // vfs-gate: archive entry
         entries.push(Entry {
             name: clean_name(&name),
             size: if is_dir { 0 } else { entry.size() },

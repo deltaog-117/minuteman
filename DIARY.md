@@ -4840,10 +4840,10 @@ finished archive appear under its real name at once. Archive creation, extractio
 checks and the preview listing all take a `&dyn Vfs` now. Each new method has a conformance
 scenario, so a future backend is held to the same guarantees as the local disk and memory.
 
-**Not done.** `scripts/vfs-gate` still lists both archive files as allowed to touch the disk; they
-no longer do. The entries pass only because zip's own `entry.is_dir()` matches the gate's pattern,
-so they should be removed with a narrower pattern. Copying between two different backends is also
-still missing.
+**Gate.** Both archive files left `scripts/vfs-gate`'s allow-list, which had only been passing
+because zip's own `entry.is_dir()` matched the gate's pattern. Those few lines now carry a
+`// vfs-gate: archive entry` marker the gate skips, rather than a looser pattern that could miss a
+real disk call. Copying between two different backends is still missing.
 
 **Verification.** `scripts/check` passes. Not tried in a real terminal.
 

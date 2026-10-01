@@ -1034,7 +1034,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `create_write` (a seekable writer that creates new files only and never follows a link),
   `create_symlink`, `set_mode` (a backend without permissions declines, which extraction accepts)
   and `replace` (a finished archive appears under its name in one step); each has a conformance
-  scenario, and `MemVfs` implements them. The extraction safeguards are unchanged.
+  scenario, and `MemVfs` implements them. The extraction safeguards are unchanged. The archive
+  files left `scripts/vfs-gate`'s allow-list; a line that only asks an archive entry whether it is
+  a folder carries a `// vfs-gate: archive entry` marker instead.
 
 ---
 
@@ -1131,9 +1133,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   between sessions.
 - **VFS, follow-ups** – archives are now read and written through `Vfs`, but browsing inside an
   archive as a directory is not built, and there is no copy between two different backends.
-  `scripts/vfs-gate` still lists both archive files as allowed to touch the disk, though they no
-  longer do; the entries pass only because zip's `entry.is_dir()` matches the gate's pattern, so
-  drop them and narrow the pattern. The remaining direct users of the disk are listed, each with its
+  The remaining direct users of the disk are listed, each with its
   reason, in `scripts/vfs-gate`: the desktop trash, git, launching programs, the desktop's MIME
   and application files, this machine's `/proc`, the app's own config and the start directory.
   Owner names are looked up in this machine's `passwd` only for a path on its disk, so another

@@ -514,7 +514,8 @@ fn extract_zip(
         // Some Windows tools write `\` between names; a zip's separator is `/`.
         let name = PathBuf::from(entry.name().replace('\\', "/"));
         let mode = entry.unix_mode();
-        let kind = if entry.is_dir() {
+        let is_dir = entry.is_dir(); // vfs-gate: archive entry
+        let kind = if is_dir {
             Kind::Dir
         } else if entry.is_symlink() {
             let mut target = Vec::new();
@@ -543,8 +544,8 @@ fn extract_tar(reader: impl Read, sink: &mut Sink<'_>) -> Result<(), FileOpsErro
         let header = entry.header();
         let mode = header.mode().ok();
         let kind = match header.entry_type() {
-            t if t.is_file() => Kind::File,
-            t if t.is_dir() => Kind::Dir,
+            t if t.is_file() => Kind::File, // vfs-gate: archive entry
+            t if t.is_dir() => Kind::Dir,   // vfs-gate: archive entry
             t if t.is_symlink() => match entry.link_name().map_err(damaged)? {
                 Some(target) => Kind::Symlink(target.into_owned()),
                 None => Kind::Other,
