@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/shared",
     "crates/vfs_ssh",
+    "crates/vfs_archive",
     "crates/browser",
     "crates/file_ops",
     "crates/preview",

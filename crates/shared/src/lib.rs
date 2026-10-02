@@ -22,8 +22,10 @@
 pub mod conformance;
 pub mod error;
 pub mod memory;
+pub mod mount;
 pub mod vfs;
 
 pub use error::VfsError;
 pub use memory::MemVfs;
+pub use mount::{MOUNT_MARK, archive_of_root, mount_root};
 pub use vfs::{DirEntryInfo, FileKind, LocalVfs, Metadata, ReadSeek, ScanEntry, Vfs, WriteSeek};

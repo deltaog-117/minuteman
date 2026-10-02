@@ -54,6 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `vfs_archive`, `shared`, `browser`, `tui`: archives can be browsed as folders. `enter` on a
+  `.zip`, `.jar`, `.tar`, `.tar.gz` or `.tgz` (also `l`, a double-click, or "Open" in the
+  right-click menu) opens it; its root is the archive's path plus `!` (`/x/a.zip!`) and `h` steps
+  back out onto the archive's row. A new `ArchiveVfs` wraps the application's `Vfs` and serves
+  those paths, so previews, search, marks, disk usage and copying files or folders out work unchanged,
+  and an archive on a remote machine opens too. Archives are read-only: changing one, running a `:`
+  command or a shell in one, trashing from one and opening a file in one with a program are refused
+  with a message. The table of contents is cached per archive and reread when the file changes.
+  Reading is bounded (200,000 entries, 512 MiB inflated while indexing, 256 MiB per opened entry,
+  no zip64 or oversized zip directory), over a limit is an error rather than a short listing, names
+  are cleaned of control characters, `..` entries are dropped, and links are followed only inside
+  the archive. An `[[open_rule]]` that covers an archive still wins over opening it as a folder.
+  `shared::mount` holds the path spelling (`mount_root`, `archive_of_root`), and
+  `BrowserState::leave` uses it to put the cursor back on the archive.
 - `vfs_ssh`, `tui`, `browser`, `shared`: native remote browsing over SSH, with no mounted
   filesystem. `:cd ssh://[user@]host[:port]/path` opens a folder on another machine; with no path
   (`:cd ssh://host`) it opens the login's home folder, and `sftp://` is accepted as the same

@@ -1,0 +1,18 @@
+[package]
+name = "vfs_archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+shared = { path = "../shared" }
+# Reading an entry needs deflate; the index only needs the central directory. No `aes-crypto`:
+# an encrypted entry is listed but cannot be opened from here (extract it instead, which asks for
+# the password).
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1"
+
+[dev-dependencies]
+proptest = "1.11"

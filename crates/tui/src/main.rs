@@ -107,6 +107,7 @@ use theming::{
     Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, PreviewHook, RawFont,
     RawLocal, RawPanels, RawStyles, RawTheme, RawUi, Styles, Theme, Ui,
 };
+use vfs_archive::ArchiveVfs;
 use vfs_ssh::RoutedVfs;
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
@@ -490,7 +491,7 @@ fn fresh_shell_box(
     shell_offset: &mut (i32, i32),
     shell_size: &mut (i32, i32),
 ) -> Result<ShellPanes> {
-    if vfs_ssh::is_remote(cwd) {
+    if vfs_ssh::is_remote(cwd) || vfs_archive::is_inside(cwd) {
         anyhow::bail!("{REMOTE_SHELL}");
     }
     *shell_offset = (0, 0);
@@ -500,7 +501,21 @@ fn fresh_shell_box(
 
 /// Why a shell cannot be opened in a folder on another machine: it would run here, on files that
 /// are not the ones in view.
-const REMOTE_SHELL: &str = "shells run on this machine; leave the remote folder first";
+const REMOTE_SHELL: &str =
+    "shells run on this machine; leave the remote folder or the archive first";
+
+/// Opens a file: an archive is entered as a folder, unless an `[[open_rule]]` claims it, and
+/// anything else goes to its program.
+fn open_file(app: &mut App, browser: &mut BrowserState, vfs: &dyn Vfs, path: &Path) {
+    if vfs_archive::is_archive(path) && !vfs_archive::is_inside(path) && !app.open_rule_covers(path)
+    {
+        if let Err(error) = browser.goto(vfs, &shared::mount_root(path)) {
+            app.status = Some(format!("cannot open the archive: {error}"));
+        }
+        return;
+    }
+    app.open_default(browser, path);
+}
 
 /// Carries out one `Alt` command (see `alt_keys`) against the shell box, returning a status
 /// message when there is something worth telling the user. Works the same whether the shell has
@@ -574,7 +589,7 @@ fn apply_alt_command(
             } else {
                 SplitDirection::Vertical
             };
-            if vfs_ssh::is_remote(cwd) {
+            if vfs_ssh::is_remote(cwd) || vfs_archive::is_inside(cwd) {
                 *shells = Some(panes);
                 return Ok(Some(REMOTE_SHELL.into()));
             }
@@ -694,7 +709,11 @@ fn main() -> Result<()> {
     // The one filesystem this session browses: everything below reaches a path through it, and
     // the background jobs and previews are handed clones. A path under `ssh://` goes to that
     // machine and every other path to the local disk.
-    let vfs: Arc<dyn Vfs> = Arc::new(RoutedVfs::new(Arc::new(LocalVfs))?);
+    // An archive is browsed as a folder by wrapping whatever serves the paths underneath it, so
+    // one on a remote machine opens just the same.
+    let vfs: Arc<dyn Vfs> = Arc::new(ArchiveVfs::new(Arc::new(RoutedVfs::new(Arc::new(
+        LocalVfs,
+    ))?)));
     let mut browser = BrowserState::with_show_hidden(vfs.as_ref(), start_dir, config.show_hidden)?;
 
     // Backs the blocking thread pool that copy/move/delete run on so a large operation never
@@ -1777,7 +1796,7 @@ fn run(
                                     app.status = Some(format!("cannot open: {e}"));
                                 }
                                 if let Some(path) = file_to_open {
-                                    app.open_default(browser, &path);
+                                    open_file(app, browser, vfs, &path);
                                 }
                                 // A plain single click on a row of the middle column may turn
                                 // into a drag; a double-click has already opened it, and a
@@ -2278,7 +2297,9 @@ fn run(
                                     } else {
                                         SplitDirection::Vertical
                                     };
-                                    if vfs_ssh::is_remote(browser.current_dir()) {
+                                    if vfs_ssh::is_remote(browser.current_dir())
+                                        || vfs_archive::is_inside(browser.current_dir())
+                                    {
                                         app.status = Some(REMOTE_SHELL.into());
                                     } else {
                                         let panes = shells
@@ -2493,7 +2514,7 @@ fn run(
                     Some(Action::Enter) => match browser.selected_entry() {
                         Some(entry) if !entry.is_dir => {
                             let path = entry.path.clone();
-                            app.open_default(browser, &path);
+                            open_file(app, browser, vfs, &path);
                         }
                         _ => browser.enter(vfs)?,
                     },
@@ -2631,7 +2652,7 @@ fn run_menu_command(
     };
     match (command, selected) {
         (MenuCommand::Open, Some((_, true))) => browser.enter(vfs)?,
-        (MenuCommand::Open, Some((path, false))) => app.open_default(browser, &path),
+        (MenuCommand::Open, Some((path, false))) => open_file(app, browser, vfs, &path),
         (MenuCommand::OpenWith(index), Some((path, _))) => {
             // The menu listed these choices plus "Other…" after them, so an index past the end
             // is "Other…".

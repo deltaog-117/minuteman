@@ -70,6 +70,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-09-30 | Default Key Remap | `d` cut, `x`/`X` delete, `s` unbound, `y`/`d`/`x`/`X` act on marks only | ✅ Confirmed |
 | 2026-10-01 | Archives Through Vfs | Four write primitives on `Vfs` (`create_write`, `create_symlink`, `set_mode`, `replace`) and archives read and written through them, with a conformance suite for each | ✅ Confirmed |
 | 2026-10-01 | Remote Browsing | Drive the system `ssh -s sftp` through `openssh` and `openssh-sftp-client`, route by a path prefix in one `Vfs`, and stream copies between backends (COA C), over `ssh2` and libssh2 (A) or `russh` (B) | ✅ Confirmed |
+| 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
 
 ---
 
@@ -4941,6 +4942,85 @@ writer that is only dropped. The real binary was driven in a terminal against th
 strict host keys: a remote `:cd`, a preview, and a paste to the local disk worked. Not tried: a
 real network, a password or passphrase login, `ProxyJump`, an agent, Windows, or a server other
 than OpenSSH.
+
+---
+
+### Browsing Archives: A Read-Only `Vfs` Addressed by a `!` Suffix (COA A)
+
+**Date:** 2026-10-02
+**Status:** Confirmed
+
+#### Context / Background
+
+Archives were already read and written through `Vfs`, and the remote backend had just shown that a
+second backend works with every feature for free. Opening an archive as a folder was the remaining
+payoff of that work.
+
+#### Options Considered
+
+**Option A: a `Vfs` that wraps another and serves archive paths.** Every feature that goes through
+the trait works inside an archive unchanged, and it nests over a remote archive. The cost is an
+index of the archive and a new crate.
+
+**Option B: extract to a temporary folder and browse that.** Small, but it extracts everything up
+front, goes stale, needs a place on disk to put it, and undoes the work that stopped archives from
+touching the disk.
+
+**Option C: the same wrapper, zip only.** Least risk, but a feature where some archives open and
+others do not.
+
+#### Decision
+
+Option A, all three formats, read-only.
+
+*The address.* An archive's root is its path plus `!`, and a file in it `/x/a.zip!/dir/f`. The path
+is split on its text, never rebuilt from components, because a component walk collapses the `//` of
+`ssh://host/...` and would change which machine the archive is on. Only a `!` that follows an
+archive extension and is followed by `/` or the end counts, so a folder named `notes!` is untouched.
+The spelling (`mount_root`, `archive_of_root`) lives in `shared`, because the browser needs it to
+put the cursor back on the archive when stepping out and may not depend on the backend.
+
+*The wrapper sits above the router.* `ArchiveVfs` wraps `RoutedVfs`, not the other way round, so
+the archive file is read through whatever backend holds it. Paths that are not in an archive are
+passed through untouched.
+
+*An index, bounded, never truncated.* Listing a folder must not touch data, so each archive is read
+once into a tree (a zip from its central directory, a plain tar by seeking over its data, a
+`.tar.gz` by inflating it once) and kept for eight archives, reused while the file's size and time
+match. Every limit is an error rather than a short listing, because a folder that looks complete
+and is not misleads more than one that says it is too big. The zip central-directory guard and the
+capped reader are copies of the ones in `preview`; feature crates do not depend on each other, and
+a shared home for them is not worth a crate yet.
+
+*Opening a file.* A plain tar's entry is read in place through a window onto the file. A zip or
+gzip entry is unpacked into memory, capped at 256 MiB, because the caller needs `Seek` and a
+compressed stream cannot. A temporary file would have been the alternative and is exactly what the
+vfs-gate forbids.
+
+*Read-only, and local-only things refused.* Every way of changing an archive answers
+`Unsupported`, the same answer a backend gives for a field it lacks. A move out of an archive is
+refused rather than reported as crossing a device, which would have copied the file and then failed
+to delete the original. A shell, a `:` command, the trash and opening with a program are refused
+inside an archive for the reason they are refused on a remote machine: the folder is not on this
+disk.
+
+*Links.* A tar link is followed only inside the archive: an absolute target, a `..` that climbs out
+and a loop longer than 16 hops all lead nowhere. A zip link is shown as the file holding its text,
+since reading it to find the target would mean inflating data while indexing.
+
+**Found while testing.** The tar writer refuses a `..` in a name, which is the very thing a hostile
+archive carries, so the test that checks such entries are dropped writes the name into the header's
+bytes directly. A first clippy pass also pointed out that the format-by-extension check was a
+table in disguise.
+
+**Verification.** `scripts/check` passes. Property tests cover walking random trees in all three
+formats, a window onto a buffer, and the path parser; unit tests cover links, hostile names,
+damaged archives, read-only refusals, copying out, and an archive that changes on disk. A 50,000
+entry zip indexes cold in about 90 ms. The real binary was driven in a PTY through `pyte`: entering
+a zip and a tar.gz, a preview, stepping out with the cursor on the archive, copying a file and a
+folder out to disk and checking the bytes, and every write, a shell and `:ls` refused with the
+archive unchanged. Not tried: a real kitty, an archive on a real remote machine, or an archive
+bigger than a few hundred bytes in the terminal.
 
 ---
 

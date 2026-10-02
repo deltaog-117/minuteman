@@ -350,6 +350,9 @@ fn trash_here(path: &Path) -> Result<(), file_ops::FileOpsError> {
     if vfs_ssh::is_remote(path) {
         return Err(VfsError::Unsupported("a trash on a remote machine").into());
     }
+    if vfs_archive::is_inside(path) {
+        return Err(VfsError::Unsupported("an archive is read-only").into());
+    }
     file_ops::trash(path)
 }
 
@@ -1096,6 +1099,13 @@ impl App {
         )
     }
 
+    /// Whether an `[[open_rule]]` of the user's covers `path`, which then beats the built-in
+    /// habit of entering an archive as a folder.
+    pub fn open_rule_covers(&self, path: &Path) -> bool {
+        let mime = self.associations().mime_of(path);
+        open::first_rule(&self.open_rules, &display_name(path), &mime).is_some()
+    }
+
     /// Opens `path` the way the user would expect: the first `[[open_rule]]` that covers it, else
     /// the program the desktop has as the default for its type, else whatever `xdg-open` picks.
     pub fn open_default(&mut self, browser: &BrowserState, path: &Path) {
@@ -1139,6 +1149,13 @@ impl App {
         if vfs_ssh::is_remote(path) {
             self.status = Some(format!(
                 "cannot open {}: it is on a remote machine, copy it here first",
+                display_name(path)
+            ));
+            return;
+        }
+        if vfs_archive::is_inside(path) {
+            self.status = Some(format!(
+                "cannot open {}: it is inside an archive, copy it out first",
                 display_name(path)
             ));
             return;
@@ -1586,6 +1603,10 @@ impl App {
         if vfs_ssh::is_remote(browser.current_dir()) {
             self.status =
                 Some("commands run on this machine; leave the remote folder first".into());
+            return;
+        }
+        if vfs_archive::is_inside(browser.current_dir()) {
+            self.status = Some("commands run on a real folder; leave the archive first".into());
             return;
         }
         if self.is_busy() {
@@ -2360,6 +2381,10 @@ impl App {
         // deleting them for good instead is not what a trash key promises.
         if targets.iter().any(|target| vfs_ssh::is_remote(target)) {
             self.status = Some("a remote machine has no trash; use the permanent delete".into());
+            return;
+        }
+        if targets.iter().any(|target| vfs_archive::is_inside(target)) {
+            self.status = Some("an archive is read-only".into());
             return;
         }
         if self.is_busy() {

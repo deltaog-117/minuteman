@@ -310,6 +310,8 @@ impl BrowserState {
 
         self.move_to(vfs, parent)?;
 
+        // Stepping out of an archive's root lands on the archive file the root was made from.
+        let came_from = shared::archive_of_root(&came_from).unwrap_or(came_from);
         self.selected = self
             .current_entries
             .iter()

@@ -1121,12 +1121,42 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ---
 
+- ✅ **Browse inside an archive as a folder (COA A)** – `enter` (or `l`, a double-click, or "Open" in
+  the right-click menu) on a `.zip`, `.jar`, `.tar`, `.tar.gz` or `.tgz` opens it as a folder, and
+  `h` steps back out onto the archive's own row. An archive's root is its path plus a `!`
+  (`/x/a.zip!`, a file in it `/x/a.zip!/dir/f`; the spelling lives in `shared::mount`). New crate
+  `vfs_archive` holds `ArchiveVfs`, a `Vfs` that wraps another and serves those paths out of the
+  archive, so previews, search, marks, the disk usage view and copying a file or a whole folder out
+  all work with no code of their own, and an archive on a remote machine opens through the same
+  wrapper. Chosen as COA A (a read-only `Vfs` routed by path) over extracting to a temporary folder
+  (B) and a zip-only first cut (C). Read-only: every way of changing an archive reports
+  `Unsupported`, and `x`, a `:` command, a shell pane and opening with a program are refused inside
+  one with a plain message. The table of contents is read once and kept (eight archives, reread when
+  the file's size or time changes); a zip is read from its central directory and a plain tar by its
+  headers, so listing costs no inflation, while a `.tar.gz` is inflated once to index it. Archives
+  are untrusted input opened by moving the cursor onto them, so reading is bounded: 200,000
+  entries, 512 MiB inflated while indexing, a zip central directory over 8 MiB or in zip64 is
+  refused, and an entry over 256 MiB is not opened (it is held in memory, since deflate cannot
+  seek); going over a limit is an error, never a quietly shorter listing. A name is cleaned of
+  control and direction-changing characters, and an entry climbing out with `..` is left out.
+  Links inside a tar are followed only within the archive (an absolute or escaping target leads
+  nowhere, a loop ends after 16 hops). Property-tested: walking a random tree of files in zip, tar
+  and tar.gz returns exactly those paths and bytes, a window onto a buffer reads exactly its
+  range, an archive path round-trips through the parser, and parsing never panics on any text.
+  A 50,000-entry zip is indexed cold in about 90 ms and listed warm in about 0.2 ms (an ignored
+  benchmark test). Verified against the real binary in a PTY read through `pyte`: entering a zip
+  and a tar.gz, a nested folder, a text preview of a file inside, stepping out with the cursor on
+  the archive, yanking a file and a folder out into a real folder (contents checked on disk), cut,
+  paste, delete, `:mkdir`, `:touch` and `:ls` inside an archive all refused with the archive file
+  byte-for-byte unchanged, `Alt+n` refused, a damaged archive saying so without leaving the
+  browser, and the git segment surviving a repository around the archive.
+
+---
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
-  compression are not supported, the codecs being opt-in cargo features if wanted; extracting from
-  inside an archive (browsing it as a directory) is not done, and needs the VFS work
-  (now done) as a base; extraction does not restore modified times (only writing a zip records them, as UTC, since
+  compression are not supported, the codecs being opt-in cargo features if wanted; extraction does not restore modified times (only writing a zip records them, as UTC, since
   the standard library has no time zone database); the compress form's "Save in" folder must
   already exist and the form never overwrites (only `:compress` and `:extract` ask); the
   central-directory check refuses any zip whose last 64 KiB holds a record that claims too much,
@@ -1148,8 +1178,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   still records it, but one interrupted mid-item records nothing for that item; on platforms
   whose trash cannot be read back (macOS) a trash is not undoable; and the history is not kept
   between sessions.
-- **VFS, follow-ups** – archives are now read and written through `Vfs`, but browsing inside an
-  archive as a directory is not built, and there is no copy between two different backends.
+- **Archive browsing, follow-ups** – an archive inside an archive is a file of the outer one and
+  cannot be entered; nothing can be changed inside an archive (adding, deleting or renaming an
+  entry would mean rewriting it); a file is held in memory when opened (256 MiB at most), so a large
+  entry is copied out by extracting it; an encrypted zip lists but its entries cannot be opened
+  from inside (extract it, which asks for the password); `rar`, `7z`, `xz`, `zstd` and `bzip2`
+  are not served; indexing a large `.tar.gz` runs on the render thread (the background-listing
+  item under Remote browsing would fix both); a zip link is shown as the file holding its text;
+  the parent column does not highlight the archive's row; inside an archive the owner, link count
+  and device are blank, as the format has none.
+- **VFS, follow-ups** – archives are now read and written through `Vfs` and browsed as folders, but
+  there is no copy between two different backends beyond the local-to-remote streaming.
   The remaining direct users of the disk are listed, each with its
   reason, in `scripts/vfs-gate`: the desktop trash, git, launching programs, the desktop's MIME
   and application files, this machine's `/proc`, the app's own config and the start directory.
@@ -1265,7 +1304,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the HUD (header, size/age columns, scrollbar, powerline status bar) and an
+1. `cargo run -p tui` — the newest: put the cursor on a `.zip`, `.tar` or `.tar.gz` and press `enter`
+   (`l`, a double-click or right-click Open work too): it opens as a folder, header `…› a.zip!`.
+   Browse it, `J`/`K` through a file's preview, `v` mark files and `y`, then `h` out and `p` into a
+   real folder to copy them out; `h` from the archive's root lands on the archive's own row. Try
+   `x` or `:mkdir` inside it for the read-only message. Before that — the HUD (header, size/age columns, scrollbar, powerline status bar) and an
    adaptive theme are the default (`COLORTERM=truecolor` for full color; the theme now follows
    your terminal's own background — Catppuccin Mocha or Latte — unless `[theme]` is set in
    `appearance.toml`, e.g. `name = "neon"` for the original cyberpunk look or `name = "classic"`
