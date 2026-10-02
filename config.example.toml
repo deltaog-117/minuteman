@@ -212,10 +212,14 @@ hidden = ["."]
 # screen; the wheel over that column scrolls it too. Capitals: "J" is Shift+j, distinct from "j".
 preview_down = ["J"]
 preview_up = ["K"]
-# Switches the browser's view: the usual name list, then the filmstrip (the selected file shown as
-# large as the window allows, with a strip of thumbnails of its neighbours underneath), then back.
-# Capital: "V" is Shift+v, distinct from "v" (marks). In the filmstrip, j/k and up/down move
-# along the strip, clicking a thumbnail selects it, and `V` returns to the list.
+# Switches the browser's view, round and round: the usual columns, then a grid of thumbnail tiles
+# (like a graphical file manager's icon view), then a flat details table (name, size, exact
+# modified time in UTC, permissions), then the filmstrip (the selected file as large as the window
+# allows, with a strip of its neighbours underneath). Capital: "V" is Shift+v, distinct from "v"
+# (marks). In the grid, up/down (and whatever move_down/move_up are bound to) move a whole row, the
+# left/right arrows move one tile, `h`/`l`/enter go up and in, and the wheel scrolls a row; in the
+# filmstrip, move_down/move_up and the up/down arrows move along the strip. Clicking selects in
+# every view and double-clicking opens.
 cycle_view = ["V"]
 # Opens the disk usage view for the folder you are in: what takes the space, biggest first, with a
 # bar and a share for each. Inside it, enter opens a folder, h goes up, a switches between the

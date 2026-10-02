@@ -241,7 +241,15 @@ pub struct Columns {
     pub name_width: usize,
     pub size: bool,
     pub age: bool,
+    /// The exact modification time (the details view's column, instead of `age`).
+    pub modified: bool,
+    /// The `rwxr-xr-x` permissions (the details view only).
+    pub mode: bool,
 }
+
+/// Width of the details view's modified column (`2026-10-02 14:03`) and mode column (`rwxr-xr-x`).
+pub const MODIFIED_WIDTH: usize = 16;
+pub const MODE_WIDTH: usize = 9;
 
 /// Picks the richest layout that still leaves a name `MIN_NAME_WIDTH` cells — dropping the age
 /// column first, then size — so a narrow terminal loses detail, never the file name. `gutter` is
@@ -257,6 +265,8 @@ pub fn plan_columns(inner_width: usize, gutter: usize) -> Columns {
                 name_width: inner_width - used,
                 size,
                 age,
+                modified: false,
+                mode: false,
             };
         }
     }
@@ -264,7 +274,69 @@ pub fn plan_columns(inner_width: usize, gutter: usize) -> Columns {
         name_width: inner_width.saturating_sub(gutter),
         size: false,
         age: false,
+        modified: false,
+        mode: false,
     }
+}
+
+/// The details view's plan: name, size, exact modified time and permissions, dropping permissions
+/// first, then the time, then size on a narrow terminal, so the name keeps `MIN_NAME_WIDTH` cells.
+pub fn plan_details_columns(inner_width: usize, gutter: usize) -> Columns {
+    let tail = |size: bool, modified: bool, mode: bool| {
+        (if size { 1 + SIZE_WIDTH } else { 0 })
+            + (if modified { 1 + MODIFIED_WIDTH } else { 0 })
+            + (if mode { 1 + MODE_WIDTH } else { 0 })
+    };
+    for (size, modified, mode) in [
+        (true, true, true),
+        (true, true, false),
+        (true, false, false),
+    ] {
+        let used = gutter + tail(size, modified, mode);
+        if inner_width >= used + MIN_NAME_WIDTH {
+            return Columns {
+                name_width: inner_width - used,
+                size,
+                age: false,
+                modified,
+                mode,
+            };
+        }
+    }
+    Columns {
+        name_width: inner_width.saturating_sub(gutter),
+        size: false,
+        age: false,
+        modified: false,
+        mode: false,
+    }
+}
+
+/// `2026-10-02 14:03` (UTC, since the standard library has no time zone database), or the
+/// glyph set's "none" mark for a missing time.
+pub fn modified_cell(time: Option<SystemTime>, none: &str) -> String {
+    let full = crate::inspect::format_utc(time);
+    match full.get(..MODIFIED_WIDTH) {
+        Some(head) if full.starts_with(|c: char| c.is_ascii_digit()) => head.to_string(),
+        _ => none.to_string(),
+    }
+}
+
+/// The header row of the details table, laid out exactly like the rows under it: `gutter` blank
+/// cells (stripe, mark and icon), then each column's title over its own width.
+pub fn details_header(plan: &Columns, gutter: usize) -> String {
+    let mut out = " ".repeat(gutter);
+    out.push_str(&pad_to("Name", plan.name_width));
+    if plan.size {
+        out.push_str(&format!(" {:>width$}", "Size", width = SIZE_WIDTH));
+    }
+    if plan.modified {
+        out.push_str(&format!(" {}", pad_to("Modified (UTC)", MODIFIED_WIDTH)));
+    }
+    if plan.mode {
+        out.push_str(&format!(" {}", pad_to("Mode", MODE_WIDTH)));
+    }
+    out
 }
 
 /// The size column's text: a file's size, or the glyph set's "none" mark for a directory (whose
@@ -1035,6 +1107,46 @@ mod tests {
         assert_eq!(ago(2 * 31_536_000), "2y");
         assert_eq!(format_age(now, None), "—");
         assert_eq!(format_age(now, Some(now + secs(500))), "now");
+    }
+
+    #[test]
+    fn the_details_plan_drops_permissions_then_time_then_size_but_never_the_name() {
+        let wide = plan_details_columns(120, 3);
+        assert!(wide.size && wide.modified && wide.mode && !wide.age);
+        let full = 3 + 1 + SIZE_WIDTH + 1 + MODIFIED_WIDTH + 1 + MODE_WIDTH;
+        assert_eq!(wide.name_width, 120 - full);
+        // Each step down loses exactly one column.
+        let no_mode = plan_details_columns(full + MIN_NAME_WIDTH - 1, 3);
+        assert!(no_mode.size && no_mode.modified && !no_mode.mode);
+        let no_time = plan_details_columns(
+            3 + 1 + SIZE_WIDTH + 1 + MODIFIED_WIDTH + MIN_NAME_WIDTH - 1,
+            3,
+        );
+        assert!(no_time.size && !no_time.modified);
+        let name_only = plan_details_columns(3 + SIZE_WIDTH + MIN_NAME_WIDTH - 1, 3);
+        assert!(!name_only.size && name_only.name_width == 3 + SIZE_WIDTH + MIN_NAME_WIDTH - 1 - 3);
+    }
+
+    #[test]
+    fn the_details_header_lines_up_with_the_rows_under_it() {
+        let plan = plan_details_columns(100, 3);
+        let header = details_header(&plan, 3);
+        assert_eq!(text_width(&header), 100);
+        assert!(header.trim_start().starts_with("Name"));
+        assert!(
+            header.contains("Size") && header.contains("Modified (UTC)") && header.contains("Mode")
+        );
+        // A name-only plan shows only the name title.
+        let narrow = plan_details_columns(10, 3);
+        assert_eq!(details_header(&narrow, 3).trim(), "Name");
+    }
+
+    #[test]
+    fn a_modified_time_reads_as_a_date_and_a_minute() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        assert_eq!(modified_cell(Some(t), "-"), "2023-11-14 22:13");
+        assert_eq!(modified_cell(None, "-"), "-");
+        assert_eq!(text_width(&modified_cell(Some(t), "-")), MODIFIED_WIDTH);
     }
 
     #[test]

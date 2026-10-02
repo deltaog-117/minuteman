@@ -176,8 +176,13 @@ pub fn themed_block_with_border(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border))
-        .title(Line::from(Span::styled(format!(" {title} "), title_style)));
+        .border_style(Style::default().fg(border));
+    // A frame with no name (a grid tile) stays a plain line rather than gaining two blanks.
+    let block = if title.is_empty() {
+        block
+    } else {
+        block.title(Line::from(Span::styled(format!(" {title} "), title_style)))
+    };
     if crate::glyphs::of(config).ascii_borders {
         block.border_set(crate::glyphs::ASCII_BORDER)
     } else {

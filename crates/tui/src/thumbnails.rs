@@ -148,7 +148,7 @@ impl Thumbnails {
         self.handle.spawn_blocking(move || {
             let protocol = preview::load_image(vfs.as_ref(), &path).and_then(|image| {
                 picker
-                    .new_protocol(image, size, Resize::Fit(Some(FilterType::Triangle)))
+                    .new_protocol(image, size, Resize::Scale(Some(FilterType::Triangle)))
                     .ok()
             });
             let _ = tx.send(Finished {

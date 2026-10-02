@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`: the filmstrip's strip now shows the same bordered tiles as the grid instead of small
+  pictures floating in a tall empty frame, and thumbnails are scaled up to fill their tile instead
+  of staying at their native size. A frame with no title (a tile) no longer gets two blank cells in
+  its top border.
 - `shared`, `file_ops`, `preview`: archives are now made, extracted, checked for a password and
   listed through the `Vfs` trait instead of the disk, so they work on any backend. `Vfs` gained
   `create_write` (a seekable writer that only creates new files and never follows a link),
@@ -54,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`: two more views on `V`. The grid shows framed tiles, a thumbnail over the name each, over
+  the whole window like a graphical file manager's icon view: up/down move a row, the left/right
+  arrows a tile, the wheel a row, a click selects and a double-click opens, and marks and the
+  right-click menu work on tiles. The details view is one flat full-width table of name, size,
+  exact modified time (UTC) and permissions with a title row, dropping the right-hand columns first
+  on a narrow terminal. `V` now cycles columns, grid, details and filmstrip. New modules
+  `tile_view` and `grid_view`; no new dependency, and the release binary grew by about 17 KB.
 - `theming`, `tui`: `V` (new `[keys] cycle_view`) switches the browser's view, and the first extra
   view is the filmstrip: the selected file's preview scaled up as large as the window allows, with
   a strip of thumbnails of its neighbours underneath. `j`/`k` and up/down move along the strip,

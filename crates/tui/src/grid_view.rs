@@ -14,56 +14,72 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Draws the filmstrip's strip of neighbour thumbnails, from the geometry `view_mode` computed
-//! and the pictures `thumbnails` made, a framed tile each (see `tile_view`). The big preview above
-//! it is the ordinary preview pane, drawn by `draw` into `FilmstripLayout::big`.
+//! Draws the grid view: framed tiles, each a thumbnail over its name, filling the window like a
+//! graphical file manager's icon view. The geometry is `view_mode::GridLayout`; each tile is
+//! `tile_view::render_tile`, the same one the filmstrip's strip uses.
 
 use std::path::Path;
 
 use ratatui::Frame;
-use ratatui::layout::Size;
+use ratatui::layout::{Alignment, Rect, Size};
+use ratatui::style::Style;
+use ratatui::widgets::Paragraph;
 use shared::DirEntryInfo;
 use theming::Config;
 
 use crate::style;
 use crate::thumbnails::Thumbnails;
 use crate::tile_view::{TileState, render_tile};
-use crate::view_mode::{FilmstripLayout, tile_picture};
+use crate::view_mode::{GridLayout, tile_picture};
 
-/// Draws the strip: a frame titled with the cursor's position, and in it the window of entries
-/// around the cursor, each a tile. Asks `thumbs` for the window's pictures, nearest the cursor
-/// first, and draws whatever has arrived.
+/// Draws the tiles of the rows from `top` down. Asks `thumbs` for the pictures on screen,
+/// top-left first, and draws whatever has arrived.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame<'_>,
-    layout: &FilmstripLayout,
+    body: Rect,
+    grid: &GridLayout,
+    top: usize,
     entries: &[DirEntryInfo],
     selected: usize,
     is_marked: impl Fn(&Path) -> bool,
     thumbs: &mut Thumbnails,
     config: &Config,
 ) {
-    let Some(first) = layout.cells.first() else {
+    if entries.is_empty() {
+        let dim = Style::default().fg(style::color(&config.theme.status_fg));
+        frame.render_widget(
+            Paragraph::new("empty folder")
+                .style(dim)
+                .alignment(Alignment::Center),
+            Rect::new(
+                body.x,
+                body.y + body.height / 2,
+                body.width,
+                1.min(body.height),
+            ),
+        );
+        return;
+    }
+    let visible = grid.visible(top, entries.len());
+    let Some(first) = grid.rect_of(visible.start, top) else {
         return;
     };
-    let window = FilmstripLayout::window(selected, entries.len(), layout.cells.len());
-    let picture = tile_picture(*first);
-
+    let picture = tile_picture(first);
     thumbs.poll();
-    let mut wanted: Vec<usize> = window.clone().collect();
-    wanted.sort_by_key(|index| index.abs_diff(selected));
     thumbs.request(
-        wanted.iter().map(|&index| entries[index].path.as_path()),
+        visible.clone().map(|index| entries[index].path.as_path()),
         Size::new(picture.width, picture.height),
     );
 
-    let title = format!("{}/{}", selected + 1, entries.len());
-    frame.render_widget(style::themed_block(config, &title, false), layout.strip);
-
-    for (slot, index) in window.enumerate() {
+    for index in visible {
+        let Some(tile) = grid.rect_of(index, top) else {
+            continue;
+        };
         let entry = &entries[index];
         render_tile(
             frame,
-            layout.cells[slot],
+            tile,
             entry,
             TileState {
                 selected: index == selected,

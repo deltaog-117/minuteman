@@ -72,6 +72,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-01 | Remote Browsing | Drive the system `ssh -s sftp` through `openssh` and `openssh-sftp-client`, route by a path prefix in one `Vfs`, and stream copies between backends (COA C), over `ssh2` and libssh2 (A) or `russh` (B) | ✅ Confirmed |
 | 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
 | 2026-10-02 | Filmstrip View | A `V` view cycle with a thumbnail strip drawn from a pool-filled cache of finished protocols (COA B, filmstrip first, grid second), over a grid only (A) and a bigger preview only (C) | ✅ Confirmed |
+| 2026-10-02 | Grid and Details Views | A grid of framed tiles and a flat details table added to the `V` cycle, the filmstrip kept and its strip rebuilt from the same tile (COA A, with the filmstrip kept as asked) | ✅ Confirmed |
 
 ---
 
@@ -5103,6 +5104,83 @@ through `pyte`, reading per-cell colors: the enlarged image, four colored thumbn
 highlighted name, `j j`, a click on a thumbnail, the wheel, a text file with its placeholder, `V`
 back to the list, and a 60×9 terminal. Not tried: a real kitty, photographs rather than 60×40
 test images, or a remote folder.
+
+---
+
+### Grid and Details Views: Tiles That Answer the Mouse Like Rows (COA A)
+
+**Date:** 2026-10-02
+**Status:** Confirmed
+
+#### Context / Background
+
+The filmstrip shipped and was reported as bugged, with a messy lower part, and the wish behind it
+was a view closer to a traditional graphical file manager. Reproducing it at 80×24, 100×30 and
+200×50 showed what was wrong: a strip frame up to nine rows tall holding pictures one row high, with
+the names far below, no outline on the selected tile, and small images left at their native size.
+
+#### Options Considered
+
+**Option A: a view cycle of columns, grid and details, with the filmstrip removed.** The cleanest
+set. It was offered with the filmstrip going away.
+
+**Option B: the same, with a toggleable preview side pane on the grid.** Keeps enlarged images but
+adds layout states in exactly the area that had just come out messy.
+
+**Option C: keep the filmstrip as is and add the new views after it.** Nothing thrown away, but
+the old strip stays as it was.
+
+#### Decision
+
+Option A's views with the filmstrip kept, which was the answer given, and a flat table rather than
+columns for details. The filmstrip's strip was rebuilt from the same framed tile as the grid, which
+removes what looked messy there instead of leaving it beside two new views.
+
+#### Consequences / Implementation Notes
+
+*A tile is a row, to the mouse.* The list's click handling is about 200 lines of selecting,
+marking, double-click opening, right-click menus and drag presses, all keyed on a `Hit`. The grid
+reports `Hit::CurrentRow(index)` for a tile and `Hit::Blank` for the space between, so every one of
+those paths works on tiles with no copy. Two things are deliberately different: the wheel moves a
+row of tiles and not three entries, and a press never becomes a drag, because `drop_target` only
+knows rows.
+
+*Details is the list pane, widened.* `browser_layout` returns the usual split everywhere except
+details, where the parent and preview get zero-width rectangles and the current pane takes the whole
+body minus one title row. Because drawing, hit-testing, edge scroll and drop targets all ask that one
+function, the list code needed no change to work full width; only the row builder grew two columns
+(`hud::Columns` gained `modified` and `mode`). The title row sits outside the list's frame so the
+rows' hit-test offsets stay exact.
+
+*Keys.* In the grid, whatever is bound to move down and up goes a whole row, and the left and right
+arrows go one tile. Those two arrows are `Leave` and `Enter` everywhere else, so they are fixed here
+rather than bindable, while `h`, `l` and `enter` keep going up and in. Binding sideways movement to
+`h`/`l` as well would have cost the vim-style way up a folder.
+
+*Scrolling.* `GridLayout::follow` moves the first row as little as it can, the same rule the disk
+usage view uses, and is clamped so the last screen never shows half a body of blanks.
+
+*The shared tile.* `tile_size` fixes a tile from its picture height (three columns per row, plus a
+frame and a name row) and one painter, `tile_view::render_tile`, draws it in both the grid and the
+strip. Thumbnails are now made with `Resize::Scale` so a small image fills its tile; the cost is
+that a tiny icon is enlarged and soft, which is what a graphical file manager does too.
+
+*Size.* 17,240 bytes more than the committed filmstrip (13,596,648 to 13,613,888, +0.13%).
+
+**Found while testing.** A property test failed on a 0×0 tile because two empty rectangles compare
+unequal when one sits at the origin and the other does not; that was a wrong assertion, not a
+drawing fault, and it now says "empty, or inside". The double-click check also failed once, for
+a plain reason: it read row 1 of the screen for the header, which is row 0. And `themed_block` always
+wrapped its title in blanks, so an unnamed tile frame showed `╭  ───`; the title is now added only
+when there is one.
+
+**Verification.** `scripts/check` passes. Property tests cover the grid geometry, scrolling,
+cursor movement and click mapping, the tile's parts, and the details plan and header. The real
+binary was driven in a PTY through `pyte` with the terminal probe answered in full: the grid
+(tiles across and down, a filled picture, both arrow directions, `j`/`k`, scrolling, the wheel, a
+click, a double-click into a folder and `h` back, an empty folder), details (title row, date, mode,
+size, full width, `j`, a click), the filmstrip's framed tiles, and back to the columns. Not tried: a
+real kitty, photographs rather than test images, or a remote folder.
 
 ---
 

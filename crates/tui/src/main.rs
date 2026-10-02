@@ -34,6 +34,7 @@ mod filmstrip_view;
 mod git_status;
 mod glyphs;
 mod gradient;
+mod grid_view;
 mod hud;
 mod image_preview;
 mod inspect;
@@ -55,6 +56,7 @@ mod system_hud;
 mod terminal_init;
 mod text_preview;
 mod thumbnails;
+mod tile_view;
 mod view_mode;
 
 use std::collections::BTreeMap;
@@ -73,7 +75,7 @@ use appearance_popup::{
 };
 use boot_splash::BootSplash;
 use browser::BrowserState;
-use browser_mouse::{BrowserLayout, Click, ClickTracker, Hit, Listing, Pane, Select, Wheel};
+use browser_mouse::{Click, ClickTracker, Hit, Listing, Pane, Select, Wheel};
 use compress_popup::CompressPopup;
 use context_menu::{
     Context as MenuContext, ContextMenu, MenuCommand, Nav, Outcome as MenuOutcome,
@@ -113,7 +115,9 @@ use theming::{
 use thumbnails::Thumbnails;
 use vfs_archive::ArchiveVfs;
 use vfs_ssh::RoutedVfs;
-use view_mode::{FilmstripLayout, ViewMode};
+use view_mode::{
+    FilmstripLayout, GridLayout, Step, ViewMode, body_of, browser_layout, details_title_row,
+};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -360,6 +364,8 @@ struct Overlay<'a> {
     mode: hud::Mode,
     /// Which view the browser is in (`V`): the name list or the filmstrip.
     view_mode: ViewMode,
+    /// The grid's first visible row of tiles.
+    grid_top: usize,
     shell: Option<ShellView<'a>>,
     current_list: &'a mut ListState,
     /// The boot splash, drawn dead last so nothing else can show through it.
@@ -1143,6 +1149,9 @@ fn run(
     // How the browsed folder is shown, switched by `V`. Not saved: every session starts on the
     // name list.
     let mut view_mode = ViewMode::default();
+    // The first row of tiles the grid draws, kept between frames so it scrolls only when the
+    // cursor leaves the screen (see `GridLayout::follow`).
+    let mut grid_top = 0usize;
     // The tmux-style split-pane shell tree (see `shell_layout`) — `Some` for the whole time any
     // shell pane is open. Never suspends raw mode/the alternate screen: it's just tiled into the
     // frame's own area (below the status bar) as part of the normal draw.
@@ -1302,8 +1311,12 @@ fn run(
             && last_edge_scroll.elapsed() >= EDGE_SCROLL_EVERY
         {
             let panels = effective_panels(config, &local_panels);
-            let layout =
-                BrowserLayout::split(terminal.size()?.into(), panels.columns, panels.show_hud);
+            let layout = browser_layout(
+                terminal.size()?.into(),
+                panels.columns,
+                panels.show_hud,
+                view_mode,
+            );
             if let Some(row) = browser_drag::edge_scroll(
                 active.pointer,
                 layout.current,
@@ -1347,6 +1360,20 @@ fn run(
         if let Some(popup) = appearance.as_mut() {
             popup.sync_saved(&local_custom_themes);
         }
+        if view_mode == ViewMode::Grid {
+            let panels = effective_panels(config, &local_panels);
+            let layout = browser_layout(
+                terminal.size()?.into(),
+                panels.columns,
+                panels.show_hud,
+                view_mode,
+            );
+            grid_top = GridLayout::split(body_of(&layout)).follow(
+                grid_top,
+                browser.selected_index(),
+                browser.current_entries().len(),
+            );
+        }
         terminal.draw(|frame| {
             draw(
                 frame,
@@ -1358,6 +1385,7 @@ fn run(
                 Overlay {
                     mode,
                     view_mode,
+                    grid_top,
                     shell: shells.as_ref().map(|panes| ShellView {
                         panes,
                         offset: shell_offset,
@@ -1457,6 +1485,7 @@ fn run(
                                     frame_area,
                                     panels.columns,
                                     panels.show_hud,
+                                    view_mode,
                                     browser,
                                     current_list.offset(),
                                     shell_box,
@@ -1728,10 +1757,9 @@ fn run(
                     && app.prompt.is_none()
                 {
                     let panels = effective_panels(config, &local_panels);
-                    let layout = BrowserLayout::split(frame_area, panels.columns, panels.show_hud);
-                    let film = FilmstripLayout::split(
-                        layout.parent.union(layout.current).union(layout.preview),
-                    );
+                    let layout =
+                        browser_layout(frame_area, panels.columns, panels.show_hud, view_mode);
+                    let film = FilmstripLayout::split(body_of(&layout));
                     let len = browser.current_entries().len();
                     let window =
                         FilmstripLayout::window(browser.selected_index(), len, film.cells.len());
@@ -1769,13 +1797,14 @@ fn run(
                     }
                 }
                 if config.browser_mouse
-                    && view_mode == ViewMode::List
+                    && view_mode != ViewMode::Filmstrip
                     && !over_shell
                     && !dragging
                     && app.prompt.is_none()
                 {
                     let panels = effective_panels(config, &local_panels);
-                    let layout = BrowserLayout::split(frame_area, panels.columns, panels.show_hud);
+                    let layout =
+                        browser_layout(frame_area, panels.columns, panels.show_hud, view_mode);
                     // A click on the header's path jumps to that segment's directory. Only worked
                     // out for the buttons that act on it, since it lays the header out again.
                     let crumb_dir = if panels.show_hud
@@ -1791,15 +1820,28 @@ fn run(
                     } else {
                         None
                     };
-                    let hit = browser_mouse::hit_test(
-                        &layout,
-                        Position::new(mouse.column, mouse.row),
-                        Listing::unscrolled(browser.parent_entries().len()),
-                        Listing {
-                            len: browser.current_entries().len(),
-                            offset: current_list.offset(),
-                        },
-                    );
+                    let pointer = Position::new(mouse.column, mouse.row);
+                    // A tile of the grid answers like a row of the list: everything below that
+                    // selects, marks, opens or right-clicks a row works on it unchanged.
+                    let hit = if view_mode == ViewMode::Grid {
+                        let body = body_of(&layout);
+                        let grid = GridLayout::split(body);
+                        match grid.entry_at(grid_top, browser.current_entries().len(), pointer) {
+                            Some(index) => Hit::CurrentRow(index),
+                            None if body.contains(pointer) => Hit::Blank(Pane::Current),
+                            None => Hit::Elsewhere,
+                        }
+                    } else {
+                        browser_mouse::hit_test(
+                            &layout,
+                            pointer,
+                            Listing::unscrolled(browser.parent_entries().len()),
+                            Listing {
+                                len: browser.current_entries().len(),
+                                offset: current_list.offset(),
+                            },
+                        )
+                    };
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
                             if crumb_dir.is_some() =>
@@ -1869,8 +1911,11 @@ fn run(
                                 // A plain single click on a row of the middle column may turn
                                 // into a drag; a double-click has already opened it, and a
                                 // marking click returned above.
+                                // The grid has no drop targets to aim at (its tiles are not rows
+                                // `drop_target` knows), so a press there never becomes a drag.
                                 if !middle
                                     && click == Click::Single
+                                    && view_mode != ViewMode::Grid
                                     && let Hit::CurrentRow(row) = hit
                                 {
                                     drag.press(row, Position::new(mouse.column, mouse.row));
@@ -1958,11 +2003,25 @@ fn run(
                         kind if matches!(hit.pane(), Some(Pane::Parent | Pane::Current)) => {
                             if let Some(wheel) = Wheel::of(kind) {
                                 let len = browser.current_entries().len();
-                                browser.select_index(browser_mouse::wheel_target(
-                                    browser.selected_index(),
-                                    len,
-                                    wheel,
-                                ));
+                                if view_mode == ViewMode::Grid {
+                                    // A notch moves a row of tiles, not three entries.
+                                    let grid = GridLayout::split(body_of(&layout));
+                                    let step = match wheel {
+                                        Wheel::Up => Step::Up,
+                                        Wheel::Down => Step::Down,
+                                    };
+                                    browser.select_index(grid.step(
+                                        browser.selected_index(),
+                                        len,
+                                        step,
+                                    ));
+                                } else {
+                                    browser.select_index(browser_mouse::wheel_target(
+                                        browser.selected_index(),
+                                        len,
+                                        wheel,
+                                    ));
+                                }
                                 continue;
                             }
                         }
@@ -2562,6 +2621,37 @@ fn run(
                     continue;
                 }
 
+                // In the grid the cursor moves in two dimensions: the arrows go one tile sideways
+                // (they are `Leave`/`Enter` elsewhere; `h`, `l` and `enter` still go up and in),
+                // and whatever is bound to move down or up goes a whole row.
+                if view_mode == ViewMode::Grid {
+                    let step = match key.code {
+                        KeyCode::Left => Some(Step::Left),
+                        KeyCode::Right => Some(Step::Right),
+                        code => match config.keys.resolve(code) {
+                            Some(Action::MoveDown) => Some(Step::Down),
+                            Some(Action::MoveUp) => Some(Step::Up),
+                            _ => None,
+                        },
+                    };
+                    if let Some(step) = step {
+                        let panels = effective_panels(config, &local_panels);
+                        let layout = browser_layout(
+                            terminal.size()?.into(),
+                            panels.columns,
+                            panels.show_hud,
+                            view_mode,
+                        );
+                        let grid = GridLayout::split(body_of(&layout));
+                        browser.select_index(grid.step(
+                            browser.selected_index(),
+                            browser.current_entries().len(),
+                            step,
+                        ));
+                        continue;
+                    }
+                }
+
                 match config.keys.resolve(key.code) {
                     Some(Action::Quit) => return Ok(()),
                     // Without `--cwd-file` (a bare `minuteman` run) there's nobody to hand the
@@ -2623,11 +2713,12 @@ fn run(
                     Some(Action::PreviewUp) => previews.text.scroll_half_pages(-1),
                     Some(Action::CycleView) => {
                         view_mode = view_mode.cycled();
-                        if view_mode == ViewMode::List {
-                            // The pictures belong to the strip; a folder of photos should not
-                            // stay in memory behind a list.
+                        if !matches!(view_mode, ViewMode::Grid | ViewMode::Filmstrip) {
+                            // The pictures belong to the grid and the strip; a folder of photos
+                            // should not stay in memory behind a list.
                             previews.thumbs.clear();
                         }
+                        grid_top = 0;
                         app.status = Some(format!("view: {}", view_mode.label()));
                     }
                     Some(Action::ToggleHidden) => {
@@ -2843,6 +2934,7 @@ fn drop_target(
     frame_area: Rect,
     columns: theming::ColumnLayout,
     show_hud: bool,
+    view_mode: ViewMode,
     browser: &BrowserState,
     list_offset: usize,
     shell_box: Option<Rect>,
@@ -2850,7 +2942,7 @@ fn drop_target(
     sources: &[PathBuf],
 ) -> browser_drag::Target {
     let hit = browser_mouse::hit_test(
-        &BrowserLayout::split(frame_area, columns, show_hud),
+        &browser_layout(frame_area, columns, show_hud, view_mode),
         pointer,
         Listing::unscrolled(browser.parent_entries().len()),
         Listing {
@@ -2914,6 +3006,7 @@ fn draw(
     let Overlay {
         mode,
         view_mode,
+        grid_top,
         shell,
         current_list: current_state,
         boot_splash,
@@ -2976,19 +3069,25 @@ fn draw(
 
     // Header, the three file columns, then the status bar. The mouse handler hit-tests against
     // this same split (see `browser_mouse`), so the two can't disagree about where a row is.
-    let layout = BrowserLayout::split(frame.area(), config.panels.columns, config.panels.show_hud);
+    let layout = browser_layout(
+        frame.area(),
+        config.panels.columns,
+        config.panels.show_hud,
+        view_mode,
+    );
     let (header_row, status_row) = (layout.header, layout.status);
-    // The filmstrip replaces the three columns with one big preview over a strip of thumbnails;
-    // the two list columns then get the zero-width `Rect` the two-pane layout already uses for a
-    // removed column, so they are skipped rather than drawn empty.
-    let filmstrip = (view_mode == ViewMode::Filmstrip)
-        .then(|| FilmstripLayout::split(layout.parent.union(layout.current).union(layout.preview)));
-    let columns = match &filmstrip {
-        Some(film) => {
-            let removed = Rect::new(film.big.x, film.big.y, 0, film.big.height);
-            [removed, removed, film.big]
-        }
-        None => [layout.parent, layout.current, layout.preview],
+    // The filmstrip replaces the three columns with one big preview over a strip of thumbnails,
+    // and the grid with tiles over the whole body; the list columns then get the zero-width
+    // `Rect` the two-pane layout already uses for a removed column, so they are skipped rather
+    // than drawn empty. The details view's layout (see `browser_layout`) already has them so.
+    let body = body_of(&layout);
+    let filmstrip = (view_mode == ViewMode::Filmstrip).then(|| FilmstripLayout::split(body));
+    let grid = (view_mode == ViewMode::Grid).then(|| GridLayout::split(body));
+    let removed = Rect::new(body.x, body.y, 0, body.height);
+    let columns = match (&filmstrip, &grid) {
+        (Some(film), _) => [removed, removed, film.big],
+        (_, Some(_)) => [removed; 3],
+        _ => [layout.parent, layout.current, layout.preview],
     };
 
     // Read once: the status bar wants the selected directory's item count, and the preview pane
@@ -3008,6 +3107,7 @@ fn draw(
             frame.area(),
             config.panels.columns,
             config.panels.show_hud,
+            view_mode,
             browser,
             current_state.offset(),
             shell_box,
@@ -3055,10 +3155,24 @@ fn draw(
     let now = SystemTime::now();
     let glyphs = glyphs::of(config);
     if columns[1].width > 0 {
-        let plan = hud::plan_columns(
-            columns[1].width.saturating_sub(2) as usize,
-            hud::BASE_GUTTER + glyphs.icon_width(),
-        );
+        let gutter = hud::BASE_GUTTER + glyphs.icon_width();
+        let inner_width = columns[1].width.saturating_sub(2) as usize;
+        let plan = if view_mode == ViewMode::Details {
+            hud::plan_details_columns(inner_width, gutter)
+        } else {
+            hud::plan_columns(inner_width, gutter)
+        };
+        if view_mode == ViewMode::Details {
+            let row = details_title_row(&layout);
+            let dim = style::styled(
+                Style::default().fg(color_from_name(&config.theme.status_fg)),
+                config.styles.columns,
+            );
+            frame.render_widget(
+                Paragraph::new(hud::details_header(&plan, gutter)).style(dim),
+                Rect::new(row.x + 1, row.y, row.width.saturating_sub(2), row.height),
+            );
+        }
         let current_items: Vec<ListItem> = browser
             .current_entries()
             .iter()
@@ -3117,50 +3231,68 @@ fn draw(
     let is_selected_file = browser.selected_entry().is_some_and(|e| !e.is_dir)
         && previews.text.status() != TextPreviewStatus::Empty;
 
-    if is_selected_image {
-        let block = style::themed_block(config, "preview", false);
-        let inner = block.inner(columns[2]);
-        frame.render_widget(block, columns[2]);
-        match previews.image.status() {
-            ImagePreviewStatus::Ready => {
-                // The filmstrip exists to look at the picture, so it is scaled up to fill the
-                // area; the narrow preview column only ever shrinks one to fit.
-                let widget = if filmstrip.is_some() {
-                    StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle)))
-                } else {
-                    StatefulImage::default()
-                };
-                frame.render_stateful_widget(widget, inner, previews.image.protocol_mut());
+    // The grid and the details view have no preview column (zero width); drawing into it
+    // would only waste a decode.
+    if columns[2].width > 0 {
+        if is_selected_image {
+            let block = style::themed_block(config, "preview", false);
+            let inner = block.inner(columns[2]);
+            frame.render_widget(block, columns[2]);
+            match previews.image.status() {
+                ImagePreviewStatus::Ready => {
+                    // The filmstrip exists to look at the picture, so it is scaled up to fill the
+                    // area; the narrow preview column only ever shrinks one to fit.
+                    let widget = if filmstrip.is_some() {
+                        StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle)))
+                    } else {
+                        StatefulImage::default()
+                    };
+                    frame.render_stateful_widget(widget, inner, previews.image.protocol_mut());
+                }
+                ImagePreviewStatus::Loading => {
+                    frame.render_widget(Paragraph::new("loading preview…"), inner);
+                }
+                ImagePreviewStatus::Failed => {
+                    frame.render_widget(Paragraph::new("preview failed"), inner);
+                }
+                ImagePreviewStatus::Empty => {}
             }
-            ImagePreviewStatus::Loading => {
-                frame.render_widget(Paragraph::new("loading preview…"), inner);
-            }
-            ImagePreviewStatus::Failed => {
-                frame.render_widget(Paragraph::new("preview failed"), inner);
-            }
-            ImagePreviewStatus::Empty => {}
+        } else if is_selected_file {
+            preview_view::render(frame, columns[2], &mut previews.text, config);
+        } else if let Some(children) = &dir_preview {
+            let items: Vec<ListItem> = children
+                .iter()
+                .map(|e| entry_item(e, config, Row::PLAIN, None))
+                .collect();
+            frame.render_widget(
+                List::new(items).block(style::themed_block(config, "preview", false)),
+                columns[2],
+            );
+        } else {
+            let label = browser
+                .selected_entry()
+                .map(|e| e.name.clone())
+                .unwrap_or_default();
+            let style = Style::default().fg(color_from_name(&config.theme.file_fg));
+            frame.render_widget(
+                List::new(vec![ListItem::new(Span::styled(label, style))])
+                    .block(style::themed_block(config, "preview", false)),
+                columns[2],
+            );
         }
-    } else if is_selected_file {
-        preview_view::render(frame, columns[2], &mut previews.text, config);
-    } else if let Some(children) = &dir_preview {
-        let items: Vec<ListItem> = children
-            .iter()
-            .map(|e| entry_item(e, config, Row::PLAIN, None))
-            .collect();
-        frame.render_widget(
-            List::new(items).block(style::themed_block(config, "preview", false)),
-            columns[2],
-        );
-    } else {
-        let label = browser
-            .selected_entry()
-            .map(|e| e.name.clone())
-            .unwrap_or_default();
-        let style = Style::default().fg(color_from_name(&config.theme.file_fg));
-        frame.render_widget(
-            List::new(vec![ListItem::new(Span::styled(label, style))])
-                .block(style::themed_block(config, "preview", false)),
-            columns[2],
+    }
+
+    if let Some(tiles) = &grid {
+        grid_view::render(
+            frame,
+            body,
+            tiles,
+            grid_top,
+            browser.current_entries(),
+            browser.selected_index(),
+            |path| browser.is_marked(path),
+            &mut previews.thumbs,
+            config,
         );
     }
 
@@ -3387,6 +3519,22 @@ fn entry_item(
                     None => g.none.to_string(),
                 };
                 spans.push(Span::styled(format!(" {age:>3}"), dim));
+            }
+            if plan.modified {
+                spans.push(Span::styled(
+                    format!(" {}", hud::modified_cell(entry.modified, g.none)),
+                    dim,
+                ));
+            }
+            if plan.mode {
+                let mode = match entry.mode {
+                    Some(mode) => hud::format_perms(mode),
+                    None => g.none.to_string(),
+                };
+                spans.push(Span::styled(
+                    format!(" {}", hud::pad_to(&mode, hud::MODE_WIDTH)),
+                    dim,
+                ));
             }
         }
         None => spans.push(Span::styled(label, name_style)),

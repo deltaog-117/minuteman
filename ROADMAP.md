@@ -1153,7 +1153,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ---
 
-- ✅ **Filmstrip view, switched with `V` (view modes, stage 1 of 2)** – `V` (new `[keys] cycle_view`,
+- ✅ **Filmstrip view, switched with `V` (view modes, stage 1)** – `V` (new `[keys] cycle_view`,
   `Action::CycleView`) cycles the browser between views; the first one added is the filmstrip: the
   selected entry's preview as large as the window allows, with a strip of thumbnails of its
   neighbours underneath (the cursor's slot highlighted, a mark shown as `*`, `n/N` in the strip's
@@ -1189,13 +1189,46 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ---
 
+- ✅ **Grid and details views, and a redone filmstrip strip (view modes, stage 2)** – `V` now cycles
+  four views: the columns, a **grid**, a **details** table and the filmstrip. The grid is framed
+  tiles over the whole window, each a thumbnail over the entry's name (a folder or a non-image shows
+  `dir` or its extension), like a graphical file manager's icon view: as many columns as fit, the
+  block centred, scrolling by rows only when the cursor leaves the screen. Up/down (whatever
+  `move_down`/`move_up` are bound to) move a whole row, the left/right arrows one tile (they are
+  `Leave`/`Enter` in the other views; `h`, `l` and `enter` still go up and in), the wheel a row, a
+  click selects, a double-click opens, and marks, right-click menus, `y`/`d`/`p` and the rest work
+  because a tile answers the mouse as a `Hit::CurrentRow`, so the list's existing handling runs
+  unchanged. Details is one flat, full-width table with a title row (Name, Size, Modified (UTC),
+  Mode) and no parent or preview column, dropping Mode, then Modified, then Size on a narrow
+  terminal so a name always keeps 12 cells. It reuses the list pane, so clicks, marks, drag and drop
+  and the context menu already work, through one new function, `view_mode::browser_layout`, that
+  drawing and every mouse path ask for the rectangles. The filmstrip's strip was reworked after it
+  looked messy (tiny pictures floating in a tall, mostly empty frame): it now holds the same
+  bordered tiles as the grid, sized from one shared `tile_size`, and thumbnails are scaled up to fill
+  their tile (`Resize::Scale`, bilinear) instead of staying at their native size. New modules
+  `tile_view` (one tile), `grid_view`, and an extended `view_mode`; `hud::Columns` gained `modified`
+  and `mode`, `themed_block` no longer adds two blanks to an unnamed frame, and `cycle_view` in
+  `config.toml` documents the keys per view. Chosen as COA A's grid and details with the filmstrip
+  kept (the choice made when it was presented), over a grid with a side preview (B) and four
+  separate view systems (C). Cost: the release binary grew by 17,240 bytes (13,596,648 to
+  13,613,888, +0.13%). Property-tested: grid tiles stay inside the body and never overlap for any
+  size, the cursor stays on screen after `follow`, cursor steps never leave the listing and a
+  down-then-up returns, a click resolves only inside a visible tile, a tile's picture and name stay
+  inside it and apart, and the details plan and header agree. A property test also caught that two
+  empty rectangles compare unequal, which was a mistake in the test, not the drawing. Verified
+  against the real binary in a PTY read through `pyte` with the terminal probe answered in full:
+  the grid drew five tiles across and four rows, a colored image filled its tile, `Right` moved
+  one, `j`/`k` a row, six `j` scrolled the first row off with the cursor's name still shown, the
+  wheel moved a row, a click selected a tile, a double-click entered a folder (an empty folder said
+  so) and `h` returned; details showed the title row, an exact date, `rw-r--r--`, the size and a
+  table spanning the full width, with `j` and a click selecting; the filmstrip's strip drew framed
+  tiles with colored pictures; and the fourth `V` returned to the columns. Not tried in a real
+  kitty or with photographs.
+
+---
+
 ## 🟡 Medium Priority (Important)
 
-- **View modes, stage 2 — the grid** – a third `V` view: thumbnails in rows and columns over the
-  whole body (the filmstrip's cache and `Thumbnails::request` already do the heavy part), with
-  `hjkl` moving in two dimensions, a size that follows the terminal, and mouse selection through a
-  grid version of `FilmstripLayout::entry_at`. Needs a 2-D window (rows scroll, not slots) and a
-  decision on what `h`/`l` mean, since in the list they leave and enter a folder.
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
   compression are not supported, the codecs being opt-in cargo features if wanted; extraction does not restore modified times (only writing a zip records them, as UTC, since
   the standard library has no time zone database); the compress form's "Save in" folder must
@@ -1240,6 +1273,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟢 Low Priority (Nice-to-Have)
 
+- **Grid and details, follow-ups** – details cannot be sorted or its columns resized (clicking a
+  column title could sort); the details time is UTC for want of a time zone database, as in Inspect;
+  the grid's tile size follows the window height and is not configurable; the arrows and `h`/`l`
+  mean different things in the grid than elsewhere and are fixed rather than bindable; a tile has
+  no icon for a folder or a non-image beyond its text, even with the Nerd glyph set; drag and drop
+  does nothing from the grid (its tiles are not rows `drop_target` knows); the grid has no
+  scrollbar; there is no key for a page of rows; and a file an `Image`-kind `[[preview_hook]]`
+  covers gets a placeholder in a tile, not its thumbnail.
 - **Filmstrip, follow-ups** – a thumbnail's file is decoded in full, so a folder of large photos
   costs a decode each and a decode already started for an entry that has since left the window is
   not cancelled (a scaled JPEG decode and a cancel flag would fix both); a file an `Image`-kind
@@ -1354,7 +1395,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the newest: press `V` in a folder of images for the filmstrip: the selected
+1. `cargo run -p tui` — the newest: press `V` in a folder of images and keep pressing it: first a
+   grid of tiles (arrows, `j`/`k` to move, a click to select, a double-click to open, the wheel to
+   scroll), then a flat details table (name, size, modified time, permissions), then the filmstrip,
+   then back to the columns. Before that, the filmstrip on its own: the selected
    image fills the window with a strip of its neighbours underneath; `j`/`k` or a click on a
    thumbnail moves along it, the wheel over the strip moves three at a time, `V` goes back to the
    list. Before that — put the cursor on a `.zip`, `.tar` or `.tar.gz` and press `enter`
