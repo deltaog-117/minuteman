@@ -168,6 +168,12 @@ impl ImagePreview {
         self.detected_background
     }
 
+    /// The terminal's graphics capabilities, found once at startup, for the thumbnail cache to
+    /// encode with the same protocol the preview uses.
+    pub fn picker(&self) -> Picker {
+        self.picker.clone()
+    }
+
     pub fn protocol_mut(&mut self) -> &mut ThreadProtocol {
         &mut self.protocol
     }

@@ -30,6 +30,7 @@ mod desktop_entry;
 mod disk_usage;
 mod disk_usage_view;
 mod extract_popup;
+mod filmstrip_view;
 mod git_status;
 mod glyphs;
 mod gradient;
@@ -53,6 +54,8 @@ mod style;
 mod system_hud;
 mod terminal_init;
 mod text_preview;
+mod thumbnails;
+mod view_mode;
 
 use std::collections::BTreeMap;
 use std::io::{self, Stdout};
@@ -98,7 +101,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
-use ratatui_image::StatefulImage;
+use ratatui_image::{FilterType, Resize, StatefulImage};
 use settings_popup::{Outcome as SettingsOutcome, Row as SettingsRow, SettingsPopup, SettingsView};
 use shared::{DirEntryInfo, LocalVfs, Vfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
@@ -107,8 +110,10 @@ use theming::{
     Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, PreviewHook, RawFont,
     RawLocal, RawPanels, RawStyles, RawTheme, RawUi, Styles, Theme, Ui,
 };
+use thumbnails::Thumbnails;
 use vfs_archive::ArchiveVfs;
 use vfs_ssh::RoutedVfs;
+use view_mode::{FilmstripLayout, ViewMode};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -353,6 +358,8 @@ fn snap_box_offset(
 /// state, which `draw` updates and the mouse handler reads back to find the row under a click.
 struct Overlay<'a> {
     mode: hud::Mode,
+    /// Which view the browser is in (`V`): the name list or the filmstrip.
+    view_mode: ViewMode,
     shell: Option<ShellView<'a>>,
     current_list: &'a mut ListState,
     /// The boot splash, drawn dead last so nothing else can show through it.
@@ -635,13 +642,18 @@ fn apply_alt_command(
 struct Previews {
     image: ImagePreview,
     text: TextPreview,
+    /// The filmstrip's strip of neighbour thumbnails; filled only while that view is showing.
+    thumbs: Thumbnails,
 }
 
 impl Previews {
     fn new(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>) -> Self {
+        let image = ImagePreview::new(handle.clone()).with_vfs(Arc::clone(&vfs));
+        let thumbs = Thumbnails::new(image.picker(), handle.clone(), Arc::clone(&vfs));
         Self {
-            image: ImagePreview::new(handle.clone()).with_vfs(Arc::clone(&vfs)),
+            image,
             text: TextPreview::new(handle).with_vfs(vfs),
+            thumbs,
         }
     }
 
@@ -1128,6 +1140,9 @@ fn run(
     let mut boot_splash = config
         .boot_splash
         .then(|| BootSplash::start(Instant::now()));
+    // How the browsed folder is shown, switched by `V`. Not saved: every session starts on the
+    // name list.
+    let mut view_mode = ViewMode::default();
     // The tmux-style split-pane shell tree (see `shell_layout`) — `Some` for the whole time any
     // shell pane is open. Never suspends raw mode/the alternate screen: it's just tiled into the
     // frame's own area (below the status bar) as part of the normal draw.
@@ -1342,6 +1357,7 @@ fn run(
                 config,
                 Overlay {
                     mode,
+                    view_mode,
                     shell: shells.as_ref().map(|panes| ShellView {
                         panes,
                         offset: shell_offset,
@@ -1705,7 +1721,59 @@ fn run(
                     || dragging_shell.is_some()
                     || dragging_shell_width.is_some()
                     || alt_resizing.is_some();
-                if config.browser_mouse && !over_shell && !dragging && app.prompt.is_none() {
+                if config.browser_mouse
+                    && view_mode == ViewMode::Filmstrip
+                    && !over_shell
+                    && !dragging
+                    && app.prompt.is_none()
+                {
+                    let panels = effective_panels(config, &local_panels);
+                    let layout = BrowserLayout::split(frame_area, panels.columns, panels.show_hud);
+                    let film = FilmstripLayout::split(
+                        layout.parent.union(layout.current).union(layout.preview),
+                    );
+                    let len = browser.current_entries().len();
+                    let window =
+                        FilmstripLayout::window(browser.selected_index(), len, film.cells.len());
+                    let pos = Position::new(mouse.column, mouse.row);
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some(index) = film.entry_at(&window, pos) {
+                                shell_focused = false;
+                                pending_leader = false;
+                                shell_chord = None;
+                                pending_bookmark = None;
+                                browser.select_index(index);
+                                continue;
+                            }
+                        }
+                        // Over the strip the wheel moves along it; over the big preview it
+                        // scrolls what that shows, as the preview column does in the list view.
+                        kind if film.strip.contains(pos) => {
+                            if let Some(wheel) = Wheel::of(kind) {
+                                browser.select_index(browser_mouse::wheel_target(
+                                    browser.selected_index(),
+                                    len,
+                                    wheel,
+                                ));
+                                continue;
+                            }
+                        }
+                        kind if film.big.contains(pos) => {
+                            if let Some(wheel) = Wheel::of(kind) {
+                                previews.text.scroll_rows(browser_mouse::wheel_rows(wheel));
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if config.browser_mouse
+                    && view_mode == ViewMode::List
+                    && !over_shell
+                    && !dragging
+                    && app.prompt.is_none()
+                {
                     let panels = effective_panels(config, &local_panels);
                     let layout = BrowserLayout::split(frame_area, panels.columns, panels.show_hud);
                     // A click on the header's path jumps to that segment's directory. Only worked
@@ -2553,6 +2621,15 @@ fn run(
                     }
                     Some(Action::PreviewDown) => previews.text.scroll_half_pages(1),
                     Some(Action::PreviewUp) => previews.text.scroll_half_pages(-1),
+                    Some(Action::CycleView) => {
+                        view_mode = view_mode.cycled();
+                        if view_mode == ViewMode::List {
+                            // The pictures belong to the strip; a folder of photos should not
+                            // stay in memory behind a list.
+                            previews.thumbs.clear();
+                        }
+                        app.status = Some(format!("view: {}", view_mode.label()));
+                    }
                     Some(Action::ToggleHidden) => {
                         let shown = browser.toggle_hidden(vfs)?;
                         app.status = Some(
@@ -2836,6 +2913,7 @@ fn draw(
 ) {
     let Overlay {
         mode,
+        view_mode,
         shell,
         current_list: current_state,
         boot_splash,
@@ -2900,7 +2978,18 @@ fn draw(
     // this same split (see `browser_mouse`), so the two can't disagree about where a row is.
     let layout = BrowserLayout::split(frame.area(), config.panels.columns, config.panels.show_hud);
     let (header_row, status_row) = (layout.header, layout.status);
-    let columns = [layout.parent, layout.current, layout.preview];
+    // The filmstrip replaces the three columns with one big preview over a strip of thumbnails;
+    // the two list columns then get the zero-width `Rect` the two-pane layout already uses for a
+    // removed column, so they are skipped rather than drawn empty.
+    let filmstrip = (view_mode == ViewMode::Filmstrip)
+        .then(|| FilmstripLayout::split(layout.parent.union(layout.current).union(layout.preview)));
+    let columns = match &filmstrip {
+        Some(film) => {
+            let removed = Rect::new(film.big.x, film.big.y, 0, film.big.height);
+            [removed, removed, film.big]
+        }
+        None => [layout.parent, layout.current, layout.preview],
+    };
 
     // Read once: the status bar wants the selected directory's item count, and the preview pane
     // wants its listing — one `list_dir`, not two, per frame.
@@ -2965,54 +3054,56 @@ fn draw(
     let has_selection = !browser.current_entries().is_empty();
     let now = SystemTime::now();
     let glyphs = glyphs::of(config);
-    let plan = hud::plan_columns(
-        columns[1].width.saturating_sub(2) as usize,
-        hud::BASE_GUTTER + glyphs.icon_width(),
-    );
-    let current_items: Vec<ListItem> = browser
-        .current_entries()
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let row = Row {
-                gutter: true,
-                selected: has_selection && i == browser.selected_index(),
-                marked: browser.is_marked(&e.path),
-                drop: drop_dir == Some(e.path.as_path()),
-            };
-            entry_item(e, config, row, Some((plan, now)))
-        })
-        .collect();
-    // `select(None)` also rewinds the scroll offset, so an emptied directory doesn't leave the
-    // next one drawn from a stale row.
-    current_state.select(has_selection.then(|| browser.selected_index()));
-    // The header carries the full path; the frame just names this directory.
-    let title = browser
-        .current_dir()
-        .file_name()
-        .map_or_else(|| "/".to_string(), |n| n.to_string_lossy().into_owned());
-    frame.render_stateful_widget(
-        List::new(current_items)
-            .block(style::themed_block(config, &title, true))
-            .highlight_style(selection_style),
-        columns[1],
-        current_state,
-    );
-    if config.gradient_borders {
-        gradient::paint(
-            frame.buffer_mut(),
+    if columns[1].width > 0 {
+        let plan = hud::plan_columns(
+            columns[1].width.saturating_sub(2) as usize,
+            hud::BASE_GUTTER + glyphs.icon_width(),
+        );
+        let current_items: Vec<ListItem> = browser
+            .current_entries()
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let row = Row {
+                    gutter: true,
+                    selected: has_selection && i == browser.selected_index(),
+                    marked: browser.is_marked(&e.path),
+                    drop: drop_dir == Some(e.path.as_path()),
+                };
+                entry_item(e, config, row, Some((plan, now)))
+            })
+            .collect();
+        // `select(None)` also rewinds the scroll offset, so an emptied directory doesn't leave the
+        // next one drawn from a stale row.
+        current_state.select(has_selection.then(|| browser.selected_index()));
+        // The header carries the full path; the frame just names this directory.
+        let title = browser
+            .current_dir()
+            .file_name()
+            .map_or_else(|| "/".to_string(), |n| n.to_string_lossy().into_owned());
+        frame.render_stateful_widget(
+            List::new(current_items)
+                .block(style::themed_block(config, &title, true))
+                .highlight_style(selection_style),
             columns[1],
-            style::color(&config.theme.accent_fg),
-            style::color(&config.theme.border_focused_fg),
+            current_state,
+        );
+        if config.gradient_borders {
+            gradient::paint(
+                frame.buffer_mut(),
+                columns[1],
+                style::color(&config.theme.accent_fg),
+                style::color(&config.theme.border_focused_fg),
+            );
+        }
+        hud::render_scrollbar(
+            frame,
+            columns[1],
+            browser.current_entries().len(),
+            browser.selected_index(),
+            config,
         );
     }
-    hud::render_scrollbar(
-        frame,
-        columns[1],
-        browser.current_entries().len(),
-        browser.selected_index(),
-        config,
-    );
 
     // Preview pane — an inline image for image files (or ones an `Image`-kind preview hook
     // thumbnailed), rendered text for code/text files (or ones a `Text`-kind hook extracted),
@@ -3032,11 +3123,14 @@ fn draw(
         frame.render_widget(block, columns[2]);
         match previews.image.status() {
             ImagePreviewStatus::Ready => {
-                frame.render_stateful_widget(
-                    StatefulImage::default(),
-                    inner,
-                    previews.image.protocol_mut(),
-                );
+                // The filmstrip exists to look at the picture, so it is scaled up to fill the
+                // area; the narrow preview column only ever shrinks one to fit.
+                let widget = if filmstrip.is_some() {
+                    StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle)))
+                } else {
+                    StatefulImage::default()
+                };
+                frame.render_stateful_widget(widget, inner, previews.image.protocol_mut());
             }
             ImagePreviewStatus::Loading => {
                 frame.render_widget(Paragraph::new("loading preview…"), inner);
@@ -3067,6 +3161,18 @@ fn draw(
             List::new(vec![ListItem::new(Span::styled(label, style))])
                 .block(style::themed_block(config, "preview", false)),
             columns[2],
+        );
+    }
+
+    if let Some(film) = &filmstrip {
+        filmstrip_view::render(
+            frame,
+            film,
+            browser.current_entries(),
+            browser.selected_index(),
+            |path| browser.is_marked(path),
+            &mut previews.thumbs,
+            config,
         );
     }
 

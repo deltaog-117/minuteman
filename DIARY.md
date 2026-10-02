@@ -71,6 +71,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-01 | Archives Through Vfs | Four write primitives on `Vfs` (`create_write`, `create_symlink`, `set_mode`, `replace`) and archives read and written through them, with a conformance suite for each | ✅ Confirmed |
 | 2026-10-01 | Remote Browsing | Drive the system `ssh -s sftp` through `openssh` and `openssh-sftp-client`, route by a path prefix in one `Vfs`, and stream copies between backends (COA C), over `ssh2` and libssh2 (A) or `russh` (B) | ✅ Confirmed |
 | 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
+| 2026-10-02 | Filmstrip View | A `V` view cycle with a thumbnail strip drawn from a pool-filled cache of finished protocols (COA B, filmstrip first, grid second), over a grid only (A) and a bigger preview only (C) | ✅ Confirmed |
 
 ---
 
@@ -5021,6 +5022,87 @@ a zip and a tar.gz, a preview, stepping out with the cursor on the archive, copy
 folder out to disk and checking the bytes, and every write, a shell and `:ls` refused with the
 archive unchanged. Not tried: a real kitty, an archive on a real remote machine, or an archive
 bigger than a few hundred bytes in the terminal.
+
+---
+
+### Filmstrip View: A `V` View Cycle and a Cache of Finished Thumbnails (COA B)
+
+**Date:** 2026-10-02
+**Status:** Confirmed
+
+#### Context / Background
+
+The browser had one way to show a folder, a list of names with one preview beside it. The request
+was a second view, switched by `V`, that shows images already enlarged while moving through them,
+and a question whether it would make the binary much larger.
+
+#### Options Considered
+
+**Option A: a grid of thumbnails only.** Nearest to what a gallery is, but it never shows a picture
+large, which was the point of the request.
+
+**Option B: a view cycle, with a filmstrip first and the grid after.** The filmstrip is the large
+picture with a strip of neighbours; the grid reuses its cache. More states to design than A or C.
+
+**Option C: a bigger preview only.** Smallest to build and nearly free, but it is a larger preview
+and not a different view of the folder.
+
+#### Decision
+
+Option B, in two stages. This one ships the cycle and the filmstrip; the grid is queued under
+Medium Priority.
+
+#### Consequences / Implementation Notes
+
+*The big picture is the existing preview.* The filmstrip does not draw its own big view. `draw`
+gives the preview pane the filmstrip's `big` rectangle and the two list columns the zero-width
+`Rect` the two-pane layout already uses for a removed column, so text, hex, archive listings and
+folders work there with no code of their own. The one difference is that an image is scaled up:
+`ratatui-image`'s default `Fit` only shrinks, which left a 60×40 picture at its native few cells in
+the same window.
+
+*Thumbnails are finished before the render loop sees them.* `ImagePreview` uses `ThreadProtocol`
+because it shows one picture whose area changes. A strip needs a dozen of one fixed size, so each
+is decoded and encoded for its cell size on the blocking pool with `Picker::new_protocol` and
+arrives as a `Protocol` that the stateless `Image` widget draws. That is simpler than a dozen
+`ThreadProtocol` channels and leaves nothing for the render thread to do. The cache is keyed by
+path alone because the size is the same for every slot, and it is emptied when the size changes;
+a result that arrives for another size is dropped.
+
+*Bounded.* 64 entries, oldest requested evicted first, and the whole cache cleared on leaving the
+view, so a folder of photos is not held in memory behind a list. Requests go nearest the cursor
+first and only for the window on screen.
+
+*Geometry is pure.* `FilmstripLayout` follows `browser_mouse`: the rectangles drawn and the ones a
+click is tested against come from one function. The strip always has an odd number of slots so the
+cursor can sit in the middle, and the window slides to the ends of the folder rather than leaving
+empty slots there.
+
+*Mouse.* The list view's mouse code is gated to the list view and the filmstrip has its own small
+branch (click a thumbnail, wheel over the strip or the big preview), rather than teaching the
+list's hit-testing about a layout it does not have. Right-click, drag and drop and range clicks do
+nothing in the filmstrip for now.
+
+*Size.* Built from the committed `HEAD` and from the working tree with the feature, the release
+binary went from 13,511,080 to 13,596,648 bytes, 85,568 more (+0.63%), all of it the crate's own
+code. The first comparison, against a binary built two weeks earlier, showed 3 MB and was wrong
+for this purpose: it included every commit since.
+
+**Found while testing.** The first PTY run showed no pictures at all, in the filmstrip and in the
+plain list, so it was the harness: the test shell inherited the real kitty's environment variables
+and the app chose the Kitty protocol, whose escapes the harness strips for `pyte`. A second run
+with those variables removed still showed nothing, because the startup probe's last query is a
+device-status request and the harness had answered only the first of its five queries; the app
+waited out the rest and never learned the cell size. Answering all of them (primary attributes,
+cell size, background color, status) made the pictures appear. Worth keeping next to the earlier
+notes on this probe.
+
+**Verification.** `scripts/check` passes. Property tests cover the layout for any terminal size,
+the window and the click mapping; unit tests cover the cache. The real binary was driven in a PTY
+through `pyte`, reading per-cell colors: the enlarged image, four colored thumbnails, the
+highlighted name, `j j`, a click on a thumbnail, the wheel, a text file with its placeholder, `V`
+back to the list, and a 60×9 terminal. Not tried: a real kitty, photographs rather than 60×40
+test images, or a remote folder.
 
 ---
 

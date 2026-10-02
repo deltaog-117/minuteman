@@ -1153,8 +1153,49 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ---
 
+- ✅ **Filmstrip view, switched with `V` (view modes, stage 1 of 2)** – `V` (new `[keys] cycle_view`,
+  `Action::CycleView`) cycles the browser between views; the first one added is the filmstrip: the
+  selected entry's preview as large as the window allows, with a strip of thumbnails of its
+  neighbours underneath (the cursor's slot highlighted, a mark shown as `*`, `n/N` in the strip's
+  frame). `V` again returns to the name list. The big area is the ordinary preview pane, so an image
+  is scaled *up* to fill it (`Resize::Scale`, bilinear; the narrow preview column still only
+  shrinks), and a text file, archive listing, hex dump or folder shows exactly as it does there. In
+  the strip, `j`/`k` and up/down move the cursor, a click on a thumbnail selects it, the wheel
+  over the strip moves three entries and over the big preview scrolls it. New `tui::view_mode` holds
+  `ViewMode` (`cycled`, `label`) and `FilmstripLayout` as pure geometry in the `browser_mouse`
+  pattern (the rectangles `draw` paints and the ones a click is tested against are one function):
+  the strip's height, how many thumbnails fit (always an odd count, so the cursor stays central),
+  the `window` of entries shown (sliding to the ends of the folder instead of leaving empty slots)
+  and `entry_at` for a click. New `tui::thumbnails` is the cache: a bounded (64) map filled on the
+  blocking pool, each picture decoded *and encoded for its final cell size* there
+  (`Picker::new_protocol`) so the render loop only draws a finished `Protocol` with the stateless
+  `Image` widget; the cache is emptied when the slot size changes and when leaving the view.
+  New `tui::filmstrip_view` draws the strip, with a `dir`/extension placeholder for anything that
+  is not an image. Chosen as COA B (a view cycle, filmstrip first and grid second) over a grid only
+  (A) and a bigger preview only (C). Cost: the release binary grew by 85,568 bytes (13,511,080 to
+  13,596,648, +0.63%), all of it this crate's own code, as the decoders and `ratatui-image` were
+  already linked. Property-tested: the layout stays inside the body and its cells never overlap for
+  any terminal size, the window always holds the cursor and never runs past the folder, and a click
+  never resolves to an entry outside the window; unit tests cover the cache (a ready thumbnail, a
+  broken image reporting `Failed`, a slot-size change, the capacity bound with oldest-first
+  eviction). Verified against the real binary in a PTY read through `pyte` with the terminal probe
+  answered in full (cell size included), reading per-cell colors: a 60×40 image filled over half of
+  the big area (the same image shows at its native size in the list view), four differently
+  colored images each showed in their own thumbnail, the selected name was highlighted, `j j` moved
+  the cursor and the big preview changed color with it, a click on a thumbnail selected exactly that
+  entry, the wheel over the strip moved 2/9 to 5/9, a text file showed its content above a `TXT`
+  placeholder, `V` returned to the list, and a 60×9 terminal dropped the strip and kept running.
+  Not tried in a real kitty or with photographs.
+
+---
+
 ## 🟡 Medium Priority (Important)
 
+- **View modes, stage 2 — the grid** – a third `V` view: thumbnails in rows and columns over the
+  whole body (the filmstrip's cache and `Thumbnails::request` already do the heavy part), with
+  `hjkl` moving in two dimensions, a size that follows the terminal, and mouse selection through a
+  grid version of `FilmstripLayout::entry_at`. Needs a 2-D window (rows scroll, not slots) and a
+  decision on what `h`/`l` mean, since in the list they leave and enter a folder.
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
   compression are not supported, the codecs being opt-in cargo features if wanted; extraction does not restore modified times (only writing a zip records them, as UTC, since
   the standard library has no time zone database); the compress form's "Save in" folder must
@@ -1199,6 +1240,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟢 Low Priority (Nice-to-Have)
 
+- **Filmstrip, follow-ups** – a thumbnail's file is decoded in full, so a folder of large photos
+  costs a decode each and a decode already started for an entry that has since left the window is
+  not cancelled (a scaled JPEG decode and a cancel flag would fix both); a file an `Image`-kind
+  `[[preview_hook]]` covers (a PDF) has a big preview but a placeholder in the strip; the chosen view
+  is not remembered between sessions; right-click, drag and drop and the `Ctrl`/range clicks do
+  nothing in this view (only the keyboard marks and acts); `h`/`l` still leave and enter folders,
+  so there is no key for scrolling the strip sideways by a page; on a remote machine every
+  thumbnail is fetched whole over the connection; and the strip's picture is drawn with the
+  terminal's own graphics protocol, which was not tried in a real kitty.
 - **Mouse, stage 2 follow-ups** – `Ctrl`/range clicks in the left column act as plain clicks; the
   keyboard's `v` does not set the range anchor; a range click past the edge of the view does not
   scroll it; there is no rubber-band selection by dragging; the `…` in the breadcrumb could jump
@@ -1304,7 +1354,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the newest: put the cursor on a `.zip`, `.tar` or `.tar.gz` and press `enter`
+1. `cargo run -p tui` — the newest: press `V` in a folder of images for the filmstrip: the selected
+   image fills the window with a strip of its neighbours underneath; `j`/`k` or a click on a
+   thumbnail moves along it, the wheel over the strip moves three at a time, `V` goes back to the
+   list. Before that — put the cursor on a `.zip`, `.tar` or `.tar.gz` and press `enter`
    (`l`, a double-click or right-click Open work too): it opens as a folder, header `…› a.zip!`.
    Browse it, `J`/`K` through a file's preview, `v` mark files and `y`, then `h` out and `p` into a
    real folder to copy them out; `h` from the archive's root lands on the archive's own row. Try

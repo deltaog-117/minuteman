@@ -54,6 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `theming`, `tui`: `V` (new `[keys] cycle_view`) switches the browser's view, and the first extra
+  view is the filmstrip: the selected file's preview scaled up as large as the window allows, with
+  a strip of thumbnails of its neighbours underneath. `j`/`k` and up/down move along the strip,
+  a click on a thumbnail selects it, the wheel over the strip moves three entries and over the big
+  preview scrolls it; `V` returns to the name list. Thumbnails are decoded and encoded for their
+  cell size on the blocking pool into a bounded cache, so the interface never waits on a picture;
+  folders and non-images show their type instead. New modules `view_mode`, `thumbnails` and
+  `filmstrip_view`; no new dependency, and the release binary grew by about 84 KB.
 - `vfs_archive`, `shared`, `browser`, `tui`: archives can be browsed as folders. `enter` on a
   `.zip`, `.jar`, `.tar`, `.tar.gz` or `.tgz` (also `l`, a double-click, or "Open" in the
   right-click menu) opens it; its root is the archive's path plus `!` (`/x/a.zip!`) and `h` steps

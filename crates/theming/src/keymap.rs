@@ -75,6 +75,9 @@ pub enum Action {
     PreviewDown,
     /// Scrolls the preview pane up by half a screen.
     PreviewUp,
+    /// Switches to the next browser view: the name list, then the filmstrip (the selected file
+    /// enlarged with a strip of its neighbours below), and round again.
+    CycleView,
     /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
     /// later bulk action (e.g. `Delete`) instead of acting on it immediately.
     Select,
@@ -124,6 +127,7 @@ pub struct RawKeyMap {
     pub hidden: Vec<String>,
     pub preview_down: Vec<String>,
     pub preview_up: Vec<String>,
+    pub cycle_view: Vec<String>,
     pub disk_usage: Vec<String>,
     pub appearance: Vec<String>,
     pub bookmark_jump: Vec<String>,
@@ -159,6 +163,7 @@ impl Default for RawKeyMap {
             hidden: vec![".".into()],
             preview_down: vec!["J".into()],
             preview_up: vec!["K".into()],
+            cycle_view: vec!["V".into()],
             disk_usage: vec!["u".into()],
             appearance: vec!["a".into()],
             // `B` ("Bookmark") stands in for Ranger's own `m`, which `cut` used to hold.
@@ -228,6 +233,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.hidden, Action::ToggleHidden);
         bind_all(&raw.preview_down, Action::PreviewDown);
         bind_all(&raw.preview_up, Action::PreviewUp);
+        bind_all(&raw.cycle_view, Action::CycleView);
         bind_all(&raw.disk_usage, Action::DiskUsage);
         bind_all(&raw.appearance, Action::Appearance);
         bind_all(&raw.bookmark_jump, Action::BookmarkJump);
@@ -311,6 +317,9 @@ mod tests {
             Some(Action::PreviewDown)
         );
         assert_eq!(keymap.resolve(KeyCode::Char('K')), Some(Action::PreviewUp));
+        assert_eq!(keymap.resolve(KeyCode::Char('V')), Some(Action::CycleView));
+        // `v` marks and `V` switches view: the two must stay distinct, like `q` and `Q`.
+        assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));
         assert_eq!(keymap.resolve(KeyCode::Char('u')), Some(Action::DiskUsage));
         assert_eq!(keymap.resolve(KeyCode::Char('a')), Some(Action::Appearance));
         assert_eq!(
