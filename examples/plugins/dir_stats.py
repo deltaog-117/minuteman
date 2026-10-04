@@ -27,6 +27,10 @@ Wire it up in config.toml:
     commands = ["stats"]
     events = ["dir_changed", "job_finished"]
 
+It also registers `:state` while it runs (a `register_command` request at `init`), which needs no
+line in the config: `:state` then does what `:plugin dir-stats state` does. The host keeps a
+registered word even after the plugin exits, so `:state` starts it again if it has gone.
+
 Then `i` (or `I`, or `:stats`) shows how many files and folders the browsed directory holds and
 how many bytes the files add up to, and `:plugin dir-stats touch notes.txt` creates a file there,
 which shows a plugin doing real work through the host and not just reading.
@@ -95,7 +99,7 @@ def on_command(params):
     args = params.get("args", [])
     if command == "stats":
         log("info", stats(params))
-    elif command == "plugin" and args == ["state"]:
+    elif command == "state" or (command == "plugin" and args == ["state"]):
         state = request("get_state", {})
         cursor = os.path.basename(state["cursor"]) if state["cursor"] else "none"
         log(
@@ -120,6 +124,11 @@ def handle(message):
     name = params["name"]
     if name == "init":
         log("info", "dir-stats ready")
+        try:
+            request("register_command", {"name": "state"})
+            log("info", "registered :state")
+        except RuntimeError as error:
+            log("warn", f"could not register :state: {error}")
     elif name == "key":
         log("info", f"[{params['key']}] {stats(params)}")
     elif name == "command":

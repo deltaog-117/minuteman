@@ -81,6 +81,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields are additive, so `API_VERSION` stays 1. `PluginManager::spawn` takes a `Triggers` value
   (keys and commands) instead of one optional key, and `PluginSpec.on_key` became `on_keys`.
   `:plugin` with an unknown name says so and lists the running plugins.
+- `plugins`, `tui`: a plugin can register a `:` command while it runs, with a `register_command`
+  request (`{"name": "blame"}`), and give it up with `unregister_command`, so `:blame` reaches it
+  without a `commands` line in config. A name is letters, digits, `-`, `_`, `.` or `+`; a built-in
+  command and a word another plugin owns are refused, with the reason in the reply. A registered
+  word stays after the process that registered it exits, so it still starts the plugin again;
+  `:plugins restart` forgets it until the new process registers again. Config words and registered
+  words share one registry (new `plugins::registry`), checked at once by the plugin's reader
+  without waiting on the render thread. Additive, so `API_VERSION` stays 1. New
+  `PluginManager::reserve_commands`; `tui::command::BUILTIN_WORDS` lists the reserved words and a
+  test keeps it in step with `parse`. `dir_stats.py` registers `:state`.
 - `plugins`, `tui`: a plugin whose process has ended is started again the next time something is
   meant for it (a key, a `:` command, `:plugin <name>`, or an event for a plugin with no keys or
   commands), where a key bound to a plugin that had exited used to do nothing, silently. Status 0

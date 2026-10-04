@@ -27,6 +27,12 @@
 //! `dir_changed`, `selection_changed` and `job_finished` it is sent, as `name: from -> to` or
 //! `job_finished: kind outcome`.
 //!
+//! `--register=WORD` (repeatable) asks the host at `init` for `:WORD`, and logs `register WORD: ok`
+//! or the host's refusal; `--unregister-on-key=WORD` gives it up again on a `key`, logging
+//! `unregister WORD: ok` or the refusal. A `command` event is logged as `command: WORD args...`.
+//! Because it takes the next line on stdin as a request's reply, a test must wait for these logs
+//! before sending it anything else.
+//!
 //! Three flags make it end on purpose, so the tests can play a one-shot plugin and a plugin in a
 //! crash loop: `--exit-on-init=N`, `--exit-after-key=N` and `--exit-after-event=N` exit with
 //! status N right at `init`, after finishing a `key`, or after logging a change or job event.
@@ -40,13 +46,30 @@ fn exit_code(flag: &str) -> Option<i32> {
         .and_then(|code| code.parse().ok())
 }
 
+/// Events that arrived while a request waited for its reply, handled once it has one.
+static PENDING: std::sync::Mutex<std::collections::VecDeque<String>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// The next line to handle: an event set aside by `send_request` first, then stdin.
+fn next_line(lines: &mut io::Lines<io::StdinLock<'_>>) -> Option<String> {
+    let held = PENDING.lock().ok()?.pop_front();
+    held.or_else(|| lines.next().and_then(Result::ok))
+}
+
+/// Every value given as `--<flag>=VALUE`.
+fn flag_values(flag: &str) -> Vec<String> {
+    std::env::args()
+        .filter_map(|arg| arg.strip_prefix(&format!("--{flag}=")).map(str::to_string))
+        .collect()
+}
+
 fn main() {
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     let mut stdout = io::stdout();
     let mut next_id: u64 = 1;
 
-    while let Some(Ok(line)) = lines.next() {
+    while let Some(line) = next_line(&mut lines) {
         if line.trim().is_empty() {
             continue;
         }
@@ -64,11 +87,53 @@ fn main() {
                     "info",
                     &format!("ready pid={}", std::process::id()),
                 );
+                for word in flag_values("register") {
+                    let result = send_request(
+                        &mut stdout,
+                        &mut lines,
+                        &mut next_id,
+                        "register_command",
+                        serde_json::json!({ "name": word }),
+                    );
+                    let outcome = result.map_or_else(|e| e, |_| "ok".to_string());
+                    send_log(&mut stdout, "info", &format!("register {word}: {outcome}"));
+                }
                 if let Some(code) = exit_code("exit-on-init") {
                     std::process::exit(code);
                 }
             }
+            "command" => {
+                let params = &event["params"];
+                let args: Vec<&str> = params["args"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!(
+                        "command: {} {}",
+                        params["command"].as_str().unwrap_or("?"),
+                        args.join(" ")
+                    ),
+                );
+            }
             "key" => {
+                for word in flag_values("unregister-on-key") {
+                    let result = send_request(
+                        &mut stdout,
+                        &mut lines,
+                        &mut next_id,
+                        "unregister_command",
+                        serde_json::json!({ "name": word }),
+                    );
+                    let outcome = result.map_or_else(|e| e, |_| "ok".to_string());
+                    send_log(
+                        &mut stdout,
+                        "info",
+                        &format!("unregister {word}: {outcome}"),
+                    );
+                }
                 handle_key(&event, &mut stdout, &mut lines, &mut next_id);
                 if let Some(code) = exit_code("exit-after-key") {
                     std::process::exit(code);
@@ -184,11 +249,9 @@ fn send_log(stdout: &mut io::Stdout, level: &str, message: &str) {
     let _ = stdout.flush();
 }
 
-/// Sends one request and blocks for its reply. This fixture only ever has one request in flight
-/// at a time and never receives a new event while waiting, so reading the very next stdin line
-/// back as the reply is safe here — a real client would still need to match replies by `id`
-/// (nothing on the wire assumes strict ordering) since a host may interleave a new event with an
-/// outstanding request's response.
+/// Sends one request and blocks for its reply, matched by `id`. An event that arrives first (a
+/// host may write one before it has answered) is set aside for the main loop, as a real client
+/// must, since nothing on the wire promises a reply comes before the next event.
 fn send_request(
     stdout: &mut io::Stdout,
     lines: &mut io::Lines<io::StdinLock<'_>>,
@@ -203,12 +266,20 @@ fn send_request(
     let _ = writeln!(stdout, "{request}");
     let _ = stdout.flush();
 
-    let Some(Ok(line)) = lines.next() else {
-        return Err("no reply".into());
-    };
-    let response: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-    if let Some(error) = response.get("error") {
-        return Err(error["message"].as_str().unwrap_or("error").to_string());
+    loop {
+        let Some(Ok(line)) = lines.next() else {
+            return Err("no reply".into());
+        };
+        let message: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        if message["id"] != serde_json::json!(id) {
+            if let Ok(mut held) = PENDING.lock() {
+                held.push_back(line);
+            }
+            continue;
+        }
+        if let Some(error) = message.get("error") {
+            return Err(error["message"].as_str().unwrap_or("error").to_string());
+        }
+        return Ok(message["result"].clone());
     }
-    Ok(response["result"].clone())
 }

@@ -807,3 +807,247 @@ fn a_plugin_with_a_key_is_not_started_again_by_an_event() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn spawn_fixture_args(
+    runtime: &tokio::runtime::Runtime,
+    manager: &mut PluginManager,
+    name: &str,
+    dir: &std::path::Path,
+    args: &[&str],
+    triggers: Triggers,
+) {
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+    manager
+        .spawn(runtime.handle(), name, FIXTURE, &args, triggers, dir)
+        .unwrap();
+}
+
+#[test]
+fn a_plugin_registers_a_command_while_running_and_the_command_then_reaches_it() {
+    let dir = scratch_dir("register-run");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--register=blame"],
+        Triggers::default(),
+    );
+    assert!(
+        !manager.dispatch_command("blame", Vec::new(), &dir, &[]),
+        "nothing owns the word before the plugin asks"
+    );
+    wait_for_log(&mut manager, "register blame: ok");
+
+    assert!(manager.dispatch_command("blame", vec!["a.rs".into(), "b".into()], &dir, &[]));
+    wait_for_log(&mut manager, "command: blame a.rs b");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_built_in_word_and_a_word_another_plugin_holds_are_refused_with_a_reason() {
+    let dir = scratch_dir("register-refused");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    manager.reserve_commands(["cd".to_string()]);
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "first",
+        &dir,
+        &["--register=shared"],
+        Triggers::default(),
+    );
+    wait_for_log(&mut manager, "register shared: ok");
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "second",
+        &dir,
+        &["--register=cd", "--register=shared", "--register=two words"],
+        Triggers::default(),
+    );
+
+    let seen = wait_for_log(&mut manager, "register two words:");
+    let said = |word: &str| {
+        seen.iter()
+            .find(|m| m.starts_with(&format!("register {word}:")))
+            .unwrap_or_else(|| panic!("no answer for {word} in {seen:?}"))
+            .clone()
+    };
+    assert!(said("cd").contains("built-in command"), "{}", said("cd"));
+    assert!(
+        said("shared").contains("belongs to plugin 'first'"),
+        "{}",
+        said("shared")
+    );
+    assert!(
+        said("two words").contains("letters, digits"),
+        "{}",
+        said("two words")
+    );
+
+    // The word stays with the plugin that had it.
+    assert!(manager.dispatch_command("shared", Vec::new(), &dir, &[]));
+    wait_for_log(&mut manager, "command: shared");
+    assert!(!manager.dispatch_command("cd", Vec::new(), &dir, &[]));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_config_word_and_a_registered_word_answer_alike_and_config_words_cannot_be_given_up() {
+    let dir = scratch_dir("register-config");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--register=live", "--unregister-on-key=fixed"],
+        Triggers {
+            keys: vec![KeyCode::Char('b')],
+            commands: vec!["fixed".to_string()],
+            ..Triggers::default()
+        },
+    );
+    wait_for_log(&mut manager, "register live: ok");
+
+    assert!(manager.dispatch_command("fixed", Vec::new(), &dir, &[]));
+    wait_for_log(&mut manager, "command: fixed");
+    assert!(manager.dispatch_command("live", Vec::new(), &dir, &[]));
+    wait_for_log(&mut manager, "command: live");
+
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    let seen = wait_for_log(&mut manager, "unregister fixed:");
+    assert!(
+        seen.iter()
+            .any(|m| m.contains("declared in the config file")),
+        "{seen:?}"
+    );
+    assert!(manager.dispatch_command("fixed", Vec::new(), &dir, &[]));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_unregistered_word_stops_reaching_the_plugin() {
+    let dir = scratch_dir("register-unregister");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--register=live", "--unregister-on-key=live"],
+        on_key_b(),
+    );
+    wait_for_log(&mut manager, "register live: ok");
+    assert!(manager.dispatch_command("live", Vec::new(), &dir, &[]));
+    wait_for_log(&mut manager, "command: live");
+
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    wait_for_log(&mut manager, "unregister live: ok");
+
+    assert!(!manager.dispatch_command("live", Vec::new(), &dir, &[]));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_registered_command_still_starts_a_plugin_that_has_exited() {
+    let dir = scratch_dir("register-respawn");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--register=blame", "--exit-after-key=0"],
+        on_key_b(),
+    );
+    wait_for_log(&mut manager, "register blame: ok");
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    wait_for_state(&manager, |s| *s == PluginState::Finished);
+
+    assert!(
+        manager.dispatch_command("blame", vec!["x".into()], &dir, &[]),
+        "the word must outlive the process that registered it"
+    );
+
+    // The fresh process registers again at `init` (the same word, so it is accepted) and the
+    // command that started it is delivered after.
+    let seen = wait_for_log(&mut manager, "command: blame x");
+    assert!(
+        seen.iter().any(|m| m == "register blame: ok"),
+        "the fresh process should have registered first; saw {seen:?}"
+    );
+    assert_eq!(manager.summaries()[0].restarts, 1);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn restart_forgets_what_the_plugin_registered_while_running_and_keeps_its_config_words() {
+    let dir = scratch_dir("register-restart");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    // The plugin registers `live` at `init` and the config declares `fixed`; a restart wipes
+    // what was registered while running, and the fresh process registers it again.
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--register=live"],
+        Triggers {
+            commands: vec!["fixed".to_string()],
+            ..Triggers::default()
+        },
+    );
+    wait_for_log(&mut manager, "register live: ok");
+    assert!(manager.dispatch_command("live", Vec::new(), &dir, &[]));
+    wait_for_log(&mut manager, "command: live");
+
+    assert_eq!(manager.restart("fixture"), Restart::Restarted);
+
+    // Config words are never gone; the runtime one is back once the new process asks for it.
+    assert!(manager.dispatch_command("fixed", Vec::new(), &dir, &[]));
+    wait_for_log(&mut manager, "register live: ok");
+    assert!(manager.dispatch_command("live", Vec::new(), &dir, &[]));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_python_plugin_registers_its_own_command_with_no_config() {
+    if !has_python() {
+        return;
+    }
+    let dir = scratch_dir("python-register");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    manager
+        .spawn(
+            runtime.handle(),
+            "dir-stats",
+            "python3",
+            &[PYTHON_EXAMPLE.to_string()],
+            Triggers::default(),
+            &dir,
+        )
+        .unwrap();
+    wait_for_log(&mut manager, "registered :state");
+    manager.publish_state(state_at(&dir, Some("a.txt"), &[]));
+
+    assert!(manager.dispatch_command("state", Vec::new(), &dir, &[]));
+    wait_for_log(&mut manager, "state: cursor=a.txt");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

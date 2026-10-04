@@ -70,6 +70,13 @@ pub enum Command {
     Interactive(String),
 }
 
+/// The first words `parse` gives a meaning of its own, which a plugin may therefore not register
+/// as a `:` command. A test keeps this in step with the `match` in `parse`.
+pub const BUILTIN_WORDS: &[&str] = &[
+    "q", "q!", "qa", "qa!", "quit", "trash", "extract", "compress", "plugin", "plugins", "cd",
+    "mkdir", "touch",
+];
+
 /// Characters that mean the user is writing shell, not naming a file: pipes, redirects,
 /// substitution and globs. A built-in can't honour them, `sh` can.
 const SHELL_SYNTAX: &[char] = &[
@@ -367,6 +374,34 @@ mod tests {
             }))
         );
         assert!(parse("plugin 'unterminated").is_err());
+    }
+
+    /// Every word `parse` has an arm for, read from its own source, so a built-in added there
+    /// without being added to `BUILTIN_WORDS` fails here instead of letting a plugin claim it.
+    fn words_parse_has_arms_for() -> Vec<String> {
+        let source = include_str!("command.rs");
+        let body = &source[source.find("    match name {").unwrap()..];
+        let body = &body[..body.find("\n    }\n}").unwrap()];
+        let mut words = Vec::new();
+        for line in body.lines().filter(|l| l.starts_with("        \"")) {
+            let patterns = line.split(" =>").next().unwrap();
+            let patterns = patterns.split(" if ").next().unwrap();
+            words.extend(
+                patterns
+                    .split('|')
+                    .map(|p| p.trim().trim_matches('"').to_string()),
+            );
+        }
+        words.sort();
+        words.dedup();
+        words
+    }
+
+    #[test]
+    fn the_reserved_words_are_exactly_the_ones_parse_has_arms_for() {
+        let mut reserved: Vec<String> = BUILTIN_WORDS.iter().map(ToString::to_string).collect();
+        reserved.sort();
+        assert_eq!(reserved, words_parse_has_arms_for());
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub mod host;
 mod life;
 mod mailbox;
 pub mod protocol;
+mod registry;
 
 pub use error::PluginError;
 pub use host::{LogMessage, PluginManager, Restart, Triggers};

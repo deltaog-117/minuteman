@@ -138,6 +138,9 @@ interactive_commands = [
 # "dir_changed" and "selection_changed" (each with `from` and `to`; a burst of cursor moves
 # arrives as one event from where it began to where it ended, and marks changing counts too) and
 # "job_finished" (the job's `kind` and `outcome`). It hears none unless it lists them.
+# A plugin can also add `:` commands while it runs, with a `register_command` request, so
+# `commands` is only needed to have a word answered before the plugin has started. A built-in
+# command or a word another plugin has is refused, and the plugin is told why.
 # A plugin may exit whenever it likes: it is started again the next time a key, command or
 # `:plugin <name>` reaches it (or, if it has no keys or commands, an event). One that crashes
 # three times in a row is left alone until `:plugins restart <name>`; `:plugins` lists them all.

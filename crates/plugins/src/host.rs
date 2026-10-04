@@ -44,6 +44,7 @@ use crate::mailbox::{Mailbox, Queued};
 use crate::protocol::{
     self, EventKind, Incoming, JobOutcome, LogLevel, PluginRequest, StateSnapshot, WireEntry,
 };
+use crate::registry::SharedRegistry;
 
 /// One line to show the user, from a plugin's own `log` notification or the host's diagnostics
 /// about it (a malformed line, an abnormal exit).
@@ -67,8 +68,8 @@ struct RunningPlugin {
     args: Vec<String>,
     handle: Handle,
     on_keys: Vec<KeyCode>,
-    commands: Vec<String>,
     events: Vec<EventKind>,
+    registry: SharedRegistry,
     process: Process,
     /// Crashes in a row, each soon after starting (see `life::after_crash`).
     crashes: u32,
@@ -144,8 +145,11 @@ impl RunningPlugin {
             &self.command,
             &self.args,
             &cwd,
-            logs_tx,
-            state_tx.subscribe(),
+            Wiring {
+                logs_tx: logs_tx.clone(),
+                state_rx: state_tx.subscribe(),
+                registry: self.registry.clone(),
+            },
         )?;
         self.restarts += 1;
         Ok(())
@@ -153,7 +157,8 @@ impl RunningPlugin {
 
     /// Whether `event` may be written to the plugin now. A plugin only ever started by events
     /// (no keys, no commands) has nothing else to bring it back, so one of those is started
-    /// again for an event; any other waits for a key or a command.
+    /// again for an event; any other waits for a key or a command, including one it registered
+    /// itself while running.
     fn ready_for_event(
         &mut self,
         logs_tx: &UnboundedSender<LogMessage>,
@@ -163,7 +168,7 @@ impl RunningPlugin {
             return true;
         }
         self.on_keys.is_empty()
-            && self.commands.is_empty()
+            && self.registry.lock().words_of(&self.name).is_empty()
             && self.ensure_alive(logs_tx, state_tx, false)
     }
 
@@ -204,6 +209,14 @@ impl RunningPlugin {
     }
 }
 
+/// What a plugin's process is connected to besides its own pipes: where its log lines go, the
+/// published state it reads, and the command registry it writes.
+struct Wiring {
+    logs_tx: UnboundedSender<LogMessage>,
+    state_rx: watch::Receiver<StateSnapshot>,
+    registry: SharedRegistry,
+}
+
 /// How `PluginManager::restart` went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Restart {
@@ -238,6 +251,8 @@ pub struct PluginManager {
     logs_rx: UnboundedReceiver<LogMessage>,
     /// The latest browser state, shared with every plugin's reader (see `publish_state`).
     state_tx: watch::Sender<StateSnapshot>,
+    /// Who answers which `:` command word, shared with every plugin's reader.
+    registry: SharedRegistry,
     /// Whether the interface has published at least once; the first publish is the browser
     /// arriving, not a change, so it fires no event.
     published: AtomicBool,
@@ -251,6 +266,7 @@ impl Default for PluginManager {
             logs_tx,
             logs_rx,
             state_tx: watch::channel(StateSnapshot::default()).0,
+            registry: SharedRegistry::default(),
             published: AtomicBool::new(false),
         }
     }
@@ -285,14 +301,26 @@ impl PluginManager {
             unset
         });
 
+        {
+            // A word the interface or an earlier plugin already has stays theirs, as it always
+            // did: a built-in is tried first, and the plugin configured first wins a word.
+            let mut registry = self.registry.lock();
+            for word in &triggers.commands {
+                let _ = registry.register(name, word, false);
+            }
+        }
+
         let process = start(
             handle,
             name,
             command,
             args,
             cwd,
-            &self.logs_tx,
-            self.state_tx.subscribe(),
+            Wiring {
+                logs_tx: self.logs_tx.clone(),
+                state_rx: self.state_tx.subscribe(),
+                registry: self.registry.clone(),
+            },
         )?;
         self.plugins.push(RunningPlugin {
             name: name.to_string(),
@@ -300,8 +328,8 @@ impl PluginManager {
             args: args.to_vec(),
             handle: handle.clone(),
             on_keys: triggers.keys,
-            commands: triggers.commands,
             events: triggers.events,
+            registry: self.registry.clone(),
             process,
             crashes: 0,
             restarts: 0,
@@ -349,16 +377,16 @@ impl PluginManager {
         cwd: &Path,
         selection: &[PathBuf],
     ) -> bool {
+        let Some(owner) = self.registry.lock().owner(command).map(str::to_string) else {
+            return false;
+        };
         let Self {
             plugins,
             logs_tx,
             state_tx,
             ..
         } = self;
-        let Some(plugin) = plugins
-            .iter_mut()
-            .find(|p| p.commands.iter().any(|word| word == command))
-        else {
+        let Some(plugin) = plugins.iter_mut().find(|p| p.name == owner) else {
             return false;
         };
         if plugin.ensure_alive(logs_tx, state_tx, true) {
@@ -409,6 +437,7 @@ impl PluginManager {
             return Restart::NotFound;
         };
         plugin.process.life.stop();
+        plugin.registry.lock().clear_runtime(name);
         plugin.crashes = 0;
         plugin.given_up = false;
         plugin.last_crash = None;
@@ -420,6 +449,12 @@ impl PluginManager {
                 Restart::Failed(e.to_string())
             }
         }
+    }
+
+    /// Declares the words of the interface's own `:` commands, which no plugin may claim. Call
+    /// before spawning, so a plugin's config cannot get ahead of them.
+    pub fn reserve_commands(&mut self, words: impl IntoIterator<Item = String>) {
+        self.registry.lock().reserve(words);
     }
 
     /// Whether no plugin is running, so a caller can skip building a snapshot nobody will read.
@@ -557,7 +592,8 @@ async fn write_loop(
 }
 
 /// Reads the plugin's stdout one line at a time: a `log` notification is forwarded to
-/// `logs_tx`, a `get_state` request is answered at once from `state_rx`, any other request is
+/// `logs_tx`, a `get_state` request is answered at once from `state_rx`, a `register_command` or
+/// `unregister_command` at once from `registry`, any other request is
 /// executed on the blocking pool and replied to over `stdin_tx`, and a malformed line is reported the same way `log` is (with a reply if it carried an `id`).
 async fn read_loop(
     plugin: String,
@@ -565,6 +601,7 @@ async fn read_loop(
     stdin_tx: UnboundedSender<String>,
     logs_tx: UnboundedSender<LogMessage>,
     state_rx: watch::Receiver<StateSnapshot>,
+    registry: SharedRegistry,
     handle: tokio::runtime::Handle,
 ) {
     let mut lines = BufReader::new(stdout).lines();
@@ -597,6 +634,16 @@ async fn read_loop(
             Ok(Incoming::Request { id, request }) => {
                 let reply = match request {
                     PluginRequest::GetState => Ok(state_json(&state_rx.borrow())),
+                    PluginRequest::RegisterCommand { name } => registry
+                        .lock()
+                        .register(&plugin, &name, true)
+                        .map(|()| json!({ "registered": name }))
+                        .map_err(|e| format!("cannot register '{name}': {e}")),
+                    PluginRequest::UnregisterCommand { name } => registry
+                        .lock()
+                        .unregister(&plugin, &name)
+                        .map(|()| json!({ "unregistered": name }))
+                        .map_err(|e| format!("cannot unregister '{name}': {e}")),
                     request => match handle.spawn_blocking(move || execute(request)).await {
                         Ok(result) => result,
                         Err(e) => Err(format!("request task panicked: {e}")),
@@ -668,9 +715,13 @@ fn start(
     command: &str,
     args: &[String],
     cwd: &Path,
-    logs_tx: &UnboundedSender<LogMessage>,
-    state_rx: watch::Receiver<StateSnapshot>,
+    wiring: Wiring,
 ) -> Result<Process, PluginError> {
+    let Wiring {
+        logs_tx,
+        state_rx,
+        registry,
+    } = wiring;
     let mut child = {
         // `Command::spawn` registers the child with the calling thread's tokio reactor, so it
         // needs `handle` bound as current for the duration of the call: this runs outside any
@@ -703,6 +754,7 @@ fn start(
         stdin_tx.clone(),
         logs_tx.clone(),
         state_rx,
+        registry,
         handle.clone(),
     ));
     handle.spawn(reap(
@@ -728,7 +780,11 @@ fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
     let vfs = LocalVfs;
     match request {
         // `read_loop` answers this one from the published snapshot and never gets here.
-        PluginRequest::GetState => Err("get_state is answered by the host".to_string()),
+        PluginRequest::GetState
+        | PluginRequest::RegisterCommand { .. }
+        | PluginRequest::UnregisterCommand { .. } => {
+            Err("answered by the host's reader, not here".to_string())
+        }
         PluginRequest::ReadDir { path } => vfs
             .list_dir(&path)
             .map(|entries| json!(entries.iter().map(WireEntry::from).collect::<Vec<_>>()))

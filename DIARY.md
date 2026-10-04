@@ -5731,6 +5731,70 @@ in pids 121333 and 121344, three presses of the crasher's key ended in the stopp
 the next two repeated, `:plugins` read `oneshot: finished, restarted 1x; crasher: stopped after
 repeated crashes (exit status: 1), restarted 2x`, and `:plugins restart crasher` started it again.
 
+### Plugin `register_command`: A Shared Registry (COA A)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** A plugin's `:` commands could only come from `commands = [...]` in config, so a plugin
+could not add one while running. The roadmap asked for runtime `register_command`.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | One registry behind a lock, shared by every plugin's reader and the manager | Chosen |
+| B | The reader sends the request to the render thread, which applies it on a tick and replies | Rejected |
+| C | A reply-less notification applied on the tick, a refusal logged as a warning | Rejected |
+
+**Why A.** The same reasoning as `get_state`: a plugin's request should not wait on the render loop,
+and while the interface is handed to `:nvim` the loop is not ticking, so B and C would leave a
+plugin blocked or unanswered for as long as the editor ran. A also gives one answer to "who owns
+this word", which can be tested as a plain type. C was only ever the cheap option, and it leaves a
+plugin unable to know whether it worked.
+
+**Design.** `Registry` maps a word to its owner and whether it came from config or from a running
+plugin, and holds the reserved words. `register` checks, in order, that a runtime word is made of
+letters, digits and `-_.+` (a word with a space or a shell character could never reach a plugin,
+since such a line goes to the shell), that it is not reserved, and that no other plugin has it;
+the same plugin asking twice is accepted, which is what lets a respawned process register again.
+Config words go through the same call, minus the character rule, which they never had, so a
+config word that clashes is silently dropped as it always was and `commands` is no longer a list on
+the plugin. `dispatch_command` asks the registry for the owner instead of scanning plugins. The
+reader answers `register_command` and `unregister_command` itself, like `get_state`, and the
+refusal text goes back as the error. Registered words are kept when a process ends, since lazy
+respawn depends on `:blame` finding a plugin that has exited, and are cleared only by `restart`,
+whose fresh process registers them again. The event-only test for respawn now asks the registry,
+so a plugin that has registered a command is not started again by an event. The reserved list is
+`command::BUILTIN_WORDS`; a test scans the source of `parse`'s `match` for its arms and compares,
+which fails both when a built-in is added without being listed and when one is listed that does
+not exist (checked by removing `touch` from the list). A `description` param is not read: storing
+it with no place to show it would be speculative, and an unknown param is ignored, so a plugin may
+already send one.
+
+**A fixture bug the tests found.** The fixture took the next stdin line as a request's reply. After
+a respawn the host had already queued the command that started it, so the fixture swallowed that
+event as the reply and the real reply as an unknown message. It now matches replies by `id` and
+sets events aside, as the Python example does and as the protocol note always said a client must.
+
+**Trade-offs.** A registered word that clashes with a plugin configured later loses to the earlier
+one, with no message to the user, only to the plugin that asked. A plugin that registers a word and
+is then given up on keeps the word, and the command says why it does nothing. The lock is held for
+a lookup or an insert, never across an await. Registering needs the plugin to be running, so a
+word a plugin registers at `init` is not there until `init` has been handled, a few milliseconds
+after startup.
+
+**Verification.** `scripts/check` passes. New tests cover the two request shapes and the ignored
+`description`, the registry's rules one by one (first come, repeat, taken, built-in, character
+rule, config's looser rule, who may unregister, clearing, the errors' wording) and a model-based
+property test over any sequence of registers, unregisters and clears, plus the reserved-word test
+above and end-to-end tests with the fixture and a real `python3`: a word reaches the plugin that
+registered it and not before; a built-in, a taken word and a bad name are each refused with their
+reason and the word stays put; config and registered words answer alike and a config word cannot
+be given up; an unregistered word stops reaching the plugin; a registered word still starts a
+plugin that has exited; and a restart forgets the registered word until the new process asks
+again. The real binary was run in a PTY: a plugin with no `commands` answered `:state`, another
+was told `cd=that is a built-in command | hello=ok | a b=a command name is one or more letters,
+digits, '-', '_', '.' or '+'`, `:hello world` reached it with its argument, and `:cd /tmp` was
+still the built-in.
+
 ---
 
 ## 🧠 Usage Guidelines

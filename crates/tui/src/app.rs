@@ -530,7 +530,11 @@ impl App {
             search_state: SearchState::Idle,
             search_matches: Vec::new(),
             search_position: 0,
-            plugins: PluginManager::new(),
+            plugins: {
+                let mut plugins = PluginManager::new();
+                plugins.reserve_commands(command::BUILTIN_WORDS.iter().map(ToString::to_string));
+                plugins
+            },
             vfs,
             caps_lock: false,
         }

@@ -24,7 +24,8 @@
 //!   they happen; see `EventKind`.
 //! - plugin -> host: a request with an `id` (`read_dir`, `copy`, `mv`, `delete`, `create_dir`,
 //!   `create_file`, `touch`, `rename` — the same `file_ops` orchestration the built-in keys use —
-//!   and `get_state`, which asks for the browser's cwd, cursor, marks and view settings)
+//!   `get_state`, which asks for the browser's cwd, cursor, marks and view settings, and
+//!   `register_command`/`unregister_command`, which add and remove a `:` command word)
 //!   gets exactly one reply line carrying that same `id`; a `log` notification (no `id`) is
 //!   fire-and-forget and surfaces as the status bar message.
 //!
@@ -261,6 +262,14 @@ fn default_policy() -> ConflictPolicyWire {
 pub enum PluginRequest {
     /// Asks for the latest `StateSnapshot`; takes no parameters.
     GetState,
+    /// Asks for `:name` to reach this plugin from now on.
+    RegisterCommand {
+        name: String,
+    },
+    /// Gives up a `:name` this plugin registered while running.
+    UnregisterCommand {
+        name: String,
+    },
     ReadDir {
         path: PathBuf,
     },
@@ -299,6 +308,11 @@ struct PathParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct NameParams {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CopyMoveParams {
     src: PathBuf,
     dst: PathBuf,
@@ -321,6 +335,16 @@ impl PluginRequest {
         let bad = |e: serde_json::Error| format!("invalid params for '{method}': {e}");
         match method {
             "get_state" => Ok(Self::GetState),
+            "register_command" => Ok(Self::RegisterCommand {
+                name: serde_json::from_value::<NameParams>(params)
+                    .map_err(bad)?
+                    .name,
+            }),
+            "unregister_command" => Ok(Self::UnregisterCommand {
+                name: serde_json::from_value::<NameParams>(params)
+                    .map_err(bad)?
+                    .name,
+            }),
             "read_dir" => Ok(Self::ReadDir {
                 path: serde_json::from_value::<PathParams>(params)
                     .map_err(bad)?
@@ -648,6 +672,39 @@ mod tests {
                 other => panic!("expected a get_state request for {line}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn register_and_unregister_command_take_a_name() {
+        let register =
+            r#"{"jsonrpc":"2.0","id":1,"method":"register_command","params":{"name":"blame"}}"#;
+        let unregister =
+            r#"{"jsonrpc":"2.0","id":2,"method":"unregister_command","params":{"name":"blame"}}"#;
+        assert!(matches!(
+            parse_line(register).unwrap(),
+            Incoming::Request {
+                request: PluginRequest::RegisterCommand { ref name },
+                ..
+            } if name == "blame"
+        ));
+        assert!(matches!(
+            parse_line(unregister).unwrap(),
+            Incoming::Request {
+                request: PluginRequest::UnregisterCommand { ref name },
+                ..
+            } if name == "blame"
+        ));
+    }
+
+    #[test]
+    fn register_command_ignores_params_it_does_not_know_and_needs_a_name() {
+        let extra = r#"{"jsonrpc":"2.0","id":1,"method":"register_command","params":{"name":"x","description":"later"}}"#;
+        assert!(parse_line(extra).is_ok());
+        let missing = r#"{"jsonrpc":"2.0","id":7,"method":"register_command","params":{}}"#;
+        assert_eq!(
+            parse_line(missing).unwrap_err().id,
+            Some(serde_json::json!(7))
+        );
     }
 
     #[test]

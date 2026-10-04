@@ -1415,6 +1415,29 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   plugin with a key). Verified in the compiled binary through a PTY: a one-shot plugin answered
   two key presses from two different processes, a crashing plugin was stopped after three presses
   with the message above, `:plugins` showed both, and `:plugins restart` started the crasher again.
+- ✅ **Plugin `register_command` (stage 1.5, fifth cycle)** – a plugin can send `register_command
+  {name}` while it runs and `:name` reaches it from then on, with no line in config;
+  `unregister_command` gives a word up again. Chosen as COA A, a shared registry, over a message to
+  the render thread (B) and a reply-less notification (C). New `plugins::registry` holds who owns
+  each word, config words and registered ones together, behind one lock that every plugin's reader
+  and the manager share, so a request is answered at once with the real reason and never waits on
+  the render loop (the reasoning that chose a snapshot for `get_state`). A word is one or more
+  letters, digits, `-`, `_`, `.` or `+`, so it is one a `:` line can start with and still reach a
+  plugin; a built-in command word is refused (`tui` hands the list over at startup, and a test
+  reads `command::parse`'s own arms so a new built-in cannot be left off it), so is a word another
+  plugin owns, and asking again for one you hold is fine. Config words keep the looser rule they
+  always had and are held to the same ownership, and only a word registered while running can be
+  unregistered. A registered word outlives the process that registered it, so `:blame` still
+  starts a plugin that has exited; `:plugins restart` forgets a plugin's registered words, and the
+  fresh process registers them again at `init`. A plugin whose only commands were registered at
+  run time counts as having commands, so an event does not start it again. Additive, so
+  `API_VERSION` stays 1; a `description` param is ignored for now, so a plugin that sends one keeps
+  working when it is used. `examples/plugins/dir_stats.py` registers `:state`. Tested against a
+  plain model of the rules over any sequence of registers, unregisters and clears, and end to end
+  with the fixture and a real `python3`. Verified in the compiled binary through a PTY: a plugin
+  with no `commands` answered `:state`, one that asked for `cd`, `hello` and `a b` was told that
+  `cd` is built in, got `hello`, and was told what a name may hold, `:hello world` reached it with
+  its argument, and `:cd /tmp` was still the built-in.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1510,8 +1533,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   built-in features stay native and untouched, and plugins in any language add to them. Nothing
   here lets a plugin replace or remove a built-in; a user who wants that rebinds or unbinds a key
   in config (or, later, a `disabled_actions` list), and a built-in wins a key conflict unless the
-  user remaps it. Still to do, cheapest first:
-  runtime `register_command` instead of config-only `commands`; and stable string names for the
+  user remaps it. Still to do: stable string names for the
   existing `Action`s so a plugin can invoke a built-in such as `paste` or `sort`. Expected cost:
   negligible binary size and nothing on the hot paths for anyone not using plugins; a plugin
   costs a process, a few ms to spawn (off the first-key path) and a sub-millisecond round trip per
