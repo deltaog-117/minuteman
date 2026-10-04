@@ -1198,7 +1198,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `Leave`/`Enter` in the other views; `h`, `l` and `enter` still go up and in), the wheel a row, a
   click selects, a double-click opens, and marks, right-click menus, `y`/`d`/`p` and the rest work
   because a tile answers the mouse as a `Hit::CurrentRow`, so the list's existing handling runs
-  unchanged. Details is one flat, full-width table with a title row (Name, Size, Modified (UTC),
+  unchanged. Details is one flat, full-width table with a title row (Name, Size, Modified,
   Mode) and no parent or preview column, dropping Mode, then Modified, then Size on a narrow
   terminal so a name always keeps 12 cells. It reuses the list pane, so clicks, marks, drag and drop
   and the context menu already work, through one new function, `view_mode::browser_layout`, that
@@ -1267,6 +1267,29 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   first one, and the saved choice wins once `V` has been used. `Config::save_view` rewrites the
   file with everything else as it is on disk, and `save_local` keeps a stored `view` when its
   caller (the popups) does not set one, so a popup save never erases it.
+- ✅ **Sorting, local time, grid icons, page keys and prompt editing** – five small gaps closed in
+  one cycle. *Sorting:* `,` cycles the order (name, size largest first, modified newest first,
+  permissions) and `<` reverses it; in the details view the title of the ordering column wears an
+  arrow, and clicking a title orders by it and clicking again flips it. The order lives in
+  `BrowserState` (`browser::sort`) and is applied whenever a listing is stored, the same moment
+  hidden entries are dropped, so the cursor, `/` search, marks and every mouse hit all index the
+  list the user sees; folders always come first, equal keys fall back to the name, and the cursor
+  follows its entry when the order changes. It applies in every view and lasts for the session.
+  *Local time:* Inspect and the details column show the modified time in the machine's time zone
+  (`chrono`, already built for the trash crate; Inspect writes the offset out, the column says
+  just `Modified`), replacing the UTC-only formatting and its hand-written calendar code. *Grid
+  icons:* with the Nerd glyph set a folder or non-image tile draws its file-type icon, in the type's
+  color, above the extension label; other sets keep the text label. *Page keys:* `PageUp`,
+  `PageDown`, `Home` and `End` move a screenful (the list's rows, the grid's tiles, the strip's
+  thumbnails) or to the first or last entry in every view; fixed, like the disk usage view's.
+  *Prompt editing:* rename, create, `/`, `:` and Open with → Other… now edit a line with a cursor
+  (`line_edit::LineEdit`): arrows, Home/End, Delete, `Ctrl`-A/E/B/F/D/W/U/K, `Alt`-B/F and `Ctrl`
+  or `Alt` with the arrows for words; the cursor is drawn where typing lands, a `/` search only
+  re-runs when the text changes, and `Ctrl`+`Alt` characters (AltGr layouts) still type. Chosen as
+  COA A for the time crate (`chrono`, over `jiff` and a direct `localtime_r`) and for the editor
+  (a shared `LineEdit`, over a cursor field per prompt and an end-of-line-only Ctrl-W/U). The sort
+  keys are `,` and `<`: `o` and `s`, the natural picks, are deliberately unbound by an existing
+  test of freed keys.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1314,13 +1337,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 
 ## 🟢 Low Priority (Nice-to-Have)
 
-- **Grid and details, follow-ups** – details cannot be sorted or its columns resized (clicking a
-  column title could sort); the details time is UTC for want of a time zone database, as in Inspect;
-  the grid's tile size follows the window height and is not configurable; the arrows and `h`/`l`
+- **Grid and details, follow-ups** – details columns cannot be resized; the grid's tile size follows the window height and is not configurable; the arrows and `h`/`l`
   mean different things in the grid than elsewhere and are fixed rather than bindable; a tile has
   no icon for a folder or a non-image beyond its text, even with the Nerd glyph set; drag and drop
   does nothing from the grid (its tiles are not rows `drop_target` knows); the grid has no
-  scrollbar; there is no key for a page of rows; and a file an `Image`-kind `[[preview_hook]]`
+  scrollbar; and a file an `Image`-kind `[[preview_hook]]`
   covers gets a placeholder in a tile, not its thumbnail.
 - **Filmstrip, follow-ups** – a thumbnail's file is decoded in full, so a folder of large photos
   costs a decode each and a decode already started for an entry that has since left the window is
@@ -1376,9 +1397,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Optional Lua scripting tier** – lightweight `mlua`-based, in-process scripting for config/
   keybindings/simple commands, layered alongside the two process-based plugin tiers above for
   latency-sensitive hooks that don't need "any language."
-- **Menu and Inspect polish** – Inspect times are UTC because the standard library has no time
-  zone database; a `chrono`/`jiff` dependency or `TZ` handling would show local time. Inspect
-  could also total the marked set and follow a symlink to its target's details. The menu could grow
+- **Menu and Inspect polish** – Inspect could total the marked set and follow a symlink to its target's details. The menu could grow
   keyboard-first access (a key to open it on the selection), per-item shortcut hints, and a
   configurable item list.
 - **Git status, follow-ups** – the segment refreshes every three seconds, so a `:git commit` or a
@@ -1402,9 +1421,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   the directory. Still missing: subsequence matching (`aernd` finding `aerend`), ranking by match
   quality rather than depth alone, and stepping through further matches (`n`/`N`, or the arrows
   while the prompt is open).
-- **Arrow keys, `PageUp`/`PageDown`, `Home`/`End` in prompts and lists** – arrows browse now, but
-  the text prompts have no cursor movement, and paging and jumping to the first or last entry
-  have no keys.
+- **Prompt editing, follow-ups** – the password prompts (extract, compress) still only append and
+  delete the last character, with no cursor; the `/`, `:` and rename prompts have no history of
+  what was typed before, no `Tab` completion of a path, and no selection or paste of more than a
+  typed line; paging keys are not rebindable.
+- **Sorting, follow-ups** – the order lasts for the session only (like the view, it could be saved
+  to `local.toml`); it cannot be set per folder; folders cannot be listed after files or mixed in;
+  there is no natural ordering of numbers in names (`f2` before `f10`); and an owner or extension
+  key is not offered.
 - **Event-driven refresh (inotify) instead of polling** – the live refresh re-lists the browsed
   directory twice a second, which costs one `readdir` plus a `stat` per entry and can lag a
   change by about half a second. Worth replacing with `notify` only if that is noticeable in very

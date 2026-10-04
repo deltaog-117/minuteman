@@ -219,13 +219,20 @@ preview_down = ["J"]
 preview_up = ["K"]
 # Switches the browser's view, round and round: the usual columns, then a grid of thumbnail tiles
 # (like a graphical file manager's icon view), then a flat details table (name, size, exact
-# modified time in UTC, permissions), then the filmstrip (the selected file as large as the window
+# modified time in your time zone, permissions), then the filmstrip (the selected file as large as the window
 # allows, with a strip of its neighbours underneath). Capital: "V" is Shift+v, distinct from "v"
 # (marks). In the grid, up/down (and whatever move_down/move_up are bound to) move a whole row, the
 # left/right arrows move one tile, `h`/`l`/enter go up and in, and the wheel scrolls a row; in the
 # filmstrip, move_down/move_up and the up/down arrows move along the strip. Clicking selects in
 # every view and double-clicking opens.
 cycle_view = ["V"]
+# Orders the folder by the next key — name, size (largest first), modified time (newest first), then
+# permissions — and round again; the status line names the order, and the details view marks the
+# column with an arrow. Folders always stay first. Clicking a column title in the details view
+# picks that key, and clicking it again flips the direction. The order lasts for the session.
+sort = [","]
+# Runs the current order the other way round (Z to A, smallest first, oldest first).
+sort_reverse = ["<"]
 # Opens the disk usage view for the folder you are in: what takes the space, biggest first, with a
 # bar and a share for each. Inside it, enter opens a folder, h goes up, a switches between the
 # size on disk and the apparent size, r scans again and q or Esc closes it. Hard links are counted

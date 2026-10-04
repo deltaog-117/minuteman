@@ -22,6 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+use browser::sort::{Sort, SortKey};
 use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
@@ -74,6 +75,15 @@ pub fn pad_to(s: &str, width: usize) -> String {
     let mut out = fit_width(s, width);
     out.push_str(&" ".repeat(width.saturating_sub(text_width(&out))));
     out
+}
+
+/// `fit_width`, then left-padded with spaces to exactly `width` cells (right-aligned).
+fn pad_left(s: &str, width: usize) -> String {
+    let fitted = fit_width(s, width);
+    format!(
+        "{}{fitted}",
+        " ".repeat(width.saturating_sub(text_width(&fitted)))
+    )
 }
 
 /// A byte count in at most five cells: `512B`, `1.2K`, `14K`, `3.4M`.
@@ -312,10 +322,23 @@ pub fn plan_details_columns(inner_width: usize, gutter: usize) -> Columns {
     }
 }
 
-/// `2026-10-02 14:03` (UTC, since the standard library has no time zone database), or the
-/// glyph set's "none" mark for a missing time.
+/// `2026-10-02 14:03` in this machine's time zone, or the glyph set's "none" mark for a missing
+/// time.
 pub fn modified_cell(time: Option<SystemTime>, none: &str) -> String {
-    let full = crate::inspect::format_utc(time);
+    cell_from(crate::inspect::format_time(time), none)
+}
+
+/// [`modified_cell`] in a chosen zone, for tests that must not depend on the machine's.
+#[cfg(test)]
+fn modified_cell_in<Tz>(time: Option<SystemTime>, none: &str, zone: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    cell_from(crate::inspect::format_in(time, zone), none)
+}
+
+fn cell_from(full: String, none: &str) -> String {
     match full.get(..MODIFIED_WIDTH) {
         Some(head) if full.starts_with(|c: char| c.is_ascii_digit()) => head.to_string(),
         _ => none.to_string(),
@@ -323,20 +346,58 @@ pub fn modified_cell(time: Option<SystemTime>, none: &str) -> String {
 }
 
 /// The header row of the details table, laid out exactly like the rows under it: `gutter` blank
-/// cells (stripe, mark and icon), then each column's title over its own width.
-pub fn details_header(plan: &Columns, gutter: usize) -> String {
+/// cells (stripe, mark and icon), then each column's title over its own width. The title of the
+/// column the folder is ordered by ends in an arrow showing which way the order runs.
+pub fn details_header(plan: &Columns, gutter: usize, sort: Sort, glyphs: &Glyphs) -> String {
+    let title = |label: &str, key: SortKey| {
+        if sort.key != key {
+            return label.to_string();
+        }
+        let arrow = if sort.descending() {
+            glyphs.sort_down
+        } else {
+            glyphs.sort_up
+        };
+        format!("{label}{arrow}")
+    };
     let mut out = " ".repeat(gutter);
-    out.push_str(&pad_to("Name", plan.name_width));
+    out.push_str(&pad_to(&title("Name", SortKey::Name), plan.name_width));
     if plan.size {
-        out.push_str(&format!(" {:>width$}", "Size", width = SIZE_WIDTH));
+        let size = title("Size", SortKey::Size);
+        out.push_str(&format!(" {}", pad_left(&size, SIZE_WIDTH)));
     }
     if plan.modified {
-        out.push_str(&format!(" {}", pad_to("Modified (UTC)", MODIFIED_WIDTH)));
+        let modified = title("Modified", SortKey::Modified);
+        out.push_str(&format!(" {}", pad_to(&modified, MODIFIED_WIDTH)));
     }
     if plan.mode {
-        out.push_str(&format!(" {}", pad_to("Mode", MODE_WIDTH)));
+        out.push_str(&format!(
+            " {}",
+            pad_to(&title("Mode", SortKey::Mode), MODE_WIDTH)
+        ));
     }
     out
+}
+
+/// Which column title is `x` cells from the left edge of the header row, if any — the gutter and
+/// the gaps between columns belong to none. Mirrors [`details_header`]'s layout.
+pub fn header_key_at(plan: &Columns, gutter: usize, x: usize) -> Option<SortKey> {
+    let mut columns = vec![(SortKey::Name, gutter, plan.name_width)];
+    let mut next = gutter + plan.name_width + 1;
+    for (shown, key, width) in [
+        (plan.size, SortKey::Size, SIZE_WIDTH),
+        (plan.modified, SortKey::Modified, MODIFIED_WIDTH),
+        (plan.mode, SortKey::Mode, MODE_WIDTH),
+    ] {
+        if shown {
+            columns.push((key, next, width));
+            next += width + 1;
+        }
+    }
+    columns
+        .into_iter()
+        .find(|&(_, start, width)| (start..start + width).contains(&x))
+        .map(|(key, _, _)| key)
 }
 
 /// The size column's text: a file's size, or the glyph set's "none" mark for a directory (whose
@@ -1031,6 +1092,14 @@ impl StatusClock {
 
 #[cfg(test)]
 mod tests {
+    fn unicode() -> &'static Glyphs {
+        Glyphs::for_set(theming::GlyphSet::Unicode)
+    }
+
+    fn ascii() -> &'static Glyphs {
+        Glyphs::for_set(theming::GlyphSet::Ascii)
+    }
+
     use super::*;
     use proptest::prelude::*;
     use ratatui::Terminal;
@@ -1132,22 +1201,66 @@ mod tests {
     #[test]
     fn the_details_header_lines_up_with_the_rows_under_it() {
         let plan = plan_details_columns(100, 3);
-        let header = details_header(&plan, 3);
+        let header = details_header(&plan, 3, Sort::default(), unicode());
         assert_eq!(text_width(&header), 100);
         assert!(header.trim_start().starts_with("Name"));
-        assert!(
-            header.contains("Size") && header.contains("Modified (UTC)") && header.contains("Mode")
-        );
+        assert!(header.contains("Size") && header.contains("Modified") && header.contains("Mode"));
         // A name-only plan shows only the name title.
         let narrow = plan_details_columns(10, 3);
-        assert_eq!(details_header(&narrow, 3).trim(), "Name");
+        assert_eq!(
+            details_header(&narrow, 3, Sort::default(), unicode()).trim(),
+            "Name▲"
+        );
+    }
+
+    #[test]
+    fn the_sorted_column_wears_an_arrow_that_follows_the_direction() {
+        let plan = plan_details_columns(100, 3);
+        let by_size = Sort::default().clicked(SortKey::Size);
+        let header = details_header(&plan, 3, by_size, unicode());
+        assert!(header.contains("Size▼"), "largest first: {header}");
+        assert!(!header.contains("Name▲") && !header.contains("Modified▼"));
+        let header = details_header(&plan, 3, by_size.clicked(SortKey::Size), unicode());
+        assert!(header.contains("Size▲"), "{header}");
+        assert_eq!(text_width(&header), 100, "an arrow never moves a column");
+        let ascii = details_header(&plan, 3, by_size, ascii());
+        assert!(ascii.contains("Sizev"), "{ascii}");
+    }
+
+    #[test]
+    fn a_click_on_a_title_finds_its_column_and_nothing_else() {
+        let gutter = 3;
+        let plan = plan_details_columns(100, gutter);
+        let header = details_header(&plan, gutter, Sort::default(), unicode());
+        let at = |label: &str| header.find(label).map(|byte| text_width(&header[..byte]));
+        assert_eq!(header_key_at(&plan, gutter, 0), None, "the gutter");
+        assert_eq!(
+            header_key_at(&plan, gutter, at("Name").unwrap()),
+            Some(SortKey::Name)
+        );
+        assert_eq!(
+            header_key_at(&plan, gutter, at("Size").unwrap() + 1),
+            Some(SortKey::Size)
+        );
+        assert_eq!(
+            header_key_at(&plan, gutter, at("Modified").unwrap()),
+            Some(SortKey::Modified)
+        );
+        assert_eq!(
+            header_key_at(&plan, gutter, at("Mode").unwrap()),
+            Some(SortKey::Mode)
+        );
+        assert_eq!(header_key_at(&plan, gutter, 100), None, "past the end");
+        let narrow = plan_details_columns(10, gutter);
+        assert_eq!(header_key_at(&narrow, gutter, 3 + 12), None);
     }
 
     #[test]
     fn a_modified_time_reads_as_a_date_and_a_minute() {
         let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        assert_eq!(modified_cell(Some(t), "-"), "2023-11-14 22:13");
-        assert_eq!(modified_cell(None, "-"), "-");
+        let utc = chrono::Utc;
+        assert_eq!(modified_cell_in(Some(t), "-", &utc), "2023-11-14 22:13");
+        assert_eq!(modified_cell_in(None, "-", &utc), "-");
         assert_eq!(text_width(&modified_cell(Some(t), "-")), MODIFIED_WIDTH);
     }
 

@@ -29,6 +29,9 @@ ratatui-image = { version = "11.0.8", default-features = false, features = ["cro
 vt100 = "0.16.2"
 # `poll`/`read` for the terminal-palette probe, which must time out instead of blocking on stdin.
 libc = "0.2"
+# Local time for the modified/accessed/created times. Already built for the trash crate; `clock`
+# is what reads the machine's time zone.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Only for the `DynamicImage` type name in `preview_hook.rs` — decoding a hook's output reuses
 # `preview::load_image`, so no format-decoder features are needed here.
 image = { version = "0.25.10", default-features = false }

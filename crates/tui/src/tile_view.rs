@@ -21,12 +21,13 @@ use std::path::Path;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect, Size};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::widgets::Paragraph;
 use ratatui_image::Image;
 use shared::DirEntryInfo;
 use theming::Config;
 
+use crate::glyphs;
 use crate::hud;
 use crate::style::{self, FileKind};
 use crate::thumbnails::Thumb;
@@ -86,9 +87,14 @@ pub fn render_tile(
         Some(Thumb::Ready(protocol)) => {
             frame.render_widget(Image::new(protocol), centered(area, protocol.size()));
         }
-        Some(Thumb::Loading) => draw_placeholder(frame, area, "…", config),
+        Some(Thumb::Loading) => draw_placeholder(frame, area, "…", None, config),
         Some(Thumb::Failed) | None => {
-            draw_placeholder(frame, area, &placeholder_text(entry), config);
+            let kind = FileKind::classify(entry);
+            let icon = glyphs::of(config)
+                .icons
+                .as_ref()
+                .map(|icons| (icons.for_kind(kind), style::color(kind.theme_color(theme))));
+            draw_placeholder(frame, area, &placeholder_text(entry), icon, config);
         }
     }
 
@@ -120,18 +126,46 @@ pub fn render_tile(
     );
 }
 
-fn draw_placeholder(frame: &mut Frame<'_>, area: Rect, text: &str, config: &Config) {
-    if area.height == 0 {
-        return;
+/// Which rows of a picture area of `height` rows a placeholder's icon and text go on, counted from
+/// its top. With no icon the text sits in the middle. With one, the icon and the text under it are
+/// centred as a pair; if only a single row fits, the icon (the better picture) gets it.
+fn placeholder_rows(height: u16, has_icon: bool) -> (Option<u16>, Option<u16>) {
+    match (height, has_icon) {
+        (0, _) => (None, None),
+        (_, false) => (None, Some(height / 2)),
+        (1, true) => (Some(0), None),
+        (_, true) => {
+            let top = (height - 2) / 2;
+            (Some(top), Some(top + 1))
+        }
     }
-    let dim = Style::default().fg(style::color(&config.theme.status_fg));
-    let middle = Rect::new(area.x, area.y + area.height / 2, area.width, 1);
-    frame.render_widget(
-        Paragraph::new(text.to_string())
-            .style(dim)
-            .alignment(Alignment::Center),
-        middle,
-    );
+}
+
+fn draw_placeholder(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    text: &str,
+    icon: Option<(&str, Color)>,
+    config: &Config,
+) {
+    let (icon_row, text_row) = placeholder_rows(area.height, icon.is_some());
+    if let (Some(row), Some((glyph, color))) = (icon_row, icon) {
+        frame.render_widget(
+            Paragraph::new(glyph.to_string())
+                .style(Style::default().fg(color))
+                .alignment(Alignment::Center),
+            Rect::new(area.x, area.y + row, area.width, 1),
+        );
+    }
+    if let Some(row) = text_row {
+        let dim = Style::default().fg(style::color(&config.theme.status_fg));
+        frame.render_widget(
+            Paragraph::new(text.to_string())
+                .style(dim)
+                .alignment(Alignment::Center),
+            Rect::new(area.x, area.y + row, area.width, 1),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +183,95 @@ mod tests {
             modified: None,
             mode: None,
         }
+    }
+
+    #[test]
+    fn the_icon_and_its_text_are_centred_as_a_pair_and_never_leave_the_area() {
+        assert_eq!(placeholder_rows(0, true), (None, None));
+        assert_eq!(placeholder_rows(0, false), (None, None));
+        assert_eq!(
+            placeholder_rows(5, false),
+            (None, Some(2)),
+            "text alone: the middle"
+        );
+        assert_eq!(
+            placeholder_rows(1, true),
+            (Some(0), None),
+            "one row: the icon"
+        );
+        assert_eq!(placeholder_rows(2, true), (Some(0), Some(1)));
+        assert_eq!(placeholder_rows(5, true), (Some(1), Some(2)));
+        for height in 0..40 {
+            for has_icon in [false, true] {
+                let (icon, text) = placeholder_rows(height, has_icon);
+                assert!(icon.is_none_or(|row| row < height));
+                assert!(text.is_none_or(|row| row < height));
+                if let (Some(i), Some(t)) = (icon, text) {
+                    assert!(i < t, "the icon is above its text");
+                }
+            }
+        }
+    }
+
+    fn drawn(config: &Config, entry: &DirEntryInfo) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                let state = TileState {
+                    selected: false,
+                    marked: false,
+                    thumb: None,
+                };
+                render_tile(frame, Rect::new(0, 0, 14, 8), entry, state, config);
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn the_nerd_set_draws_a_folders_icon_in_its_tile_and_other_sets_do_not() {
+        let nerd = Config::from_sources(None, Some("[ui]\nglyphs = \"nerd\"\n"), None);
+        let plain = Config::from_sources(None, None, None);
+        let folder = entry("photos", true);
+        let folder_icon = glyphs::Glyphs::for_set(theming::GlyphSet::Nerd)
+            .icons
+            .as_ref()
+            .unwrap()
+            .dir;
+
+        let with_icons = drawn(&nerd, &folder);
+        assert!(with_icons.contains(folder_icon), "{with_icons}");
+        assert!(with_icons.contains("dir"), "the text stays under the icon");
+        assert!(!drawn(&plain, &folder).contains(folder_icon));
+        assert!(
+            drawn(&plain, &folder).contains("dir"),
+            "the text-only look is unchanged"
+        );
+    }
+
+    #[test]
+    fn a_file_gets_the_icon_of_its_kind() {
+        let nerd = Config::from_sources(None, Some("[ui]\nglyphs = \"nerd\"\n"), None);
+        let icons = glyphs::Glyphs::for_set(theming::GlyphSet::Nerd)
+            .icons
+            .as_ref()
+            .unwrap();
+        let source = drawn(&nerd, &entry("main.rs", false));
+        assert!(
+            source.contains(icons.source) && source.contains("RS"),
+            "{source}"
+        );
+        let archive = drawn(&nerd, &entry("backup.zip", false));
+        assert!(archive.contains(icons.archive) && !archive.contains(icons.source));
     }
 
     #[test]

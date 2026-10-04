@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use browser::search::{Outcome as SearchOutcome, Query};
 use browser::{BrowserState, MovePlan};
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
@@ -50,6 +50,7 @@ use crate::disk_usage::DiskUsageView;
 use crate::extract_popup::{self, ExtractPopup};
 use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
+use crate::line_edit::LineEdit;
 use crate::live_refresh::LiveRefresh;
 use crate::marked_size::{MarkedSize, Total};
 use crate::nav_job::{NavJob, NavPoll};
@@ -120,10 +121,10 @@ pub struct Handover {
 pub enum Prompt {
     RenameInput {
         target: PathBuf,
-        buffer: String,
+        buffer: LineEdit,
     },
     CreateInput {
-        buffer: String,
+        buffer: LineEdit,
     },
     /// Confirms a permanent delete of one or more targets — either the single cursor entry, or
     /// every currently marked path if any are marked (Ranger-style: marks win over the cursor).
@@ -138,17 +139,17 @@ pub enum Prompt {
     Conflict(ConflictSource),
     /// Incremental filename search (`/`). `origin` is where to return to on `Esc`.
     SearchInput {
-        buffer: String,
+        buffer: LineEdit,
         origin: SearchOrigin,
     },
     /// The `:`-command prompt (`:q`, `:cd <path>`, `:mkdir`, `:touch`, or any shell command).
     CommandInput {
-        buffer: String,
+        buffer: LineEdit,
     },
     /// The command typed for the "Open with" menu's "Other…": what should open `path`.
     OpenOther {
         path: PathBuf,
-        buffer: String,
+        buffer: LineEdit,
     },
     /// The password for an encrypted archive about to be extracted, shown as dots. `archive` is
     /// the one being asked about, `error` why the last try was not accepted.
@@ -203,6 +204,26 @@ impl Prompt {
     /// Whether confirming this prompt is destructive (permanent delete, overwrite).
     pub fn is_destructive(&self) -> bool {
         matches!(self, Prompt::ConfirmDelete { .. } | Prompt::Conflict(_))
+    }
+
+    /// [`display`](Self::display) with `glyph` drawn where typing will land: inside the text for a
+    /// line that has a cursor, at the end for a password (whose dots only ever grow).
+    pub fn display_with_cursor(&self, glyph: &str) -> String {
+        match self {
+            Prompt::RenameInput { buffer, .. } => format!("rename: {}", buffer.render(glyph)),
+            Prompt::CreateInput { buffer } => {
+                format!(
+                    "create (end with / for a directory): {}",
+                    buffer.render(glyph)
+                )
+            }
+            Prompt::SearchInput { buffer, .. } => format!("/{}", buffer.render(glyph)),
+            Prompt::CommandInput { buffer } => format!(":{}", buffer.render(glyph)),
+            Prompt::OpenOther { path, buffer } => {
+                format!("open {} with: {}", display_name(path), buffer.render(glyph))
+            }
+            other => format!("{}{glyph}", other.display()),
+        }
     }
 
     pub fn display(&self) -> String {
@@ -569,7 +590,13 @@ impl App {
         self
     }
 
+    #[cfg(test)]
     pub fn status_line(&self) -> String {
+        self.status_line_with(None)
+    }
+
+    /// The status line, with a text prompt's cursor drawn (as `cursor`) where typing will land.
+    pub fn status_line_with(&self, cursor: Option<&str>) -> String {
         if let Some(bulk) = &self.bulk {
             return match &bulk.kind {
                 BulkKind::Delete { targets } | BulkKind::Trash { targets } => {
@@ -610,12 +637,16 @@ impl App {
                 }
             };
         }
+        let shown = |prompt: &Prompt| match cursor {
+            Some(glyph) if prompt.is_text_input() => prompt.display_with_cursor(glyph),
+            _ => prompt.display(),
+        };
         match &self.prompt {
             Some(prompt @ Prompt::SearchInput { .. }) => match self.search_state.note() {
-                Some(note) => format!("{note} {}", prompt.display()),
-                None => prompt.display(),
+                Some(note) => format!("{note} {}", shown(prompt)),
+                None => shown(prompt),
             },
-            Some(prompt) => prompt.display(),
+            Some(prompt) => shown(prompt),
             None => self.status.clone().unwrap_or_default(),
         }
     }
@@ -1085,7 +1116,7 @@ impl App {
             Some(entry) => {
                 self.prompt = Some(Prompt::RenameInput {
                     target: entry.path.clone(),
-                    buffer: entry.name.clone(),
+                    buffer: LineEdit::new(entry.name.clone()),
                 });
             }
             None => self.status = Some("nothing selected".into()),
@@ -1094,14 +1125,14 @@ impl App {
 
     pub fn begin_create(&mut self) {
         self.prompt = Some(Prompt::CreateInput {
-            buffer: String::new(),
+            buffer: LineEdit::default(),
         });
     }
 
     pub fn begin_search(&mut self, browser: &BrowserState) {
         self.end_search();
         self.prompt = Some(Prompt::SearchInput {
-            buffer: String::new(),
+            buffer: LineEdit::default(),
             origin: SearchOrigin {
                 dir: browser.current_dir().to_path_buf(),
                 index: browser.selected_index(),
@@ -1111,7 +1142,7 @@ impl App {
 
     pub fn begin_command(&mut self) {
         self.prompt = Some(Prompt::CommandInput {
-            buffer: String::new(),
+            buffer: LineEdit::default(),
         });
     }
 
@@ -1213,7 +1244,7 @@ impl App {
     pub fn begin_open_other(&mut self, path: PathBuf) {
         self.prompt = Some(Prompt::OpenOther {
             path,
-            buffer: String::new(),
+            buffer: LineEdit::default(),
         });
     }
 
@@ -1280,12 +1311,30 @@ impl App {
 
     /// Routes a raw key to the active prompt. No-op if there is no active prompt. Returns
     /// `ControlFlow::Break` if a `:`-command (`:q`/`:quit`) requested the app exit.
+    #[cfg(test)]
     pub fn handle_prompt_key(
         &mut self,
         code: KeyCode,
         vfs: &dyn Vfs,
         browser: &mut BrowserState,
     ) -> Result<ControlFlow<()>> {
+        self.handle_prompt_event(
+            KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
+            vfs,
+            browser,
+        )
+    }
+
+    /// Feeds one key press to the open prompt. A text prompt edits its line with the whole key
+    /// (arrows, Home/End, Delete and the Ctrl/Alt shortcuts, see `line_edit`); the others look at
+    /// the key code alone.
+    pub fn handle_prompt_event(
+        &mut self,
+        key: KeyEvent,
+        vfs: &dyn Vfs,
+        browser: &mut BrowserState,
+    ) -> Result<ControlFlow<()>> {
+        let code = key.code;
         let Some(prompt) = self.prompt.take() else {
             return Ok(ControlFlow::Continue(()));
         };
@@ -1298,33 +1347,24 @@ impl App {
                     self.status = Some("rename cancelled: empty name".into());
                 }
                 KeyCode::Enter => {
-                    self.finish_rename(vfs, browser, target, buffer, ConflictPolicy::Abort)?;
+                    let name = buffer.to_string();
+                    self.finish_rename(vfs, browser, target, name, ConflictPolicy::Abort)?;
                 }
-                KeyCode::Backspace => {
-                    buffer.pop();
+                _ => {
+                    buffer.edit(key);
                     self.prompt = Some(Prompt::RenameInput { target, buffer });
                 }
-                KeyCode::Char(c) => {
-                    buffer.push(c);
-                    self.prompt = Some(Prompt::RenameInput { target, buffer });
-                }
-                _ => self.prompt = Some(Prompt::RenameInput { target, buffer }),
             },
             Prompt::CreateInput { mut buffer } => match code {
                 KeyCode::Esc => self.status = Some("create cancelled".into()),
                 KeyCode::Enter if buffer.is_empty() => {
                     self.status = Some("create cancelled: empty name".into());
                 }
-                KeyCode::Enter => self.finish_create(vfs, browser, buffer)?,
-                KeyCode::Backspace => {
-                    buffer.pop();
+                KeyCode::Enter => self.finish_create(vfs, browser, buffer.to_string())?,
+                _ => {
+                    buffer.edit(key);
                     self.prompt = Some(Prompt::CreateInput { buffer });
                 }
-                KeyCode::Char(c) => {
-                    buffer.push(c);
-                    self.prompt = Some(Prompt::CreateInput { buffer });
-                }
-                _ => self.prompt = Some(Prompt::CreateInput { buffer }),
             },
             Prompt::ConfirmDelete { targets } => match code {
                 KeyCode::Char('y') => self.spawn_delete(targets),
@@ -1358,17 +1398,13 @@ impl App {
                     }
                     self.end_search();
                 }
-                KeyCode::Backspace => {
-                    buffer.pop();
-                    self.update_search(vfs, browser, &buffer, &origin);
+                _ => {
+                    // Only a change to the text starts a new search; moving the cursor does not.
+                    if buffer.edit(key) {
+                        self.update_search(vfs, browser, &buffer, &origin);
+                    }
                     self.prompt = Some(Prompt::SearchInput { buffer, origin });
                 }
-                KeyCode::Char(c) => {
-                    buffer.push(c);
-                    self.update_search(vfs, browser, &buffer, &origin);
-                    self.prompt = Some(Prompt::SearchInput { buffer, origin });
-                }
-                _ => self.prompt = Some(Prompt::SearchInput { buffer, origin }),
             },
             Prompt::OpenOther { path, mut buffer } => match code {
                 KeyCode::Esc => self.status = Some("open with cancelled".into()),
@@ -1380,15 +1416,10 @@ impl App {
                         self.open_with(browser, &command, &path);
                     }
                 }
-                KeyCode::Backspace => {
-                    buffer.pop();
+                _ => {
+                    buffer.edit(key);
                     self.prompt = Some(Prompt::OpenOther { path, buffer });
                 }
-                KeyCode::Char(c) => {
-                    buffer.push(c);
-                    self.prompt = Some(Prompt::OpenOther { path, buffer });
-                }
-                _ => self.prompt = Some(Prompt::OpenOther { path, buffer }),
             },
             Prompt::CompressPassword {
                 pending,
@@ -1461,15 +1492,10 @@ impl App {
             Prompt::CommandInput { mut buffer } => match code {
                 KeyCode::Esc => self.status = Some("command cancelled".into()),
                 KeyCode::Enter => flow = self.run_command(vfs, browser, &buffer)?,
-                KeyCode::Backspace => {
-                    buffer.pop();
+                _ => {
+                    buffer.edit(key);
                     self.prompt = Some(Prompt::CommandInput { buffer });
                 }
-                KeyCode::Char(c) => {
-                    buffer.push(c);
-                    self.prompt = Some(Prompt::CommandInput { buffer });
-                }
-                _ => self.prompt = Some(Prompt::CommandInput { buffer }),
             },
         }
         Ok(flow)
@@ -3372,6 +3398,87 @@ mod tests {
         assert_eq!(f.browser.current_dir(), f.root.join("sub"));
         assert_eq!(f.app.status.as_deref(), Some("cd sub"));
         assert_eq!(f.flow("quit"), ControlFlow::Break(()));
+    }
+
+    fn press_key(f: &mut Fixture, code: KeyCode, modifiers: crossterm::event::KeyModifiers) {
+        let _ = f
+            .app
+            .handle_prompt_event(KeyEvent::new(code, modifiers), &LocalVfs, &mut f.browser)
+            .unwrap();
+    }
+
+    fn type_text(f: &mut Fixture, text: &str) {
+        for c in text.chars() {
+            press_key(f, KeyCode::Char(c), crossterm::event::KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn a_rename_can_be_fixed_in_the_middle_of_the_name() {
+        use crossterm::event::KeyModifiers as M;
+        let mut f = Fixture::new("edit-rename");
+        std::fs::write(f.root.join("reprot.txt"), b"x").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_rename(&f.browser);
+        // "reprot.txt" -> "report.txt": go back to after "repro", delete "ro", type "or".
+        for _ in 0..5 {
+            press_key(&mut f, KeyCode::Left, M::NONE);
+        }
+        press_key(&mut f, KeyCode::Backspace, M::NONE);
+        press_key(&mut f, KeyCode::Backspace, M::NONE);
+        type_text(&mut f, "or");
+        let shown = f.app.status_line_with(Some("|"));
+        assert_eq!(shown, "rename: repor|t.txt");
+        press_key(&mut f, KeyCode::Enter, M::NONE);
+
+        assert!(f.root.join("report.txt").exists(), "{:?}", f.app.status);
+        assert!(!f.root.join("reprot.txt").exists());
+    }
+
+    #[test]
+    fn the_command_bar_edits_with_home_end_and_control_keys() {
+        use crossterm::event::KeyModifiers as M;
+        let mut f = Fixture::new("edit-command");
+        f.app.begin_command();
+        type_text(&mut f, "mkdir old name");
+        press_key(&mut f, KeyCode::Home, M::NONE);
+        for _ in 0..5 {
+            press_key(&mut f, KeyCode::Right, M::NONE);
+        }
+        assert_eq!(f.app.status_line_with(Some("|")), ":mkdir| old name");
+        press_key(&mut f, KeyCode::Char('k'), M::CONTROL);
+        assert_eq!(f.app.status_line_with(Some("|")), ":mkdir|");
+        type_text(&mut f, " fresh");
+        press_key(&mut f, KeyCode::Char('w'), M::CONTROL);
+        type_text(&mut f, "tidy");
+        press_key(&mut f, KeyCode::Enter, M::NONE);
+        f.wait_for_idle();
+        assert!(f.root.join("tidy").is_dir(), "{:?}", f.app.status);
+    }
+
+    #[test]
+    fn moving_the_cursor_in_a_search_does_not_start_another_search() {
+        use crossterm::event::KeyModifiers as M;
+        let mut f = Fixture::new("edit-search");
+        std::fs::create_dir(f.root.join("alpha")).unwrap();
+        std::fs::create_dir(f.root.join("beta")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        type_text(&mut f, "bet");
+        assert_eq!(
+            f.browser.selected_entry().map(|e| e.name.as_str()),
+            Some("beta")
+        );
+        // Select something else by hand, then only move the cursor: the search must not jump back.
+        f.browser.select_index(0);
+        press_key(&mut f, KeyCode::Left, M::NONE);
+        press_key(&mut f, KeyCode::Home, M::NONE);
+        assert_eq!(f.browser.selected_index(), 0);
+        // Changing the text does search again.
+        press_key(&mut f, KeyCode::Delete, M::NONE);
+        assert_eq!(f.app.status_line_with(Some("|")), "/|et");
     }
 
     #[test]

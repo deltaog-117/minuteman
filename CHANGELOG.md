@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`: modified, accessed and created times are shown in the machine's time zone instead of UTC
+  (Inspect writes the offset, e.g. `+02:00`; the details column title is now `Modified`). `tui`
+  depends on `chrono` directly, already built for the trash crate.
 - `tui`: the filmstrip's strip now shows the same bordered tiles as the grid instead of small
   pictures floating in a tall empty frame, and thumbnails are scaled up to fill their tile instead
   of staying at their native size. A frame with no title (a tile) no longer gets two blank cells in
@@ -58,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `browser`: the folder can be ordered. `,` cycles the order (name, size largest first,
+  modified newest first, permissions) and `<` reverses it, both rebindable as `sort` and
+  `sort_reverse`; in the details view the ordering column's title ends in an arrow and clicking a
+  title orders by it (again to flip). Folders stay first and the cursor stays on its entry. The
+  order lasts for the session. New `browser::sort` (`Sort`, `SortKey`) and `BrowserState::sort`
+  and `set_sort`.
+- `tui`: `PageUp`, `PageDown`, `Home` and `End` jump a screenful or to the first or last entry in
+  the list, details, grid and filmstrip views.
+- `tui`: with the Nerd glyph set the grid and the filmstrip's strip draw a file-type icon on the
+  tiles of folders and of files with no picture.
+- `tui`: the rename, create, `/` search, `:` command and Open with prompts now edit a line with a
+  cursor: Left/Right, Home/End, Delete, `Ctrl`-A/E/B/F/D/W/U/K, `Alt`-B/F and word jumps with
+  `Ctrl`/`Alt`+arrows. A `/` search runs again only when its text changes.
 - `tui`, `browser`: folders open in the background. Entering, leaving, `:cd`, a bookmark jump, a
   breadcrumb click, a click in either column and the menu's Open no longer freeze the interface
   while a slow folder (another machine, a large archive) loads: the old folder stays on screen, the

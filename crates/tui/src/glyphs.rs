@@ -60,6 +60,9 @@ pub struct Glyphs {
     pub track: &'static str,
     /// The text cursor at the end of a prompt.
     pub cursor: &'static str,
+    /// Marks the details column the folder is ordered by: smallest-first and largest-first.
+    pub sort_up: &'static str,
+    pub sort_down: &'static str,
     /// Between status-bar segments that share a background, when arrows aren't used.
     pub divider: &'static str,
     pub gauge_on: &'static str,
@@ -104,6 +107,8 @@ static UNICODE: Glyphs = Glyphs {
     thumb: "█",
     track: "│",
     cursor: "▏",
+    sort_up: "▲",
+    sort_down: "▼",
     divider: "│",
     gauge_on: "▰",
     gauge_off: "▱",
@@ -153,6 +158,8 @@ static ASCII: Glyphs = Glyphs {
     thumb: "#",
     track: "|",
     cursor: "_",
+    sort_up: "^",
+    sort_down: "v",
     divider: "|",
     gauge_on: "#",
     gauge_off: "-",

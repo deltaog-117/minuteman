@@ -38,6 +38,7 @@ mod grid_view;
 mod hud;
 mod image_preview;
 mod inspect;
+mod line_edit;
 mod live_refresh;
 mod marked_size;
 mod mime_type;
@@ -77,6 +78,7 @@ use appearance_popup::{
 };
 use boot_splash::BootSplash;
 use browser::BrowserState;
+use browser::sort::Sort;
 use browser_mouse::{Click, ClickTracker, Hit, Listing, Pane, Select, Wheel};
 use compress_popup::CompressPopup;
 use context_menu::{
@@ -118,7 +120,8 @@ use thumbnails::Thumbnails;
 use vfs_archive::ArchiveVfs;
 use vfs_ssh::RoutedVfs;
 use view_mode::{
-    FilmstripLayout, GridLayout, Step, ViewMode, body_of, browser_layout, details_title_row,
+    FilmstripLayout, GridLayout, Jump, Step, ViewMode, body_of, browser_layout, details_title_row,
+    jump_target, page_size,
 };
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
@@ -1835,6 +1838,24 @@ fn run(
                         None
                     };
                     let pointer = Position::new(mouse.column, mouse.row);
+                    // A click on a column title of the details table picks that column to order
+                    // the folder by (and flips it if it already is).
+                    let sort_click = if view_mode == ViewMode::Details
+                        && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    {
+                        let title = details_title_row(&layout);
+                        let gutter = hud::BASE_GUTTER + glyphs::of(config).icon_width();
+                        let plan = hud::plan_details_columns(
+                            layout.current.width.saturating_sub(2) as usize,
+                            gutter,
+                        );
+                        // The header text starts one cell inside the pane's frame.
+                        (mouse.row == title.y && mouse.column > title.x)
+                            .then(|| usize::from(mouse.column - title.x - 1))
+                            .and_then(|x| hud::header_key_at(&plan, gutter, x))
+                    } else {
+                        None
+                    };
                     // A tile of the grid answers like a row of the list: everything below that
                     // selects, marks, opens or right-clicks a row works on it unchanged.
                     let hit = if view_mode == ViewMode::Grid {
@@ -1857,6 +1878,18 @@ fn run(
                         )
                     };
                     match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if sort_click.is_some() => {
+                            pending_leader = false;
+                            shell_chord = None;
+                            pending_bookmark = None;
+                            clicks.reset();
+                            if let Some(key) = sort_click {
+                                let sort = browser.sort().clicked(key);
+                                browser.set_sort(sort);
+                                app.status = Some(format!("sorted by {}", sort.describe()));
+                            }
+                            continue;
+                        }
                         MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
                             if crumb_dir.is_some() =>
                         {
@@ -2619,7 +2652,7 @@ fn run(
                 }
 
                 if app.prompt.is_some() {
-                    if app.handle_prompt_key(key.code, vfs, browser)?.is_break() {
+                    if app.handle_prompt_event(key, vfs, browser)?.is_break() {
                         return Ok(());
                     }
                     continue;
@@ -2631,6 +2664,33 @@ fn run(
                     } else if config.keys.resolve(key.code) == Some(Action::Cancel) {
                         app.cancel_all(browser);
                     }
+                    continue;
+                }
+
+                // The keys that jump further than a step, the same in every view: a screenful up or
+                // down, or straight to the first or last entry. Fixed rather than bindable, like
+                // the disk usage view's.
+                let jump = match key.code {
+                    KeyCode::PageUp => Some(Jump::PageUp),
+                    KeyCode::PageDown => Some(Jump::PageDown),
+                    KeyCode::Home => Some(Jump::Home),
+                    KeyCode::End => Some(Jump::End),
+                    _ => None,
+                };
+                if let Some(jump) = jump {
+                    let panels = effective_panels(config, &local_panels);
+                    let layout = browser_layout(
+                        terminal.size()?.into(),
+                        panels.columns,
+                        panels.show_hud,
+                        view_mode,
+                    );
+                    browser.select_index(jump_target(
+                        browser.selected_index(),
+                        browser.current_entries().len(),
+                        page_size(view_mode, &layout),
+                        jump,
+                    ));
                     continue;
                 }
 
@@ -2732,6 +2792,23 @@ fn run(
                     }
                     Some(Action::PreviewDown) => previews.text.scroll_half_pages(1),
                     Some(Action::PreviewUp) => previews.text.scroll_half_pages(-1),
+                    Some(Action::Sort) => {
+                        let sort = Sort {
+                            key: browser.sort().key.cycled(),
+                            reversed: false,
+                        };
+                        browser.set_sort(sort);
+                        app.status = Some(format!("sorted by {}", sort.describe()));
+                    }
+                    Some(Action::SortReverse) => {
+                        let current = browser.sort();
+                        let sort = Sort {
+                            reversed: !current.reversed,
+                            ..current
+                        };
+                        browser.set_sort(sort);
+                        app.status = Some(format!("sorted by {}", sort.describe()));
+                    }
                     Some(Action::CycleView) => {
                         view_mode = view_mode.cycled();
                         if !matches!(view_mode, ViewMode::Grid | ViewMode::Filmstrip) {
@@ -3197,7 +3274,8 @@ fn draw(
                 config.styles.columns,
             );
             frame.render_widget(
-                Paragraph::new(hud::details_header(&plan, gutter)).style(dim),
+                Paragraph::new(hud::details_header(&plan, gutter, browser.sort(), glyphs))
+                    .style(dim),
                 Rect::new(row.x + 1, row.y, row.width.saturating_sub(2), row.height),
             );
         }
@@ -3340,11 +3418,8 @@ fn draw(
         hud::render_header(frame, header_row, &header_view(browser, app), config);
     }
 
-    let mut message = app.status_line();
-    if app.prompt.as_ref().is_some_and(|p| p.is_text_input()) {
-        // A visible cursor: prompts only ever append to their buffer.
-        message.push_str(glyphs::of(config).cursor);
-    }
+    // A text prompt shows its cursor where typing will land.
+    let message = app.status_line_with(Some(glyphs::of(config).cursor));
     // Hiding the command bar only suppresses its idle chrome (the mode pill, the selected file's
     // details, the key hints) — a prompt, a busy/leader/resize/move mode or a transient message
     // still renders the bar in full, exactly as when the setting is on. The row itself always

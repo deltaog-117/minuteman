@@ -17,11 +17,13 @@
 //! Miller-column navigation state and logic — no rendering, no I/O beyond the `Vfs` trait.
 
 pub mod search;
+pub mod sort;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use shared::{DirEntryInfo, Vfs, VfsError};
+use sort::Sort;
 
 #[derive(Debug)]
 pub struct BrowserState {
@@ -40,6 +42,8 @@ pub struct BrowserState {
     /// stored, not when it is drawn, so `selected`, `/` search and mouse hit-testing all index
     /// the same list the user sees.
     show_hidden: bool,
+    /// How both listings are ordered; applied whenever one is stored.
+    sort: Sort,
 }
 
 /// A dot-prefixed name is hidden, the Unix convention every shell and file manager shares.
@@ -181,6 +185,7 @@ impl BrowserState {
             marked: HashSet::new(),
             range_anchor: None,
             show_hidden,
+            sort: Sort::default(),
         };
         state.refresh(vfs)?;
         Ok(state)
@@ -298,11 +303,9 @@ impl BrowserState {
     /// Entries of the selected item, if it's a directory — used to render the preview pane.
     pub fn preview_entries(&self, vfs: &dyn Vfs) -> Vec<DirEntryInfo> {
         match self.selected_entry() {
-            Some(entry) if entry.is_dir => filter_hidden(
-                vfs.list_dir(&entry.path).unwrap_or_default(),
-                self.show_hidden,
-                None,
-            ),
+            Some(entry) if entry.is_dir => {
+                self.arrange(vfs.list_dir(&entry.path).unwrap_or_default(), None)
+            }
             _ => Vec::new(),
         }
     }
@@ -430,8 +433,8 @@ impl BrowserState {
         if loaded.from != self.current_dir {
             return false;
         }
-        self.current_entries = filter_hidden(loaded.current, self.show_hidden, None);
-        self.parent_entries = filter_hidden(loaded.parent, self.show_hidden, Some(&loaded.dir));
+        self.current_entries = self.arrange(loaded.current, None);
+        self.parent_entries = self.arrange(loaded.parent, Some(&loaded.dir));
         self.current_dir = loaded.dir;
         self.selected = match loaded.landing {
             Landing::First => 0,
@@ -469,8 +472,8 @@ impl BrowserState {
         if dir != self.current_dir {
             return false;
         }
-        let current = filter_hidden(current, self.show_hidden, None);
-        let parent = filter_hidden(parent, self.show_hidden, Some(&self.current_dir));
+        let current = self.arrange(current, None);
+        let parent = self.arrange(parent, Some(&self.current_dir));
         if current == self.current_entries && parent == self.parent_entries {
             return false;
         }
@@ -500,22 +503,44 @@ impl BrowserState {
     }
 
     fn refresh(&mut self, vfs: &dyn Vfs) -> Result<(), VfsError> {
-        self.current_entries =
-            filter_hidden(vfs.list_dir(&self.current_dir)?, self.show_hidden, None);
+        self.current_entries = self.arrange(vfs.list_dir(&self.current_dir)?, None);
         self.selected = self
             .selected
             .min(self.current_entries.len().saturating_sub(1));
 
         self.parent_entries = match self.current_dir.parent() {
-            Some(parent) => filter_hidden(
+            Some(parent) => self.arrange(
                 vfs.list_dir(parent).unwrap_or_default(),
-                self.show_hidden,
                 Some(&self.current_dir),
             ),
             None => Vec::new(),
         };
 
         Ok(())
+    }
+
+    /// What a listing from the `Vfs` becomes when stored: hidden entries dropped (unless shown),
+    /// then put in the current order.
+    fn arrange(&self, entries: Vec<DirEntryInfo>, keep: Option<&Path>) -> Vec<DirEntryInfo> {
+        let mut entries = filter_hidden(entries, self.show_hidden, keep);
+        self.sort.sort(&mut entries);
+        entries
+    }
+
+    pub fn sort(&self) -> Sort {
+        self.sort
+    }
+
+    /// Re-orders both listings in place, keeping the cursor on the same entry. No folder is read.
+    pub fn set_sort(&mut self, sort: Sort) {
+        if sort == self.sort {
+            return;
+        }
+        let previous = self.selected_path();
+        self.sort = sort;
+        sort.sort(&mut self.current_entries);
+        sort.sort(&mut self.parent_entries);
+        self.reselect(previous);
     }
 }
 
@@ -537,6 +562,92 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub").join("file.txt"), b"hi").unwrap();
         root
+    }
+
+    fn sized_tree(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "minuteman-browser-sort-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("dir")).unwrap();
+        std::fs::write(root.join("small"), b"1").unwrap();
+        std::fs::write(root.join("medium"), vec![0u8; 100]).unwrap();
+        std::fs::write(root.join("large"), vec![0u8; 10_000]).unwrap();
+        root
+    }
+
+    fn names_of(browser: &BrowserState) -> Vec<String> {
+        browser
+            .current_entries()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn changing_the_sort_reorders_in_place_and_keeps_the_cursor_on_its_entry() {
+        let root = sized_tree("keep");
+        let mut browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        assert_eq!(names_of(&browser), ["dir", "large", "medium", "small"]);
+        browser.select_index(
+            browser
+                .current_entries()
+                .iter()
+                .position(|e| e.name == "medium")
+                .unwrap(),
+        );
+
+        browser.set_sort(Sort::default().clicked(sort::SortKey::Size));
+        assert_eq!(names_of(&browser), ["dir", "large", "medium", "small"]);
+        browser.set_sort(
+            Sort::default()
+                .clicked(sort::SortKey::Size)
+                .clicked(sort::SortKey::Size),
+        );
+        assert_eq!(names_of(&browser), ["dir", "small", "medium", "large"]);
+        assert_eq!(
+            browser.selected_entry().map(|e| e.name.as_str()),
+            Some("medium"),
+            "the cursor follows its entry"
+        );
+    }
+
+    #[test]
+    fn the_sort_survives_a_reload_a_move_and_a_background_listing() {
+        let root = sized_tree("survive");
+        let mut browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        let by_size_up = Sort::default()
+            .clicked(sort::SortKey::Size)
+            .clicked(sort::SortKey::Size);
+        browser.set_sort(by_size_up);
+
+        browser.reload(&LocalVfs).unwrap();
+        assert_eq!(names_of(&browser), ["dir", "small", "medium", "large"]);
+
+        std::fs::write(root.join("tiny"), b"").unwrap();
+        let fresh = LocalVfs.list_dir(&root).unwrap();
+        let parent = LocalVfs.list_dir(root.parent().unwrap()).unwrap();
+        assert!(browser.apply_listing(&root, fresh, parent));
+        assert_eq!(
+            names_of(&browser),
+            ["dir", "tiny", "small", "medium", "large"]
+        );
+
+        browser.goto(&LocalVfs, &root.join("dir")).unwrap();
+        browser.leave(&LocalVfs).unwrap();
+        assert_eq!(browser.sort(), by_size_up);
+        assert_eq!(names_of(&browser)[1], "tiny");
+    }
+
+    #[test]
+    fn setting_the_sort_it_already_has_changes_nothing() {
+        let root = sized_tree("same");
+        let mut browser = BrowserState::new(&LocalVfs, root).unwrap();
+        browser.select_index(2);
+        browser.set_sort(Sort::default());
+        assert_eq!(browser.selected_index(), 2);
     }
 
     #[test]

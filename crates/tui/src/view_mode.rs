@@ -106,6 +106,38 @@ pub fn body_of(layout: &BrowserLayout) -> Rect {
     layout.parent.union(layout.current).union(layout.preview)
 }
 
+/// The keys that jump the cursor further than a step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jump {
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+/// Where the cursor goes after `jump` in a listing of `len` entries, a screenful (`page`) at a time.
+/// Never off the listing, and a page key at the edge stays there.
+pub fn jump_target(selected: usize, len: usize, page: usize, jump: Jump) -> usize {
+    let last = len.saturating_sub(1);
+    match jump {
+        Jump::Home => 0,
+        Jump::End => last,
+        Jump::PageUp => selected.saturating_sub(page.max(1)).min(last),
+        Jump::PageDown => selected.saturating_add(page.max(1)).min(last),
+    }
+}
+
+/// How many entries a page key moves: what the current view shows at once — the rows of the list,
+/// the tiles of the grid, the thumbnails of the strip — and at least one.
+pub fn page_size(view: ViewMode, layout: &BrowserLayout) -> usize {
+    let shown = match view {
+        ViewMode::List | ViewMode::Details => usize::from(layout.current.height.saturating_sub(2)),
+        ViewMode::Grid => GridLayout::split(body_of(layout)).capacity(),
+        ViewMode::Filmstrip => FilmstripLayout::split(body_of(layout)).cells.len(),
+    };
+    shown.max(1)
+}
+
 /// The details table's title row: the line just above its list.
 pub fn details_title_row(layout: &BrowserLayout) -> Rect {
     Rect::new(
@@ -348,6 +380,69 @@ impl GridLayout {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn page_keys_move_a_screenful_and_stop_at_the_ends() {
+        use Jump::*;
+        assert_eq!(jump_target(2, 100, 10, PageDown), 12);
+        assert_eq!(jump_target(95, 100, 10, PageDown), 99);
+        assert_eq!(jump_target(99, 100, 10, PageDown), 99, "already at the end");
+        assert_eq!(jump_target(12, 100, 10, PageUp), 2);
+        assert_eq!(jump_target(3, 100, 10, PageUp), 0);
+        assert_eq!(jump_target(0, 100, 10, PageUp), 0);
+        assert_eq!(jump_target(40, 100, 10, Home), 0);
+        assert_eq!(jump_target(40, 100, 10, End), 99);
+        for jump in [PageUp, PageDown, Home, End] {
+            assert_eq!(jump_target(0, 0, 10, jump), 0, "an empty listing");
+            assert_eq!(jump_target(0, 1, 10, jump), 0);
+        }
+        assert_eq!(
+            jump_target(5, 100, 0, PageDown),
+            6,
+            "a page is at least one entry"
+        );
+    }
+
+    #[test]
+    fn a_page_is_what_the_view_shows_at_once() {
+        let area = Rect::new(0, 0, 120, 40);
+        let list = browser_layout(area, ColumnLayout::default(), true, ViewMode::List);
+        assert_eq!(
+            page_size(ViewMode::List, &list),
+            usize::from(list.current.height - 2)
+        );
+        let grid = browser_layout(area, ColumnLayout::default(), true, ViewMode::Grid);
+        assert_eq!(
+            page_size(ViewMode::Grid, &grid),
+            GridLayout::split(body_of(&grid)).capacity()
+        );
+        let tiny = browser_layout(
+            Rect::new(0, 0, 4, 3),
+            ColumnLayout::default(),
+            true,
+            ViewMode::List,
+        );
+        assert!(page_size(ViewMode::List, &tiny) >= 1);
+        for view in [
+            ViewMode::List,
+            ViewMode::Details,
+            ViewMode::Grid,
+            ViewMode::Filmstrip,
+        ] {
+            assert!(page_size(view, &tiny) >= 1);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn a_jump_always_lands_inside_the_listing(
+            selected in 0usize..500, len in 0usize..500, page in 0usize..100, which in 0usize..4,
+        ) {
+            let jump = [Jump::PageUp, Jump::PageDown, Jump::Home, Jump::End][which];
+            let to = jump_target(selected.min(len.saturating_sub(1)), len, page, jump);
+            prop_assert!(to < len.max(1));
+        }
+    }
 
     #[test]
     fn every_view_is_found_again_by_its_label_and_nothing_else_is() {

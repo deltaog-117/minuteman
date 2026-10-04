@@ -73,6 +73,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
 | 2026-10-02 | Filmstrip View | A `V` view cycle with a thumbnail strip drawn from a pool-filled cache of finished protocols (COA B, filmstrip first, grid second), over a grid only (A) and a bigger preview only (C) | ✅ Confirmed |
 | 2026-10-02 | Grid and Details Views | A grid of framed tiles and a flat details table added to the `V` cycle, the filmstrip kept and its strip rebuilt from the same tile (COA A, with the filmstrip kept as asked) | ✅ Confirmed |
+| 2026-10-04 | Sorting, Local Time, Icons, Page Keys, Prompt Editing | Sort kept in `BrowserState` and applied when a listing is stored; `chrono` for local time (A); a shared `LineEdit` for prompts (A) | ✅ Confirmed |
 | 2026-10-04 | Background Folder Moves and Remembered View | A planned-then-applied move loaded on the blocking pool with a 40 ms grace, old folder kept until it arrives (COA A), over an empty target shown at once (B) and a worker-thread browser (C); the view saved in `local.toml` | ✅ Confirmed |
 | 2026-10-04 | Default Theme Source | The terminal's own palette (OSC 4/10/11), mapped with contrast lifting, over a static palette (A) and a palette file (C) | ✅ Confirmed |
 
@@ -5183,6 +5184,69 @@ binary was driven in a PTY through `pyte` with the terminal probe answered in fu
 click, a double-click into a folder and `h` back, an empty folder), details (title row, date, mode,
 size, full width, `j`, a click), the filmstrip's framed tiles, and back to the columns. Not tried: a
 real kitty, photographs rather than test images, or a remote folder.
+
+### Sorting, Local Time, Grid Icons, Page Keys and Prompt Editing
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** Five small gaps that each showed up in daily use: the details table could not be
+sorted, times were in UTC, folder tiles in the grid were text only, there were no page keys, and a
+typo in the middle of a name in a prompt meant deleting everything after it.
+
+| Choice | Options | Verdict |
+|---|---|---|
+| Local time crate | `chrono` (already built for the trash crate) / `jiff` / a direct `localtime_r` | `chrono` (A): nothing new to compile, cross-platform, handles DST and `TZ`; `jiff` adds a tree nothing else uses; `localtime_r` needs `unsafe` and is Unix only |
+| Prompt editing | a `LineEdit` type shared by the prompts / a cursor field in each prompt / only Ctrl-W and Ctrl-U at the end | `LineEdit` (A): one tested editor instead of the logic five times, or less than was asked |
+| Where to sort | when a listing is stored / when it is drawn / in the `Vfs` | when stored: the list the cursor, `/` search and the mouse index is the list on screen, which is why hidden files are already filtered there; sorting at draw time would make every index disagree |
+
+**Sorting.** `browser::sort` holds `SortKey` and `Sort` (a key and a flag). Each key has a natural
+direction: name and permissions run from the start, size and time from the biggest and newest,
+because that is what is looked for. `Sort::descending` is that direction flipped by the flag, so the
+arrow in the header and the comparison use one definition. Folders always come first; a folder's
+size means nothing, so folders order by name under the size key; equal keys fall back to the name so
+nothing shuffles between refreshes. Both listings are sorted, and `set_sort` re-orders them in place
+without reading anything and keeps the cursor on the same entry by path. The header's title is the
+click target: `hud::header_key_at` mirrors the layout of `details_header` so the drawing and the
+hit test cannot disagree. The keys had to be `,` and `<`: `o` and `s`, the obvious picks, are named
+in an existing test as keys deliberately left unbound, and that test is a decision, not a fault.
+
+**Local time.** `inspect::format_in` takes the zone, so the tests use fixed offsets and are the
+same on every machine; `format_time` passes the machine's. The hand-written civil-date code was
+removed with the UTC formatting. Inspect now writes the offset so a time is unambiguous.
+
+**Icons.** The placeholder rows are a pure function, so the icon and its text are centred as a pair
+and a single row gives the icon the space. Tested against a rendered tile for both glyph sets.
+
+**Page keys.** `jump_target` and `page_size` are pure, in `view_mode`. A page is what the view shows:
+the list's rows, the grid's tiles, the strip's thumbnails. They are fixed keys, like the disk usage
+view's.
+
+**Prompt editing.** `LineEdit` is text and a byte cursor kept on a character boundary, with a
+property test that no key sequence can break that. It dereferences to `str`, so the existing reads
+of a prompt's buffer kept working. The prompt handler gained `handle_prompt_event`, which takes the
+whole key event because shortcuts need the modifiers; `handle_prompt_key` remains for the tests.
+`Ctrl`+`Alt` together is how some layouts type AltGr characters, so it still inserts text. The
+cursor is drawn inside the line by `status_line_with`, replacing the glyph that used to be appended
+to the end. The password prompts were left alone.
+
+**Found while testing.** The first key press of a session dismisses the splash and never reaches
+the app, which made several rounds of test output confusing before it was understood. A terminal driver
+that reads the byte stream instead of rendering a screen also misleads, because the interface only
+redraws changed cells; the final checks use a terminal emulator (`pyte`).
+
+**Verification.** `scripts/check` passes, with tests for every sort order and direction, the
+cursor surviving a re-sort, the order surviving a reload, a move and a background listing, the
+header arrows and the click hit test, local time in several zones, the icon rows and a rendered
+tile, the jump targets and page size, and the line editor (including a property test). The real
+binary was driven in a terminal emulator: `,` cycled name, size, modified, mode and back with the
+right messages, `<` reversed, clicking Size, Size again and Modified changed the header arrow,
+the time column read `07:13` under `TZ=Asia/Tokyo` for a file shown as `22:13` in UTC, `PageDown`
+moved 26 rows in a 30-row terminal and `End`/`Home` landed on the last and first entries, and a
+rename typo was fixed with five Left presses and two Backspaces (`reprot.txt` became `report.txt`
+on disk). Not tried: the grid icons in a real Nerd Font terminal, the filmstrip's page key, or
+`Alt`-based shortcuts in a terminal that sends Alt differently.
+
+---
 
 ### Background Folder Moves and a Remembered View (COA A)
 

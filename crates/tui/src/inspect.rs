@@ -27,7 +27,7 @@
 //! machine's ids mean nothing in them.
 //!
 //! Everything that turns numbers into text lives here as plain functions (`mode_string`,
-//! `format_utc`, `group_thousands`) so it can be tested without a terminal.
+//! `format_time`, `group_thousands`) so it can be tested without a terminal.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -159,9 +159,9 @@ impl Inspection {
         if let Some(hard_links) = self.hard_links {
             rows.push(("Links", hard_links.to_string()));
         }
-        rows.push(("Modified", format_utc(self.modified)));
-        rows.push(("Accessed", format_utc(self.accessed)));
-        rows.push(("Created", format_utc(self.created)));
+        rows.push(("Modified", format_time(self.modified)));
+        rows.push(("Accessed", format_time(self.accessed)));
+        rows.push(("Created", format_time(self.created)));
         rows
     }
 
@@ -233,43 +233,29 @@ pub fn mode_string(mode: u32) -> String {
     out
 }
 
-/// `2023-11-14 22:13:20 UTC`, or `—` for a missing or pre-1970 time. UTC because the standard
-/// library has no time zone database and a wrong local time would be worse than a labelled one.
-pub fn format_utc(time: Option<SystemTime>) -> String {
+/// `2023-11-14 22:13:20 +01:00` in this machine's time zone, or `—` for a missing or pre-1970
+/// time. The offset is written out so the time is unambiguous.
+pub fn format_time(time: Option<SystemTime>) -> String {
+    format_in(time, &chrono::Local)
+}
+
+/// [`format_time`] in a chosen zone, so the formatting can be tested without depending on the
+/// zone of the machine running the tests.
+pub fn format_in<Tz>(time: Option<SystemTime>, zone: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
     let Some(secs) = time
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
     else {
         return "—".into();
     };
-    let (year, month, day) = civil_from_days((secs / 86_400) as i64);
-    let rest = secs % 86_400;
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
-}
-
-/// Days since 1970-01-01 to a proleptic Gregorian `(year, month, day)` — Howard Hinnant's
-/// `civil_from_days`, which needs no tables and is exact across leap years and centuries.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    (year, month as u32, day as u32)
+    match zone.timestamp_opt(secs, 0).single() {
+        Some(local) => local.format("%Y-%m-%d %H:%M:%S %:z").to_string(),
+        None => "—".into(),
+    }
 }
 
 /// The name for `id`: looked up in this machine's `passwd`- or `group`-format file when the path
@@ -488,11 +474,43 @@ mod tests {
 
     #[test]
     fn times_are_exact_across_leap_days_and_the_epoch() {
-        assert_eq!(format_utc(at(0)), "1970-01-01 00:00:00 UTC");
-        assert_eq!(format_utc(at(951_782_400)), "2000-02-29 00:00:00 UTC");
-        assert_eq!(format_utc(at(1_700_000_000)), "2023-11-14 22:13:20 UTC");
-        assert_eq!(format_utc(at(4_102_444_799)), "2099-12-31 23:59:59 UTC");
-        assert_eq!(format_utc(None), "—");
+        use chrono::Utc;
+        assert_eq!(format_in(at(0), &Utc), "1970-01-01 00:00:00 +00:00");
+        assert_eq!(
+            format_in(at(951_782_400), &Utc),
+            "2000-02-29 00:00:00 +00:00"
+        );
+        assert_eq!(
+            format_in(at(1_700_000_000), &Utc),
+            "2023-11-14 22:13:20 +00:00"
+        );
+        assert_eq!(
+            format_in(at(4_102_444_799), &Utc),
+            "2099-12-31 23:59:59 +00:00"
+        );
+        assert_eq!(format_in(None, &Utc), "—");
+    }
+
+    #[test]
+    fn a_time_is_shown_in_the_zone_it_is_given_with_its_offset() {
+        let plus_two = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let minus_330 = chrono::FixedOffset::west_opt(3 * 3600 + 1800).unwrap();
+        assert_eq!(
+            format_in(at(1_700_000_000), &plus_two),
+            "2023-11-15 00:13:20 +02:00"
+        );
+        assert_eq!(
+            format_in(at(1_700_000_000), &minus_330),
+            "2023-11-14 18:43:20 -03:30"
+        );
+    }
+
+    #[test]
+    fn local_time_is_the_same_instant_as_utc() {
+        use chrono::{DateTime, Utc};
+        let shown = format_time(at(1_700_000_000));
+        let parsed = DateTime::parse_from_str(&shown, "%Y-%m-%d %H:%M:%S %:z").unwrap();
+        assert_eq!(parsed.with_timezone(&Utc).timestamp(), 1_700_000_000);
     }
 
     #[test]
@@ -643,7 +661,7 @@ mod tests {
         #[test]
         fn later_times_never_sort_before_earlier_ones(a in 0u64..4_000_000_000, b in 0u64..4_000_000_000) {
             let (early, late) = (a.min(b), a.max(b));
-            prop_assert!(format_utc(at(early)) <= format_utc(at(late)));
+            prop_assert!(format_in(at(early), &chrono::Utc) <= format_in(at(late), &chrono::Utc));
         }
 
         #[test]

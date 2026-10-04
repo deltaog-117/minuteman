@@ -78,6 +78,11 @@ pub enum Action {
     /// Switches to the next browser view: the name list, then the filmstrip (the selected file
     /// enlarged with a strip of its neighbours below), and round again.
     CycleView,
+    /// Orders the folder by the next key: name, then size, modified time and permissions, and
+    /// round again. Folders always stay first.
+    Sort,
+    /// Runs the current order the other way round.
+    SortReverse,
     /// Toggles the current entry's mark, Ranger-style: pressed once per file to queue it for a
     /// later bulk action (e.g. `Delete`) instead of acting on it immediately.
     Select,
@@ -128,6 +133,8 @@ pub struct RawKeyMap {
     pub preview_down: Vec<String>,
     pub preview_up: Vec<String>,
     pub cycle_view: Vec<String>,
+    pub sort: Vec<String>,
+    pub sort_reverse: Vec<String>,
     pub disk_usage: Vec<String>,
     pub appearance: Vec<String>,
     pub bookmark_jump: Vec<String>,
@@ -164,6 +171,8 @@ impl Default for RawKeyMap {
             preview_down: vec!["J".into()],
             preview_up: vec!["K".into()],
             cycle_view: vec!["V".into()],
+            sort: vec![",".into()],
+            sort_reverse: vec!["<".into()],
             disk_usage: vec!["u".into()],
             appearance: vec!["a".into()],
             // `B` ("Bookmark") stands in for Ranger's own `m`, which `cut` used to hold.
@@ -234,6 +243,8 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.preview_down, Action::PreviewDown);
         bind_all(&raw.preview_up, Action::PreviewUp);
         bind_all(&raw.cycle_view, Action::CycleView);
+        bind_all(&raw.sort, Action::Sort);
+        bind_all(&raw.sort_reverse, Action::SortReverse);
         bind_all(&raw.disk_usage, Action::DiskUsage);
         bind_all(&raw.appearance, Action::Appearance);
         bind_all(&raw.bookmark_jump, Action::BookmarkJump);
@@ -318,6 +329,11 @@ mod tests {
         );
         assert_eq!(keymap.resolve(KeyCode::Char('K')), Some(Action::PreviewUp));
         assert_eq!(keymap.resolve(KeyCode::Char('V')), Some(Action::CycleView));
+        assert_eq!(keymap.resolve(KeyCode::Char(',')), Some(Action::Sort));
+        assert_eq!(
+            keymap.resolve(KeyCode::Char('<')),
+            Some(Action::SortReverse)
+        );
         // `v` marks and `V` switches view: the two must stay distinct, like `q` and `Q`.
         assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));
         assert_eq!(keymap.resolve(KeyCode::Char('u')), Some(Action::DiskUsage));

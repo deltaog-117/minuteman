@@ -136,6 +136,8 @@ named `init` must be passed as `./init`.
 | `/`         | search — jump to the nearest entry whose name contains what you type, in this directory or any below it (`Enter` stays, `Esc` goes back) |
 | `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory (`:cd ssh://[user@]host[:port][/path]` for one on another machine, over your own `ssh` setup; connect once with `ssh host` first so the host key is trusted), `:mkdir [-p] <name>...`, `:touch <name>...`, `:extract` (marked or selected `.zip`/`.tar`/`.tar.gz` into a directory named after each), `:compress [-p] <name.zip|.tar|.tar.gz>` (marked or selected entries into one archive, `-p` asks for a password for a zip, and an existing archive asks overwrite / skip / abort; or right-click an entry and choose *Compress…* for a form with name, save-in folder, format, level, an optional password (zip only, AES-256; file names stay visible) and options; right-click an archive and choose *Extract…* for a form with the destination folder (an encrypted zip asks for its password first), what to do with existing files and whether to delete the archive); an editor or other full-screen program (`:nvim ROADMAP.md`, or any command after a `!`, as in `:!python3`) gets the whole terminal until it exits; anything else runs in `sh` in the current directory (`Esc` cancels) |
 | `c`         | cancel everything pending — the yank/cut clipboard, every mark, and a running copy/move/command — from any directory |
+| `,` / `<`   | order the folder by the next key — name, size (largest first), modified (newest first), permissions — / run the order the other way round; in the details view, click a column title to order by it (click again to flip) |
+| `PageUp` / `PageDown` / `Home` / `End` | jump a screenful up or down, or to the first or last entry (in any view) |
 | `.`         | show or hide dot-files (hidden by default; `show_hidden = true` in `config.toml` starts them shown) |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
 | `space`     | leader — commands for the mini-shell panes (below); inert with no shell open |
@@ -172,7 +174,7 @@ opens a submenu, `←`/`h` closes it, `Enter` chooses and `Esc` closes. Cut, Cop
 on every marked entry when the clicked one is marked, and only on the clicked entry otherwise.
 
 **Inspect** opens a panel with the name, location, type, size (exact and on disk), permissions,
-owner and group, link count and the modified, accessed and created times (UTC). For a folder it
+owner and group, link count and the modified, accessed and created times (in your time zone). For a folder it
 also counts the files, subfolders and total size below it, in the background. `Esc`, `Enter` or a
 click closes it. Owner, on-disk size and link count come from the local filesystem only.
 
