@@ -1310,6 +1310,16 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   the search began. Chosen as COA A (nearest level first, ranked within it) over ranking across the
   whole walk with a depth penalty (B, always scans up to the cap so answers are slower and move
   while typing) and a matcher crate (C, a new dependency that is not available offline).
+- ✅ **Instant start** – measured with a terminal that answers every query the way kitty does:
+  the first frame is drawn about 14 ms after the process starts, so the wait people felt was the
+  900 ms boot splash, plus the splash swallowing the first key pressed. `boot_splash` now defaults
+  to off, and with it on the browser is drawn underneath from the first frame and a key press goes
+  on to do its job after dismissing the splash (a click only dismisses it, since it would land on a
+  row hidden behind). Not changed, and the next place to look: a terminal that does not answer
+  the startup queries (some tmux and ssh setups) costs 2 s for each query left unanswered (4.3 s in
+  a test with a silent terminal), because the keyboard query and the graphics probe each wait for
+  their timeout; cutting both to a few hundred milliseconds would fix that at the risk of a slow
+  terminal missing its image support.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1550,7 +1560,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    Then: press `Alt+n` to open a shell, then `Alt+n` again to split it — the new pane's border fades in from
    the dim frame color while the one that just lost focus fades back out, instead of either one
    snapping instantly; `Alt+z`/`x`/`c`/`v` moves focus between panes with the same fade each time.
-   Then: on launch, a brief splash names the app over the browser — press any key to
+   Then: with `boot_splash = true`, a brief splash names the app over the browser — press any key to
    skip it, or just wait under a second. The current (middle) pane's border and title now sweep
    through a gradient between two theme colors instead of one flat shade. Select a longer text
    file and watch it stream in from the top instead of appearing all at once (scroll it, or wait —

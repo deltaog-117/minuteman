@@ -417,7 +417,7 @@ impl Config {
             git_status: config.git_status.unwrap_or(true),
             show_hidden: config.show_hidden.unwrap_or(false),
             view: local.view.clone().or(config.view),
-            boot_splash: config.boot_splash.unwrap_or(true),
+            boot_splash: config.boot_splash.unwrap_or(false),
             gradient_borders: config.gradient_borders.unwrap_or(true),
             typewriter_preview: config.typewriter_preview.unwrap_or(true),
             system_hud: config.system_hud.unwrap_or(false),
@@ -549,7 +549,7 @@ mod tests {
         assert_eq!(raw.mouse_range_modifier.as_deref(), Some("either"));
         assert_eq!(raw.git_status, Some(true));
         assert_eq!(raw.show_hidden, Some(false));
-        assert_eq!(raw.boot_splash, Some(true));
+        assert_eq!(raw.boot_splash, Some(false));
         assert_eq!(raw.gradient_borders, Some(true));
         assert_eq!(raw.typewriter_preview, Some(true));
         assert_eq!(raw.system_hud, Some(false));
@@ -629,9 +629,10 @@ mod tests {
     }
 
     #[test]
-    fn boot_splash_defaults_on_and_can_be_switched_off() {
-        assert!(Config::from_sources(None, None, None).boot_splash);
+    fn boot_splash_defaults_off_and_can_be_switched_on() {
+        assert!(!Config::from_sources(None, None, None).boot_splash);
         assert!(!Config::from_sources(Some("boot_splash = false\n"), None, None).boot_splash);
+        assert!(Config::from_sources(Some("boot_splash = true\n"), None, None).boot_splash);
     }
 
     #[test]

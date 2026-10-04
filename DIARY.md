@@ -73,6 +73,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
 | 2026-10-02 | Filmstrip View | A `V` view cycle with a thumbnail strip drawn from a pool-filled cache of finished protocols (COA B, filmstrip first, grid second), over a grid only (A) and a bigger preview only (C) | ✅ Confirmed |
 | 2026-10-02 | Grid and Details Views | A grid of framed tiles and a flat details table added to the `V` cycle, the filmstrip kept and its strip rebuilt from the same tile (COA A, with the filmstrip kept as asked) | ✅ Confirmed |
+| 2026-10-04 | Instant Start | Splash off by default; with it on the browser is drawn underneath and a key passes through | ✅ Confirmed |
 | 2026-10-04 | Fuzzy Search | Own subsequence scorer; nearest level first, best matches within it, top 20 to step through (COA A), over ranking the whole walk (B) and a matcher crate (C) | ✅ Confirmed |
 | 2026-10-04 | Sorting, Local Time, Icons, Page Keys, Prompt Editing | Sort kept in `BrowserState` and applied when a listing is stored; `chrono` for local time (A); a shared `LineEdit` for prompts (A) | ✅ Confirmed |
 | 2026-10-04 | Background Folder Moves and Remembered View | A planned-then-applied move loaded on the blocking pool with a 40 ms grace, old folder kept until it arrives (COA A), over an empty target shown at once (B) and a worker-thread browser (C); the view saved in `local.toml` | ✅ Confirmed |
@@ -5185,6 +5186,38 @@ binary was driven in a PTY through `pyte` with the terminal probe answered in fu
 click, a double-click into a folder and `h` back, an empty folder), details (title row, date, mode,
 size, full width, `j`, a click), the filmstrip's framed tiles, and back to the columns. Not tried: a
 real kitty, photographs rather than test images, or a remote folder.
+
+### Instant Start: Splash Off by Default, Keys Pass Through
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** "It opens a little slowly, less than Ranger, but still some time." Nothing was measured,
+so the first step was to measure.
+
+**Measurement.** A terminal emulator driven through a pseudo-terminal, answering the startup
+queries as kitty does (font size, graphics support, colors, the status request), timed from the
+process start. The first frame is drawn after about 14 ms. The 900 ms boot splash was the delay, and
+because its first key press only dismissed it, a key typed at launch was lost as well. A first
+measurement showed 2.3 s because my fake terminal left one query (the status request that ends the
+graphics probe) unanswered, so the library waited out its 2 s timeout; that is a fault of the
+measurement, but it also shows what a terminal that ignores the queries costs.
+
+**Choice.** The user chose to turn the splash off by default and draw the browser at once. The
+browser was already drawn underneath the splash, since it is an overlay, so "at once" is what the
+default now gives; with the splash switched on, a key press goes on to be handled after it
+dismisses the splash, and a click only dismisses it because it would land on a row hidden behind
+the box.
+
+**Not done.** Cutting the 2 s waits for a terminal that never answers (the keyboard query and the
+graphics probe), offered as COA C and not chosen. It is in the roadmap as the next place to look.
+
+**Verification.** `scripts/check` passes, with the default and the shipped example both read as off.
+The real binary was driven through the same emulator: with no config the first key press changed the
+view at once, with `boot_splash = true` the splash was on screen at 0.3 s with the file list drawn
+around it, a key press was both dismissing it and handled (the view changed), and a click dismissed
+it without moving the cursor. Not tried: inside tmux, or a real kitty.
+
+---
 
 ### Fuzzy Search: A Scorer of Our Own, Nearest Level First (COA A)
 

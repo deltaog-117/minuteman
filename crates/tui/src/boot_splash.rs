@@ -15,9 +15,11 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! A brief, dismissible splash drawn over the browser before the first real keystroke — the
-//! cinematic layer's boot flourish. `main` owns the one `BootSplash` for the whole time it's up:
-//! any key or mouse event dismisses it immediately (checked ahead of everything else `run`'s
-//! event loop does), and it also clears itself once [`DURATION`] has passed with no input at all.
+//! cinematic layer's boot flourish, off by default. `main` owns the one `BootSplash` for the whole
+//! time it's up: any key or mouse event dismisses it immediately (checked ahead of everything else
+//! `run`'s event loop does; a key is then handled as usual, a click only dismisses), and it also
+//! clears itself once [`DURATION`] has passed with no input at all. The browser is drawn
+//! underneath from the first frame.
 
 use std::time::{Duration, Instant};
 

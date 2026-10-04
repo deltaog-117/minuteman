@@ -1450,13 +1450,14 @@ fn run(
         }
 
         let event = event::read()?;
-        // Any key or click dismisses the boot splash outright, ahead of every other handler
-        // below — including a resize, so a terminal maximized right at startup doesn't leave a
-        // stale splash rect on screen. It never also drives the browser, the same first-keystroke
-        // convention as the disk usage/Inspect/menu modals just below.
+        // Any event dismisses the boot splash outright, ahead of every other handler below —
+        // including a resize, so a terminal maximized right at startup doesn't leave a stale
+        // splash rect on screen. A key goes on to do its job, so typing at launch is never lost
+        // to the splash; a click would land on whatever sits hidden behind it, so it only
+        // dismisses.
         if boot_splash.is_some() {
             boot_splash = None;
-            if !matches!(event, Event::Resize(..)) {
+            if matches!(event, Event::Mouse(_)) {
                 continue;
             }
         }

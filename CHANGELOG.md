@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`, `theming`: the startup splash is now off by default (`boot_splash = false`), so the
+  browser is there the moment it starts instead of after a 900 ms splash. With it switched on, the
+  browser is already drawn underneath, and a key press that dismisses the splash is now also handled
+  as usual instead of being swallowed (a mouse click still only dismisses it).
 - `browser`: `BrowserState::find_match` uses the same fuzzy ranking as the `/` search.
 - `tui`: modified, accessed and created times are shown in the machine's time zone instead of UTC
   (Inspect writes the offset, e.g. `+02:00`; the details column title is now `Modified`). `tui`

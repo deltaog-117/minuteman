@@ -43,9 +43,11 @@ show_hidden = false
 # this line once you have used `V`). Leave it out to start on the name list.
 # view = "list"
 
-# A brief splash screen before the browser on startup, dismissed by the first keypress or mouse
-# click, or after under a second on its own. Set this to false to skip straight to the browser.
-boot_splash = true
+# A brief splash drawn over the browser on startup, for the sake of the look. Off by default, so the
+# browser is simply there the moment it starts. When on, the browser is already drawn underneath;
+# a key press dismisses the splash and is also handled as usual (a mouse click only dismisses it,
+# since it would land on a row hidden behind it), and it clears itself after under a second.
+boot_splash = false
 
 # Paints the focused pane's border and title as a gradient (from the theme's accent color to its
 # focused-border color) instead of one flat color. Falls back to the flat look on its own on a
