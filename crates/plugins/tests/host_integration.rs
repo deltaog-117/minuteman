@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
-use plugins::{PluginManager, Triggers};
+use plugins::{PluginManager, StateSnapshot, Triggers};
 
 fn scratch_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -229,6 +229,107 @@ fn a_declared_colon_command_and_plugin_by_name_reach_the_python_plugin() {
     wait_for_log(&mut manager, "created new.txt");
     assert!(dir.join("new.txt").exists());
     assert!(!manager.dispatch_named("no-such-plugin", Vec::new(), &dir, &[]));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn get_state_returns_what_the_host_last_published() {
+    let dir = scratch_dir("get-state");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    manager
+        .spawn(
+            runtime.handle(),
+            "fixture",
+            FIXTURE,
+            &[],
+            Triggers {
+                keys: vec![KeyCode::Char('b')],
+                commands: Vec::new(),
+            },
+            &dir,
+        )
+        .unwrap();
+    manager.publish_state(StateSnapshot {
+        cwd: dir.clone(),
+        cursor: Some(dir.join("picked.txt")),
+        ..StateSnapshot::default()
+    });
+
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    let seen = wait_for_log(&mut manager, "cursor: ");
+    assert!(
+        seen.iter()
+            .any(|m| m == &format!("cursor: {}", dir.join("picked.txt").display())),
+        "the plugin did not see the published cursor; saw {seen:?}"
+    );
+
+    manager.publish_state(StateSnapshot {
+        cwd: dir.clone(),
+        cursor: None,
+        ..StateSnapshot::default()
+    });
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    wait_for_log(&mut manager, "cursor: none");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn before_anything_is_published_get_state_still_names_the_start_directory() {
+    let dir = scratch_dir("get-state-early");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    manager
+        .spawn(
+            runtime.handle(),
+            "fixture",
+            FIXTURE,
+            &[],
+            Triggers {
+                keys: vec![KeyCode::Char('b')],
+                commands: Vec::new(),
+            },
+            &dir,
+        )
+        .unwrap();
+
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    wait_for_log(&mut manager, "cursor: none");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_python_plugin_reads_the_browser_state_with_get_state() {
+    if !has_python() {
+        return;
+    }
+    let dir = scratch_dir("python-state");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_python_example(&runtime, &mut manager, &dir);
+    wait_for_log(&mut manager, "ready");
+    manager.publish_state(StateSnapshot {
+        cwd: dir.clone(),
+        cursor: Some(dir.join("a.txt")),
+        marks: vec![dir.join("a.txt"), dir.join("b.txt")],
+        sort: "size".into(),
+        view: "grid".into(),
+        ..StateSnapshot::default()
+    });
+
+    assert!(manager.dispatch_named("dir-stats", vec!["state".into()], &dir, &[]));
+    let seen = wait_for_log(&mut manager, "state: ");
+    let line = seen.iter().find(|m| m.starts_with("state: ")).unwrap();
+    assert!(
+        line.contains("cursor=a.txt")
+            && line.contains("marks=2")
+            && line.contains("sort=size")
+            && line.contains("view=grid"),
+        "unexpected state line: {line}"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

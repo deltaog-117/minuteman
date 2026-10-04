@@ -29,6 +29,8 @@ Wire it up in config.toml:
 Then `i` (or `I`, or `:stats`) shows how many files and folders the browsed directory holds and
 how many bytes the files add up to, and `:plugin dir-stats touch notes.txt` creates a file there,
 which shows a plugin doing real work through the host and not just reading.
+`:plugin dir-stats state` asks the host for the browser's state with `get_state` and shows the
+entry under the cursor, how many entries are marked and the sort and view.
 
 The protocol is one JSON object per line on stdin/stdout (see the `plugins` crate). The host
 sends `event` notifications (`init` once, `key` and `command` as they happen); this program sends
@@ -37,6 +39,7 @@ back `log` notifications, which the status bar shows, and requests such as `read
 """
 
 import json
+import os
 import sys
 from collections import deque
 
@@ -88,11 +91,19 @@ def on_command(params):
     args = params.get("args", [])
     if command == "stats":
         log("info", stats(params))
+    elif command == "plugin" and args == ["state"]:
+        state = request("get_state", {})
+        cursor = os.path.basename(state["cursor"]) if state["cursor"] else "none"
+        log(
+            "info",
+            f"state: cursor={cursor} marks={len(state['marks'])} sort={state['sort']} "
+            f"view={state['view']} cwd={state['cwd']}",
+        )
     elif command == "plugin" and args[:1] == ["touch"] and len(args) == 2:
         request("create_file", {"path": f"{params['cwd']}/{args[1]}"})
         log("info", f"created {args[1]}")
     else:
-        log("warn", "try :stats or :plugin dir-stats touch NAME")
+        log("warn", "try :stats, :plugin dir-stats state or :plugin dir-stats touch NAME")
 
 
 def handle(message):

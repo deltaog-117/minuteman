@@ -126,7 +126,8 @@ interactive_commands = [
 # JSON-RPC protocol over their own stdin/stdout (see the `plugins` crate). Any language that can
 # read a line and print one works — no compile step, no per-language bindings — and a plugin
 # reaches the same read_dir/copy/mv/delete/create_dir/create_file/touch/rename operations the
-# built-in keys use, not a bolted-on subset of them. A plugin can be started three ways:
+# built-in keys use, not a bolted-on subset of them. It can also send `get_state` at any time to
+# read the cwd, cursor, marks, sort and view as of the last tick. A plugin can be started three ways:
 #   - `on_key`: one key string or a list of them (`on_key = ["b", "B"]`), in the same key-string
 #     grammar as [keys] below. A key a built-in already uses stays the built-in's; rebind the
 #     built-in in [keys] first. The `key` event says which key fired.

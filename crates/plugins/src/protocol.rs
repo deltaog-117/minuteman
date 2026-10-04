@@ -21,7 +21,8 @@
 //!   happened (`init`, sent once right after the process starts, or `key`, sent when the
 //!   plugin's configured key is pressed) plus the current directory and selection.
 //! - plugin -> host: a request with an `id` (`read_dir`, `copy`, `mv`, `delete`, `create_dir`,
-//!   `create_file`, `touch`, `rename` — the same `file_ops` orchestration the built-in keys use)
+//!   `create_file`, `touch`, `rename` — the same `file_ops` orchestration the built-in keys use —
+//!   and `get_state`, which asks for the browser's cwd, cursor, marks and view settings)
 //!   gets exactly one reply line carrying that same `id`; a `log` notification (no `id`) is
 //!   fire-and-forget and surfaces as the status bar message.
 //!
@@ -121,6 +122,27 @@ impl HostEvent {
     }
 }
 
+/// What a `get_state` reply carries: the browser as the user sees it, as of the last render tick.
+/// Published by the host on a `watch` channel each tick (see `PluginManager::publish_state`), so
+/// answering a request never touches the render thread, and a plugin that asks twice in one tick
+/// gets the same answer twice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StateSnapshot {
+    /// The directory being browsed.
+    pub cwd: PathBuf,
+    /// The entry under the cursor, or `null` for an empty directory.
+    pub cursor: Option<PathBuf>,
+    /// Every `v` mark, in no particular order. Marks are the only selection, so this is what a
+    /// built-in bulk action would act on.
+    pub marks: Vec<PathBuf>,
+    pub show_hidden: bool,
+    /// The sort key's name (`"name"`, `"size"`, `"modified"` or `"mode"`).
+    pub sort: String,
+    pub sort_reversed: bool,
+    /// The view's name (`"list"`, `"grid"`, `"details"` or `"filmstrip"`).
+    pub view: String,
+}
+
 /// What to do when a `copy`/`mv`/`rename` request's destination already exists — the wire form of
 /// `file_ops::ConflictPolicy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -149,6 +171,8 @@ fn default_policy() -> ConflictPolicyWire {
 /// `file_ops` orchestration the built-in keys use, not a bolted-on subset of it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PluginRequest {
+    /// Asks for the latest `StateSnapshot`; takes no parameters.
+    GetState,
     ReadDir {
         path: PathBuf,
     },
@@ -208,6 +232,7 @@ impl PluginRequest {
     fn parse(method: &str, params: Value) -> Result<Self, String> {
         let bad = |e: serde_json::Error| format!("invalid params for '{method}': {e}");
         match method {
+            "get_state" => Ok(Self::GetState),
             "read_dir" => Ok(Self::ReadDir {
                 path: serde_json::from_value::<PathParams>(params)
                     .map_err(bad)?
@@ -473,6 +498,51 @@ mod tests {
             }
             other => panic!("expected a read_dir request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_get_state_request_needs_no_params() {
+        for line in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"get_state"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"get_state","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"get_state","params":null}"#,
+        ] {
+            match parse_line(line).unwrap() {
+                Incoming::Request {
+                    request: PluginRequest::GetState,
+                    ..
+                } => {}
+                other => panic!("expected a get_state request for {line}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_state_snapshot_serializes_to_the_documented_shape() {
+        let snapshot = StateSnapshot {
+            cwd: PathBuf::from("/home/x"),
+            cursor: Some(PathBuf::from("/home/x/a.txt")),
+            marks: vec![PathBuf::from("/home/x/b.txt")],
+            show_hidden: true,
+            sort: "size".into(),
+            sort_reversed: true,
+            view: "grid".into(),
+        };
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["cwd"], "/home/x");
+        assert_eq!(value["cursor"], "/home/x/a.txt");
+        assert_eq!(value["marks"], serde_json::json!(["/home/x/b.txt"]));
+        assert_eq!(value["show_hidden"], true);
+        assert_eq!(value["sort"], "size");
+        assert_eq!(value["sort_reversed"], true);
+        assert_eq!(value["view"], "grid");
+    }
+
+    #[test]
+    fn an_empty_directory_has_a_null_cursor() {
+        let value = serde_json::to_value(StateSnapshot::default()).unwrap();
+        assert!(value["cursor"].is_null());
+        assert_eq!(value["marks"], serde_json::json!([]));
     }
 
     #[test]

@@ -81,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields are additive, so `API_VERSION` stays 1. `PluginManager::spawn` takes a `Triggers` value
   (keys and commands) instead of one optional key, and `PluginSpec.on_key` became `on_keys`.
   `:plugin` with an unknown name says so and lists the running plugins.
+- `plugins`, `tui`: a plugin can send a `get_state` request at any time and get back the browser's
+  `cwd`, `cursor`, `marks`, `show_hidden`, `sort`, `sort_reversed` and `view`. The interface
+  publishes the state once per tick (only while a plugin is running) and a plugin's reader answers
+  from the latest value, so a request never waits on the render thread and can be up to one tick
+  old; before the first tick it still names the start directory. Additive, so `API_VERSION` stays
+  1. New `StateSnapshot` and `PluginManager::publish_state`/`is_empty`; `App::poll_plugins` now
+  takes the browser and the view's name. `dir_stats.py` gained `:plugin dir-stats state`.
 - `examples/plugins/dir_stats.py`: a dependency-free Python reference plugin (key, `:` command and
   `:plugin` use, `read_dir` and `create_file` requests, replies matched by `id`), run end to end by
   the `plugins` integration tests with a real `python3` (skipped, with a note, when absent).

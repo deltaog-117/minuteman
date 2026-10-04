@@ -1303,7 +1303,7 @@ fn run(
             previews.reload(&config.preview_hooks);
         }
         app.poll_hud(browser, Instant::now());
-        app.poll_plugins();
+        app.poll_plugins(browser, view_mode.label());
         // While the trash browser is open the preview follows its cursor, not the browser's.
         match trash_view.as_ref() {
             Some(view) => previews.update(view.preview_subject().as_ref(), &config.preview_hooks),

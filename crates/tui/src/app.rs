@@ -37,7 +37,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
-use plugins::{PluginManager, Triggers};
+use plugins::{PluginManager, StateSnapshot, Triggers};
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
 use theming::{OpenRule, OpenWith, PluginSpec};
@@ -777,8 +777,22 @@ impl App {
     }
 
     /// Surfaces every plugin's pending `log` line as the status message (last one wins, the same
-    /// way every other status write already behaves). Call once per render tick.
-    pub fn poll_plugins(&mut self) {
+    /// way every other status write already behaves), and publishes the browser's state for
+    /// plugins to read with `get_state`; `view` is the view's name, which lives outside `App`.
+    /// Call once per render tick.
+    pub fn poll_plugins(&mut self, browser: &BrowserState, view: &str) {
+        if !self.plugins.is_empty() {
+            let sort = browser.sort();
+            self.plugins.publish_state(StateSnapshot {
+                cwd: browser.current_dir().to_path_buf(),
+                cursor: browser.selected_entry().map(|entry| entry.path.clone()),
+                marks: browser.marked_paths(),
+                show_hidden: browser.show_hidden(),
+                sort: sort.key.label().to_string(),
+                sort_reversed: sort.reversed,
+                view: view.to_string(),
+            });
+        }
         for message in self.plugins.poll() {
             self.status = Some(format!("[{}] {}", message.plugin, message.message));
         }

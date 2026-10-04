@@ -5576,6 +5576,49 @@ binary was run in a PTY (a fresh config folder, `pyte` to read the screen): both
 behaved. The first keystroke after startup was sometimes lost in that harness, for a plain `j` as
 well, which fits the terminal-probe artifact already noted in this log; not a plugin matter.
 
+### Plugin `get_state`: A Published Snapshot (COA A)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** A plugin only knew the directory and selection that rode along on the event that woke
+it, so a long-running plugin could not ask where the user was now. The state lives in `App` and
+`BrowserState` on the render thread, while a plugin's requests are read by tokio tasks, so the
+question was how a reply gets from one to the other.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Publish a snapshot on a `watch` channel each tick; the reader answers from it | Chosen |
+| B | The reader asks the render thread through a oneshot and `poll` answers it | Rejected |
+| C | Return the state cached from the last event sent to that plugin | Rejected |
+
+**Why A.** B is exact only to the tick it is answered in, so it is no fresher than a snapshot
+taken at the end of the previous one, and it makes the plugin wait whenever the loop is busy or a
+modal view owns it. C is stale by construction for the plugin that most needs the call. A also
+builds the channel the throttled `dir_changed` and `selection_changed` events need next.
+
+**Design.** `StateSnapshot` is a plain serializable value in `protocol`. `PluginManager` owns the
+`watch::Sender`, each reader holds a `Receiver`, and `publish_state` uses `send_if_modified` so an
+unchanged state wakes nobody and clones nothing. `App::poll_plugins` builds the snapshot only when
+`PluginManager::is_empty` is false, so a session without plugins pays nothing. `get_state` is
+answered inside `read_loop` and never reaches `execute` on the blocking pool; `execute` keeps an
+error arm for it so the match stays exhaustive without a panic. `spawn` seeds an empty snapshot
+with the start directory, so a plugin that asks while handling `init` gets a real answer. The view
+mode lives in `main`'s loop, not in `App`, so its name is passed into `poll_plugins` rather than
+moving the state.
+
+**Trade-offs.** The reply can be one tick old, and the marks list is cloned each tick a change is
+possible, which is cheap against a 100 ms tick but would matter with tens of thousands of marks.
+The snapshot has no event for "changed" yet; a plugin has to ask.
+
+**Verification.** `scripts/check` passes. New tests cover parsing `get_state` with no, empty and
+null params, the snapshot's JSON shape and null cursor, `publish_state` reporting a change only
+once, and three end-to-end tests: the Rust fixture sees a published cursor and then `none` after a
+republish, the fixture sees the start directory before anything is published, and the Python
+plugin reads cursor, marks, sort and view. The real binary was run in a PTY (a fresh config
+folder, `pyte` for the screen, the harness answering the terminal probes including `ESC[5n`):
+with two entries marked, `:plugin dir-stats state` showed `cursor=alpha.txt marks=2 sort=name
+view=list`. The status line cuts a long message, so the example puts the short fields first.
+
 ---
 
 ## 🧠 Usage Guidelines

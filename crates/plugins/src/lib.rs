@@ -27,4 +27,4 @@ pub mod protocol;
 
 pub use error::PluginError;
 pub use host::{LogMessage, PluginManager, Triggers};
-pub use protocol::{API_VERSION, LogLevel};
+pub use protocol::{API_VERSION, LogLevel, StateSnapshot};

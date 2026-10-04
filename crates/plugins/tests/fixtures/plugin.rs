@@ -22,7 +22,8 @@
 //!
 //! On `init` it logs "ready". On `key` it reads the directory it was told is the cwd, logs how
 //! many entries it found, asks the host to create a marker file next to the first selected path
-//! (proving a plugin reaches real file operations, not just read-only queries), and logs "done".
+//! (proving a plugin reaches real file operations, not just read-only queries), asks for the
+//! browser state with `get_state` and logs its cursor, and logs "done".
 
 use std::io::{self, BufRead, Write};
 
@@ -104,6 +105,14 @@ fn handle_key(
             },
         );
     }
+
+    let state = send_request(stdout, lines, next_id, "get_state", serde_json::json!({}));
+    let cursor = state
+        .as_ref()
+        .ok()
+        .and_then(|v| v["cursor"].as_str())
+        .unwrap_or("none");
+    send_log(stdout, "info", &format!("cursor: {cursor}"));
 
     send_log(stdout, "info", "done");
 }

@@ -1362,6 +1362,18 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   end to end against a real `python3` by the integration tests, which closes the gap that nothing
   had exercised an external interpreter. Verified in the compiled binary through a PTY: both keys,
   `:stats`, `:plugin dir-stats touch made.txt` (the file appeared) and an unknown name's message.
+- ✅ **Plugin `get_state` (stage 1.5, second cycle)** – a plugin can ask the browser where it is at
+  any moment, not only when an event fires: a `get_state` request (no parameters) is answered with
+  `{cwd, cursor, marks, show_hidden, sort, sort_reversed, view}`. Chosen as COA A, a shared
+  snapshot: `App::poll_plugins` publishes the state on a `tokio::sync::watch` channel each tick (only
+  when a plugin is running, and an unchanged state is dropped), and a plugin's reader answers from
+  the latest value without touching the render thread, so a request never waits on a busy or
+  modal interface. It is at most one tick (about 100 ms) behind, and the channel is the one the
+  throttled `dir_changed`/`selection_changed` events will use. Before the first tick the answer
+  already names the start directory. Additive, so `API_VERSION` stays 1. `examples/plugins/
+  dir_stats.py` gained `:plugin dir-stats state`. Verified in the compiled binary through a PTY
+  with two entries marked: the plugin reported `cursor=alpha.txt marks=2 sort=name view=list` and
+  the browsed directory.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1457,8 +1469,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   built-in features stay native and untouched, and plugins in any language add to them. Nothing
   here lets a plugin replace or remove a built-in; a user who wants that rebinds or unbinds a key
   in config (or, later, a `disabled_actions` list), and a built-in wins a key conflict unless the
-  user remaps it. Still to do, cheapest first: an on-demand `get_state` request (cwd, selection,
-  marks) instead of state only riding on events; a few events (`dir_changed`, `selection_changed`,
+  user remaps it. Still to do, cheapest first: a few events (`dir_changed`, `selection_changed`,
   `job_finished`), batched or throttled so holding `j` cannot flood a slow plugin; a crash-restart
   policy (a plugin gets one log line on an abnormal exit and is not restarted) and a plugin list;
   runtime `register_command` instead of config-only `commands`; and stable string names for the

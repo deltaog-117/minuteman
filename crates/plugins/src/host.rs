@@ -18,7 +18,9 @@
 //! queue (so firing an event never blocks the caller), a second reads its stdout line by line and
 //! either runs a `file_ops` call on the blocking pool and replies, or forwards a `log` line to
 //! `PluginManager::poll`, and a third waits on the process so an abnormal exit gets reported and
-//! `kill_on_drop` has something alive to act on for the plugin's whole lifetime.
+//! `kill_on_drop` has something alive to act on for the plugin's whole lifetime. A `get_state`
+//! request is answered by that second task straight from a `watch` channel the render loop
+//! publishes to each tick, so it never waits on the render thread.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -29,9 +31,10 @@ use shared::{LocalVfs, Vfs};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 
 use crate::error::PluginError;
-use crate::protocol::{self, Incoming, LogLevel, PluginRequest, WireEntry};
+use crate::protocol::{self, Incoming, LogLevel, PluginRequest, StateSnapshot, WireEntry};
 
 /// One line to show the user, from a plugin's own `log` notification or the host's diagnostics
 /// about it (a malformed line, an abnormal exit).
@@ -70,6 +73,8 @@ pub struct PluginManager {
     plugins: Vec<RunningPlugin>,
     logs_tx: UnboundedSender<LogMessage>,
     logs_rx: UnboundedReceiver<LogMessage>,
+    /// The latest browser state, shared with every plugin's reader (see `publish_state`).
+    state_tx: watch::Sender<StateSnapshot>,
 }
 
 impl Default for PluginManager {
@@ -79,6 +84,7 @@ impl Default for PluginManager {
             plugins: Vec::new(),
             logs_tx,
             logs_rx,
+            state_tx: watch::channel(StateSnapshot::default()).0,
         }
     }
 }
@@ -132,9 +138,20 @@ impl PluginManager {
             stdout,
             stdin_tx.clone(),
             self.logs_tx.clone(),
+            self.state_tx.subscribe(),
             handle.clone(),
         ));
         handle.spawn(reap(name.to_string(), child, self.logs_tx.clone()));
+
+        // A plugin may ask for the state in answer to `init`, before the first tick has published
+        // one, so until then the answer names at least the directory the session started in.
+        self.state_tx.send_if_modified(|state| {
+            let unset = state.cwd.as_os_str().is_empty();
+            if unset {
+                state.cwd = cwd.to_path_buf();
+            }
+            unset
+        });
 
         let init = protocol::HostEvent::new(protocol::EVENT_INIT, cwd.to_path_buf(), Vec::new());
         let _ = stdin_tx.send(init.to_line());
@@ -207,6 +224,24 @@ impl PluginManager {
         }
     }
 
+    /// Whether no plugin is running, so a caller can skip building a snapshot nobody will read.
+    pub fn is_empty(&self) -> bool {
+        self.plugins.is_empty()
+    }
+
+    /// Makes `snapshot` what a plugin's `get_state` returns from now on. Call once per render
+    /// tick; an unchanged snapshot is dropped, so a quiet browser does no work. Returns whether it
+    /// replaced the previous one.
+    pub fn publish_state(&self, snapshot: StateSnapshot) -> bool {
+        self.state_tx.send_if_modified(|current| {
+            let changed = *current != snapshot;
+            if changed {
+                *current = snapshot;
+            }
+            changed
+        })
+    }
+
     /// The names of every running plugin, in the order they were configured.
     pub fn names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name.as_str()).collect()
@@ -251,13 +286,14 @@ async fn write_loop(mut stdin: ChildStdin, mut rx: UnboundedReceiver<String>) {
 }
 
 /// Reads the plugin's stdout one line at a time: a `log` notification is forwarded to
-/// `logs_tx`, a request is executed on the blocking pool and replied to over `stdin_tx`, and a
-/// malformed line is reported the same way `log` is (with a reply if it carried an `id`).
+/// `logs_tx`, a `get_state` request is answered at once from `state_rx`, any other request is
+/// executed on the blocking pool and replied to over `stdin_tx`, and a malformed line is reported the same way `log` is (with a reply if it carried an `id`).
 async fn read_loop(
     plugin: String,
     stdout: ChildStdout,
     stdin_tx: UnboundedSender<String>,
     logs_tx: UnboundedSender<LogMessage>,
+    state_rx: watch::Receiver<StateSnapshot>,
     handle: tokio::runtime::Handle,
 ) {
     let mut lines = BufReader::new(stdout).lines();
@@ -288,9 +324,12 @@ async fn read_loop(
             }
             Ok(Incoming::UnknownNotification) => {}
             Ok(Incoming::Request { id, request }) => {
-                let reply = match handle.spawn_blocking(move || execute(request)).await {
-                    Ok(result) => result,
-                    Err(e) => Err(format!("request task panicked: {e}")),
+                let reply = match request {
+                    PluginRequest::GetState => Ok(state_json(&state_rx.borrow())),
+                    request => match handle.spawn_blocking(move || execute(request)).await {
+                        Ok(result) => result,
+                        Err(e) => Err(format!("request task panicked: {e}")),
+                    },
                 };
                 let line = match reply {
                     Ok(result) => protocol::ok_response(&id, result),
@@ -335,6 +374,8 @@ async fn reap(
 fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
     let vfs = LocalVfs;
     match request {
+        // `read_loop` answers this one from the published snapshot and never gets here.
+        PluginRequest::GetState => Err("get_state is answered by the host".to_string()),
         PluginRequest::ReadDir { path } => vfs
             .list_dir(&path)
             .map(|entries| json!(entries.iter().map(WireEntry::from).collect::<Vec<_>>()))
@@ -367,6 +408,10 @@ fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
     }
 }
 
+fn state_json(state: &StateSnapshot) -> serde_json::Value {
+    serde_json::to_value(state).expect("a snapshot of plain strings and paths always serializes")
+}
+
 fn outcome_json(outcome: file_ops::Outcome) -> serde_json::Value {
     json!({
         "outcome": match outcome {
@@ -388,5 +433,22 @@ mod tests {
         assert!(!manager.dispatch_command("x", Vec::new(), Path::new("/"), &[]));
         assert!(!manager.dispatch_named("x", Vec::new(), Path::new("/"), &[]));
         assert!(manager.names().is_empty());
+        assert!(manager.is_empty());
+    }
+
+    #[test]
+    fn publishing_the_same_state_twice_reports_a_change_only_the_first_time() {
+        let manager = PluginManager::new();
+        let snapshot = StateSnapshot {
+            cwd: PathBuf::from("/a"),
+            ..StateSnapshot::default()
+        };
+
+        assert!(manager.publish_state(snapshot.clone()));
+        assert!(!manager.publish_state(snapshot));
+        assert!(manager.publish_state(StateSnapshot {
+            cwd: PathBuf::from("/b"),
+            ..StateSnapshot::default()
+        }));
     }
 }
