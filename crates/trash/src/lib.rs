@@ -19,6 +19,9 @@
 //! the `trash` crate (imported here as `os_trash`; this crate is itself named `trash`, which
 //! `cargo` won't let depend on the identically-named crates.io package under its own name).
 //!
+//! Besides sending and restoring what Minuteman itself trashed (for undo), it can list everything
+//! in the trash and restore or permanently delete chosen items, for the trash browser.
+//!
 //! This is a local-filesystem concept with no equivalent in the `Vfs` trait `shared`/`file_ops`
 //! build everything else on — there is no "SSH trash" — so, unlike the rest of `file_ops`, sending
 //! something here is not backend-agnostic.
@@ -29,7 +32,7 @@ use std::path::{Path, PathBuf};
 
 /// Wrapped as plain text rather than depending on `os_trash::Error`'s own trait shape, which
 /// this crate has no control over.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("{0}")]
 pub struct TrashError(String);
 
@@ -95,6 +98,92 @@ pub fn restore(item: &Trashed) -> Result<(), TrashError> {
     imp::restore(item.0.clone())
 }
 
+/// How big a trashed item is: bytes for a file, the number of entries directly inside for a folder
+/// (the trash does not total a folder's contents).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrySize {
+    Bytes(u64),
+    Entries(usize),
+    /// The trash could not say.
+    Unknown,
+}
+
+/// One item in the trash, as plain data a browser can list, sort and test with. `id` is the
+/// trash's own name for it, which `restore_entries` and `purge_entries` find it by again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrashEntry {
+    pub id: String,
+    pub name: String,
+    /// The folder it was in when it was trashed.
+    pub original_dir: PathBuf,
+    /// When it was trashed, in seconds since the Unix epoch.
+    pub deleted: i64,
+    pub size: EntrySize,
+}
+
+impl TrashEntry {
+    /// Where it would go back to.
+    pub fn original_path(&self) -> PathBuf {
+        self.original_dir.join(&self.name)
+    }
+}
+
+/// Everything in the desktop trash, newest first.
+///
+/// # Errors
+///
+/// The trash could not be read, or this platform's cannot be.
+pub fn entries() -> Result<Vec<TrashEntry>, TrashError> {
+    let mut items = imp::list()?;
+    items.sort_by_key(|item| std::cmp::Reverse(item.time_deleted));
+    Ok(items.iter().map(entry_of).collect())
+}
+
+fn entry_of(item: &os_trash::TrashItem) -> TrashEntry {
+    TrashEntry {
+        id: item.id.to_string_lossy().into_owned(),
+        name: item.name.to_string_lossy().into_owned(),
+        original_dir: item.original_parent.clone(),
+        deleted: item.time_deleted,
+        size: imp::size(item),
+    }
+}
+
+/// Puts each of `entries` back where it was, one result per entry, in order. One that cannot go
+/// back (something is already there, or it is no longer in the trash) stays in the trash and says
+/// why; the others are not held up by it.
+pub fn restore_entries(entries: &[TrashEntry]) -> Vec<Result<(), TrashError>> {
+    act_on(entries, imp::restore)
+}
+
+/// Deletes each of `entries` for good, one result per entry, in order.
+pub fn purge_entries(entries: &[TrashEntry]) -> Vec<Result<(), TrashError>> {
+    act_on(entries, imp::purge)
+}
+
+/// Looks the entries up in the trash as it is now — once — and applies `act` to each.
+fn act_on(
+    entries: &[TrashEntry],
+    act: fn(os_trash::TrashItem) -> Result<(), TrashError>,
+) -> Vec<Result<(), TrashError>> {
+    let current = match imp::list() {
+        Ok(items) => items,
+        Err(error) => return entries.iter().map(|_| Err(error.clone())).collect(),
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            match current
+                .iter()
+                .find(|item| item.id.to_string_lossy() == entry.id)
+            {
+                Some(item) => act(item.clone()),
+                None => Err(TrashError("it is no longer in the trash".into())),
+            }
+        })
+        .collect()
+}
+
 #[cfg(any(
     target_os = "windows",
     all(
@@ -113,6 +202,18 @@ mod imp {
 
     pub fn restore(item: os_trash::TrashItem) -> Result<(), TrashError> {
         os_trash::os_limited::restore_all([item]).map_err(|e| TrashError(e.to_string()))
+    }
+
+    pub fn purge(item: os_trash::TrashItem) -> Result<(), TrashError> {
+        os_trash::os_limited::purge_all([item]).map_err(|e| TrashError(e.to_string()))
+    }
+
+    pub fn size(item: &os_trash::TrashItem) -> super::EntrySize {
+        match os_trash::os_limited::metadata(item).map(|meta| meta.size) {
+            Ok(os_trash::TrashItemSize::Bytes(bytes)) => super::EntrySize::Bytes(bytes),
+            Ok(os_trash::TrashItemSize::Entries(entries)) => super::EntrySize::Entries(entries),
+            Err(_) => super::EntrySize::Unknown,
+        }
     }
 }
 
@@ -138,6 +239,16 @@ mod imp {
 
     pub fn restore(_item: os_trash::TrashItem) -> Result<(), TrashError> {
         Err(TrashError("this platform's trash cannot restore".into()))
+    }
+
+    pub fn purge(_item: os_trash::TrashItem) -> Result<(), TrashError> {
+        Err(TrashError(
+            "this platform's trash cannot be emptied from here".into(),
+        ))
+    }
+
+    pub fn size(_item: &os_trash::TrashItem) -> super::EntrySize {
+        super::EntrySize::Unknown
     }
 }
 
@@ -198,6 +309,134 @@ mod tests {
         restore(item).unwrap();
 
         assert_eq!(std::fs::read(&file).unwrap(), b"hi");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A unique folder with one file in it, sent to the trash; returns the folder, the file's
+    /// original path and its entry. Only this file is ever touched in the user's real trash.
+    fn trashed(label: &str) -> (PathBuf, PathBuf, TrashEntry) {
+        let dir = std::env::temp_dir().join(format!(
+            "minuteman-trash-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{label}.txt"));
+        std::fs::write(&file, b"12345").unwrap();
+        send(&file).unwrap();
+        let entry = entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.original_path() == file)
+            .expect("the file shows up in the listing");
+        (dir, file, entry)
+    }
+
+    #[test]
+    fn the_listing_describes_a_trashed_file() {
+        let (dir, file, entry) = trashed("listing");
+        assert_eq!(entry.name, "listing.txt");
+        assert_eq!(entry.original_dir, dir);
+        assert_eq!(entry.original_path(), file);
+        assert_eq!(entry.size, EntrySize::Bytes(5));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!((now - entry.deleted).abs() < 120, "deleted just now");
+
+        assert!(restore_entries(&[entry]).remove(0).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_listing_is_newest_first() {
+        let all = entries().unwrap();
+        assert!(
+            all.windows(2)
+                .all(|pair| pair[0].deleted >= pair[1].deleted)
+        );
+    }
+
+    #[test]
+    fn a_listed_entry_can_be_restored_and_is_then_gone_from_the_trash() {
+        let (dir, file, entry) = trashed("restore-entry");
+        assert!(!file.exists());
+
+        let results = restore_entries(std::slice::from_ref(&entry));
+        assert!(results[0].is_ok(), "{:?}", results[0]);
+        assert_eq!(std::fs::read(&file).unwrap(), b"12345");
+        assert!(entries().unwrap().iter().all(|other| other.id != entry.id));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn restoring_onto_something_that_is_there_fails_and_keeps_the_item() {
+        let (dir, file, entry) = trashed("restore-clash");
+        std::fs::write(&file, b"in the way").unwrap();
+
+        let results = restore_entries(std::slice::from_ref(&entry));
+        assert!(results[0].is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"in the way", "left alone");
+        assert!(
+            entries().unwrap().iter().any(|other| other.id == entry.id),
+            "still in the trash"
+        );
+
+        // Clean up: make room, put it back, and remove the folder.
+        std::fs::remove_file(&file).unwrap();
+        assert!(restore_entries(&[entry]).remove(0).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_purged_entry_is_gone_for_good() {
+        let (dir, file, entry) = trashed("purge-entry");
+
+        let results = purge_entries(std::slice::from_ref(&entry));
+        assert!(results[0].is_ok(), "{:?}", results[0]);
+        assert!(!file.exists());
+        assert!(entries().unwrap().iter().all(|other| other.id != entry.id));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_entry_that_is_no_longer_there_reports_it_without_stopping_the_rest() {
+        let (dir, _file, real) = trashed("gone-mixed");
+        let ghost = TrashEntry {
+            id: "/nowhere/info/ghost.trashinfo".into(),
+            name: "ghost".into(),
+            original_dir: PathBuf::from("/nowhere"),
+            deleted: 0,
+            size: EntrySize::Unknown,
+        };
+
+        let results = restore_entries(&[ghost, real]);
+        assert!(results[0].is_err());
+        assert!(results[1].is_ok(), "the real one was still restored");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_trashed_folder_reports_how_many_entries_it_holds() {
+        let dir = std::env::temp_dir().join(format!(
+            "minuteman-trash-test-folder-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let sub = dir.join("pile");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("one"), b"1").unwrap();
+        std::fs::write(sub.join("two"), b"2").unwrap();
+        send(&sub).unwrap();
+        let entry = entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.original_path() == sub)
+            .expect("listed");
+        assert_eq!(entry.size, EntrySize::Entries(2));
+
+        assert!(purge_entries(&[entry]).remove(0).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

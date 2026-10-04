@@ -1320,6 +1320,30 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   a test with a silent terminal), because the keyboard query and the graphics probe each wait for
   their timeout; cutting both to a few hundred milliseconds would fix that at the risk of a slow
   terminal missing its image support.
+- ✅ **Marks are the only selection, and spent when used** – `v` is now the one way to choose
+  entries. Before, the keys already refused to act on nothing marked, but the right-click menu's
+  Copy, Cut, Delete, Compress and Extract and the `:trash`, `:compress` and `:extract` commands fell
+  back to the row under the cursor, and the marks stayed after being used, so a later `x` could hit
+  what a `y` had just taken. Now every operation reads the marks alone (`App::marked_only`) and
+  spends them: `yank` and `cut` clear them as they fill the clipboard, a confirmed trash or delete
+  clears them (declining keeps them), and a compress or extract clears them when it starts. A
+  plugin key still receives the marks or else the cursor row, since that is the plugin API's
+  documented meaning, and dragging an unmarked row still drags it, since that is a pointer gesture
+  rather than an operation on a selection.
+- ✅ **Trash browser (`T`)** – a view over the whole screen listing everything in the desktop trash,
+  newest first, with its name, size (bytes, or the number of entries in a folder), when it was
+  deleted and the folder it came from; the columns thin out on a narrow terminal, folder first.
+  `v` marks, `r` puts the marked entries back, `x` deletes them for good and `E` empties the whole
+  trash, the last two behind a `y` question, and nothing ever acts on the row under the cursor
+  unless it is marked (`E` is the one operation that takes everything). A restore onto a place
+  that is taken, or an entry already gone, fails for that entry alone, keeps it in the trash and
+  says why while the others go through. Reading and acting run on the blocking pool, the view
+  showing `loading…` or `working…`. The `trash` crate gained `entries`, `restore_entries`,
+  `purge_entries` and the plain-data `TrashEntry`, which looks items up again by the trash's own
+  id (one listing per batch), and the view reaches the trash through a `TrashBackend` trait so its
+  tests use a fake. Chosen as COA B (a popup view like the disk usage view) over browsing the trash
+  as a virtual folder (A, the `Vfs` is built for real paths and every key would need a special
+  case there) and shelling out to `trash-cli` (C, an external tool most people lack).
 
 ## 🟡 Medium Priority (Important)
 
@@ -1453,6 +1477,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   would be needed); the scoring weights are hand-tuned, not learned from use; a query is matched
   against the name only, not the path (`src/main` does not find `src/main.rs`); and there is no
   smart-case switch or exact-match mode.
+- **Trash browser, follow-ups** – no sort order other than newest first, no search or filter, no
+  preview of a trashed file, no mouse marking (a click selects the row; `v` marks it), restore
+  cannot choose another place, and the size of a folder is its entry count, not its total. The
+  trash of another disk (`.Trash-<uid>`) is listed with the home trash and treated the same.
+  On macOS the trash cannot be read back, so the view says so.
 - **Prompt editing, follow-ups** – the password prompts (extract, compress) still only append and
   delete the last character, with no cursor; the `/`, `:` and rename prompts have no history of
   what was typed before, no `Tab` completion of a path, and no selection or paste of more than a

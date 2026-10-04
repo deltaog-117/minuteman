@@ -537,6 +537,14 @@ impl App {
     }
 
     /// Opens the disk usage view on `path`, starting its scan on the blocking pool.
+    /// Opens the trash browser, which starts reading the desktop trash at once.
+    pub fn begin_trash_view(&self) -> crate::trash_view::TrashView {
+        crate::trash_view::TrashView::open(
+            self.handle.clone(),
+            Arc::new(crate::trash_view::SystemTrash),
+        )
+    }
+
     pub fn begin_disk_usage(&self, path: PathBuf) -> DiskUsageView {
         DiskUsageView::open(self.handle.clone(), Arc::clone(&self.vfs), path)
     }
@@ -1059,22 +1067,32 @@ impl App {
         }
     }
 
+    /// What every operation acts on: the entries marked with `Select` (`v`), and nothing else.
+    /// Marking is the one way to choose entries; the cursor row is never used as a stand-in, so
+    /// `y`, `d`, `x`, `C`, `E`, their menu entries and the `:` commands all mean the same thing.
+    fn marked_only(browser: &BrowserState) -> Vec<PathBuf> {
+        browser.marked_paths()
+    }
+
     /// Whether anything is marked with `Select`. The yank, cut and delete keys act on marks only,
     /// so with none this reports it on the status line and returns `false`.
     pub fn require_marks(&mut self, browser: &BrowserState) -> bool {
         let any = !browser.marked_paths().is_empty();
         if !any {
-            self.status = Some("nothing marked — mark with v first".into());
+            self.status = Some(NOTHING_MARKED.into());
         }
         any
     }
 
-    pub fn yank(&mut self, browser: &BrowserState) {
-        let paths = Self::marked_or_selected(browser);
+    /// Copies the marked entries to the clipboard. The marks are spent: `y` takes what `v` chose,
+    /// leaving nothing selected, so selecting stays a separate step from acting.
+    pub fn yank(&mut self, browser: &mut BrowserState) {
+        let paths = Self::marked_only(browser);
         if paths.is_empty() {
-            self.status = Some("nothing selected".into());
+            self.status = Some(NOTHING_MARKED.into());
             return;
         }
+        browser.clear_marks();
         self.status = Some(format!("yanked {}", batch_label(&paths)));
         self.clipboard = Some(Clipboard {
             paths,
@@ -1082,26 +1100,27 @@ impl App {
         });
     }
 
-    pub fn cut(&mut self, browser: &BrowserState) {
-        let paths = Self::marked_or_selected(browser);
+    /// Like [`yank`](Self::yank), but the entries are moved when pasted.
+    pub fn cut(&mut self, browser: &mut BrowserState) {
+        let paths = Self::marked_only(browser);
         if paths.is_empty() {
-            self.status = Some("nothing selected".into());
+            self.status = Some(NOTHING_MARKED.into());
             return;
         }
-        self.status = Some(format!("marked {} to move", batch_label(&paths)));
+        browser.clear_marks();
+        self.status = Some(format!("cut {} to move", batch_label(&paths)));
         self.clipboard = Some(Clipboard {
             paths,
             mode: ClipboardMode::Move,
         });
     }
 
-    /// Marks (via `Select`) win over the cursor: if any entries are marked, trash confirms
-    /// against the whole marked set; otherwise it falls back to the single entry under the
-    /// cursor, matching Ranger's "act on marks if any, else the current file" convention.
+    /// Asks to send the marked entries to the desktop trash. Nothing marked means nothing to do:
+    /// the entry under the cursor is never used in its place.
     pub fn begin_trash(&mut self, browser: &BrowserState) {
-        let targets = Self::marked_or_selected(browser);
+        let targets = Self::marked_only(browser);
         if targets.is_empty() {
-            self.status = Some("nothing selected".into());
+            self.status = Some(NOTHING_MARKED.into());
             return;
         }
         self.prompt = Some(Prompt::ConfirmTrash { targets });
@@ -1109,9 +1128,9 @@ impl App {
 
     /// Same batching as `begin_trash`, but for a permanent, trash-bypassing delete.
     pub fn begin_delete_permanently(&mut self, browser: &BrowserState) {
-        let targets = Self::marked_or_selected(browser);
+        let targets = Self::marked_only(browser);
         if targets.is_empty() {
-            self.status = Some("nothing selected".into());
+            self.status = Some(NOTHING_MARKED.into());
             return;
         }
         self.prompt = Some(Prompt::ConfirmDelete { targets });
@@ -1373,11 +1392,17 @@ impl App {
                 }
             },
             Prompt::ConfirmDelete { targets } => match code {
-                KeyCode::Char('y') => self.spawn_delete(targets),
+                KeyCode::Char('y') => {
+                    browser.clear_marks();
+                    self.spawn_delete(targets);
+                }
                 _ => self.status = Some("delete cancelled".into()),
             },
             Prompt::ConfirmTrash { targets } => match code {
-                KeyCode::Char('y') | KeyCode::Enter => self.spawn_trash(targets),
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    browser.clear_marks();
+                    self.spawn_trash(targets);
+                }
                 _ => self.status = Some("trash cancelled".into()),
             },
             Prompt::Conflict(source) => match code {
@@ -1977,14 +2002,18 @@ impl App {
     /// Starts extracting the marked (or selected) archives, each into a new directory named after
     /// it beside the archive's own listing, so a tarball full of loose files cannot litter the
     /// browsed directory.
-    fn begin_extract(&mut self, browser: &BrowserState) {
-        let archives: Vec<PathBuf> = Self::marked_or_selected(browser)
+    fn begin_extract(&mut self, browser: &mut BrowserState) {
+        let archives: Vec<PathBuf> = Self::marked_only(browser)
             .into_iter()
             .filter(|path| Format::of(path).is_some())
             .collect();
         match archives.is_empty() {
-            true => self.status = Some("extract: no zip, tar or tar.gz selected".into()),
+            true => {
+                self.status =
+                    Some("extract: no zip, tar or tar.gz marked — mark with v first".into())
+            }
             false => {
+                browser.clear_marks();
                 let jobs = Self::extract_jobs_per_archive(browser.current_dir(), archives);
                 self.continue_extract(PendingExtract {
                     jobs,
@@ -2028,7 +2057,7 @@ impl App {
 
     /// The extract form for the marked (or selected) archives, or `None` if there are none.
     pub fn begin_extract_form(&mut self, browser: &BrowserState) -> Option<ExtractPopup> {
-        let archives: Vec<PathBuf> = Self::marked_or_selected(browser)
+        let archives: Vec<PathBuf> = Self::marked_only(browser)
             .into_iter()
             .filter(|path| Format::of(path).is_some())
             .collect();
@@ -2038,7 +2067,10 @@ impl App {
                 let warning = Self::extract_warning(self.vfs.as_ref(), form);
                 form.set_warning(warning);
             }
-            None => self.status = Some("extract: no zip, tar or tar.gz selected".into()),
+            None => {
+                self.status =
+                    Some("extract: no zip, tar or tar.gz marked — mark with v first".into());
+            }
         }
         form
     }
@@ -2106,7 +2138,7 @@ impl App {
 
     /// Starts packing the marked (or selected) entries into `name` in the browsed directory. With
     /// `ask_password` (`:compress -p`) a zip is sealed with a password asked for in a prompt.
-    fn begin_compress(&mut self, browser: &BrowserState, name: &str, ask_password: bool) {
+    fn begin_compress(&mut self, browser: &mut BrowserState, name: &str, ask_password: bool) {
         let Some(format) = Format::of(Path::new(name)) else {
             self.status = Some("compress: name must end in .zip, .tar or .tar.gz".into());
             return;
@@ -2115,11 +2147,12 @@ impl App {
             self.status = Some("compress: only a zip can be encrypted".into());
             return;
         }
-        let sources = Self::marked_or_selected(browser);
+        let sources = Self::marked_only(browser);
         if sources.is_empty() {
-            self.status = Some("compress: nothing selected".into());
+            self.status = Some("compress: nothing marked — mark with v first".into());
             return;
         }
+        browser.clear_marks();
         let out = browser.current_dir().join(name);
         self.continue_compress(PendingCompress {
             jobs: vec![CompressJob { sources, out }],
@@ -2434,7 +2467,7 @@ impl App {
     /// The compress form for the marked (or selected) entries, or `None` if there are none.
     pub fn begin_compress_form(&mut self, browser: &BrowserState) -> Option<CompressPopup> {
         let mut form = CompressPopup::new(
-            Self::marked_or_selected(browser),
+            Self::marked_only(browser),
             browser.current_dir().to_path_buf(),
             self.vfs.as_ref(),
         );
@@ -2443,7 +2476,7 @@ impl App {
                 let warning = Self::compress_warning(self.vfs.as_ref(), form);
                 form.set_warning(warning);
             }
-            None => self.status = Some("compress: nothing selected".into()),
+            None => self.status = Some("compress: nothing marked — mark with v first".into()),
         }
         form
     }
@@ -2775,6 +2808,9 @@ fn handover_status(line: &str, result: &std::io::Result<ExitStatus>) -> String {
     }
 }
 
+/// What an operation says when nothing is marked.
+const NOTHING_MARKED: &str = "nothing marked — mark with v first";
+
 fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -2935,9 +2971,14 @@ mod tests {
         }
     }
 
+    /// Chooses an entry the only way there is: puts the cursor on it and marks it, as `v` does.
     fn select_named(f: &mut Fixture, name: &str) {
         let index = f.listed().iter().position(|n| n == name).unwrap();
         f.browser.select_index(index);
+        let path = f.root.join(name);
+        if !f.browser.is_marked(&path) {
+            f.browser.toggle_mark();
+        }
     }
 
     #[test]
@@ -2978,7 +3019,7 @@ mod tests {
         f.run("extract");
         assert_eq!(
             f.app.status.as_deref(),
-            Some("extract: no zip, tar or tar.gz selected")
+            Some("extract: no zip, tar or tar.gz marked — mark with v first")
         );
         f.run("compress plain.rar");
         assert_eq!(
@@ -3260,7 +3301,7 @@ mod tests {
         assert!(f.app.begin_extract_form(&f.browser).is_none());
         assert_eq!(
             f.app.status.as_deref(),
-            Some("extract: no zip, tar or tar.gz selected")
+            Some("extract: no zip, tar or tar.gz marked — mark with v first")
         );
 
         let mut f = fixture_with_archive("extract-form-some");
@@ -3399,7 +3440,10 @@ mod tests {
     fn opening_the_compress_form_with_nothing_selected_says_so() {
         let mut f = Fixture::new("form-empty");
         assert!(f.app.begin_compress_form(&f.browser).is_none());
-        assert_eq!(f.app.status.as_deref(), Some("compress: nothing selected"));
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("compress: nothing marked — mark with v first")
+        );
     }
 
     #[test]
@@ -3737,6 +3781,139 @@ mod tests {
         );
     }
 
+    fn three_files(label: &str) -> Fixture {
+        let mut f = Fixture::new(label);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(f.root.join(name), b"x").unwrap();
+        }
+        f.browser.reload(&LocalVfs).unwrap();
+        f
+    }
+
+    const NOTHING_MARKED_STATUS: &str = "nothing marked — mark with v first";
+
+    #[test]
+    fn with_nothing_marked_no_operation_falls_back_to_the_cursor_row() {
+        let mut f = three_files("marks-only");
+        f.browser.select_index(1);
+
+        f.app.yank(&mut f.browser);
+        assert!(f.app.clipboard.is_none());
+        assert_eq!(f.app.status.as_deref(), Some(NOTHING_MARKED_STATUS));
+
+        f.app.status = None;
+        f.app.cut(&mut f.browser);
+        assert!(f.app.clipboard.is_none());
+        assert_eq!(f.app.status.as_deref(), Some(NOTHING_MARKED_STATUS));
+
+        f.app.status = None;
+        f.app.begin_trash(&f.browser);
+        assert!(f.app.prompt.is_none());
+        assert_eq!(f.app.status.as_deref(), Some(NOTHING_MARKED_STATUS));
+
+        f.app.status = None;
+        f.app.begin_delete_permanently(&f.browser);
+        assert!(f.app.prompt.is_none());
+        assert_eq!(f.app.status.as_deref(), Some(NOTHING_MARKED_STATUS));
+
+        assert!(f.app.begin_compress_form(&f.browser).is_none());
+        assert!(f.app.begin_extract_form(&f.browser).is_none());
+        for line in ["compress out.zip", "extract", "trash"] {
+            f.app.status = None;
+            f.run(line);
+            assert!(f.app.prompt.is_none(), "{line}");
+            assert!(!f.app.is_busy(), "{line}");
+            let status = f.app.status.clone().unwrap_or_default();
+            assert!(status.contains("mark with v first"), "{line}: {status}");
+        }
+        assert!(f.root.join("b.txt").exists(), "nothing was touched");
+        assert!(!f.root.join("out.zip").exists());
+    }
+
+    #[test]
+    fn a_yank_takes_the_marks_and_nothing_else_and_leaves_none_behind() {
+        let mut f = three_files("yank-spends");
+        select_named(&mut f, "a.txt");
+        select_named(&mut f, "c.txt");
+        f.browser.select_index(1); // the cursor rests on b.txt, which is not marked
+
+        f.app.yank(&mut f.browser);
+
+        let held = f.app.clipboard.as_ref().expect("yanked");
+        assert_eq!(held.paths, [f.root.join("a.txt"), f.root.join("c.txt")]);
+        assert_eq!(held.mode, ClipboardMode::Copy);
+        assert!(
+            f.browser.marked_paths().is_empty(),
+            "y spends the selection"
+        );
+        // So a following operation has nothing to act on until something is marked again.
+        f.app.begin_trash(&f.browser);
+        assert!(f.app.prompt.is_none());
+    }
+
+    #[test]
+    fn a_cut_takes_the_marks_too() {
+        let mut f = three_files("cut-spends");
+        select_named(&mut f, "b.txt");
+
+        f.app.cut(&mut f.browser);
+
+        let held = f.app.clipboard.as_ref().expect("cut");
+        assert_eq!(held.paths, [f.root.join("b.txt")]);
+        assert_eq!(held.mode, ClipboardMode::Move);
+        assert!(f.browser.marked_paths().is_empty());
+    }
+
+    #[test]
+    fn confirming_a_delete_spends_the_marks_and_declining_keeps_them() {
+        // The permanent delete is used for the confirming half: a trash would send a real file to
+        // the user's desktop trash from a test.
+        let mut f = three_files("confirm-spends");
+        select_named(&mut f, "b.txt");
+        f.app.begin_trash(&f.browser);
+        f.press(KeyCode::Char('n'));
+        assert_eq!(
+            f.browser.marked_paths().len(),
+            1,
+            "declining a trash keeps the selection"
+        );
+
+        f.app.begin_delete_permanently(&f.browser);
+        f.press(KeyCode::Char('n'));
+        assert_eq!(
+            f.browser.marked_paths().len(),
+            1,
+            "so does declining a delete"
+        );
+        assert!(f.root.join("b.txt").exists());
+
+        f.app.begin_delete_permanently(&f.browser);
+        f.press(KeyCode::Char('y'));
+        assert!(f.browser.marked_paths().is_empty(), "confirming spends it");
+        f.wait_for_idle();
+        assert!(!f.root.join("b.txt").exists());
+        assert!(
+            f.root.join("c.txt").exists(),
+            "unmarked entries are never touched"
+        );
+    }
+
+    #[test]
+    fn compress_and_extract_spend_the_marks_they_use() {
+        let mut f = three_files("archive-spends");
+        select_named(&mut f, "a.txt");
+        f.run("compress out.zip");
+        f.wait_for_idle();
+        assert!(f.browser.marked_paths().is_empty());
+        assert!(f.root.join("out.zip").exists());
+
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "out.zip");
+        f.run("extract");
+        f.wait_for_idle();
+        assert!(f.browser.marked_paths().is_empty());
+    }
+
     #[test]
     fn cancel_forgets_a_cut_and_the_marks_from_any_directory() {
         let mut f = Fixture::new("cancel-all");
@@ -3749,8 +3926,15 @@ mod tests {
         f.browser.toggle_mark();
         f.browser.select_index(2);
         f.browser.toggle_mark();
-        f.app.cut(&f.browser);
+        f.app.cut(&mut f.browser);
         assert!(f.app.clipboard.is_some());
+        assert!(
+            f.browser.marked_paths().is_empty(),
+            "a cut spends the marks it took"
+        );
+        // A later, separate selection is what `cancel` forgets along with the clipboard.
+        f.browser.select_index(3);
+        f.browser.toggle_mark();
 
         // Somewhere else entirely, as the request says: "no matter the directory I am".
         f.browser
@@ -3762,7 +3946,7 @@ mod tests {
         assert!(f.browser.marked_paths().is_empty());
         let status = f.app.status.clone().unwrap();
         assert!(status.starts_with("cancelled: cut of "), "{status}");
-        assert!(status.ends_with("2 marks"), "{status}");
+        assert!(status.ends_with("1 mark"), "{status}");
         for name in ["a", "b", "c"] {
             assert!(
                 f.root.join(name).exists(),
@@ -4580,9 +4764,8 @@ mod tests {
         std::fs::write(f.root.join("a.txt"), b"a").unwrap();
         std::fs::create_dir(f.root.join("dest")).unwrap();
         f.browser.reload(&LocalVfs).unwrap();
-        f.browser
-            .select_index(f.listed().iter().position(|n| n == "a.txt").unwrap());
-        f.app.yank(&f.browser);
+        select_named(&mut f, "a.txt");
+        f.app.yank(&mut f.browser);
 
         f.app.begin_paste_into(f.root.join("dest"));
         f.wait_for_idle();
@@ -4598,9 +4781,8 @@ mod tests {
         std::fs::write(f.root.join("keep.txt"), b"k").unwrap();
         std::fs::create_dir(f.root.join("dest")).unwrap();
         f.browser.reload(&LocalVfs).unwrap();
-        f.browser
-            .select_index(f.listed().iter().position(|n| n == "keep.txt").unwrap());
-        f.app.yank(&f.browser);
+        select_named(&mut f, "keep.txt");
+        f.app.yank(&mut f.browser);
 
         f.app.begin_drop(
             vec![f.root.join("a.txt")],

@@ -60,6 +60,7 @@ mod terminal_palette;
 mod text_preview;
 mod thumbnails;
 mod tile_view;
+mod trash_view;
 mod view_mode;
 
 use std::collections::BTreeMap;
@@ -117,6 +118,7 @@ use theming::{
     RawLocal, RawPanels, RawStyles, RawTheme, RawUi, Styles, Theme, Ui,
 };
 use thumbnails::Thumbnails;
+use trash_view::TrashView;
 use vfs_archive::ArchiveVfs;
 use vfs_ssh::RoutedVfs;
 use view_mode::{
@@ -384,6 +386,8 @@ struct Overlay<'a> {
     inspect: Option<&'a InspectView>,
     /// The disk usage view, which covers the whole screen when open.
     usage: Option<&'a DiskUsageView>,
+    /// The trash browser, which covers the whole screen when open.
+    trash: Option<&'a TrashView>,
     settings: Option<&'a SettingsPopup>,
     compress: Option<&'a CompressPopup>,
     extract: Option<&'a ExtractPopup>,
@@ -1237,6 +1241,8 @@ fn run(
     let mut inspect: Option<InspectView> = None;
     // The disk usage view while one is open; modal, and drawn over the whole screen.
     let mut usage: Option<DiskUsageView> = None;
+    // The trash browser while one is open; modal in the same way.
+    let mut trash_view: Option<TrashView> = None;
     // The settings popup (`Space` then `t` with no shell pane open) while one is open; modal too.
     let mut settings: Option<SettingsPopup> = None;
     // The compress form ("Compress…" on an entry's right-click menu) while one is open; modal too.
@@ -1277,6 +1283,9 @@ fn run(
             view.poll();
         }
         if let Some(view) = usage.as_mut() {
+            view.poll();
+        }
+        if let Some(view) = trash_view.as_mut() {
             view.poll();
         }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
@@ -1414,6 +1423,7 @@ fn run(
                     menu: menu.as_ref(),
                     inspect: inspect.as_ref(),
                     usage: usage.as_ref(),
+                    trash: trash_view.as_ref(),
                     settings: settings.as_ref(),
                     compress: compress.as_ref(),
                     extract: extract.as_ref(),
@@ -1559,6 +1569,28 @@ fn run(
                             if let Some(row) =
                                 disk_usage_view::row_at(&places, view.top().get(), len, pointer)
                             {
+                                view.move_to(row);
+                            }
+                        }
+                        kind => {
+                            if let Some(wheel) = Wheel::of(kind) {
+                                view.move_by(browser_mouse::wheel_rows(wheel));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Some(view) = trash_view.as_mut() {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let places = trash_view::layout(frame_area);
+                            let pointer = Position::new(mouse.column, mouse.row);
+                            if let Some(row) = trash_view::row_at(
+                                &places,
+                                view.top().get(),
+                                view.entries().len(),
+                                pointer,
+                            ) {
                                 view.move_to(row);
                             }
                         }
@@ -2309,6 +2341,12 @@ fn run(
                     }
                     continue;
                 }
+                if let Some(view) = trash_view.as_mut() {
+                    if view.key(key.code, config.keys.resolve(key.code)) {
+                        trash_view = None;
+                    }
+                    continue;
+                }
                 if inspect.is_some() {
                     if matches!(
                         key.code,
@@ -2361,7 +2399,11 @@ fn run(
                         compress_popup::Key::Stay => app.refresh_compress_warning(popup),
                         compress_popup::Key::Close => compress = None,
                         compress_popup::Key::Submit(request) => match app.start_compress(request) {
-                            Ok(()) => compress = None,
+                            Ok(()) => {
+                                // The marks are spent: the job has what `v` chose.
+                                browser.clear_marks();
+                                compress = None;
+                            }
                             Err(message) => popup.set_error(message),
                         },
                     }
@@ -2372,7 +2414,10 @@ fn run(
                         extract_popup::Key::Stay => app.refresh_extract_warning(popup),
                         extract_popup::Key::Close => extract = None,
                         extract_popup::Key::Submit(request) => match app.start_extract(request) {
-                            Ok(()) => extract = None,
+                            Ok(()) => {
+                                browser.clear_marks();
+                                extract = None;
+                            }
                             Err(message) => popup.set_error(message),
                         },
                     }
@@ -2785,6 +2830,7 @@ fn run(
                     // itself is read back in the `pending_bookmark` block up above.
                     Some(Action::BookmarkJump) => pending_bookmark = Some(BookmarkChord::Jump),
                     Some(Action::BookmarkSet) => pending_bookmark = Some(BookmarkChord::Set),
+                    Some(Action::TrashView) => trash_view = Some(app.begin_trash_view()),
                     Some(Action::DiskUsage) => {
                         usage = Some(app.begin_disk_usage(browser.current_dir().to_path_buf()));
                     }
@@ -3120,6 +3166,7 @@ fn draw(
         menu,
         inspect,
         usage,
+        trash,
         settings,
         compress,
         extract,
@@ -3468,6 +3515,9 @@ fn draw(
     }
     if let Some(view) = usage {
         disk_usage_view::render(frame, view, config);
+    }
+    if let Some(view) = trash {
+        trash_view::render(frame, view, config);
     }
     if let Some(menu) = menu {
         overlay_view::render_menu(frame, menu, config);

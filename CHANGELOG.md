@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`: marking with `v` is now the only way to choose entries. Yank, cut, trash, delete,
+  compress and extract — from the keys, the right-click menu and the `:` commands — act on the
+  marks and nothing else, where the menu and the commands used to fall back to the row under the
+  cursor; and each spends the marks it takes: after `y` or `d` nothing stays marked, and the same
+  goes for a confirmed trash or delete and for a compress or extract that starts (declining a
+  question keeps them). Messages now read "nothing marked — mark with v first". The status line
+  after a cut says "cut X to move" instead of "marked X to move".
 - `tui`, `theming`: the startup splash is now off by default (`boot_splash = false`), so the
   browser is there the moment it starts instead of after a 900 ms splash. With it switched on, the
   browser is already drawn underneath, and a key press that dismisses the splash is now also handled
@@ -66,6 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `trash`: a trash browser, opened with `T` (rebindable as `trash_view`). It lists everything
+  in the desktop trash, newest first, with its original folder, when it was deleted and its size.
+  `v` marks, `r` puts the marked entries back where they were (one whose place is taken stays in
+  the trash and says so), `x` deletes the marked ones for good and `E` empties the trash; both ask
+  first. It reads and acts on the blocking pool, so the interface never waits. New in `trash`:
+  `entries`, `restore_entries`, `purge_entries`, `TrashEntry` and `EntrySize`.
 - `tui`, `browser`: `/` is now a fuzzy search. A name matches when it holds the typed letters in
   order (`aernd` finds `aerend`), and matches are ranked: letters side by side, at the start of a
   name or a word, and in the same case score higher, and a name containing the whole text beats any

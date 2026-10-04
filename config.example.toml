@@ -167,7 +167,13 @@ quit = ["q"]
 # case-sensitive: "Q" is Shift+q, distinct from "q". Without `--cwd-file` (the bare binary run
 # as `command mman`, not through the wrapper) it just quits.
 quit_to_cwd = ["Q"]
-# Yank, cut and both deletes act on the entries marked with `select` (v) only; with nothing marked they just say so.
+# Marking with `select` (v) is the only way to choose entries. Every operation — yank, cut, both
+# deletes, compress and extract, the right-click menu's entries for them and the `:` commands —
+# acts on the marks and on nothing else, never on the row under the cursor; with nothing marked
+# they just say so. And each one spends the marks it took: after `y` or `d` the entries are on the
+# clipboard and nothing is marked any more, and the same goes for a confirmed trash or delete and
+# for a compress or extract that starts (declining a question keeps the marks). Choosing and acting
+# are two steps: `v` to choose, then the key for what to do.
 yank = ["y"]
 cut = ["d"]
 paste = ["p"]
@@ -182,9 +188,10 @@ compress = ["C"]
 extract = ["E"]
 undo = ["z"]
 redo = ["Z"]
-# Sends every marked entry (see `select` below) to the desktop trash if any are marked, else the
-# current selection — the same trash Nautilus/Dolphin/Explorer/Finder use. Confirms with "y" or
-# enter, since this is reversible. ":trash" does the same thing from the `:` prompt.
+# Sends every marked entry (see `select` below) to the desktop trash — the same trash
+# Nautilus/Dolphin/Explorer/Finder use. Confirms with "y" or enter, since this is reversible.
+# ":trash" does the same thing from the `:` prompt, and the trash browser (`trash_view`) shows
+# what is in it and puts things back.
 delete = ["x"]
 # Same batching as `delete`, but permanent: bypasses the trash entirely. Single-character keys are
 # case-sensitive (see `quit_to_cwd` above), so "X" is Shift+x, distinct from "x". Confirms with "y"
@@ -232,6 +239,13 @@ preview_up = ["K"]
 # filmstrip, move_down/move_up and the up/down arrows move along the strip. Clicking selects in
 # every view and double-clicking opens.
 cycle_view = ["V"]
+# Opens the trash browser over the whole screen: everything in the desktop trash, newest first,
+# with where each item came from and when it was deleted. Choose entries with the mark key (`v`) —
+# nothing acts on the row under the cursor unless it is marked — then `r` puts the marked ones back
+# where they were (one whose place is taken stays in the trash and says so), `x` deletes them for
+# good, and `E` empties the whole trash; both of those ask first (`y`). `c` clears the marks, and
+# `q` or Esc closes the view.
+trash_view = ["T"]
 # Orders the folder by the next key — name, size (largest first), modified time (newest first), then
 # permissions — and round again; the status line names the order, and the details view marks the
 # column with an arrow. Folders always stay first. Clicking a column title in the details view
@@ -244,8 +258,8 @@ sort_reverse = ["<"]
 # size on disk and the apparent size, r scans again and q or Esc closes it. Hard links are counted
 # once, other filesystems and symlinks are not entered. Also in the right-click menu.
 disk_usage = ["u"]
-# Toggles a mark on the current entry, Ranger-style — press once per file to queue it for a
-# later bulk action instead of acting on it immediately.
+# Toggles a mark on the current entry — press once per file to choose it for the next operation.
+# This is the only way to choose entries; see `yank` above.
 select = ["v"]
 # Opens the appearance popup: Theme picks the base palette (default, neon, classic, dracula,
 # catppuccin, nord or terminal); Accent, Focused border, Selection, Directory, Status bar and Danger are edited as free

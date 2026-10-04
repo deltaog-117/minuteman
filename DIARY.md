@@ -73,6 +73,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
 | 2026-10-02 | Filmstrip View | A `V` view cycle with a thumbnail strip drawn from a pool-filled cache of finished protocols (COA B, filmstrip first, grid second), over a grid only (A) and a bigger preview only (C) | ✅ Confirmed |
 | 2026-10-02 | Grid and Details Views | A grid of framed tiles and a flat details table added to the `V` cycle, the filmstrip kept and its strip rebuilt from the same tile (COA A, with the filmstrip kept as asked) | ✅ Confirmed |
+| 2026-10-04 | Trash Browser and Marks-Only Operations | A popup view on `T` that acts only on `v` marks (COA B), over a virtual folder (A) and `trash-cli` (C); every operation reads marks alone and spends them | ✅ Confirmed |
 | 2026-10-04 | Instant Start | Splash off by default; with it on the browser is drawn underneath and a key passes through | ✅ Confirmed |
 | 2026-10-04 | Fuzzy Search | Own subsequence scorer; nearest level first, best matches within it, top 20 to step through (COA A), over ranking the whole walk (B) and a matcher crate (C) | ✅ Confirmed |
 | 2026-10-04 | Sorting, Local Time, Icons, Page Keys, Prompt Editing | Sort kept in `BrowserState` and applied when a listing is stored; `chrono` for local time (A); a shared `LineEdit` for prompts (A) | ✅ Confirmed |
@@ -5186,6 +5187,68 @@ binary was driven in a PTY through `pyte` with the terminal probe answered in fu
 click, a double-click into a folder and `h` back, an empty folder), details (title row, date, mode,
 size, full width, `j`, a click), the filmstrip's framed tiles, and back to the columns. Not tried: a
 real kitty, photographs rather than test images, or a remote folder.
+
+### Trash Browser, and Marks as the Only Selection (COA B)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** Two requests in one cycle: a way to see and manage the desktop trash from inside the
+app, and a rule that choosing entries belongs to `v` alone, with `y` (and the other operations)
+responsible only for what they do.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Browse the trash as a virtual folder in the normal browser | Rejected: the `Vfs` is built for real paths, and every key would need a special meaning there |
+| B | A popup view like the disk usage view, opened with `T` | Chosen |
+| C | Shell out to `trash-cli` | Rejected: an external tool most people do not have |
+
+**The marks rule.** The keys already refused to act with nothing marked ("mark with v first"), so
+the first step was to reproduce what could still behave like selection. Two things did: the
+right-click menu and the `:trash`, `:compress` and `:extract` commands still fell back to the cursor
+row, and a yank left its marks in place, so the next `x` would trash what the `y` had just taken.
+The request was answered with a free-text clarification that read as wanting both fixed, with the
+stress on selecting being `v` alone and `y` doing only the yanking, so both were done: every
+operation reads the marks alone, and each spends the marks it takes (yank and cut as they fill the
+clipboard, a confirmed trash or delete, a compress or extract once it starts). Declining a question
+keeps the marks. Two things were left on purpose and are named in the roadmap: a plugin key still
+gets the marks or else the cursor row (that is what the plugin API says it gets), and dragging an
+unmarked row still drags it (a pointer gesture, not an operation on a selection). If either is
+meant to change too, it is a small edit.
+
+**The trash crate.** It already listed the trash for undo. `TrashEntry` is plain data (id, name,
+original folder, when, size) so a view can sort and test it; restoring and purging look the entries up
+by id in one listing per batch and return one result per entry, so a restore onto a place that is
+taken fails for that entry alone and the rest go through. On a platform whose trash cannot be read
+(macOS) every function says so.
+
+**The view.** State, keys and drawing are in `trash_view`, with the trash behind a `TrashBackend`
+trait so the tests run against a fake that can simulate a clash and an unreadable trash. Reading and
+acting run on the blocking pool, and the keys are ignored while an action runs. The destructive steps
+ask `(y/N)` and any key but `y` declines, including `Enter` and `Esc`. The view takes `v` for marks
+for the same reason everything else does, and has no mark-all key: `E` is the one operation that
+takes everything, and it asks first.
+
+**A mistake worth recording.** The first run of the real binary showed 109 items in the trash view
+although it was given an empty home. The crate also lists the `.Trash-<uid>` folder of any mount, and
+`/tmp` is its own mount, where earlier unit tests had trashed temporary files; the run's `E` then
+deleted those. It was test leftovers only, and the real home trash was checked afterwards and was
+untouched (54 items before and after), but it showed that an isolated `HOME` is not enough to
+isolate the trash. One of the new app tests had also been sending a file to the real trash each
+time it ran; it now uses the permanent delete for the confirming half.
+
+**Verification.** `scripts/check` passes. Tests cover the marks-only rule for every operation, the
+marks being spent by each, declining keeping them, the trash crate against the real trash with
+uniquely named files (listing, restore, purge, a clash, a missing entry, a folder's entry count),
+and the view against the fake (listing, a read failure, moving, `v` as the only way to mark, nothing
+acting on the cursor row, restore, a partial restore, the confirmation, `E`, the keys while working,
+the column plan, the scroll, a click, and the drawing at several sizes). The real binary was driven in
+a terminal emulator with its own home and trash: `y`, `d` and `x` refused with nothing marked, `v`
+then `y` copied and cleared the mark, an immediate `x` had nothing to act on, `v` then `x` then `y`
+trashed only the marked file; and in the trash view `r` and `x` refused with nothing marked, `v` then
+`r` put the file back, `Enter` declined a delete, and `x` then `y` deleted it for good. Not tried: a
+very large trash, the trash on a second disk beyond what `/tmp` showed, or Windows.
+
+---
 
 ### Instant Start: Splash Off by Default, Keys Pass Through
 

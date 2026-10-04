@@ -123,7 +123,8 @@ named `init` must be passed as `./init`.
 | `h` / `←`   | leave directory                               |
 | `q`         | quit                                          |
 | `Q`         | quit and `cd` your shell to the directory you were in (needs the `mman` wrapper above) |
-| `v`         | mark the entry under the cursor; `y`, `d`, `x` and `X` work on marked entries only |
+| `v`         | mark the entry under the cursor — the only way to choose entries. `y`, `d`, `x`, `X`, `C`, `E`, their right-click entries and the `:` commands act on the marked entries and nothing else, and spend the marks when they take them |
+| `T`         | open the trash browser: what is in the desktop trash, newest first. `v` marks, `r` puts the marked back, `x` deletes them for good, `E` empties the trash (both ask first), `q` closes |
 | `y`         | yank (copy) the marked entries                |
 | `d`         | cut (move) the marked entries                 |
 | `C` / `E`   | compress / extract the marked entries (opens the form) |
