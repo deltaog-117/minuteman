@@ -73,6 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `trash`: the trash browser previews the selected item in a pane beside the list (on a
+  terminal 100 columns wide or more): text, an image, an archive's listing, a hex dump or a
+  folder's contents, read from where the trash keeps the item, so nothing is restored to be looked
+  at. `J` and `K` (the browser's preview-scroll keys) scroll it. `TrashEntry` gained `stored_path`.
+  The browser's preview drawing moved into `draw_preview_pane`, which both screens now use.
 - `tui`, `trash`: a trash browser, opened with `T` (rebindable as `trash_view`). It lists everything
   in the desktop trash, newest first, with its original folder, when it was deleted and its size.
   `v` marks, `r` puts the marked entries back where they were (one whose place is taken stays in

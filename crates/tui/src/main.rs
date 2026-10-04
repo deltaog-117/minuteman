@@ -1304,7 +1304,11 @@ fn run(
         }
         app.poll_hud(browser, Instant::now());
         app.poll_plugins();
-        previews.update(browser.selected_entry(), &config.preview_hooks);
+        // While the trash browser is open the preview follows its cursor, not the browser's.
+        match trash_view.as_ref() {
+            Some(view) => previews.update(view.preview_subject().as_ref(), &config.preview_hooks),
+            None => previews.update(browser.selected_entry(), &config.preview_hooks),
+        }
 
         if let Some(mut panes) = shells.take() {
             let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
@@ -2342,6 +2346,18 @@ fn run(
                     continue;
                 }
                 if let Some(view) = trash_view.as_mut() {
+                    // The preview scrolls with the browser's own keys for it.
+                    match config.keys.resolve(key.code) {
+                        Some(Action::PreviewDown) => {
+                            previews.text.scroll_half_pages(1);
+                            continue;
+                        }
+                        Some(Action::PreviewUp) => {
+                            previews.text.scroll_half_pages(-1);
+                            continue;
+                        }
+                        _ => {}
+                    }
                     if view.key(key.code, config.keys.resolve(key.code)) {
                         trash_view = None;
                     }
@@ -3146,6 +3162,80 @@ fn drop_into_shell(
     }
 }
 
+/// What a preview pane is showing something about.
+struct PreviewSubject<'a> {
+    /// A file, which the image or the text pipeline shows, whichever has something for it.
+    is_file: bool,
+    /// The listing of a folder, shown when it is not a file.
+    children: Option<&'a [DirEntryInfo]>,
+    /// The name shown when there is nothing else to show.
+    label: &'a str,
+}
+
+/// Draws a preview pane into `area` — an inline image for image files (or ones an `Image`-kind
+/// preview hook thumbnailed), rendered text for code and text files (or ones a `Text`-kind hook
+/// extracted, an archive's listing, a hex dump), the children of a folder, or the file's name as a
+/// placeholder for anything else, including a hook-covered file whose hook is missing, failed or
+/// timed out, which quietly reads back as `Empty` on either pipeline rather than an error. The
+/// browser's preview column and the trash browser's pane are both drawn by this. `scale_up` makes
+/// a picture fill the area (the filmstrip); otherwise it only ever shrinks to fit.
+fn draw_preview_pane(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    subject: PreviewSubject<'_>,
+    previews: &mut Previews,
+    scale_up: bool,
+    config: &Config,
+) {
+    let is_image = subject.is_file && previews.image.status() != ImagePreviewStatus::Empty;
+    // Any other file has something to show — text, an archive's listing or a hex dump — unless
+    // it is not a regular file (a socket, a pipe), which reads back as `Empty`.
+    let is_text = subject.is_file && previews.text.status() != TextPreviewStatus::Empty;
+    if is_image {
+        let block = style::themed_block(config, "preview", false);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        match previews.image.status() {
+            ImagePreviewStatus::Ready => {
+                let widget = if scale_up {
+                    StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle)))
+                } else {
+                    StatefulImage::default()
+                };
+                frame.render_stateful_widget(widget, inner, previews.image.protocol_mut());
+            }
+            ImagePreviewStatus::Loading => {
+                frame.render_widget(Paragraph::new("loading preview…"), inner);
+            }
+            ImagePreviewStatus::Failed => {
+                frame.render_widget(Paragraph::new("preview failed"), inner);
+            }
+            ImagePreviewStatus::Empty => {}
+        }
+    } else if is_text {
+        preview_view::render(frame, area, &mut previews.text, config);
+    } else if let Some(children) = subject.children {
+        let items: Vec<ListItem> = children
+            .iter()
+            .map(|e| entry_item(e, config, Row::PLAIN, None))
+            .collect();
+        frame.render_widget(
+            List::new(items).block(style::themed_block(config, "preview", false)),
+            area,
+        );
+    } else {
+        let style = Style::default().fg(color_from_name(&config.theme.file_fg));
+        frame.render_widget(
+            List::new(vec![ListItem::new(Span::styled(
+                subject.label.to_string(),
+                style,
+            ))])
+            .block(style::themed_block(config, "preview", false)),
+            area,
+        );
+    }
+}
+
 fn draw(
     frame: &mut ratatui::Frame<'_>,
     browser: &BrowserState,
@@ -3373,67 +3463,23 @@ fn draw(
         );
     }
 
-    // Preview pane — an inline image for image files (or ones an `Image`-kind preview hook
-    // thumbnailed), rendered text for code/text files (or ones a `Text`-kind hook extracted),
-    // children of a selected directory, or the file's name as a placeholder for anything else —
-    // including a hook-covered file whose hook is missing, failed or timed out, which quietly
-    // reads back as `Empty` on either pipeline rather than an error.
-    let is_selected_image = browser.selected_entry().is_some_and(|e| !e.is_dir)
-        && previews.image.status() != ImagePreviewStatus::Empty;
-    // Any other file has something to show — text, an archive's listing or a hex dump — unless
-    // it is not a regular file (a socket, a pipe), which reads back as `Empty`.
-    let is_selected_file = browser.selected_entry().is_some_and(|e| !e.is_dir)
-        && previews.text.status() != TextPreviewStatus::Empty;
-
+    // Preview pane: see `draw_preview_pane`.
     // The grid and the details view have no preview column (zero width); drawing into it
     // would only waste a decode.
     if columns[2].width > 0 {
-        if is_selected_image {
-            let block = style::themed_block(config, "preview", false);
-            let inner = block.inner(columns[2]);
-            frame.render_widget(block, columns[2]);
-            match previews.image.status() {
-                ImagePreviewStatus::Ready => {
-                    // The filmstrip exists to look at the picture, so it is scaled up to fill the
-                    // area; the narrow preview column only ever shrinks one to fit.
-                    let widget = if filmstrip.is_some() {
-                        StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle)))
-                    } else {
-                        StatefulImage::default()
-                    };
-                    frame.render_stateful_widget(widget, inner, previews.image.protocol_mut());
-                }
-                ImagePreviewStatus::Loading => {
-                    frame.render_widget(Paragraph::new("loading preview…"), inner);
-                }
-                ImagePreviewStatus::Failed => {
-                    frame.render_widget(Paragraph::new("preview failed"), inner);
-                }
-                ImagePreviewStatus::Empty => {}
-            }
-        } else if is_selected_file {
-            preview_view::render(frame, columns[2], &mut previews.text, config);
-        } else if let Some(children) = &dir_preview {
-            let items: Vec<ListItem> = children
-                .iter()
-                .map(|e| entry_item(e, config, Row::PLAIN, None))
-                .collect();
-            frame.render_widget(
-                List::new(items).block(style::themed_block(config, "preview", false)),
-                columns[2],
-            );
-        } else {
-            let label = browser
-                .selected_entry()
-                .map(|e| e.name.clone())
-                .unwrap_or_default();
-            let style = Style::default().fg(color_from_name(&config.theme.file_fg));
-            frame.render_widget(
-                List::new(vec![ListItem::new(Span::styled(label, style))])
-                    .block(style::themed_block(config, "preview", false)),
-                columns[2],
-            );
-        }
+        let selected = browser.selected_entry();
+        draw_preview_pane(
+            frame,
+            columns[2],
+            PreviewSubject {
+                is_file: selected.is_some_and(|e| !e.is_dir),
+                children: dir_preview.as_deref(),
+                label: selected.map_or("", |e| e.name.as_str()),
+            },
+            previews,
+            filmstrip.is_some(),
+            config,
+        );
     }
 
     if let Some(tiles) = &grid {
@@ -3518,6 +3564,26 @@ fn draw(
     }
     if let Some(view) = trash {
         trash_view::render(frame, view, config);
+        if let Some(area) = trash_view::layout(frame.area()).preview {
+            let subject = view.preview_subject();
+            // A trashed folder is listed once per frame, as a folder in the browser's preview is.
+            let children: Option<Vec<DirEntryInfo>> = subject
+                .as_ref()
+                .filter(|entry| entry.is_dir)
+                .map(|entry| vfs.list_dir(&entry.path).unwrap_or_default());
+            draw_preview_pane(
+                frame,
+                area,
+                PreviewSubject {
+                    is_file: subject.as_ref().is_some_and(|entry| !entry.is_dir),
+                    children: children.as_deref(),
+                    label: view.selected_name().unwrap_or(""),
+                },
+                previews,
+                false,
+                config,
+            );
+        }
     }
     if let Some(menu) = menu {
         overlay_view::render_menu(frame, menu, config);

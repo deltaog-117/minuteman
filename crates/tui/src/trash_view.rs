@@ -36,6 +36,7 @@ use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
+use shared::DirEntryInfo;
 use theming::{Action, Config};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -203,6 +204,11 @@ impl TrashView {
         self.selected
     }
 
+    /// The name of the entry under the cursor, for a pane that has nothing else to say.
+    pub fn selected_name(&self) -> Option<&str> {
+        self.entries.get(self.selected).map(|e| e.name.as_str())
+    }
+
     pub fn marked_count(&self) -> usize {
         self.marked.len()
     }
@@ -250,6 +256,26 @@ impl TrashView {
             .filter(|entry| self.marked.contains(&entry.id))
             .cloned()
             .collect()
+    }
+
+    /// The entry under the cursor, described the way the browser's own preview pipelines want a
+    /// file: the place its contents sit in the trash, so text, images, archives and binaries are
+    /// shown by the code that already shows them. `None` when nothing is selected or the trash
+    /// does not say where the contents are.
+    pub fn preview_subject(&self) -> Option<DirEntryInfo> {
+        let entry = self.entries.get(self.selected)?;
+        let path = entry.stored_path.clone()?;
+        Some(DirEntryInfo {
+            name: entry.name.clone(),
+            path,
+            is_dir: matches!(entry.size, EntrySize::Entries(_)),
+            size: match entry.size {
+                EntrySize::Bytes(bytes) => bytes,
+                _ => 0,
+            },
+            modified: None,
+            mode: None,
+        })
     }
 
     pub fn move_by(&mut self, by: isize) {
@@ -411,16 +437,41 @@ fn summary(work: Work, results: &[Result<(), String>]) -> String {
 
 // ---- drawing ------------------------------------------------------------------------------
 
-/// The regions of the view within the screen: the same arrangement as the disk usage view's.
+/// The regions of the view within the screen: the list's frame with its header, rows and footer,
+/// and — on a screen wide enough — a preview pane beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
+    /// The frame around the list.
+    pub frame: Rect,
     pub header: Rect,
     pub rows: Rect,
     pub footer: Rect,
+    /// Where the selected entry's contents are shown; `None` on a narrow screen, which gives the
+    /// whole width to the list.
+    pub preview: Option<Rect>,
 }
 
+/// The least width at which a preview pane is worth its room beside the list.
+pub const PREVIEW_MIN_WIDTH: u16 = 100;
+
 pub fn layout(screen: Rect) -> Layout {
-    let inner = screen.inner(Margin::new(2, 1));
+    let (frame, preview) = if screen.width >= PREVIEW_MIN_WIDTH {
+        let list_width = screen.width * 55 / 100;
+        (
+            Rect {
+                width: list_width,
+                ..screen
+            },
+            Some(Rect {
+                x: screen.x + list_width,
+                width: screen.width - list_width,
+                ..screen
+            }),
+        )
+    } else {
+        (screen, None)
+    };
+    let inner = frame.inner(Margin::new(2, 1));
     let header = Rect {
         height: inner.height.min(1),
         ..inner
@@ -436,9 +487,11 @@ pub fn layout(screen: Rect) -> Layout {
         ..inner
     };
     Layout {
+        frame,
         header,
         rows,
         footer,
+        preview,
     }
 }
 
@@ -559,7 +612,7 @@ pub fn render(frame: &mut Frame<'_>, view: &TrashView, config: &Config) {
     let places = layout(screen);
     let theme = &config.theme;
     frame.render_widget(Clear, screen);
-    frame.render_widget(style::themed_block(config, "trash", true), screen);
+    frame.render_widget(style::themed_block(config, "trash", true), places.frame);
 
     let dim = Style::default().fg(style::color(&theme.status_fg));
     let accent = Style::default().fg(style::color(&theme.accent_fg));
@@ -594,7 +647,7 @@ pub fn render(frame: &mut Frame<'_>, view: &TrashView, config: &Config) {
     view.top().set(top);
     view.viewport().set(viewport);
 
-    let columns = plan(width);
+    let columns = plan(usize::from(places.rows.width));
     let lines: Vec<Line<'static>> = view
         .entries()
         .iter()
@@ -629,12 +682,13 @@ pub fn render(frame: &mut Frame<'_>, view: &TrashView, config: &Config) {
     };
     frame.render_widget(Paragraph::new(footer), places.footer);
 
-    let strip = Rect {
-        y: places.rows.y.saturating_sub(1),
-        height: places.rows.height + 2,
-        ..screen
-    };
-    hud::render_scrollbar(frame, strip, view.entries().len(), view.selected(), config);
+    hud::render_scrollbar(
+        frame,
+        places.frame,
+        view.entries().len(),
+        view.selected(),
+        config,
+    );
 }
 
 fn row_line(
@@ -729,6 +783,7 @@ mod tests {
             original_dir: PathBuf::from("/home/me/docs"),
             deleted: secs,
             size,
+            stored_path: Some(PathBuf::from("/trash/files").join(name)),
         }
     }
 
@@ -1183,7 +1238,7 @@ mod tests {
     fn the_screen_shows_each_entry_with_its_size_folder_and_marks() {
         let (_rt, mut view) = open(&sample());
         ch(&mut view, 'v');
-        let screen = drawn(&view, 120, 12);
+        let screen = drawn(&view, 99, 12);
         assert!(screen.contains("3 items, 1 marked"), "{screen}");
         assert!(
             screen.contains("newest.txt") && screen.contains("2.0K"),
@@ -1200,6 +1255,117 @@ mod tests {
         );
         assert!(
             screen.contains("v mark") && screen.contains("E empty"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_wide_screen_gets_a_preview_pane_beside_the_list_and_a_narrow_one_does_not() {
+        let narrow = layout(Rect::new(0, 0, PREVIEW_MIN_WIDTH - 1, 30));
+        assert_eq!(narrow.preview, None);
+        assert_eq!(narrow.frame, Rect::new(0, 0, PREVIEW_MIN_WIDTH - 1, 30));
+
+        let wide = layout(Rect::new(0, 0, 140, 30));
+        let preview = wide.preview.expect("room for a pane");
+        assert_eq!(
+            wide.frame.x + wide.frame.width,
+            preview.x,
+            "side by side, no gap"
+        );
+        assert_eq!(
+            wide.frame.width + preview.width,
+            140,
+            "together they fill the screen"
+        );
+        assert!(
+            wide.frame.width > preview.width,
+            "the list is the larger part"
+        );
+        assert!(preview.width >= 40, "wide enough to read: {preview:?}");
+        assert!(
+            wide.rows.right() <= wide.frame.right(),
+            "the rows stay inside the list's frame"
+        );
+    }
+
+    proptest! {
+        /// Whatever the screen, the list and the pane never overlap and never leave it.
+        #[test]
+        fn the_list_and_the_pane_partition_the_screen(w in 0u16..400, h in 0u16..100) {
+            let screen = Rect::new(0, 0, w, h);
+            let places = layout(screen);
+            prop_assert_eq!(places.frame.intersection(screen), places.frame);
+            if let Some(preview) = places.preview {
+                prop_assert_eq!(preview.intersection(screen), preview);
+                prop_assert_eq!(places.frame.intersection(preview).area(), 0);
+                prop_assert_eq!(places.frame.width + preview.width, w);
+            }
+            prop_assert_eq!(places.rows.intersection(places.frame), places.rows);
+        }
+    }
+
+    #[test]
+    fn the_preview_subject_is_the_stored_file_described_for_the_browsers_pipelines() {
+        let (_rt, mut view) = open(&sample());
+        let file = view
+            .preview_subject()
+            .expect("the first entry has a stored path");
+        assert_eq!(file.path, PathBuf::from("/trash/files/newest.txt"));
+        assert_eq!(file.name, "newest.txt");
+        assert!(!file.is_dir);
+        assert_eq!(file.size, 2048);
+
+        ch(&mut view, 'j');
+        ch(&mut view, 'j');
+        let folder = view.preview_subject().unwrap();
+        assert_eq!(folder.path, PathBuf::from("/trash/files/folder"));
+        assert!(
+            folder.is_dir,
+            "an entry with a count of entries is a folder"
+        );
+        assert_eq!(view.selected_name(), Some("folder"));
+    }
+
+    #[test]
+    fn with_nowhere_to_read_it_from_there_is_no_subject_but_the_name_remains() {
+        let mut odd = entry("1", "mystery", 1, EntrySize::Unknown);
+        odd.stored_path = None;
+        let (_rt, view) = open(&Fake::new(vec![odd]));
+        assert!(view.preview_subject().is_none());
+        assert_eq!(view.selected_name(), Some("mystery"));
+
+        let (_rt, empty) = open(&Fake::new(Vec::new()));
+        assert!(empty.preview_subject().is_none());
+        assert_eq!(empty.selected_name(), None);
+    }
+
+    #[test]
+    fn the_subject_follows_the_cursor() {
+        let (_rt, mut view) = open(&sample());
+        let first = view.preview_subject().unwrap().path;
+        ch(&mut view, 'j');
+        assert_ne!(view.preview_subject().unwrap().path, first);
+        ch(&mut view, 'k');
+        assert_eq!(view.preview_subject().unwrap().path, first);
+    }
+
+    #[test]
+    fn on_a_wide_screen_the_list_is_framed_on_its_own_and_still_shows_its_rows() {
+        let (_rt, mut view) = open(&sample());
+        ch(&mut view, 'v');
+        let screen = drawn(&view, 140, 12);
+        let first_line = screen.lines().next().unwrap();
+        assert!(first_line.starts_with("╭ trash "), "{first_line}");
+        assert!(
+            first_line.contains("╮"),
+            "the list has its own right corner: {first_line}"
+        );
+        assert!(
+            screen.contains("3 items, 1 marked") && screen.contains("* newest.txt"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("2.0K") && screen.contains("4 items"),
             "{screen}"
         );
     }

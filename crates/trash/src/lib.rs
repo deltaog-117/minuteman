@@ -119,6 +119,10 @@ pub struct TrashEntry {
     /// When it was trashed, in seconds since the Unix epoch.
     pub deleted: i64,
     pub size: EntrySize,
+    /// Where the item's contents sit on disk while it is in the trash, so it can be read — to
+    /// preview it — without restoring it. `None` where the trash does not keep plain files that
+    /// can be found from the item (it is only known for the freedesktop layout).
+    pub stored_path: Option<PathBuf>,
 }
 
 impl TrashEntry {
@@ -146,7 +150,20 @@ fn entry_of(item: &os_trash::TrashItem) -> TrashEntry {
         original_dir: item.original_parent.clone(),
         deleted: item.time_deleted,
         size: imp::size(item),
+        stored_path: stored_path(&item.id),
     }
+}
+
+/// The freedesktop trash keeps an item's record at `<trash>/info/<name>.trashinfo` and its
+/// contents at `<trash>/files/<name>`; `id` is the record's path.
+fn stored_path(id: &OsString) -> Option<PathBuf> {
+    let info = Path::new(id);
+    let name = info.file_name()?.to_str()?.strip_suffix(".trashinfo")?;
+    let folder = info.parent()?;
+    if folder.file_name()? != "info" {
+        return None;
+    }
+    Some(folder.parent()?.join("files").join(name))
 }
 
 /// Puts each of `entries` back where it was, one result per entry, in order. One that cannot go
@@ -350,6 +367,42 @@ mod tests {
     }
 
     #[test]
+    fn the_stored_path_is_where_the_contents_can_be_read_without_restoring() {
+        let (dir, file, entry) = trashed("stored");
+        let stored = entry
+            .stored_path
+            .clone()
+            .expect("the freedesktop layout is understood");
+        assert_eq!(std::fs::read(&stored).unwrap(), b"12345");
+        assert!(!file.exists(), "it is still in the trash");
+
+        assert!(restore_entries(&[entry]).remove(0).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_stored_path_is_worked_out_from_the_record_and_nothing_else() {
+        let id = |s: &str| OsString::from(s);
+        assert_eq!(
+            stored_path(&id("/home/u/.local/share/Trash/info/a b.txt.trashinfo")),
+            Some(PathBuf::from("/home/u/.local/share/Trash/files/a b.txt"))
+        );
+        assert_eq!(
+            stored_path(&id("/mnt/disk/.Trash-1000/info/x.trashinfo")),
+            Some(PathBuf::from("/mnt/disk/.Trash-1000/files/x"))
+        );
+        for odd in [
+            "C:\\$Recycle.Bin\\something",
+            "/trash/files/x.trashinfo",
+            "/trash/info/x.txt",
+            "relative",
+            "",
+        ] {
+            assert_eq!(stored_path(&id(odd)), None, "{odd:?}");
+        }
+    }
+
+    #[test]
     fn the_listing_is_newest_first() {
         let all = entries().unwrap();
         assert!(
@@ -409,6 +462,7 @@ mod tests {
             original_dir: PathBuf::from("/nowhere"),
             deleted: 0,
             size: EntrySize::Unknown,
+            stored_path: None,
         };
 
         let results = restore_entries(&[ghost, real]);

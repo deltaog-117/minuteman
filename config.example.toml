@@ -244,7 +244,11 @@ cycle_view = ["V"]
 # nothing acts on the row under the cursor unless it is marked — then `r` puts the marked ones back
 # where they were (one whose place is taken stays in the trash and says so), `x` deletes them for
 # good, and `E` empties the whole trash; both of those ask first (`y`). `c` clears the marks, and
-# `q` or Esc closes the view.
+# `q` or Esc closes the view. On a terminal 100 columns or wider, the selected item is previewed
+# beside the list exactly as in the browser's own preview column — its text, an image, an
+# archive's listing, a hex dump, or a folder's contents — read from where the trash keeps it, so
+# nothing has to be restored to be looked at; the keys bound to `preview_down` / `preview_up`
+# scroll it.
 trash_view = ["T"]
 # Orders the folder by the next key — name, size (largest first), modified time (newest first), then
 # permissions — and round again; the status line names the order, and the details view marks the

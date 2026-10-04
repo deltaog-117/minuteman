@@ -5236,6 +5236,17 @@ untouched (54 items before and after), but it showed that an isolated `HOME` is 
 isolate the trash. One of the new app tests had also been sending a file to the real trash each
 time it ran; it now uses the permanent delete for the confirming half.
 
+**Preview (same day).** The trash browser then got a preview of the selected item. The browser's
+preview code (an image or the text pipeline, a folder's children, or the file's name) was moved
+unchanged into `draw_preview_pane`, so the trash browser reuses it instead of copying it, and the
+main loop feeds `Previews::update` the trash cursor's item while the view is open and the
+browser's selection otherwise. What the pipelines need is a readable path, so the `trash` crate
+reports where each item's contents sit (`stored_path`: `<trash>/files/<name>` for the record at
+`<trash>/info/<name>.trashinfo`), which also keeps the file's extension, so type detection works.
+The view splits into a framed list and a preview pane at 100 columns; below that it keeps the
+single frame. The pane is a separate request from the first version, so the earlier verification
+below does not cover it; see the end of this entry.
+
 **Verification.** `scripts/check` passes. Tests cover the marks-only rule for every operation, the
 marks being spent by each, declining keeping them, the trash crate against the real trash with
 uniquely named files (listing, restore, purge, a clash, a missing entry, a folder's entry count),
@@ -5247,6 +5258,18 @@ then `y` copied and cleared the mark, an immediate `x` had nothing to act on, `v
 trashed only the marked file; and in the trash view `r` and `x` refused with nothing marked, `v` then
 `r` put the file back, `Enter` declined a delete, and `x` then `y` deleted it for good. Not tried: a
 very large trash, the trash on a second disk beyond what `/tmp` showed, or Windows.
+
+**Verification of the preview.** Tests cover the layout (no pane below 100 columns, a pane beside
+the list above it, the two never overlapping and filling the screen for any size), the preview
+subject (the stored path, whether it is a folder, none when the trash does not say where the
+contents are, following the cursor), the stored path worked out from the record's path (including
+names with spaces, another disk's `.Trash-<uid>` and layouts that are not freedesktop), and the
+list drawn in its own frame beside the pane. The real binary was driven in a terminal emulator with
+its own home and trash, four items trashed through the app (a text file, a PNG, a 1 KiB binary and
+a folder of two files): the pane showed the text's lines, a drawn picture (as coloured half blocks,
+since that terminal answered no graphics query), the binary's hex dump and the folder's two names,
+and `J` scrolled the text by half a page. Not tried: a real kitty with its graphics protocol, a
+very large text, or a trashed archive.
 
 ---
 

@@ -1344,6 +1344,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   tests use a fake. Chosen as COA B (a popup view like the disk usage view) over browsing the trash
   as a virtual folder (A, the `Vfs` is built for real paths and every key would need a special
   case there) and shelling out to `trash-cli` (C, an external tool most people lack).
+  *Preview:* on a terminal 100 columns wide or more the selected item is previewed in a pane beside
+  the list, by the same pipelines as the browser's preview column and read from where the trash
+  keeps the item (`TrashEntry::stored_path`, worked out from the freedesktop `info/` and `files/`
+  layout), so nothing has to be restored to be looked at: text, an image, an archive's listing, a
+  hex dump, or a folder's contents. `J`/`K` scroll it. The drawing the browser used for its preview
+  column was moved into `draw_preview_pane` and both screens call it, so there is one set of rules
+  for what a file shows as.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1478,7 +1485,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   against the name only, not the path (`src/main` does not find `src/main.rs`); and there is no
   smart-case switch or exact-match mode.
 - **Trash browser, follow-ups** – no sort order other than newest first, no search or filter, no
-  preview of a trashed file, no mouse marking (a click selects the row; `v` marks it), restore
+  preview below 100 columns or on a platform whose trash layout is not the freedesktop one, a
+  picture is never scaled up in the pane (as in the browser's own column), no mouse marking (a click selects the row; `v` marks it), restore
   cannot choose another place, and the size of a folder is its entry count, not its total. The
   trash of another disk (`.Trash-<uid>`) is listed with the home trash and treated the same.
   On macOS the trash cannot be read back, so the view says so.
