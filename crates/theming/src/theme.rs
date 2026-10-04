@@ -16,6 +16,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::palette::TerminalPalette;
+
 /// A resolved color palette — every field is always populated (via `named`/`Default`, then any
 /// config overrides), so `tui` never has to guess at a fallback.
 ///
@@ -82,14 +84,19 @@ impl Theme {
         }
     }
 
-    /// What "nothing configured" resolves to: `is_dark` comes from a live OSC 11 query of the
-    /// terminal's own background color (see `crates/tui/src/image_preview.rs`, which bundles
-    /// that query into its existing graphics-capability probe), classified by [`Theme::is_dark`].
-    /// `None` means the terminal never answered — most terminals that don't support the query
-    /// simply stay silent, so this is not a "light" signal — and falls back to the original
-    /// neon-cyberpunk look rather than guessing. An explicit `[theme]` (a `name`, or even just one
-    /// overridden field) always wins over this; see `Config::theme_is_customized`.
-    pub fn auto(is_dark: Option<bool>) -> Self {
+    /// What "nothing configured" resolves to. When the terminal reported its own colors, the
+    /// theme is built from them (see [`Theme::from_palette`]), so it matches the user's
+    /// wallpaper or theming tool on any window manager, desktop or OS. Failing that, `is_dark`
+    /// (from the OSC 11 background alone, classified by [`Theme::is_dark`]) picks Catppuccin
+    /// Mocha or Latte. `None` means the terminal never answered — most terminals that don't
+    /// support the queries simply stay silent, so this is not a "light" signal — and falls back
+    /// to the original neon-cyberpunk look rather than guessing. An explicit `[theme]` (a
+    /// `name`, or even just one overridden field) always wins over this; see
+    /// `Config::theme_is_customized`.
+    pub fn auto(palette: Option<&TerminalPalette>, is_dark: Option<bool>) -> Self {
+        if let Some(palette) = palette {
+            return Self::from_palette(palette);
+        }
         match is_dark {
             Some(true) => Self::catppuccin(),
             Some(false) => Self::catppuccin_latte(),
@@ -620,9 +627,22 @@ mod tests {
 
     #[test]
     fn auto_picks_catppuccin_by_detected_darkness_and_falls_back_when_unknown() {
-        assert_eq!(Theme::auto(Some(true)), Theme::catppuccin());
-        assert_eq!(Theme::auto(Some(false)), Theme::catppuccin_latte());
-        assert_eq!(Theme::auto(None), Theme::default());
+        assert_eq!(Theme::auto(None, Some(true)), Theme::catppuccin());
+        assert_eq!(Theme::auto(None, Some(false)), Theme::catppuccin_latte());
+        assert_eq!(Theme::auto(None, None), Theme::default());
+    }
+
+    #[test]
+    fn auto_prefers_the_terminals_own_palette_over_the_darkness_guess() {
+        let palette = TerminalPalette {
+            background: (0x0f, 0x10, 0x12),
+            foreground: Some((0xdf, 0xda, 0xd1)),
+            ansi: [(0x80, 0x80, 0x80); 16],
+        };
+        assert_eq!(
+            Theme::auto(Some(&palette), Some(true)),
+            Theme::from_palette(&palette)
+        );
     }
 
     #[test]

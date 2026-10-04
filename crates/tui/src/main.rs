@@ -54,6 +54,7 @@ mod shell_layout;
 mod style;
 mod system_hud;
 mod terminal_init;
+mod terminal_palette;
 mod text_preview;
 mod thumbnails;
 mod tile_view;
@@ -762,7 +763,9 @@ fn main() -> Result<()> {
         let is_dark = previews
             .detected_background()
             .map(|(r, g, b)| Theme::is_dark(r, g, b));
-        config.theme = Theme::auto(is_dark);
+        // After the graphics probe has drained its own replies, so the two never share stdin.
+        let palette = terminal_palette::query();
+        config.theme = Theme::auto(palette.as_ref(), is_dark);
     }
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;

@@ -22,6 +22,7 @@ pub mod appearance;
 pub mod color;
 pub mod config;
 pub mod keymap;
+pub mod palette;
 pub mod panels;
 pub mod theme;
 pub mod ui;
@@ -33,6 +34,7 @@ pub use config::{
     RawLocal,
 };
 pub use keymap::{Action, KeyMap};
+pub use palette::TerminalPalette;
 pub use panels::{ColumnLayout, PanelsConfig, RawPanels};
 pub use theme::{RawTheme, Theme};
 pub use ui::{GlyphSet, RawUi, Ui};

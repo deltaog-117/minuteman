@@ -345,8 +345,11 @@ resets to the terminal's default.
 look), `dracula`, `catppuccin` (Mocha) and `nord`; `catppuccin-latte` (Catppuccin's light flavor)
 is reachable by name too, though it's meant for `Theme::auto`'s light-terminal case rather than
 picking by hand. Leaving `[theme]` out of both `config.toml` and `appearance.toml` entirely is
-its own thing, not a palette: Minuteman then asks the terminal for its own background color and
-picks Catppuccin Mocha or Latte to match it, falling back to `neon` if the terminal never answers.
+its own thing, not a palette: Minuteman then asks the terminal for its own colors (foreground,
+background and the 16 ANSI slots) and builds the theme from them, so it follows whatever your
+wallpaper or theming tool put in the terminal, on any window manager or desktop. If the terminal
+only reports its background, Catppuccin Mocha or Latte is picked to match; if it reports nothing,
+`neon` is used.
 
 **Text styles.** Each `[style]` element takes a list of `"bold"`, `"italic"`, `"dim"`,
 `"underline"`, `"reverse"` and `"strikethrough"`. A list *replaces* that element's default, so

@@ -1226,6 +1226,21 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   kitty or with photographs.
 
 ---
+- ✅ **Default theme follows the terminal's own colors** – with `[theme]` left out of both config
+  files, Minuteman now asks the terminal for its foreground and background (OSC 10/11) and its 16
+  ANSI colors (OSC 4), then builds the whole theme from them (`Theme::from_palette`), so it matches
+  whatever the user's wallpaper or theming tool (pywal, matugen, a hand-made scheme) already pushed
+  into the terminal, on any window manager, desktop or OS. Panel and bar backgrounds stay `reset`
+  so a translucent terminal shows through; only the selection row gets a solid color. The accent is
+  the most colorful non-red ANSI slot, and every text color is lifted toward the foreground until
+  it reaches a readable contrast against the background, so a dim palette entry never becomes
+  unreadable. If the terminal answers only the background, the Catppuccin Mocha/Latte pick stays;
+  if it answers nothing, the neon look stays. The probe (`terminal_palette.rs`) runs after the
+  graphics probe, ends on a device-attributes reply so it never waits for a terminal that ignores
+  OSC, and is capped at 300 ms. Unix only for now; other platforms keep the old behavior. Chosen
+  over a hard-coded palette (A, goes stale when the wallpaper changes) and a user palette file
+  (C, needs manual wiring per user), and over reading one tool's cache or the compositor's config,
+  which would only work for people using that tool.
 
 ## 🟡 Medium Priority (Important)
 

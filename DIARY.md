@@ -73,6 +73,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
 | 2026-10-02 | Filmstrip View | A `V` view cycle with a thumbnail strip drawn from a pool-filled cache of finished protocols (COA B, filmstrip first, grid second), over a grid only (A) and a bigger preview only (C) | ✅ Confirmed |
 | 2026-10-02 | Grid and Details Views | A grid of framed tiles and a flat details table added to the `V` cycle, the filmstrip kept and its strip rebuilt from the same tile (COA A, with the filmstrip kept as asked) | ✅ Confirmed |
+| 2026-10-04 | Default Theme Source | The terminal's own palette (OSC 4/10/11), mapped with contrast lifting, over a static palette (A) and a palette file (C) | ✅ Confirmed |
 
 ---
 
@@ -5181,6 +5182,45 @@ binary was driven in a PTY through `pyte` with the terminal probe answered in fu
 click, a double-click into a folder and `h` back, an empty folder), details (title row, date, mode,
 size, full width, `j`, a click), the filmstrip's framed tiles, and back to the columns. Not tried: a
 real kitty, photographs rather than test images, or a remote folder.
+
+### Default Theme Source: The Terminal's Own Palette (COA B)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** The default theme should fit the user's wallpaper-driven setup, and it has to work for
+anyone, not only people on one compositor or one theming tool.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A static palette built from the current wallpaper colors | Rejected: goes stale when the wallpaper changes |
+| B | Build the theme from the terminal's live colors (OSC 4/10/11) | Chosen |
+| C | A user palette file written by a hook | Rejected: manual wiring per user |
+
+Reading pywal's cache or a compositor's border file was also considered and dropped, since each only
+works for people who use that exact tool. Every theming tool ends up writing into the terminal, so
+asking the terminal is the one source they all share.
+
+**Design.** `theming::palette` holds the pure mapping (`Theme::from_palette`): no I/O, so it is
+tested on plain numbers. Backgrounds stay `reset` so a translucent terminal shows through; the
+selection row alone is a solid tint between background and foreground. The accent is the most
+colorful of ANSI green, yellow, blue, magenta and cyan (red means danger). Each text color is moved
+toward the foreground until it reaches a contrast floor against the background, because wallpaper
+palettes often contain a slot barely above the background. `tui::terminal_palette` does the asking:
+it sends the queries followed by a device-attributes request and stops reading when that reply
+arrives, because every terminal answers it, so a terminal that ignores OSC costs nothing extra; a
+300 ms cap covers the rest. A palette missing the background or any ANSI slot is rejected whole, and
+the older behavior (background only, then neon) applies.
+
+**Trade-offs.** The probe is Unix only (it uses `poll` and `read` on stdin), adding a direct `libc`
+dependency to `tui`; other platforms keep the old behavior. It runs after the graphics probe so the
+two never read stdin at once. Multiplexers that do not forward OSC 4 fall back as above.
+
+**Verification.** `scripts/check` passes, including tests for the reply parser (one to four digit
+channels, malformed specs, missing foreground, missing background or slot, silence) and for the
+mapping (readable text colors, lifted dim slots, transparent backgrounds, the accent choice, a light
+terminal, a missing foreground). Not tried: a real terminal, tmux, or a light wallpaper theme.
+
+---
 
 ---
 

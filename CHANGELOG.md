@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `theming`: with no `[theme]` set, the default look is now built from the terminal's own
+  colors (foreground, background and the 16 ANSI slots, read over OSC 10/11/4), so it matches a
+  wallpaper-driven setup on any window manager, desktop or OS. Text colors are lifted to stay
+  readable, and panel backgrounds stay transparent. A terminal that answers only the background
+  still gets Catppuccin Mocha or Latte; one that answers nothing still gets the neon look. Unix only
+  for now. New `theming::TerminalPalette` and `Theme::from_palette`; `Theme::auto` takes the
+  palette as its first argument; `tui` depends on `libc` directly.
 - `tui`: two more views on `V`. The grid shows framed tiles, a thumbnail over the name each, over
   the whole window like a graphical file manager's icon view: up/down move a row, the left/right
   arrows a tile, the wheel a row, a click selects and a double-click opens, and marks and the
