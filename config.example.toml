@@ -38,6 +38,11 @@ git_status = true
 # below flips it while browsing.
 show_hidden = false
 
+# The view Minuteman starts in: "list", "grid", "details" or "filmstrip". Pressing `V` switches it
+# and remembers the choice for next time (saved in ~/.config/minuteman/local.toml, which wins over
+# this line once you have used `V`). Leave it out to start on the name list.
+# view = "list"
+
 # A brief splash screen before the browser on startup, dismissed by the first keypress or mouse
 # click, or after under a second on its own. Set this to false to skip straight to the browser.
 boot_splash = true

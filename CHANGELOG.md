@@ -58,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `browser`: folders open in the background. Entering, leaving, `:cd`, a bookmark jump, a
+  breadcrumb click, a click in either column and the menu's Open no longer freeze the interface
+  while a slow folder (another machine, a large archive) loads: the old folder stays on screen, the
+  BUSY pill shows, `Esc` abandons the move, and a local folder still opens before the key press
+  returns. A folder that cannot be read now leaves the browser where it was and says why; a failed
+  step up used to exit the program. `BrowserState` gained `plan_enter`, `plan_leave`, `plan_goto`
+  and `apply_move`, with `MovePlan` and `LoadedMove`.
+- `tui`, `theming`: the view `V` switches to is remembered between sessions (saved in
+  `local.toml`), and `view` in `config.toml` sets the one to start in. `Config` gained `view` and
+  `save_view`; `RawLocal` gained `view`.
 - `tui`, `theming`: with no `[theme]` set, the default look is now built from the terminal's own
   colors (foreground, background and the 16 ANSI slots, read over OSC 10/11/4), so it matches a
   wallpaper-driven setup on any window manager, desktop or OS. Text colors are lifted to stay

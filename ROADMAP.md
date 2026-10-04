@@ -1246,6 +1246,27 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   default off; the probe therefore runs on every start. `default` is the same adaptive look as a
   name (terminal colors, else Catppuccin from the background, else neon), first in the cycle and
   the base for a `[theme]` that sets fields without a name; `terminal` stays as the strict one.
+- ✅ **Folders open in the background** – entering, leaving, `:cd`, a bookmark jump, a breadcrumb
+  click, a click in either column and the menu's Open no longer wait for the listing on the render
+  thread, so a folder on another machine (where connecting alone can take ten seconds) or a large
+  archive no longer freezes the interface. A move is now planned (`BrowserState::plan_enter`,
+  `plan_leave`, `plan_goto`), loaded anywhere (`MovePlan::load`, which touches nothing) and applied
+  in one step (`apply_move`); the sync `enter`, `leave` and `goto` run that same path, so there is
+  one implementation. `App::begin_move` waits up to 40 ms for the result, so a local folder is open
+  before the key press returns and nothing typed right after is lost; a slower one makes the app
+  busy (the BUSY pill, `opening <folder>…` in the status line), keeps the old folder on screen with
+  its cursor and marks valid, and holds other keys back, with `Esc` abandoning the move. A result
+  for a folder the browser has since left is dropped. A folder that cannot be read now leaves the
+  browser where it was and says why; before, a failed step up exited the program and a failed
+  `goto` left the browser on the folder it could not list. Chosen as COA A (the move itself made
+  asynchronous, old folder kept) over also showing the target as an empty listing at once (B,
+  leaves the cursor, marks and preview pointing at a folder with no entries) and moving the whole
+  browser onto a worker thread (C, a rewrite of every read of the listing).
+- ✅ **The chosen view is remembered** – `V` now saves the view (`list`, `grid`, `details` or
+  `filmstrip`) to `local.toml` and the next launch starts there. `view` in `config.toml` sets the
+  first one, and the saved choice wins once `V` has been used. `Config::save_view` rewrites the
+  file with everything else as it is on disk, and `save_local` keeps a stored `view` when its
+  caller (the popups) does not set one, so a popup save never erases it.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1277,8 +1298,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   entry would mean rewriting it); a file is held in memory when opened (256 MiB at most), so a large
   entry is copied out by extracting it; an encrypted zip lists but its entries cannot be opened
   from inside (extract it, which asks for the password); `rar`, `7z`, `xz`, `zstd` and `bzip2`
-  are not served; indexing a large `.tar.gz` runs on the render thread (the background-listing
-  item under Remote browsing would fix both); a zip link is shown as the file holding its text;
+  are not served; indexing a large `.tar.gz` no longer freezes the interface (opening it is a
+  background move) but is still read whole, so a very large one is slow to open; a zip link is shown as the file holding its text;
   the parent column does not highlight the archive's row; inside an archive the owner, link count
   and device are blank, as the format has none.
 - **VFS, follow-ups** – archives are now read and written through `Vfs` and browsed as folders, but
@@ -1304,8 +1325,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 - **Filmstrip, follow-ups** – a thumbnail's file is decoded in full, so a folder of large photos
   costs a decode each and a decode already started for an entry that has since left the window is
   not cancelled (a scaled JPEG decode and a cancel flag would fix both); a file an `Image`-kind
-  `[[preview_hook]]` covers (a PDF) has a big preview but a placeholder in the strip; the chosen view
-  is not remembered between sessions; right-click, drag and drop and the `Ctrl`/range clicks do
+  `[[preview_hook]]` covers (a PDF) has a big preview but a placeholder in the strip; right-click, drag and drop and the `Ctrl`/range clicks do
   nothing in this view (only the keyboard marks and acts); `h`/`l` still leave and enter folders,
   so there is no key for scrolling the strip sideways by a page; on a remote machine every
   thumbnail is fetched whole over the connection; and the strip's picture is drawn with the
@@ -1328,9 +1348,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   "Open with" cannot set the default (writing `mimeapps.list`) or remember the last choice; the
   associations are read once per session, so an app installed while it runs is not seen; `l` and
   `→` on a file now open it, which someone used to browsing with them may find eager.
-- **Remote browsing, follow-ups** – a connection or a listing blocks the interface while it runs
-  (the `Vfs` is synchronous and the browser lists on the render thread), up to the 10 second
-  connect timeout; there is no password or key-passphrase prompt (keys and the agent only, run
+- **Remote browsing, follow-ups** – opening a folder no longer blocks the interface, but a move
+  already running cannot be interrupted at the connection (`Esc` abandons it and the connect runs
+  to its 10 second timeout on its own thread), and the live refresh, a preview and the search walk
+  still do their reading on their own; there is no password or key-passphrase prompt (keys and the agent only, run
   through `BatchMode`), no prompt to trust a new host key (run `ssh host` once), no bookmarks or
   history of machines, and no way to open a remote file with a local program except copying it
   first. A shell pane, a `:` command and the trash are refused in a remote folder. A copy passes
@@ -1525,5 +1546,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: Medium Priority holds the follow-ups to remote browsing and the other features
-   listed there. The biggest gap in remote browsing is that a connection or listing blocks the
-   interface; moving the browser's listing onto a background job fixes that for every backend.
+   listed there. Folder moves no longer block, so the next biggest gaps are the other things that
+   read on the render thread (undo of a large move, a large archive's index) and a prompt for a
+   password or a new host key.

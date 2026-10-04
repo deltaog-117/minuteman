@@ -1044,6 +1044,7 @@ mod tests {
             mouse_range_modifier: theming::RangeModifier::default(),
             git_status: true,
             show_hidden: false,
+            view: None,
             boot_splash: true,
             gradient_borders: true,
             typewriter_preview: true,

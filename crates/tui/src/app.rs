@@ -28,11 +28,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use browser::BrowserState;
 use browser::search::{Outcome as SearchOutcome, Query};
+use browser::{BrowserState, MovePlan};
 use crossterm::event::KeyCode;
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
@@ -52,6 +52,7 @@ use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
 use crate::live_refresh::LiveRefresh;
 use crate::marked_size::{MarkedSize, Total};
+use crate::nav_job::{NavJob, NavPoll};
 use crate::open;
 use crate::search_job::{SearchJob, SearchState};
 use crate::system_hud::SystemHud;
@@ -460,6 +461,13 @@ pub struct App {
     handover: Option<Handover>,
     /// The `/` prompt's search in flight, if any. Only ever `Some` while that prompt is open.
     search_job: Option<SearchJob>,
+    /// A folder being opened in the background (see `nav_job`); while it runs the app is busy and
+    /// the browser still shows the old folder.
+    nav: Option<NavJob>,
+    /// How long `begin_move` waits for the folder before going busy and returning. A local folder
+    /// opens well inside it, so ordinary browsing never drops a key pressed right after; only a
+    /// slow one (another machine) takes the background route.
+    nav_grace: Duration,
     search_state: SearchState,
     plugins: PluginManager,
     /// The filesystem being browsed. Every feature reaches a browsed path through this, and the
@@ -492,6 +500,8 @@ impl App {
             associations: std::cell::OnceCell::new(),
             handover: None,
             search_job: None,
+            nav: None,
+            nav_grace: Duration::from_millis(40),
             search_state: SearchState::Idle,
             plugins: PluginManager::new(),
             vfs,
@@ -611,10 +621,74 @@ impl App {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.bulk.is_some()
+        self.bulk.is_some() || self.nav.is_some()
+    }
+
+    /// Starts opening the folder `plan` describes, without waiting for it: the old folder stays on
+    /// screen and keys are held back (`is_busy`) until `poll_nav` applies the result. `done_status`
+    /// is shown on success and `error_prefix` leads the message on failure. Ignored while another
+    /// move is still loading.
+    pub fn begin_move(
+        &mut self,
+        browser: &mut BrowserState,
+        plan: MovePlan,
+        done_status: Option<String>,
+        error_prefix: &str,
+    ) {
+        if self.nav.is_some() {
+            return;
+        }
+        let job = NavJob::start(
+            &self.handle,
+            Arc::clone(&self.vfs),
+            plan,
+            done_status,
+            error_prefix,
+        );
+        self.status = Some(format!("opening {}…", job.label));
+        self.nav = Some(job);
+        let deadline = Instant::now() + self.nav_grace;
+        while self.nav.is_some() && Instant::now() < deadline {
+            self.poll_nav(browser);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Applies a finished folder load to `browser`, or reports why it failed. Call once per render
+    /// tick.
+    pub fn poll_nav(&mut self, browser: &mut BrowserState) {
+        let Some(job) = self.nav.as_mut() else {
+            return;
+        };
+        let result = match job.poll() {
+            NavPoll::Pending => return,
+            NavPoll::Done(result) => result,
+            NavPoll::Lost => {
+                self.nav = None;
+                self.status = Some("could not open the folder".into());
+                return;
+            }
+        };
+        let Some(job) = self.nav.take() else {
+            return;
+        };
+        match result {
+            Ok(loaded) => {
+                browser.apply_move(loaded);
+                self.status = job.done_status;
+            }
+            Err(e) => self.status = Some(format!("{}: {e}", job.error_prefix)),
+        }
     }
 
     pub fn progress(&self) -> Option<Progress> {
+        if let (None, Some(_)) = (&self.bulk, &self.nav) {
+            return Some(Progress {
+                label: "opening",
+                done: 0,
+                batch: None,
+            });
+        }
         let bulk = self.bulk.as_ref()?;
         let batch = match &bulk.kind {
             BulkKind::Paste { clip, index, .. } if clip.paths.len() > 1 => {
@@ -879,6 +953,10 @@ impl App {
 
     /// Requests cancellation of the running background operation, if it supports it.
     pub fn cancel_bulk(&mut self) {
+        if self.nav.take().is_some() {
+            self.status = Some("cancelled".into());
+            return;
+        }
         match self.bulk.as_ref().and_then(|b| b.cancel.as_ref()) {
             Some(cancel) => {
                 cancel.store(true, Ordering::Relaxed);
@@ -895,6 +973,9 @@ impl App {
     pub fn cancel_all(&mut self, browser: &mut BrowserState) {
         let mut cancelled = Vec::new();
         let mut uncancellable = false;
+        if self.nav.take().is_some() {
+            cancelled.push("opening a folder".to_string());
+        }
         if let Some(bulk) = &self.bulk {
             match &bulk.cancel {
                 Some(flag) => {
@@ -1502,10 +1583,10 @@ impl App {
         match command::parse(buffer, &self.interactive) {
             Ok(None) => {}
             Ok(Some(Command::Quit)) => return Ok(ControlFlow::Break(())),
-            Ok(Some(Command::Cd(path))) => match browser.goto(vfs, Path::new(&path)) {
-                Ok(()) => self.status = Some(format!("cd {path}")),
-                Err(e) => self.status = Some(format!("cd failed: {e}")),
-            },
+            Ok(Some(Command::Cd(path))) => {
+                let plan = browser.plan_goto(Path::new(&path));
+                self.begin_move(browser, plan, Some(format!("cd {path}")), "cd failed");
+            }
             Ok(Some(Command::Mkdir {
                 parents: true,
                 names,
@@ -2715,6 +2796,7 @@ mod tests {
             let deadline = Instant::now() + std::time::Duration::from_secs(5);
             while self.app.is_busy() && Instant::now() < deadline {
                 self.app.poll_bulk(&mut self.browser, &LocalVfs).unwrap();
+                self.app.poll_nav(&mut self.browser);
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             assert!(!self.app.is_busy(), "command did not finish in time");
@@ -3286,8 +3368,79 @@ mod tests {
         f.browser.reload(&LocalVfs).unwrap();
 
         f.run("cd sub");
+        f.wait_for_idle();
         assert_eq!(f.browser.current_dir(), f.root.join("sub"));
+        assert_eq!(f.app.status.as_deref(), Some("cd sub"));
         assert_eq!(f.flow("quit"), ControlFlow::Break(()));
+    }
+
+    #[test]
+    fn a_folder_opens_in_the_background_and_the_old_one_stays_until_it_is_ready() {
+        let mut f = Fixture::new("nav-bg");
+        f.app.nav_grace = Duration::ZERO;
+        std::fs::create_dir(f.root.join("sub")).unwrap();
+
+        f.run("cd sub");
+        assert!(f.app.is_busy(), "the move is running");
+        assert_eq!(
+            f.browser.current_dir(),
+            f.root,
+            "nothing moves until the result is applied"
+        );
+        assert_eq!(f.app.progress().map(|p| p.label), Some("opening"));
+
+        f.wait_for_idle();
+        assert_eq!(f.browser.current_dir(), f.root.join("sub"));
+    }
+
+    #[test]
+    fn a_local_folder_is_open_by_the_time_begin_move_returns() {
+        let mut f = Fixture::new("nav-fast");
+        std::fs::create_dir(f.root.join("sub")).unwrap();
+
+        f.run("cd sub");
+        assert!(!f.app.is_busy(), "no key would be held back");
+        assert_eq!(f.browser.current_dir(), f.root.join("sub"));
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_opened_says_so_and_leaves_the_browser_alone() {
+        let mut f = Fixture::new("nav-fail");
+
+        f.run("cd missing");
+        f.wait_for_idle();
+        assert_eq!(f.browser.current_dir(), f.root);
+        let status = f.app.status.clone().unwrap();
+        assert!(status.starts_with("cd failed: "), "{status}");
+    }
+
+    #[test]
+    fn cancelling_drops_a_move_still_loading() {
+        let mut f = Fixture::new("nav-cancel");
+        f.app.nav_grace = Duration::ZERO;
+        std::fs::create_dir(f.root.join("sub")).unwrap();
+
+        f.run("cd sub");
+        f.app.cancel_bulk();
+        assert!(!f.app.is_busy());
+        assert_eq!(f.app.status.as_deref(), Some("cancelled"));
+        // A result that arrives anyway has nobody to apply it.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        f.app.poll_nav(&mut f.browser);
+        assert_eq!(f.browser.current_dir(), f.root);
+    }
+
+    #[test]
+    fn a_second_move_is_ignored_while_one_is_loading() {
+        let mut f = Fixture::new("nav-second");
+        f.app.nav_grace = Duration::ZERO;
+        std::fs::create_dir(f.root.join("a")).unwrap();
+        std::fs::create_dir(f.root.join("b")).unwrap();
+
+        f.run("cd a");
+        f.run("cd b");
+        f.wait_for_idle();
+        assert_eq!(f.browser.current_dir(), f.root.join("a"));
     }
 
     #[test]

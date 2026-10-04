@@ -73,6 +73,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
 | 2026-10-02 | Filmstrip View | A `V` view cycle with a thumbnail strip drawn from a pool-filled cache of finished protocols (COA B, filmstrip first, grid second), over a grid only (A) and a bigger preview only (C) | ✅ Confirmed |
 | 2026-10-02 | Grid and Details Views | A grid of framed tiles and a flat details table added to the `V` cycle, the filmstrip kept and its strip rebuilt from the same tile (COA A, with the filmstrip kept as asked) | ✅ Confirmed |
+| 2026-10-04 | Background Folder Moves and Remembered View | A planned-then-applied move loaded on the blocking pool with a 40 ms grace, old folder kept until it arrives (COA A), over an empty target shown at once (B) and a worker-thread browser (C); the view saved in `local.toml` | ✅ Confirmed |
 | 2026-10-04 | Default Theme Source | The terminal's own palette (OSC 4/10/11), mapped with contrast lifting, over a static palette (A) and a palette file (C) | ✅ Confirmed |
 
 ---
@@ -5182,6 +5183,54 @@ binary was driven in a PTY through `pyte` with the terminal probe answered in fu
 click, a double-click into a folder and `h` back, an empty folder), details (title row, date, mode,
 size, full width, `j`, a click), the filmstrip's framed tiles, and back to the columns. Not tried: a
 real kitty, photographs rather than test images, or a remote folder.
+
+### Background Folder Moves and a Remembered View (COA A)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** Every folder change listed the folder on the render thread and waited, including the
+SSH connect (up to ten seconds) and the indexing of a large archive, so the interface froze. The
+view chosen with `V` was also lost on every launch.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Make the move itself asynchronous; the old folder stays on screen until the new one arrives | Chosen |
+| B | Also show the target at once as an empty "loading" listing | Rejected: cursor, marks and preview would point at a folder with no entries |
+| C | Run the whole browser on a worker thread | Rejected: rewrites every read of the listing |
+
+**Design.** A move is split in three: `plan_*` (instant, from the current state), `MovePlan::load`
+(all the filesystem work, touching no browser state, so it can run on the blocking pool) and
+`apply_move` (one swap). The synchronous `enter`, `leave` and `goto` now run that same path, which
+removed a second copy of the logic and fixed two old faults on the way: a failed step up returned
+its error out of the event loop and quit the program, and `goto` set the new folder before listing
+it, so an unreadable one left the browser stranded there. A result is dropped if the browser is no
+longer in the folder it was planned from. `App::begin_move` waits up to 40 ms for the result before
+going busy. Without that grace every move would be asynchronous, the app would be busy for a tick
+or two after each one, and keys pressed in that gap (`l` then `j`) would be dropped; with it a
+local folder is already open when the call returns, and only a slow one takes the background route.
+While one runs, `is_busy` holds other keys back, as it already did for copies and commands, and
+`Esc` drops the job. The thread cannot be interrupted, so it finishes its read and the result is
+discarded.
+
+The view is saved in `local.toml` on every `V`, and `view` in `config.toml` gives the first one.
+`persist_local` has nine call sites that rebuild the whole file from live state and none of them
+knows about the view, so `save_local` keeps the stored `view` when the caller leaves it empty
+instead of threading a tenth argument through all of them.
+
+**Trade-offs.** Typing during a slow load is ignored rather than queued, so a held-down key cannot
+pile up moves; the cost is that keys pressed meanwhile are lost. The live refresh, previews and the
+search walk were already off the render thread and are unchanged.
+
+**Verification.** `scripts/check` passes. Tests cover planning and applying separately, a stale
+move being dropped, a failed load leaving the browser alone, the cursor landing on the folder left
+(and on an archive's own row), a second move being ignored while one runs, `Esc` dropping one, a
+local folder being open before `begin_move` returns, and the view's round trip through
+`local.toml` and its precedence over `config.toml`. The real binary was driven in a terminal
+(with the capability queries answered): `V` wrote `view = "details"` to `local.toml`, and a second
+launch started in details. Not tried: a real slow connection (the slow path is covered by tests that
+disable the grace period, not by a remote machine), or the filmstrip and grid as starting views.
+
+---
 
 ### Default Theme Source: The Terminal's Own Palette (COA B)
 

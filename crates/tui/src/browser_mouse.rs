@@ -24,9 +24,10 @@
 
 use std::time::{Duration, Instant};
 
-use browser::BrowserState;
+use browser::{BrowserState, MovePlan};
 use crossterm::event::{KeyModifiers, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Position, Rect};
+#[cfg(test)]
 use shared::{Vfs, VfsError};
 use theming::{ColumnLayout, RangeModifier};
 
@@ -303,48 +304,51 @@ pub fn wheel_target(selected: usize, len: usize, wheel: Wheel) -> usize {
     }
 }
 
-/// Carries out what a click on `hit` means. A click on a row in the middle column selects it and
-/// a double-click opens it; a click in the left column goes up a directory and selects the entry
-/// clicked.
+/// What a click on `hit` means, short of the part that may be slow. A click on a row in the middle
+/// column selects it and a double-click opens it; a click in the left column goes up a directory
+/// and selects the entry clicked. The selecting is done here; opening or leaving a folder is
+/// returned as a [`MovePlan`], so the caller can load it in the background (see `nav_job`).
+pub fn click_move(browser: &mut BrowserState, hit: Hit, click: Click) -> Option<MovePlan> {
+    match (hit, click) {
+        (Hit::CurrentRow(index), Click::Single) => {
+            browser.select_index(index);
+            // A plain click also starts the next range, the way it does in a desktop file manager.
+            browser.anchor_here();
+            None
+        }
+        // `enter` does nothing on a file; the caller opens a double-clicked file itself, since
+        // that needs the `App`.
+        (Hit::CurrentRow(index), Click::Double | Click::Open) => {
+            browser.select_index(index);
+            browser.plan_enter()
+        }
+        (Hit::ParentRow(index), Click::Single | Click::Open) => {
+            let target = browser.parent_entries().get(index)?.path.clone();
+            browser.plan_leave().map(|plan| plan.landing_on(target))
+        }
+        // The first click already moved the columns, so the second landed on a different entry
+        // than the one it was aimed at — acting on it would send the user up twice.
+        (Hit::ParentRow(_), Click::Double) => None,
+        (Hit::Blank(_) | Hit::Elsewhere, _) => None,
+    }
+}
+
+/// Carries out what a click on `hit` means, waiting for any folder it opens (see [`click_move`]
+/// for the same without the wait). The app itself never waits; this is the form the tests use.
 ///
 /// # Errors
 ///
 /// Returns the [`VfsError`] from listing a directory that cannot be entered or left.
+#[cfg(test)]
 pub fn apply_click(
     browser: &mut BrowserState,
     vfs: &dyn Vfs,
     hit: Hit,
     click: Click,
 ) -> Result<(), VfsError> {
-    match (hit, click) {
-        (Hit::CurrentRow(index), Click::Single) => {
-            browser.select_index(index);
-            // A plain click also starts the next range, the way it does in a desktop file manager.
-            browser.anchor_here();
-        }
-        // `enter` does nothing on a file; the caller opens a double-clicked file itself, since
-        // that needs the `App`.
-        (Hit::CurrentRow(index), Click::Double | Click::Open) => {
-            browser.select_index(index);
-            browser.enter(vfs)?;
-        }
-        (Hit::ParentRow(index), Click::Single | Click::Open) => {
-            let Some(target) = browser.parent_entries().get(index).map(|e| e.path.clone()) else {
-                return Ok(());
-            };
-            browser.leave(vfs)?;
-            if let Some(position) = browser
-                .current_entries()
-                .iter()
-                .position(|e| e.path == target)
-            {
-                browser.select_index(position);
-            }
-        }
-        // The first click already moved the columns, so the second landed on a different entry
-        // than the one it was aimed at — acting on it would send the user up twice.
-        (Hit::ParentRow(_), Click::Double) => {}
-        (Hit::Blank(_) | Hit::Elsewhere, _) => {}
+    if let Some(plan) = click_move(browser, hit, click) {
+        let loaded = plan.load(vfs)?;
+        browser.apply_move(loaded);
     }
     Ok(())
 }

@@ -152,6 +152,8 @@ struct RawConfig {
     /// `None` when absent, so "unset" can default to hidden rather than serde's `false` meaning
     /// the same thing by accident.
     show_hidden: Option<bool>,
+    /// The view to start in, until `V` has been used (then `local.toml`'s wins).
+    view: Option<String>,
     /// `None` when absent, for the same reason as `alt_tap`.
     boot_splash: Option<bool>,
     /// `None` when absent, for the same reason as `alt_tap`.
@@ -232,6 +234,10 @@ pub struct RawLocal {
     /// `local.toml`'s bookmarks come out in a stable, sorted order every save instead of shuffling
     /// around for no reason.
     pub bookmarks: BTreeMap<char, PathBuf>,
+    /// The browser view `V` last switched to (`list`, `grid`, `details` or `filmstrip`), so the
+    /// next launch starts there. Written by [`Config::save_view`]; `save_local` keeps whatever is
+    /// on disk when this is `None`, so the popups, which never set it, cannot erase it.
+    pub view: Option<String>,
 }
 
 /// One theme a user named and saved from the appearance popup. `name` is unique within
@@ -291,6 +297,10 @@ pub struct Config {
     pub git_status: bool,
     /// Whether dot-prefixed entries start out visible; the `hidden` key flips it at runtime.
     pub show_hidden: bool,
+    /// The browser view to start in (`list`, `grid`, `details` or `filmstrip`): the one `V` last
+    /// switched to, else `view` from `config.toml`. `None` means the name list; an unrecognised
+    /// name is ignored by `tui` for the same reason.
+    pub view: Option<String>,
     /// Whether a brief, dismissible splash shows before the browser on startup.
     pub boot_splash: bool,
     /// Whether the focused pane's border and title are painted as a gradient instead of one flat
@@ -406,6 +416,7 @@ impl Config {
                 .unwrap_or_default(),
             git_status: config.git_status.unwrap_or(true),
             show_hidden: config.show_hidden.unwrap_or(false),
+            view: local.view.clone().or(config.view),
             boot_splash: config.boot_splash.unwrap_or(true),
             gradient_borders: config.gradient_borders.unwrap_or(true),
             typewriter_preview: config.typewriter_preview.unwrap_or(true),
@@ -448,9 +459,34 @@ impl Config {
         let dir = Self::config_dir()
             .ok_or_else(|| io::Error::other("could not determine the config directory"))?;
         std::fs::create_dir_all(&dir)?;
-        let text = toml::to_string(local)
+        let mut local = local.clone();
+        if local.view.is_none() {
+            local.view = Self::stored_local().view;
+        }
+        let text = toml::to_string(&local)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         std::fs::write(dir.join("local.toml"), text)
+    }
+
+    /// Remembers the browser view for the next launch, leaving everything else in `local.toml`
+    /// as it is on disk.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from writing the file; never fatal for the caller.
+    pub fn save_view(view: &str) -> io::Result<()> {
+        let mut local = Self::stored_local();
+        local.view = Some(view.to_string());
+        Self::save_local(&local)
+    }
+
+    /// `local.toml` as it is on disk now; empty if absent or unreadable (no warning, as the screen
+    /// belongs to the running interface).
+    fn stored_local() -> RawLocal {
+        Self::local_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default()
     }
 
     fn config_path() -> Option<PathBuf> {
@@ -679,6 +715,40 @@ mod tests {
         assert_eq!(config.merged_theme.name.as_deref(), Some("terminal"));
         assert_eq!(config.merged_theme.border_type.as_deref(), Some("plain"));
         assert!(config.theme_is_customized);
+    }
+
+    #[test]
+    fn the_saved_view_wins_over_config_tomls_and_both_are_optional() {
+        assert_eq!(Config::from_sources(None, None, None).view, None);
+        assert_eq!(
+            Config::from_sources(Some("view = \"grid\"\n"), None, None)
+                .view
+                .as_deref(),
+            Some("grid")
+        );
+        let both = Config::from_sources(
+            Some("view = \"grid\"\n"),
+            None,
+            Some("view = \"filmstrip\"\n"),
+        );
+        assert_eq!(both.view.as_deref(), Some("filmstrip"));
+    }
+
+    #[test]
+    fn a_saved_view_round_trips_through_local_toml() {
+        let local = RawLocal {
+            view: Some("details".into()),
+            ..Default::default()
+        };
+        let text = toml::to_string(&local).unwrap();
+        assert!(text.contains("view = \"details\""));
+        assert_eq!(toml::from_str::<RawLocal>(&text).unwrap(), local);
+        assert_eq!(
+            Config::from_sources(None, None, Some(&text))
+                .view
+                .as_deref(),
+            Some("details")
+        );
     }
 
     #[test]

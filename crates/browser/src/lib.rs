@@ -64,6 +64,104 @@ fn filter_hidden(
         .collect()
 }
 
+/// Where the cursor lands once a move finishes.
+#[derive(Debug, Clone)]
+enum Landing {
+    First,
+    /// The entry with this path, or the first one if it is not listed.
+    On(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+enum MoveKind {
+    /// A folder already known to be one (the selected entry, or the parent).
+    Into(PathBuf),
+    /// Whatever the user typed or a bookmark holds: resolved against the folder moved from, then
+    /// checked to be a folder, before anything is listed.
+    Typed(PathBuf),
+}
+
+/// A move to another folder, described but not yet done. Making the plan is instant; [`load`]
+/// does the filesystem work and may be slow (a remote machine), so it can run anywhere, and
+/// [`BrowserState::apply_move`] then swaps the result in at once. The browser keeps showing the
+/// old folder, with its cursor and marks valid, until that swap.
+///
+/// [`load`]: MovePlan::load
+#[derive(Debug, Clone)]
+pub struct MovePlan {
+    from: PathBuf,
+    kind: MoveKind,
+    landing: Landing,
+}
+
+/// The listings a [`MovePlan`] read, ready for [`BrowserState::apply_move`].
+#[derive(Debug)]
+pub struct LoadedMove {
+    from: PathBuf,
+    dir: PathBuf,
+    current: Vec<DirEntryInfo>,
+    parent: Vec<DirEntryInfo>,
+    landing: Landing,
+}
+
+impl MovePlan {
+    /// Puts the cursor on `path` instead of the first entry once the move is applied.
+    #[must_use]
+    pub fn landing_on(mut self, path: PathBuf) -> Self {
+        self.landing = Landing::On(path);
+        self
+    }
+
+    /// A short name for where the move goes, for a status message.
+    pub fn target_label(&self) -> String {
+        let path = match &self.kind {
+            MoveKind::Into(path) | MoveKind::Typed(path) => path,
+        };
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into(),
+        )
+    }
+
+    /// Reads the target folder and its parent. Leaves the browser alone, so a failure — an
+    /// unreachable machine, a folder that cannot be read, a typed path that is not a folder —
+    /// strands nothing.
+    ///
+    /// # Errors
+    ///
+    /// The [`VfsError`] from resolving, checking or listing the target.
+    pub fn load(&self, vfs: &dyn Vfs) -> Result<LoadedMove, VfsError> {
+        let dir = match &self.kind {
+            MoveKind::Into(dir) => dir.clone(),
+            MoveKind::Typed(typed) => {
+                let target = vfs.resolve_typed(typed, &self.from);
+                // `metadata` rather than `is_dir`, whose plain yes or no would turn "cannot reach
+                // that machine" into "not a directory".
+                match vfs.metadata(&target) {
+                    Ok(meta) if meta.kind == shared::FileKind::Dir => {}
+                    Ok(_) | Err(VfsError::NotFound(_)) => {
+                        return Err(VfsError::NotADirectory(target));
+                    }
+                    Err(other) => return Err(other),
+                }
+                target
+            }
+        };
+        let current = vfs.list_dir(&dir)?;
+        let parent = match dir.parent() {
+            Some(parent) => vfs.list_dir(parent).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        Ok(LoadedMove {
+            from: self.from.clone(),
+            dir,
+            current,
+            parent,
+            landing: self.landing.clone(),
+        })
+    }
+}
+
 impl BrowserState {
     /// A browser that shows hidden entries. Use `with_show_hidden` to start with them filtered.
     pub fn new(vfs: &dyn Vfs, start_dir: PathBuf) -> Result<Self, VfsError> {
@@ -234,18 +332,18 @@ impl BrowserState {
     /// current directory),
     /// as if the user had navigated there via repeated `enter`/`leave`. Backs the `:cd` command.
     pub fn goto(&mut self, vfs: &dyn Vfs, path: &Path) -> Result<(), VfsError> {
-        let target = vfs.resolve_typed(path, &self.current_dir);
-        // `metadata` rather than `is_dir`, whose plain yes or no would turn "cannot reach that
-        // machine" into "not a directory".
-        match vfs.metadata(&target) {
-            Ok(meta) if meta.kind == shared::FileKind::Dir => {}
-            Ok(_) | Err(VfsError::NotFound(_)) => return Err(VfsError::NotADirectory(target)),
-            Err(other) => return Err(other),
-        }
+        let loaded = self.plan_goto(path).load(vfs)?;
+        self.apply_move(loaded);
+        Ok(())
+    }
 
-        self.current_dir = target;
-        self.selected = 0;
-        self.refresh(vfs)
+    /// The move [`goto`](Self::goto) makes, without making it.
+    pub fn plan_goto(&self, path: &Path) -> MovePlan {
+        MovePlan {
+            from: self.current_dir.clone(),
+            kind: MoveKind::Typed(path.to_path_buf()),
+            landing: Landing::First,
+        }
     }
 
     /// Opens the directory `path` is in and puts the cursor on it — how a search hit far from
@@ -277,48 +375,73 @@ impl BrowserState {
 
     /// Descend into the selected entry, if it's a directory.
     pub fn enter(&mut self, vfs: &dyn Vfs) -> Result<(), VfsError> {
-        let Some(entry) = self.selected_entry() else {
-            return Ok(());
-        };
-        if !entry.is_dir {
-            return Ok(());
+        match self.plan_enter() {
+            Some(plan) => self.run(vfs, &plan),
+            None => Ok(()),
         }
-
-        self.move_to(vfs, entry.path.clone())?;
-        self.selected = 0;
-        Ok(())
     }
 
-    /// Makes `dir` the current directory if it can be listed; otherwise leaves everything as it
-    /// was, so a folder that cannot be read (or a parent that is not a folder at all, like the
-    /// step above a remote machine's root) never strands the browser on it.
-    fn move_to(&mut self, vfs: &dyn Vfs, dir: PathBuf) -> Result<(), VfsError> {
-        let before = std::mem::replace(&mut self.current_dir, dir);
-        let moved = self.refresh(vfs);
-        if moved.is_err() {
-            self.current_dir = before;
-        }
-        moved
+    /// The move [`enter`](Self::enter) makes, without making it; `None` when the selection is
+    /// not a folder.
+    pub fn plan_enter(&self) -> Option<MovePlan> {
+        let entry = self.selected_entry().filter(|entry| entry.is_dir)?;
+        Some(MovePlan {
+            from: self.current_dir.clone(),
+            kind: MoveKind::Into(entry.path.clone()),
+            landing: Landing::First,
+        })
     }
 
     /// Move up to the parent directory, restoring the selection to the directory we came from.
     pub fn leave(&mut self, vfs: &dyn Vfs) -> Result<(), VfsError> {
-        let Some(parent) = self.current_dir.parent().map(|p| p.to_path_buf()) else {
-            return Ok(());
-        };
-        let came_from = self.current_dir.clone();
+        match self.plan_leave() {
+            Some(plan) => self.run(vfs, &plan),
+            None => Ok(()),
+        }
+    }
 
-        self.move_to(vfs, parent)?;
+    /// The move [`leave`](Self::leave) makes, without making it; `None` at the root. The cursor
+    /// lands on the folder left — or, stepping out of an archive's root, on the archive file the
+    /// root was made from.
+    pub fn plan_leave(&self) -> Option<MovePlan> {
+        let parent = self.current_dir.parent()?.to_path_buf();
+        let came_from =
+            shared::archive_of_root(&self.current_dir).unwrap_or_else(|| self.current_dir.clone());
+        Some(MovePlan {
+            from: self.current_dir.clone(),
+            kind: MoveKind::Into(parent),
+            landing: Landing::On(came_from),
+        })
+    }
 
-        // Stepping out of an archive's root lands on the archive file the root was made from.
-        let came_from = shared::archive_of_root(&came_from).unwrap_or(came_from);
-        self.selected = self
-            .current_entries
-            .iter()
-            .position(|e| e.path == came_from)
-            .unwrap_or(0);
-
+    /// Loads and applies `plan` on this thread. A folder that cannot be read leaves everything as
+    /// it was, so one (or a parent that is not a folder at all, like the step above a remote
+    /// machine's root) never strands the browser on it.
+    fn run(&mut self, vfs: &dyn Vfs, plan: &MovePlan) -> Result<(), VfsError> {
+        let loaded = plan.load(vfs)?;
+        self.apply_move(loaded);
         Ok(())
+    }
+
+    /// Makes a loaded move the current folder, with the cursor where its plan said. Returns
+    /// whether it was applied: a move planned from a folder the browser has since left is
+    /// dropped, so a slow one can never override a newer one.
+    pub fn apply_move(&mut self, loaded: LoadedMove) -> bool {
+        if loaded.from != self.current_dir {
+            return false;
+        }
+        self.current_entries = filter_hidden(loaded.current, self.show_hidden, None);
+        self.parent_entries = filter_hidden(loaded.parent, self.show_hidden, Some(&loaded.dir));
+        self.current_dir = loaded.dir;
+        self.selected = match loaded.landing {
+            Landing::First => 0,
+            Landing::On(path) => self
+                .current_entries
+                .iter()
+                .position(|entry| entry.path == path)
+                .unwrap_or(0),
+        };
+        true
     }
 
     /// Re-lists the current and parent directories. The cursor stays on the same entry by path
@@ -414,6 +537,98 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub").join("file.txt"), b"hi").unwrap();
         root
+    }
+
+    #[test]
+    fn a_planned_move_changes_nothing_until_it_is_applied() {
+        let root = make_tree();
+        let mut browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        browser.select_index(
+            browser
+                .current_entries()
+                .iter()
+                .position(|e| e.name == "sub")
+                .unwrap(),
+        );
+
+        let plan = browser.plan_enter().expect("sub is a folder");
+        let loaded = plan.load(&LocalVfs).unwrap();
+        assert_eq!(
+            browser.current_dir(),
+            root,
+            "loading leaves the browser alone"
+        );
+
+        assert!(browser.apply_move(loaded));
+        assert_eq!(browser.current_dir(), root.join("sub"));
+        assert_eq!(browser.selected_index(), 0);
+    }
+
+    #[test]
+    fn a_move_planned_from_a_folder_since_left_is_dropped() {
+        let root = make_tree();
+        let mut browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        let stale = browser
+            .plan_goto(&root.join("sub"))
+            .load(&LocalVfs)
+            .unwrap();
+        browser.goto(&LocalVfs, &root.join("sub")).unwrap();
+        browser.leave(&LocalVfs).unwrap();
+        browser.goto(&LocalVfs, &root.join("sub")).unwrap();
+
+        // Planned from `root`, applied while in `sub`.
+        assert!(!browser.apply_move(stale));
+        assert_eq!(browser.current_dir(), root.join("sub"));
+    }
+
+    #[test]
+    fn a_move_that_cannot_load_leaves_the_browser_where_it_was() {
+        let root = make_tree();
+        let mut browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        let missing = root.join("nope");
+        assert!(browser.plan_goto(&missing).load(&LocalVfs).is_err());
+        assert!(browser.goto(&LocalVfs, &missing).is_err());
+        assert_eq!(browser.current_dir(), root);
+
+        let file = root.join("sub").join("file.txt");
+        assert!(matches!(
+            browser.goto(&LocalVfs, &file),
+            Err(VfsError::NotADirectory(_))
+        ));
+        assert_eq!(browser.current_dir(), root);
+    }
+
+    #[test]
+    fn leaving_lands_on_the_folder_left_and_a_plan_can_choose_another_landing() {
+        let root = make_tree();
+        std::fs::create_dir_all(root.join("zzz")).unwrap();
+        let mut browser = BrowserState::new(&LocalVfs, root.join("sub")).unwrap();
+
+        let plan = browser.plan_leave().expect("sub has a parent");
+        let sub_row = {
+            let loaded = plan.load(&LocalVfs).unwrap();
+            loaded.current.iter().position(|e| e.name == "sub")
+        };
+        browser.apply_move(plan.load(&LocalVfs).unwrap());
+        assert_eq!(Some(browser.selected_index()), sub_row);
+
+        browser.goto(&LocalVfs, &root.join("sub")).unwrap();
+        let other = root.join("zzz");
+        let plan = browser.plan_leave().unwrap().landing_on(other.clone());
+        browser.apply_move(plan.load(&LocalVfs).unwrap());
+        assert_eq!(browser.selected_entry().map(|e| &e.path), Some(&other));
+    }
+
+    #[test]
+    fn nothing_to_plan_on_a_file_or_at_the_root() {
+        let root = make_tree();
+        let mut browser = BrowserState::new(&LocalVfs, root.join("sub")).unwrap();
+        assert!(browser.plan_enter().is_none(), "file.txt is not a folder");
+        let mut at_root = BrowserState::new(&LocalVfs, PathBuf::from("/")).unwrap();
+        assert!(at_root.plan_leave().is_none());
+        at_root.leave(&LocalVfs).unwrap();
+        browser.enter(&LocalVfs).unwrap();
+        assert_eq!(browser.current_dir(), root.join("sub"));
     }
 
     #[test]

@@ -41,6 +41,7 @@ mod inspect;
 mod live_refresh;
 mod marked_size;
 mod mime_type;
+mod nav_job;
 mod open;
 mod osc52;
 mod overlay_view;
@@ -844,6 +845,8 @@ fn persist_local(
         custom_themes: local_custom_themes.to_vec(),
         active_custom_theme: local_active_custom_theme.clone(),
         bookmarks: local_bookmarks.clone(),
+        // `save_local` keeps the view `V` saved; the popups never set it.
+        view: None,
     };
     if let Err(e) = Config::save_local(&local) {
         app.status = Some(format!("could not save to local.toml: {e}"));
@@ -1151,9 +1154,14 @@ fn run(
     let mut boot_splash = config
         .boot_splash
         .then(|| BootSplash::start(Instant::now()));
-    // How the browsed folder is shown, switched by `V`. Not saved: every session starts on the
+    // How the browsed folder is shown, switched by `V`. The last one chosen is saved, and the next
+    // session starts there (`view` in `config.toml` sets the first one); an unknown name means the
     // name list.
-    let mut view_mode = ViewMode::default();
+    let mut view_mode = config
+        .view
+        .as_deref()
+        .and_then(ViewMode::named)
+        .unwrap_or_default();
     // The first row of tiles the grid draws, kept between frames so it scrolls only when the
     // cursor leaves the screen (see `GridLayout::follow`).
     let mut grid_top = 0usize;
@@ -1261,6 +1269,7 @@ fn run(
         }
         app.poll_bulk(browser, vfs)?;
         app.poll_search(browser, vfs);
+        app.poll_nav(browser);
         if let Some(view) = inspect.as_mut() {
             view.poll();
         }
@@ -1858,10 +1867,9 @@ fn run(
                             clicks.reset();
                             // The last segment is where the user already is; jumping there would
                             // only throw the cursor back to the top.
-                            if let Some(dir) = crumb_dir.filter(|d| d != browser.current_dir())
-                                && let Err(e) = browser.goto(vfs, &dir)
-                            {
-                                app.status = Some(format!("cannot open: {e}"));
+                            if let Some(dir) = crumb_dir.filter(|d| d != browser.current_dir()) {
+                                let plan = browser.plan_goto(&dir);
+                                app.begin_move(browser, plan, None, "cannot open");
                             }
                             continue;
                         }
@@ -1906,9 +1914,8 @@ fn run(
                                     }
                                     _ => None,
                                 };
-                                if let Err(e) = browser_mouse::apply_click(browser, vfs, hit, click)
-                                {
-                                    app.status = Some(format!("cannot open: {e}"));
+                                if let Some(plan) = browser_mouse::click_move(browser, hit, click) {
+                                    app.begin_move(browser, plan, None, "cannot open");
                                 }
                                 if let Some(path) = file_to_open {
                                     open_file(app, browser, vfs, &path);
@@ -1950,10 +1957,10 @@ fn run(
                                     true
                                 }
                                 Hit::ParentRow(_) => {
-                                    if let Err(e) =
-                                        browser_mouse::apply_click(browser, vfs, hit, Click::Single)
+                                    if let Some(plan) =
+                                        browser_mouse::click_move(browser, hit, Click::Single)
                                     {
-                                        app.status = Some(format!("cannot open: {e}"));
+                                        app.begin_move(browser, plan, None, "cannot open");
                                     }
                                     true
                                 }
@@ -2558,14 +2565,15 @@ fn run(
                         KeyCode::Char(c) if c.is_ascii_alphanumeric() => {
                             match mode {
                                 BookmarkChord::Jump => match local_bookmarks.get(&c) {
-                                    Some(path) => match browser.goto(vfs, path) {
-                                        Ok(()) => {
-                                            app.status = Some(format!("jumped to bookmark '{c}'"));
-                                        }
-                                        Err(e) => {
-                                            app.status = Some(format!("bookmark '{c}': {e}"));
-                                        }
-                                    },
+                                    Some(path) => {
+                                        let plan = browser.plan_goto(path);
+                                        app.begin_move(
+                                            browser,
+                                            plan,
+                                            Some(format!("jumped to bookmark '{c}'")),
+                                            &format!("bookmark '{c}'"),
+                                        );
+                                    }
                                     None => {
                                         app.status = Some(format!("no bookmark at '{c}'"));
                                     }
@@ -2679,9 +2687,17 @@ fn run(
                             let path = entry.path.clone();
                             open_file(app, browser, vfs, &path);
                         }
-                        _ => browser.enter(vfs)?,
+                        _ => {
+                            if let Some(plan) = browser.plan_enter() {
+                                app.begin_move(browser, plan, None, "cannot open");
+                            }
+                        }
                     },
-                    Some(Action::Leave) => browser.leave(vfs)?,
+                    Some(Action::Leave) => {
+                        if let Some(plan) = browser.plan_leave() {
+                            app.begin_move(browser, plan, None, "cannot open");
+                        }
+                    }
                     Some(Action::Yank) if app.require_marks(browser) => app.yank(browser),
                     Some(Action::Cut) if app.require_marks(browser) => app.cut(browser),
                     Some(Action::Paste) => app.begin_paste(browser),
@@ -2724,7 +2740,10 @@ fn run(
                             previews.thumbs.clear();
                         }
                         grid_top = 0;
-                        app.status = Some(format!("view: {}", view_mode.label()));
+                        app.status = Some(match Config::save_view(view_mode.label()) {
+                            Ok(()) => format!("view: {}", view_mode.label()),
+                            Err(e) => format!("view: {} (not saved: {e})", view_mode.label()),
+                        });
                     }
                     Some(Action::ToggleHidden) => {
                         let shown = browser.toggle_hidden(vfs)?;
@@ -2824,7 +2843,11 @@ fn run_menu_command(
         _ => browser.current_dir().to_path_buf(),
     };
     match (command, selected) {
-        (MenuCommand::Open, Some((_, true))) => browser.enter(vfs)?,
+        (MenuCommand::Open, Some((_, true))) => {
+            if let Some(plan) = browser.plan_enter() {
+                app.begin_move(browser, plan, None, "cannot open");
+            }
+        }
         (MenuCommand::Open, Some((path, false))) => open_file(app, browser, vfs, &path),
         (MenuCommand::OpenWith(index), Some((path, _))) => {
             // The menu listed these choices plus "Other…" after them, so an index past the end

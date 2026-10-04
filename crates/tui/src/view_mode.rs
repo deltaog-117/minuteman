@@ -55,6 +55,13 @@ impl ViewMode {
         }
     }
 
+    /// The view called `name` (as [`label`](Self::label) spells it, in any case), if there is one.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::List, Self::Grid, Self::Details, Self::Filmstrip]
+            .into_iter()
+            .find(|view| view.label().eq_ignore_ascii_case(name.trim()))
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::List => "list",
@@ -341,6 +348,21 @@ impl GridLayout {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn every_view_is_found_again_by_its_label_and_nothing_else_is() {
+        for view in [
+            ViewMode::List,
+            ViewMode::Grid,
+            ViewMode::Details,
+            ViewMode::Filmstrip,
+        ] {
+            assert_eq!(ViewMode::named(view.label()), Some(view));
+        }
+        assert_eq!(ViewMode::named(" Grid "), Some(ViewMode::Grid));
+        assert_eq!(ViewMode::named("icons"), None);
+        assert_eq!(ViewMode::named(""), None);
+    }
 
     #[test]
     fn the_view_cycle_visits_every_view_and_comes_back() {
