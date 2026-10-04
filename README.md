@@ -349,7 +349,9 @@ its own thing, not a palette: Minuteman then asks the terminal for its own color
 background and the 16 ANSI slots) and builds the theme from them, so it follows whatever your
 wallpaper or theming tool put in the terminal, on any window manager or desktop. If the terminal
 only reports its background, Catppuccin Mocha or Latte is picked to match; if it reports nothing,
-`neon` is used.
+`neon` is used. The same look can be picked by name, `terminal`, in the appearance popup (`a`) or
+as `name = "terminal"` in `appearance.toml`; it is the choice to use if an earlier popup save
+pinned another palette.
 
 **Text styles.** Each `[style]` element takes a list of `"bold"`, `"italic"`, `"dim"`,
 `"underline"`, `"reverse"` and `"strikethrough"`. A list *replaces* that element's default, so

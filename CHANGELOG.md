@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still gets Catppuccin Mocha or Latte; one that answers nothing still gets the neon look. Unix only
   for now. New `theming::TerminalPalette` and `Theme::from_palette`; `Theme::auto` takes the
   palette as its first argument; `tui` depends on `libc` directly.
+- `tui`, `theming`: `terminal` is now a named palette, last in the appearance popup's Theme cycle
+  and valid as `name = "terminal"` in `appearance.toml`. It is the same terminal-derived look as the
+  default, but stays selected across restarts and alongside other `[theme]` fields, which turn the
+  automatic default off. The terminal is now asked for its colors at every start rather than only
+  when no theme is set. `Config` gained `merged_theme`; `Theme::set_terminal_palette` records the
+  result; where the terminal reports nothing, `terminal` is the neon palette.
 - `tui`: two more views on `V`. The grid shows framed tiles, a thumbnail over the name each, over
   the whole window like a graphical file manager's icon view: up/down move a row, the left/right
   arrows a tile, the wheel a row, a click selects and a double-click opens, and marks and the

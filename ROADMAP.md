@@ -1240,7 +1240,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   OSC, and is capped at 300 ms. Unix only for now; other platforms keep the old behavior. Chosen
   over a hard-coded palette (A, goes stale when the wallpaper changes) and a user palette file
   (C, needs manual wiring per user), and over reading one tool's cache or the compositor's config,
-  which would only work for people using that tool.
+  which would only work for people using that tool. It is also a named palette, `terminal`, last
+  in the appearance popup's Theme cycle and valid as `name = "terminal"`, so it can be picked and
+  kept even when another `[theme]` field (or an earlier popup save) has turned the automatic
+  default off; the probe therefore runs on every start.
 
 ## 🟡 Medium Priority (Important)
 

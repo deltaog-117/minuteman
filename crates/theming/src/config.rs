@@ -326,6 +326,9 @@ pub struct Config {
     /// already carries as a fallback — any explicit customization, however small (including one
     /// ever saved from the appearance popup), is left alone.
     pub theme_is_customized: bool,
+    /// `[theme]` as merged from all three files, before it was resolved into `theme`. `main`
+    /// re-resolves it once the terminal's colors are known, for `name = "terminal"`.
+    pub merged_theme: RawTheme,
     /// `local.toml`'s own `[theme]` table, unmerged with `config.toml`/`appearance.toml` — `main`
     /// seeds the appearance popup's live overrides from this, not from `theme`, so a save only
     /// ever writes back what a popup actually changed and never masks a later hand-edit to
@@ -415,8 +418,9 @@ impl Config {
             preview_hooks: config.preview_hook,
             plugins: config.plugin.into_iter().map(PluginSpec::from).collect(),
             keys: config.keys.into(),
-            theme: theme.into(),
+            theme: theme.clone().into(),
             theme_is_customized,
+            merged_theme: theme,
             local_theme: local.theme,
             ui: config
                 .ui
@@ -663,6 +667,18 @@ mod tests {
             (config.font.family.as_str(), config.font.size),
             ("Iosevka", 13.0)
         );
+    }
+
+    #[test]
+    fn the_merged_theme_keeps_the_name_for_a_later_terminal_lookup() {
+        let config = Config::from_sources(
+            Some("[theme]\nname = \"terminal\"\n"),
+            None,
+            Some("[theme]\nborder_type = \"plain\"\n"),
+        );
+        assert_eq!(config.merged_theme.name.as_deref(), Some("terminal"));
+        assert_eq!(config.merged_theme.border_type.as_deref(), Some("plain"));
+        assert!(config.theme_is_customized);
     }
 
     #[test]

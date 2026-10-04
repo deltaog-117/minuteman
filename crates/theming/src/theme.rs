@@ -16,7 +16,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::sync::OnceLock;
+
 use crate::palette::TerminalPalette;
+
+/// The terminal's colors, recorded once at startup so the `terminal` palette can be picked by name
+/// anywhere (config, appearance popup) without every caller passing the probe's result along.
+static TERMINAL_PALETTE: OnceLock<TerminalPalette> = OnceLock::new();
 
 /// A resolved color palette — every field is always populated (via `named`/`Default`, then any
 /// config overrides), so `tui` never has to guess at a fallback.
@@ -80,8 +86,17 @@ impl Theme {
             "catppuccin" => Self::catppuccin(),
             "catppuccin-latte" => Self::catppuccin_latte(),
             "nord" => Self::nord(),
+            "terminal" => TERMINAL_PALETTE
+                .get()
+                .map_or_else(Self::default, Self::from_palette),
             _ => Self::default(),
         }
+    }
+
+    /// Records what the terminal reported for itself, so `Theme::named("terminal")` can build from
+    /// it. Only the first call counts; until it is called, `terminal` is the default palette.
+    pub fn set_terminal_palette(palette: TerminalPalette) {
+        let _ = TERMINAL_PALETTE.set(palette);
     }
 
     /// What "nothing configured" resolves to. When the terminal reported its own colors, the
@@ -643,6 +658,14 @@ mod tests {
             Theme::auto(Some(&palette), Some(true)),
             Theme::from_palette(&palette)
         );
+    }
+
+    /// No test ever calls `set_terminal_palette` (it is process-wide and would leak into the
+    /// others), so here `terminal` is still waiting for a probe result.
+    #[test]
+    fn terminal_palette_name_is_the_default_until_a_probe_result_is_recorded() {
+        assert_eq!(Theme::named("terminal"), Theme::default());
+        assert_eq!(Theme::named("TERMINAL"), Theme::default());
     }
 
     #[test]

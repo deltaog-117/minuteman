@@ -13,7 +13,9 @@
 [theme]
 # Selects a built-in base palette: "neon" (cyberpunk cyan/magenta, true color — the original
 # default), "classic" (the plain 16-color look), "dracula", "catppuccin" (Mocha), "catppuccin-latte"
-# (its light counterpart), or "nord". An unrecognised name falls back to "neon".
+# (its light counterpart), "nord", or "terminal" (built from the terminal's own colors, so it follows
+# your wallpaper or theming tool; the same look as leaving [theme] out, but kept when other fields
+# are set). An unrecognised name falls back to "neon".
 #
 # Leaving the whole [theme] table out of both config files entirely — not just this line — is the
 # real default now: Minuteman asks the terminal for its own colors (OSC 10/11 and the 16 ANSI

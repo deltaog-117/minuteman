@@ -43,8 +43,16 @@ use theming::{
 /// The built-in palettes the "Theme" row cycles through, in order. `catppuccin-latte` isn't
 /// here — it's only reached via `Theme::auto` on a light terminal, or by naming it explicitly in
 /// `appearance.toml`; this cycle sticks to dark-background palettes, like `neon`, `dracula` and
-/// `nord` already do.
-pub const THEME_NAMES: [&str; 5] = ["neon", "classic", "dracula", "catppuccin", "nord"];
+/// `nord` already do. `terminal` (built from the terminal's own colors) goes last so that, where
+/// the terminal reports nothing and it equals `neon`, a neon theme is still shown as `neon`.
+pub const THEME_NAMES: [&str; 6] = [
+    "neon",
+    "classic",
+    "dracula",
+    "catppuccin",
+    "nord",
+    "terminal",
+];
 
 /// One of the appearance popup's root-level groups — entering one replaces the row list with that
 /// group's own rows (see `AppearancePopup::rows`).

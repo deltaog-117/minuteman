@@ -1056,6 +1056,7 @@ mod tests {
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             theme_is_customized: false,
+            merged_theme: theming::RawTheme::default(),
             local_theme: theming::RawTheme::default(),
             ui: theming::Ui::default(),
             local_ui: theming::RawUi::default(),

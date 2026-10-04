@@ -5215,6 +5215,15 @@ the older behavior (background only, then neon) applies.
 dependency to `tui`; other platforms keep the old behavior. It runs after the graphics probe so the
 two never read stdin at once. Multiplexers that do not forward OSC 4 fall back as above.
 
+**Follow-up (same day).** The automatic default turns off as soon as any `[theme]` field is set,
+and the appearance popup saves one on the first change, so a user who had ever touched it could
+never get the terminal-derived look back. `terminal` is therefore also a named palette, last in the
+popup's cycle (so a neon theme on a silent terminal still reads as `neon`). The palette is kept in
+a process-wide `OnceLock`, because `Theme::named` is called from many places that have no probe
+result to hand; the merged `[theme]` is kept on `Config` so `main` can resolve it again once the
+probe has run. The probe now runs on every start instead of only when no theme was set, at the cost
+of up to 300 ms on a terminal that ignores OSC.
+
 **Verification.** `scripts/check` passes, including tests for the reply parser (one to four digit
 channels, malformed specs, missing foreground, missing background or slot, silence) and for the
 mapping (readable text colors, lifted dim slots, transparent backgrounds, the accent choice, a light
