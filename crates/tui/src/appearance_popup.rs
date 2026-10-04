@@ -45,7 +45,8 @@ use theming::{
 /// `appearance.toml`; this cycle sticks to dark-background palettes, like `neon`, `dracula` and
 /// `nord` already do. `terminal` (built from the terminal's own colors) goes last so that, where
 /// the terminal reports nothing and it equals `neon`, a neon theme is still shown as `neon`.
-pub const THEME_NAMES: [&str; 6] = [
+pub const THEME_NAMES: [&str; 7] = [
+    "default",
     "neon",
     "classic",
     "dracula",

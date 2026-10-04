@@ -5224,6 +5224,12 @@ result to hand; the merged `[theme]` is kept on `Config` so `main` can resolve i
 probe has run. The probe now runs on every start instead of only when no theme was set, at the cost
 of up to 300 ms on a terminal that ignores OSC.
 
+**Second follow-up.** `default` is also a name now, meaning the adaptive look (terminal colors,
+else Catppuccin from the background, else neon), and it is the base for a `[theme]` with fields but
+no name; `terminal` keeps the strict meaning. Because both depend on the probe, `main` resolves the
+merged theme once after asking the terminal, which replaces the earlier special case for
+`terminal`. An unrecognised name still falls back to the static neon palette.
+
 **Verification.** `scripts/check` passes, including tests for the reply parser (one to four digit
 channels, malformed specs, missing foreground, missing background or slot, silence) and for the
 mapping (readable text colors, lifted dim slots, transparent backgrounds, the accent choice, a light

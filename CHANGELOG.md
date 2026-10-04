@@ -65,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still gets Catppuccin Mocha or Latte; one that answers nothing still gets the neon look. Unix only
   for now. New `theming::TerminalPalette` and `Theme::from_palette`; `Theme::auto` takes the
   palette as its first argument; `tui` depends on `libc` directly.
+- `tui`, `theming`: `default` is now a named palette, first in the appearance popup's Theme cycle,
+  and what a `[theme]` with fields but no `name` is built on. It is the adaptive look: the
+  terminal's own colors, else Catppuccin Mocha or Latte from its background, else neon. The theme
+  is resolved again after the terminal has been asked, so this holds however it was configured.
+  `Theme::set_terminal_palette` became `Theme::set_terminal_probe` and also records the background.
 - `tui`, `theming`: `terminal` is now a named palette, last in the appearance popup's Theme cycle
   and valid as `name = "terminal"` in `appearance.toml`. It is the same terminal-derived look as the
   default, but stays selected across restarts and alongside other `[theme]` fields, which turn the

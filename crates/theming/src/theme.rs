@@ -20,9 +20,15 @@ use std::sync::OnceLock;
 
 use crate::palette::TerminalPalette;
 
-/// The terminal's colors, recorded once at startup so the `terminal` palette can be picked by name
-/// anywhere (config, appearance popup) without every caller passing the probe's result along.
-static TERMINAL_PALETTE: OnceLock<TerminalPalette> = OnceLock::new();
+/// What the startup probe learned about the terminal.
+struct TerminalProbe {
+    palette: Option<TerminalPalette>,
+    is_dark: Option<bool>,
+}
+
+/// Recorded once at startup so the `default` and `terminal` palettes can be picked by name anywhere
+/// (config, appearance popup) without every caller passing the probe's result along.
+static TERMINAL_PROBE: OnceLock<TerminalProbe> = OnceLock::new();
 
 /// A resolved color palette — every field is always populated (via `named`/`Default`, then any
 /// config overrides), so `tui` never has to guess at a fallback.
@@ -86,17 +92,22 @@ impl Theme {
             "catppuccin" => Self::catppuccin(),
             "catppuccin-latte" => Self::catppuccin_latte(),
             "nord" => Self::nord(),
-            "terminal" => TERMINAL_PALETTE
+            "default" => TERMINAL_PROBE.get().map_or_else(Self::default, |probe| {
+                Self::auto(probe.palette.as_ref(), probe.is_dark)
+            }),
+            "terminal" => TERMINAL_PROBE
                 .get()
+                .and_then(|probe| probe.palette.as_ref())
                 .map_or_else(Self::default, Self::from_palette),
             _ => Self::default(),
         }
     }
 
-    /// Records what the terminal reported for itself, so `Theme::named("terminal")` can build from
-    /// it. Only the first call counts; until it is called, `terminal` is the default palette.
-    pub fn set_terminal_palette(palette: TerminalPalette) {
-        let _ = TERMINAL_PALETTE.set(palette);
+    /// Records what the terminal reported for itself, so `Theme::named("default")` and
+    /// `Theme::named("terminal")` can build from it. Only the first call counts; until it is
+    /// called, both are the neon palette.
+    pub fn set_terminal_probe(palette: Option<TerminalPalette>, is_dark: Option<bool>) {
+        let _ = TERMINAL_PROBE.set(TerminalProbe { palette, is_dark });
     }
 
     /// What "nothing configured" resolves to. When the terminal reported its own colors, the
@@ -660,12 +671,13 @@ mod tests {
         );
     }
 
-    /// No test ever calls `set_terminal_palette` (it is process-wide and would leak into the
-    /// others), so here `terminal` is still waiting for a probe result.
+    /// No test ever calls `set_terminal_probe` (it is process-wide and would leak into the
+    /// others), so here both names are still waiting for a probe result.
     #[test]
-    fn terminal_palette_name_is_the_default_until_a_probe_result_is_recorded() {
-        assert_eq!(Theme::named("terminal"), Theme::default());
-        assert_eq!(Theme::named("TERMINAL"), Theme::default());
+    fn adaptive_names_are_the_neon_palette_until_a_probe_result_is_recorded() {
+        for name in ["default", "terminal", "TERMINAL"] {
+            assert_eq!(Theme::named(name), Theme::default(), "{name}");
+        }
     }
 
     #[test]

@@ -759,21 +759,16 @@ fn main() -> Result<()> {
     // Nothing in `[theme]` was set, so pick a look from the terminal's own background instead of
     // always falling back to the static neon default — an explicit `name` or even one overridden
     // field always wins over this (see `Config::theme_is_customized`).
-    // Asked every time, even with a theme pinned, so the `terminal` palette can still be picked in
-    // the appearance popup. After the graphics probe has drained its own replies, so the two never
+    // Asked every time, even with a theme pinned, so `default` and `terminal` can still be picked in the
+    // appearance popup. After the graphics probe has drained its own replies, so the two never
     // share stdin.
-    let palette = terminal_palette::query();
-    if let Some(palette) = palette {
-        Theme::set_terminal_palette(palette);
-    }
-    if config.merged_theme.name.as_deref() == Some("terminal") {
-        config.theme = config.merged_theme.clone().into();
-    } else if !config.theme_is_customized {
-        let is_dark = previews
-            .detected_background()
-            .map(|(r, g, b)| Theme::is_dark(r, g, b));
-        config.theme = Theme::auto(palette.as_ref(), is_dark);
-    }
+    let is_dark = previews
+        .detected_background()
+        .map(|(r, g, b)| Theme::is_dark(r, g, b));
+    Theme::set_terminal_probe(terminal_palette::query(), is_dark);
+    // Resolved again now that the terminal's colors are known: with nothing set, or `default`,
+    // that is the adaptive look; an explicit name or field still wins, layered on its own base.
+    config.theme = config.merged_theme.clone().into();
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 

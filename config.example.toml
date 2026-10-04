@@ -229,8 +229,8 @@ disk_usage = ["u"]
 # Toggles a mark on the current entry, Ranger-style — press once per file to queue it for a
 # later bulk action instead of acting on it immediately.
 select = ["v"]
-# Opens the appearance popup: Theme picks the base palette (neon, classic, dracula, catppuccin, nord
-# or terminal); Accent, Focused border, Selection, Directory, Status bar and Danger are edited as free
+# Opens the appearance popup: Theme picks the base palette (default, neon, classic, dracula,
+# catppuccin, nord or terminal); Accent, Focused border, Selection, Directory, Status bar and Danger are edited as free
 # text (enter to type, enter again to confirm, Esc to cancel); Border style, Separator and Glyphs
 # cycle through their fixed choices; Reset to defaults clears every change this popup has made
 # this session, back to whatever theme/glyphs were already in effect. j/k moves, h/l/enter/a click

@@ -1243,7 +1243,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   which would only work for people using that tool. It is also a named palette, `terminal`, last
   in the appearance popup's Theme cycle and valid as `name = "terminal"`, so it can be picked and
   kept even when another `[theme]` field (or an earlier popup save) has turned the automatic
-  default off; the probe therefore runs on every start.
+  default off; the probe therefore runs on every start. `default` is the same adaptive look as a
+  name (terminal colors, else Catppuccin from the background, else neon), first in the cycle and
+  the base for a `[theme]` that sets fields without a name; `terminal` stays as the strict one.
 
 ## 🟡 Medium Priority (Important)
 
