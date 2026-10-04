@@ -43,8 +43,18 @@ pub struct LogMessage {
 }
 
 struct RunningPlugin {
-    on_key: Option<KeyCode>,
+    name: String,
+    on_keys: Vec<KeyCode>,
+    commands: Vec<String>,
     stdin_tx: UnboundedSender<String>,
+}
+
+/// What a plugin is configured to answer: the keys that fire it and the `:` command words it
+/// declared. Both may be empty, for a plugin only ever started by `:plugin <name>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Triggers {
+    pub keys: Vec<KeyCode>,
+    pub commands: Vec<String>,
 }
 
 /// Owns every configured plugin process for the running session: spawns them, fires key and
@@ -78,8 +88,8 @@ impl PluginManager {
         Self::default()
     }
 
-    /// Starts one plugin process, fires its `init` event, and registers it to fire `key` on
-    /// `on_key`, if given. A failure to spawn (bad command, missing binary) is returned rather
+    /// Starts one plugin process, fires its `init` event, and registers it to fire `key` on each
+    /// of `triggers.keys` and `command` on each of `triggers.commands`. A failure to spawn (bad command, missing binary) is returned rather
     /// than panicking — the caller decides whether that is fatal or just a warning, the same
     /// "one bad entry must never take the whole session down" rule `theming::Config::load`
     /// already follows for a malformed config file.
@@ -89,7 +99,7 @@ impl PluginManager {
         name: &str,
         command: &str,
         args: &[String],
-        on_key: Option<KeyCode>,
+        triggers: Triggers,
         cwd: &Path,
     ) -> Result<(), PluginError> {
         let mut child = {
@@ -129,24 +139,94 @@ impl PluginManager {
         let init = protocol::HostEvent::new(protocol::EVENT_INIT, cwd.to_path_buf(), Vec::new());
         let _ = stdin_tx.send(init.to_line());
 
-        self.plugins.push(RunningPlugin { on_key, stdin_tx });
+        self.plugins.push(RunningPlugin {
+            name: name.to_string(),
+            on_keys: triggers.keys,
+            commands: triggers.commands,
+            stdin_tx,
+        });
         Ok(())
     }
 
     /// Fires the plugin bound to `code`, if any, with the browsed directory and the current
     /// selection (marks, or the single entry under the cursor — the same batch every built-in
-    /// bulk action uses). Returns whether a plugin consumed the key, so the caller can tell a
-    /// truly unbound key apart from one a plugin handled.
+    /// bulk action uses), and which key it was. When two plugins claim a key the one configured
+    /// first gets it. Returns whether a plugin consumed the key, so the caller can tell a truly
+    /// unbound key apart from one a plugin handled.
     pub fn dispatch_key(&self, code: KeyCode, cwd: &Path, selection: &[PathBuf]) -> bool {
-        let Some(plugin) = self.plugins.iter().find(|p| p.on_key == Some(code)) else {
+        let Some(plugin) = self.plugins.iter().find(|p| p.on_keys.contains(&code)) else {
             return false;
         };
         let event =
-            protocol::HostEvent::new(protocol::EVENT_KEY, cwd.to_path_buf(), selection.to_vec());
+            protocol::HostEvent::new(protocol::EVENT_KEY, cwd.to_path_buf(), selection.to_vec())
+                .with_key(code);
         // Sending into a channel whose reader already ended (the process died) is a silent
         // no-op — the plugin is gone, so there is nothing left to notify.
         let _ = plugin.stdin_tx.send(event.to_line());
         true
+    }
+
+    /// Fires `command` at the plugin that declared that word (first configured wins), with the
+    /// same directory and selection a key event carries plus the arguments. Returns whether a
+    /// plugin answered, so the caller can fall through to running the line as a shell command.
+    pub fn dispatch_command(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        cwd: &Path,
+        selection: &[PathBuf],
+    ) -> bool {
+        match self
+            .plugins
+            .iter()
+            .find(|p| p.commands.iter().any(|word| word == command))
+        {
+            Some(plugin) => {
+                self.send_command(plugin, command, args, cwd, selection);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Runs `:plugin <name> [args]`: fires the named plugin whether or not it declared any key or
+    /// command, with the command word `"plugin"`. Returns whether a plugin by that name exists.
+    pub fn dispatch_named(
+        &self,
+        name: &str,
+        args: Vec<String>,
+        cwd: &Path,
+        selection: &[PathBuf],
+    ) -> bool {
+        match self.plugins.iter().find(|p| p.name == name) {
+            Some(plugin) => {
+                self.send_command(plugin, "plugin", args, cwd, selection);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The names of every running plugin, in the order they were configured.
+    pub fn names(&self) -> Vec<&str> {
+        self.plugins.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    fn send_command(
+        &self,
+        plugin: &RunningPlugin,
+        command: &str,
+        args: Vec<String>,
+        cwd: &Path,
+        selection: &[PathBuf],
+    ) {
+        let event = protocol::HostEvent::new(
+            protocol::EVENT_COMMAND,
+            cwd.to_path_buf(),
+            selection.to_vec(),
+        )
+        .with_command(command, args);
+        let _ = plugin.stdin_tx.send(event.to_line());
     }
 
     /// Drains every plugin's pending log lines. Call once per render tick; the caller decides
@@ -305,5 +385,8 @@ mod tests {
         let mut manager = PluginManager::new();
         assert!(manager.poll().is_empty());
         assert!(!manager.dispatch_key(KeyCode::Char('x'), Path::new("/"), &[]));
+        assert!(!manager.dispatch_command("x", Vec::new(), Path::new("/"), &[]));
+        assert!(!manager.dispatch_named("x", Vec::new(), Path::new("/"), &[]));
+        assert!(manager.names().is_empty());
     }
 }

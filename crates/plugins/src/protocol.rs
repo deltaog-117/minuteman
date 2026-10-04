@@ -32,6 +32,7 @@
 
 use std::path::PathBuf;
 
+use crossterm::event::KeyCode;
 use file_ops::ConflictPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,8 +44,10 @@ pub const API_VERSION: u32 = 1;
 
 /// The event name a plugin gets exactly once, right after its process starts.
 pub const EVENT_INIT: &str = "init";
-/// The event name a plugin gets when its configured key is pressed.
+/// The event name a plugin gets when one of its configured keys is pressed.
 pub const EVENT_KEY: &str = "key";
+/// The event name a plugin gets when a `:` command it declared, or `:plugin <its name>`, is run.
+pub const EVENT_COMMAND: &str = "command";
 
 /// A host -> plugin line: always a notification, never expects a reply.
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +63,26 @@ struct EventParams {
     api_version: u32,
     cwd: PathBuf,
     selection: Vec<PathBuf>,
+    /// Which key fired a `key` event, spelled as in the config (`"b"`, `"enter"`, `"space"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    /// The word a `command` event was run as: the `:` command the plugin declared, or `"plugin"`
+    /// for `:plugin <name>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    /// The words after the command, split the way a shell splits plain arguments.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    args: Vec<String>,
+}
+
+/// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
+/// fired. Keys the config cannot name come out as their lowercase variant name.
+pub fn key_name(code: KeyCode) -> String {
+    match code {
+        KeyCode::Char(' ') => "space".to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        other => format!("{other:?}").to_lowercase(),
+    }
 }
 
 impl HostEvent {
@@ -72,8 +95,24 @@ impl HostEvent {
                 api_version: API_VERSION,
                 cwd,
                 selection,
+                key: None,
+                command: None,
+                args: Vec::new(),
             },
         }
+    }
+
+    /// Records which key fired this event (see `key_name`).
+    pub fn with_key(mut self, code: KeyCode) -> Self {
+        self.params.key = Some(key_name(code));
+        self
+    }
+
+    /// Records the `:` command this event was run as, and its arguments.
+    pub fn with_command(mut self, command: impl Into<String>, args: Vec<String>) -> Self {
+        self.params.command = Some(command.into());
+        self.params.args = args;
+        self
     }
 
     /// Serializes to exactly one `\n`-terminated line, ready to write to the plugin's stdin.
@@ -383,6 +422,43 @@ impl From<&DirEntryInfo> for WireEntry {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    fn event_json(event: &HostEvent) -> Value {
+        serde_json::from_str(event.to_line().trim()).unwrap()
+    }
+
+    #[test]
+    fn a_plain_event_carries_neither_key_nor_command_fields() {
+        let event = HostEvent::new(EVENT_INIT, PathBuf::from("/"), Vec::new());
+        let params = &event_json(&event)["params"];
+        assert!(params.get("key").is_none());
+        assert!(params.get("command").is_none());
+        assert!(params.get("args").is_none());
+    }
+
+    #[test]
+    fn a_key_event_names_the_key_the_way_the_config_spells_it() {
+        for (code, spelled) in [
+            (KeyCode::Char('b'), "b"),
+            (KeyCode::Char('B'), "B"),
+            (KeyCode::Char(' '), "space"),
+            (KeyCode::Enter, "enter"),
+            (KeyCode::F(5), "f(5)"),
+        ] {
+            let event = HostEvent::new(EVENT_KEY, PathBuf::from("/"), Vec::new()).with_key(code);
+            assert_eq!(event_json(&event)["params"]["key"], spelled);
+        }
+    }
+
+    #[test]
+    fn a_command_event_carries_the_command_word_and_its_arguments() {
+        let event = HostEvent::new(EVENT_COMMAND, PathBuf::from("/"), Vec::new())
+            .with_command("blame", vec!["a b".into(), "c".into()]);
+        let params = &event_json(&event)["params"];
+        assert_eq!(params["name"], "command");
+        assert_eq!(params["command"], "blame");
+        assert_eq!(params["args"], serde_json::json!(["a b", "c"]));
+    }
 
     #[test]
     fn a_read_dir_request_parses_from_raw_json_text() {

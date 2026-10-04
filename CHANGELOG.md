@@ -73,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `plugins`, `theming`, `tui`: a plugin can be bound to several keys (`on_key = ["b", "B"]`; a single
+  string still works), can declare `:` commands (`commands = ["blame"]`, tried after the built-ins
+  so a plugin adds commands but never replaces `cd` or `q`, and only for a line that uses no shell
+  syntax), and can be fired by name with `:plugin <name> [args]`. The `key` event now carries
+  which `key` fired it, and a new `command` event carries the `command` word and its `args`; both
+  fields are additive, so `API_VERSION` stays 1. `PluginManager::spawn` takes a `Triggers` value
+  (keys and commands) instead of one optional key, and `PluginSpec.on_key` became `on_keys`.
+  `:plugin` with an unknown name says so and lists the running plugins.
+- `examples/plugins/dir_stats.py`: a dependency-free Python reference plugin (key, `:` command and
+  `:plugin` use, `read_dir` and `create_file` requests, replies matched by `id`), run end to end by
+  the `plugins` integration tests with a real `python3` (skipped, with a note, when absent).
 - `tui`, `trash`: the trash browser previews the selected item in a pane beside the list (on a
   terminal 100 columns wide or more): text, an image, an archive's listing, a hex dump or a
   folder's contents, read from where the trash keeps the item, so nothing is restored to be looked

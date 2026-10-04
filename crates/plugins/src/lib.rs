@@ -17,7 +17,7 @@
 //! Runs Minuteman's plugins: user-configured external processes that speak a small, versioned
 //! JSON-RPC-over-stdio protocol (see `protocol`), so a plugin can be written in any language that
 //! can read a line and print one — no compile step, no host-side bindings per language. Each
-//! plugin fires on one configured key and can call back into `read_dir`/`copy`/`mv`/`delete`/
+//! plugin fires on its configured keys and `:` commands (or `:plugin <name>`) and can call back into `read_dir`/`copy`/`mv`/`delete`/
 //! `create_dir`/`create_file`/`touch`/`rename` — the same `file_ops` orchestration the built-in
 //! keys use, so a plugin reaches real core operations, not a bolted-on extras API.
 
@@ -26,5 +26,5 @@ pub mod host;
 pub mod protocol;
 
 pub use error::PluginError;
-pub use host::{LogMessage, PluginManager};
+pub use host::{LogMessage, PluginManager, Triggers};
 pub use protocol::{API_VERSION, LogLevel};

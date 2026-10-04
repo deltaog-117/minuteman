@@ -110,7 +110,10 @@ struct RawPluginSpec {
     name: String,
     command: String,
     args: Vec<String>,
-    on_key: Option<String>,
+    /// One key string (`on_key = "b"`, how it was first written) or a list of them.
+    #[serde(deserialize_with = "one_or_many")]
+    on_key: Vec<String>,
+    commands: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,10 +121,15 @@ pub struct PluginSpec {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
-    /// The key that fires this plugin, already resolved from its config string the same way
-    /// every other keybinding is (see `keymap::parse_key`) — `None` for an absent or
-    /// unrecognised string, the same "skip rather than crash" rule every other key field follows.
-    pub on_key: Option<KeyCode>,
+    /// The keys that fire this plugin, already resolved from their config strings the same way
+    /// every other keybinding is (see `keymap::parse_key`). An unrecognised string is skipped
+    /// rather than failing, the same "skip rather than crash" rule every other key field follows,
+    /// so an absent or all-unrecognised setting leaves the list empty.
+    pub on_keys: Vec<KeyCode>,
+    /// The `:` command words this plugin answers (`commands = ["blame"]` makes `:blame foo` fire
+    /// it). A blank word is dropped; a word that is also a built-in command never reaches the
+    /// plugin, as the built-in is tried first.
+    pub commands: Vec<String>,
 }
 
 impl From<RawPluginSpec> for PluginSpec {
@@ -130,7 +138,13 @@ impl From<RawPluginSpec> for PluginSpec {
             name: raw.name,
             command: raw.command,
             args: raw.args,
-            on_key: raw.on_key.as_deref().and_then(parse_key),
+            on_keys: raw.on_key.iter().filter_map(|key| parse_key(key)).collect(),
+            commands: raw
+                .commands
+                .into_iter()
+                .map(|word| word.trim().to_string())
+                .filter(|word| !word.is_empty() && !word.contains(char::is_whitespace))
+                .collect(),
         }
     }
 }
@@ -1085,8 +1099,8 @@ mod tests {
         assert_eq!(names, ["git-blame", "no-key"]);
         assert_eq!(config.plugins[0].command, "python3");
         assert_eq!(config.plugins[0].args, vec!["blame.py".to_string()]);
-        assert_eq!(config.plugins[0].on_key, Some(KeyCode::Char('b')));
-        assert_eq!(config.plugins[1].on_key, None);
+        assert_eq!(config.plugins[0].on_keys, [KeyCode::Char('b')]);
+        assert!(config.plugins[1].on_keys.is_empty());
         assert!(Config::from_sources(None, None, None).plugins.is_empty());
     }
 
@@ -1097,6 +1111,24 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(config.plugins[0].on_key, None);
+        assert!(config.plugins[0].on_keys.is_empty());
+    }
+
+    #[test]
+    fn a_plugin_can_list_several_keys_and_declare_colon_commands() {
+        let config = Config::from_sources(
+            Some(
+                "[[plugin]]\nname = \"p\"\ncommand = \"true\"\n\
+                 on_key = [\"b\", \"B\", \"nonsense-key\", \"f5\"]\n\
+                 commands = [\"blame\", \" \", \"two words\", \"log\"]\n",
+            ),
+            None,
+            None,
+        );
+        assert_eq!(
+            config.plugins[0].on_keys,
+            [KeyCode::Char('b'), KeyCode::Char('B')]
+        );
+        assert_eq!(config.plugins[0].commands, ["blame", "log"]);
     }
 }

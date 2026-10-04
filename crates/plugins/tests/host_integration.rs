@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
-use plugins::PluginManager;
+use plugins::{PluginManager, Triggers};
 
 fn scratch_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -54,7 +54,10 @@ fn a_key_event_reaches_the_plugin_and_its_file_op_reaches_the_real_filesystem() 
             "fixture",
             FIXTURE,
             &[],
-            Some(KeyCode::Char('b')),
+            Triggers {
+                keys: vec![KeyCode::Char('b')],
+                commands: Vec::new(),
+            },
             &dir,
         )
         .unwrap();
@@ -94,7 +97,10 @@ fn a_key_with_no_bound_plugin_is_not_dispatched() {
             "fixture",
             FIXTURE,
             &[],
-            Some(KeyCode::Char('b')),
+            Triggers {
+                keys: vec![KeyCode::Char('b')],
+                commands: Vec::new(),
+            },
             &dir,
         )
         .unwrap();
@@ -115,10 +121,114 @@ fn a_missing_command_fails_to_spawn_without_panicking() {
         "broken",
         "this-binary-does-not-exist-anywhere",
         &[],
-        None,
+        Triggers::default(),
         &dir,
     );
 
     assert!(result.is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The Python example from `examples/plugins`, run by a real interpreter: nothing in it shares
+/// code with this crate, so these tests prove the protocol is enough for a plugin written outside
+/// Rust. They are skipped, with a note on stderr, on a machine with no `python3`.
+const PYTHON_EXAMPLE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/plugins/dir_stats.py"
+);
+
+fn has_python() -> bool {
+    let found = std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        eprintln!("skipping: python3 is not installed");
+    }
+    found
+}
+
+fn spawn_python_example(
+    runtime: &tokio::runtime::Runtime,
+    manager: &mut PluginManager,
+    dir: &std::path::Path,
+) {
+    manager
+        .spawn(
+            runtime.handle(),
+            "dir-stats",
+            "python3",
+            &[PYTHON_EXAMPLE.to_string()],
+            Triggers {
+                keys: vec![KeyCode::Char('i'), KeyCode::Char('I')],
+                commands: vec!["stats".to_string()],
+            },
+            dir,
+        )
+        .unwrap();
+}
+
+/// Polls until a log line contains `needle`, or panics with everything seen after five seconds.
+fn wait_for_log(manager: &mut PluginManager, needle: &str) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        seen.extend(manager.poll().into_iter().map(|m| m.message));
+        if seen.iter().any(|m| m.contains(needle)) {
+            return seen;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("no log containing {needle:?}; saw {seen:?}");
+}
+
+#[test]
+fn a_python_plugin_answers_each_of_its_keys_and_names_the_one_pressed() {
+    if !has_python() {
+        return;
+    }
+    let dir = scratch_dir("python-keys");
+    std::fs::write(dir.join("a.txt"), b"12345").unwrap();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_python_example(&runtime, &mut manager, &dir);
+    wait_for_log(&mut manager, "ready");
+
+    assert!(manager.dispatch_key(KeyCode::Char('i'), &dir, &[]));
+    wait_for_log(&mut manager, "[i] 1 files, 1 folders, 5 bytes");
+    assert!(manager.dispatch_key(KeyCode::Char('I'), &dir, &[]));
+    wait_for_log(&mut manager, "[I] 1 files, 1 folders, 5 bytes");
+    assert!(!manager.dispatch_key(KeyCode::Char('j'), &dir, &[]));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_declared_colon_command_and_plugin_by_name_reach_the_python_plugin() {
+    if !has_python() {
+        return;
+    }
+    let dir = scratch_dir("python-commands");
+    std::fs::write(dir.join("a.txt"), b"12345").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_python_example(&runtime, &mut manager, &dir);
+    wait_for_log(&mut manager, "ready");
+
+    assert!(manager.dispatch_command("stats", Vec::new(), &dir, &[]));
+    wait_for_log(&mut manager, "1 files, 0 folders, 5 bytes");
+    assert!(!manager.dispatch_command("undeclared", Vec::new(), &dir, &[]));
+
+    assert!(manager.dispatch_named(
+        "dir-stats",
+        vec!["touch".into(), "new.txt".into()],
+        &dir,
+        &[]
+    ));
+    wait_for_log(&mut manager, "created new.txt");
+    assert!(dir.join("new.txt").exists());
+    assert!(!manager.dispatch_named("no-such-plugin", Vec::new(), &dir, &[]));
+
     std::fs::remove_dir_all(&dir).unwrap();
 }

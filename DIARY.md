@@ -79,6 +79,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-04 | Sorting, Local Time, Icons, Page Keys, Prompt Editing | Sort kept in `BrowserState` and applied when a listing is stored; `chrono` for local time (A); a shared `LineEdit` for prompts (A) | ✅ Confirmed |
 | 2026-10-04 | Background Folder Moves and Remembered View | A planned-then-applied move loaded on the blocking pool with a 40 ms grace, old folder kept until it arrives (COA A), over an empty target shown at once (B) and a worker-thread browser (C); the view saved in `local.toml` | ✅ Confirmed |
 | 2026-10-04 | Default Theme Source | The terminal's own palette (OSC 4/10/11), mapped with contrast lifting, over a static palette (A) and a palette file (C) | ✅ Confirmed |
+| 2026-10-04 | Plugin Triggers (stage 1.5, first cycle) | Several keys, declared `:` commands and `:plugin <name>` on the existing process host, plus a Python example (COA A); state/events (B) and action names (C) deferred | ✅ Confirmed |
 
 ---
 
@@ -5527,6 +5528,53 @@ terminal, a missing foreground). Not tried: a real terminal, tmux, or a light wa
 ---
 
 ---
+
+---
+
+### Plugin Triggers: Several Keys, `:` Commands and `:plugin` (COA A)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** The plugin model stays additive: built-ins keep running natively and plugins in any
+language add to them. A WASM tier, an action registry and "everything is a plugin" were weighed
+first and deferred or declined (see the roadmap), because nobody is asking for those hooks yet and
+the stage-1 host already covers any language. This cycle widens how a plugin is started.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Several keys, `:` commands, `:plugin <name>`, and a Python example | Chosen |
+| B | A, plus an on-demand state request and throttled events | Next cycle |
+| C | Action names and `run_action` first, then A | Later, as its own cycle |
+
+**Design.** `on_key` reuses the existing `one_or_many` deserializer, so a string and a list both
+parse and old configs are untouched. `commands` is a list of single words. `PluginManager::spawn`
+takes a `Triggers { keys, commands }` value, which grows without another signature change.
+Two events carry the new data as optional fields (`key`, `command`, `args`), skipped when absent,
+so existing plugins see byte-identical `init` and `key` lines apart from the new `key` field and
+`API_VERSION` stays 1. A `:` line is offered to a plugin only after the built-in parser has
+declined it, and only when it uses no shell syntax and splits cleanly, so a plugin can add a
+command but never shadow `cd`, `q` or `mkdir`, and `:ls | wc` stays the shell's. `:plugin <name>`
+is a parser variant of its own so it can report an unknown name instead of running a shell
+command called `plugin`. When two plugins claim a key or a word, the one configured first wins.
+
+**Example plugin.** `examples/plugins/dir_stats.py` closes the gap the roadmap named: nothing had
+yet exercised a real external interpreter. It also shows the one subtle rule for a synchronous
+plugin: events can arrive while a request waits for its reply, so it matches replies by `id` and
+holds other lines until it is done.
+
+**Trade-offs.** A plugin cannot yet register a command at runtime, only in config; a dynamic
+`register_command` message would need a reply path and unregistration. `:plugin` arguments that
+contain shell syntax (`*`, `|`) fall through to the shell, as every other built-in does. A key a
+built-in owns cannot be claimed by a plugin until the user rebinds the built-in.
+
+**Verification.** `scripts/check` passes. New tests cover the config (a key list, a bad key
+skipped, blank and multi-word command words dropped), the wire format (no extra fields on a plain
+event, the key spelled as in the config, command and args), the `:plugin` parser, an unknown plugin
+name, and two end-to-end tests that drive the Python plugin through `PluginManager`. The real
+binary was run in a PTY (a fresh config folder, `pyte` to read the screen): both keys, `:stats`,
+`:plugin dir-stats touch made.txt` (the file appeared) and `:plugin nope` (listed what runs) all
+behaved. The first keystroke after startup was sometimes lost in that harness, for a plain `j` as
+well, which fits the terminal-probe artifact already noted in this log; not a plugin matter.
 
 ---
 

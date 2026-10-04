@@ -37,7 +37,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
-use plugins::PluginManager;
+use plugins::{PluginManager, Triggers};
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
 use theming::{OpenRule, OpenWith, PluginSpec};
@@ -584,7 +584,8 @@ impl App {
     }
 
     /// Starts every configured `[[plugin]]` process (see `plugins`), each firing its `init`
-    /// event immediately and its `key` event whenever its own `on_key` is pressed. A plugin that
+    /// event immediately, its `key` event whenever one of its `on_key` keys is pressed and its
+    /// `command` event for its `commands` words or `:plugin <name>`. A plugin that
     /// fails to spawn (bad command, missing binary) is skipped with a warning on stderr rather
     /// than treated as fatal — the same "one bad entry must never take the whole session down"
     /// rule `theming::Config::load` already follows for a malformed config file.
@@ -595,7 +596,10 @@ impl App {
                 &spec.name,
                 &spec.command,
                 &spec.args,
-                spec.on_key,
+                Triggers {
+                    keys: spec.on_keys,
+                    commands: spec.commands,
+                },
                 cwd,
             ) {
                 eprintln!("minuteman: {e}");
@@ -1723,6 +1727,21 @@ impl App {
             Ok(Some(Command::Compress { name, password })) => {
                 self.begin_compress(browser, &name, password);
             }
+            Ok(Some(Command::Plugin { name, args })) => {
+                let selection = Self::marked_or_selected(browser);
+                if !self
+                    .plugins
+                    .dispatch_named(&name, args, browser.current_dir(), &selection)
+                {
+                    self.status = Some(match self.plugins.names().as_slice() {
+                        [] => format!("plugin {name}: no plugins are running"),
+                        running => {
+                            format!("plugin {name}: not found (running: {})", running.join(", "))
+                        }
+                    });
+                }
+            }
+            Ok(Some(Command::Shell(line))) if self.run_plugin_command(browser, &line) => {}
             Ok(Some(Command::Shell(line))) => self.spawn_shell_command(browser, line),
             Ok(Some(Command::Interactive(line))) if self.is_busy() => {
                 self.status = Some(format!("an operation is already in progress: {line}"));
@@ -1736,6 +1755,26 @@ impl App {
             Err(message) => self.status = Some(message),
         }
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// Hands `line` to the plugin that declared its first word as a `:` command, when there is
+    /// one; returns whether one took it. Tried only after the built-ins, so a plugin can add
+    /// commands but never replace `cd` or `q`, and before the line would run under `sh -c`.
+    fn run_plugin_command(&self, browser: &BrowserState, line: &str) -> bool {
+        let Some(word) = line.split_whitespace().next() else {
+            return false;
+        };
+        // A line using shell syntax is the user writing shell, and a malformed one is `sh`'s to
+        // report, so neither reaches a plugin.
+        let Ok(args) = command::split_words(line[word.len()..].trim()) else {
+            return false;
+        };
+        if command::uses_shell_syntax(line) {
+            return false;
+        }
+        let selection = Self::marked_or_selected(browser);
+        self.plugins
+            .dispatch_command(word, args, browser.current_dir(), &selection)
     }
 
     /// Applies `op` to each of `names` (relative to the browsed directory) and reports the
@@ -3488,6 +3527,19 @@ mod tests {
         let status = f.app.status.clone().unwrap();
         assert!(status.starts_with("mkdir taken: "), "{status}");
         assert!(status.ends_with("(1 of 2 done)"), "{status}");
+    }
+
+    #[test]
+    fn plugin_for_an_unknown_name_says_so_instead_of_running_a_shell_command() {
+        let mut f = Fixture::new("plugin-unknown");
+
+        f.run("plugin blame a.rs");
+
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("plugin blame: no plugins are running")
+        );
+        assert!(!f.app.is_busy());
     }
 
     #[test]

@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Parses the `:` prompt's text into a `Command`. The handful of commands that are cheap and
-//! safe to run in-process (`cd`, `mkdir`, `touch`, `q`/`q!`/`qa`/`qa!`/`quit`, `trash`, `extract`, `compress`) are built
+//! safe to run in-process (`cd`, `mkdir`, `touch`, `q`/`q!`/`qa`/`qa!`/`quit`, `trash`, `extract`, `compress`, `plugin`) are built
 //! in; they go through `Vfs` and `file_ops`, so they behave the same on any backend and report
 //! errors as plain messages (`trash` is the exception — see `file_ops::trash`'s own docs).
 //! Everything else — and anything using shell syntax a built-in can't honour — is handed to
@@ -51,6 +51,11 @@ pub enum Command {
     Compress {
         name: String,
         password: bool,
+    },
+    /// `:plugin <name> [args]`: fires the named plugin, whatever keys or commands it declared.
+    Plugin {
+        name: String,
+        args: Vec<String>,
     },
     /// A command line for `sh -c`, run in the browsed directory.
     Shell(String),
@@ -112,6 +117,18 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
             [] => Err("compress: missing archive name".into()),
             _ => Ok(Some(Command::Shell(line.into()))),
         },
+        // Only `plugin` followed by a name is the built-in; a bare `plugin` or one using shell
+        // syntax is left to whatever `plugin` program is on the path.
+        "plugin" if !uses_shell_syntax(line) && !line[name.len()..].trim().is_empty() => {
+            let mut words = split_words(line[name.len()..].trim())?.into_iter();
+            match words.next() {
+                Some(plugin) => Ok(Some(Command::Plugin {
+                    name: plugin,
+                    args: words.collect(),
+                })),
+                None => Ok(Some(Command::Shell(line.into()))),
+            }
+        }
         "cd" => {
             let path = split_words(line[name.len()..].trim())?.join(" ");
             match path.is_empty() {
@@ -173,7 +190,7 @@ fn operands(
 }
 
 /// Whether `line` contains shell syntax, or a `~` at the start of a word (home expansion).
-fn uses_shell_syntax(line: &str) -> bool {
+pub fn uses_shell_syntax(line: &str) -> bool {
     line.contains(SHELL_SYNTAX) || line.split_whitespace().any(|w| w.starts_with('~'))
 }
 
@@ -314,6 +331,31 @@ mod tests {
             parse("compress a.zip *.txt"),
             Ok(shell("compress a.zip *.txt"))
         );
+    }
+
+    #[test]
+    fn plugin_with_a_name_is_built_in_and_splits_its_arguments() {
+        assert_eq!(
+            parse("plugin blame a.rs 'my file'"),
+            Ok(Some(Command::Plugin {
+                name: "blame".into(),
+                args: vec!["a.rs".into(), "my file".into()],
+            }))
+        );
+        assert_eq!(
+            parse("plugin blame"),
+            Ok(Some(Command::Plugin {
+                name: "blame".into(),
+                args: Vec::new(),
+            }))
+        );
+        assert!(parse("plugin 'unterminated").is_err());
+    }
+
+    #[test]
+    fn a_bare_or_shell_flavoured_plugin_line_still_goes_to_the_shell() {
+        assert_eq!(parse("plugin"), Ok(shell("plugin")));
+        assert_eq!(parse("plugin a | wc"), Ok(shell("plugin a | wc")));
     }
 
     #[test]

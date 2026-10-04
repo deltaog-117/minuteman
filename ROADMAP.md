@@ -1352,6 +1352,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   column was moved into `draw_preview_pane` and both screens call it, so there is one set of rules
   for what a file shows as.
 
+- ✅ **Plugin triggers (stage 1.5, first cycle)** – a `[[plugin]]` can bind several keys
+  (`on_key = ["b", "B"]`, a plain string still works), declare `:` commands (`commands =
+  ["blame"]`) and be fired by name with `:plugin <name> [args]`. The `key` event says which key
+  fired, and a new `command` event carries the command word and its arguments, both as additive
+  fields, so `API_VERSION` stays 1. A `:` line reaches a plugin only after the built-in parser has
+  declined it and only when it uses no shell syntax, so a plugin adds commands but never shadows
+  `cd` or `q`. `examples/plugins/dir_stats.py` is a dependency-free Python reference plugin, run
+  end to end against a real `python3` by the integration tests, which closes the gap that nothing
+  had exercised an external interpreter. Verified in the compiled binary through a PTY: both keys,
+  `:stats`, `:plugin dir-stats touch made.txt` (the file appeared) and an unknown name's message.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -1442,19 +1453,43 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   SFTP v3 gives times in whole seconds and no inode, link count or allocated size, so Inspect
   leaves those out. `ssh://host/~` is not expanded. The `openssh` crate is Unix only, and this was
   not built or tried on Windows.
-- **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed** – a second, sandboxed plugin
-  tier alongside the stage-1 out-of-process JSON-RPC host (see Completed): a plugin compiled to
-  WASM gets no ambient filesystem/network/process access by default, only what a versioned host
-  API (`read_dir`, `get_selection`, `spawn_preview`, keybind registration, lifecycle hooks) grants
-  it explicitly — the tier worth having once a community plugin registry means running code
-  nobody local wrote. Rust, Go/TinyGo and other WASM-target languages first; Python/JS need a
-  heavier bundled runtime.
-- **Plugin system, follow-ups** – a plugin binding more than one key, or a `:plugin <name>`
-  manual-trigger command; a crash-restart/supervisor policy (stage 1's plugins get one log line on
-  an abnormal exit and are not restarted); a real, non-Rust reference plugin (Python or shell)
-  checked into the repo as a worked example, since stage 1's own tests intentionally hand-write
-  the wire format rather than reuse the crate's types, but nothing yet exercises an actual
-  external interpreter end to end.
+- **Plugin system, stage 1.5 — remaining additive hooks (next)** – the plugin model is additive:
+  built-in features stay native and untouched, and plugins in any language add to them. Nothing
+  here lets a plugin replace or remove a built-in; a user who wants that rebinds or unbinds a key
+  in config (or, later, a `disabled_actions` list), and a built-in wins a key conflict unless the
+  user remaps it. Still to do, cheapest first: an on-demand `get_state` request (cwd, selection,
+  marks) instead of state only riding on events; a few events (`dir_changed`, `selection_changed`,
+  `job_finished`), batched or throttled so holding `j` cannot flood a slow plugin; a crash-restart
+  policy (a plugin gets one log line on an abnormal exit and is not restarted) and a plugin list;
+  runtime `register_command` instead of config-only `commands`; and stable string names for the
+  existing `Action`s so a plugin can invoke a built-in such as `paste` or `sort`. Expected cost:
+  negligible binary size and nothing on the hot paths for anyone not using plugins; a plugin
+  costs a process, a few ms to spawn (off the first-key path) and a sub-millisecond round trip per
+  call. These are estimates: measure against the benchmarks after the cycle.
+- **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed, opt-in** – a second, sandboxed
+  plugin tier alongside the stage-1 out-of-process JSON-RPC host (see Completed): a plugin
+  compiled to WASM gets no ambient filesystem/network/process access by default, only what a
+  versioned host API (`read_dir`, `get_selection`, `spawn_preview`, keybind registration,
+  lifecycle hooks) grants it explicitly — the tier worth having once a community plugin registry
+  means running code nobody local wrote. Rust, Go/TinyGo, Zig and other WASM-target languages
+  first; Python/JS need a heavier bundled runtime; assembly and COBOL have no realistic path
+  (stage 1 still covers any language, including those). Work: a `PluginBackend` trait splitting
+  the process host from a WASM backend; host functions reusing the serde types in `protocol.rs`;
+  a per-plugin permission manifest checked after canonicalizing every path (so `..` and symlink
+  escapes fail); memory and time limits so a plugin cannot hang the interface; an API version
+  handshake; a worked Rust example plugin; and escape-attempt, infinite-loop and
+  unbounded-allocation tests. First cut read-only plus `log` and `get_selection`, write
+  operations in a second. Kept behind a cargo feature and initialized only when a WASM plugin is
+  configured: wasmtime would roughly double the binary (an estimated +8 to 15 MB over today's
+  ~13.9 MB release build), `wasmi` about +1 to 2 MB but slower — spike both before choosing.
+  Deferred until plugins have users asking for hooks and someone wants to share a plugin with
+  others; building it earlier is guessing at an API that must then be kept stable.
+- **Action registry, as its own cycle (optional)** – the string names and a `run_action` entry
+  point from stage 1.5, plus a `disabled_actions` config list, are useful without any plugin
+  (uniform keys, menus and `:` commands, easier tests). Pure addition: the existing `match` on
+  `Action` stays and is routed through it, with a test first proving every default key still
+  triggers what it did. Actions that open prompts or wait for a second key (`BookmarkJump`,
+  `Sort`, `Create`) need the prompt split from the operation to take arguments.
 - **Optional Lua scripting tier** – lightweight `mlua`-based, in-process scripting for config/
   keybindings/simple commands, layered alongside the two process-based plugin tiers above for
   latency-sensitive hooks that don't need "any language."
@@ -1521,6 +1556,13 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   like S3 or rclone-backed remotes.
 - **Community plugin ecosystem** – a registry/index of Extism-based plugins across languages,
   sandboxed by default.
+- **Considered and not planned: "everything is a plugin"** – turning the built-ins (trash view,
+  disk usage, archives, appearance, the browser itself) into plugins so any of them can be
+  replaced wholesale. It would rewrite about 100k lines for no visible gain, force an API big
+  enough to express the whole app (and then a promise to keep it stable), put serialization on
+  the hot paths and make a core plugin's failure a core failure. Replacing or disabling a
+  built-in stays a user decision made in config. Revisit only with a large community asking for
+  it, and then by moving selected features out one at a time, never as one rewrite.
 
 ---
 
