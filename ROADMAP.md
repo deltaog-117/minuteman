@@ -1392,6 +1392,29 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   never reads stdin being fed twenty thousand changes, and a real `python3` plugin. Verified in the
   compiled binary through a PTY: entering and leaving a folder showed `entered sub` and `entered
   tree`, and a marked file copied into the folder showed `copy completed`.
+- ✅ **Plugin restart policy and `:plugins` (stage 1.5, fourth cycle)** – a plugin whose process has
+  ended is started again the next time something is meant for it: a key, a `:` command, `:plugin
+  <name>`, or, for a plugin that has only `events` and no keys or commands, an event (one with a key
+  or command waits for those). Chosen as COA C, lazy respawn, over a supervisor task per plugin (B)
+  and listing plus a manual restart only (A). Before this a key bound to a plugin that had exited
+  was reported as handled and did nothing, silently. Exiting with status 0 counts as finishing,
+  which is allowed, so a script that does its job on a key press and quits works without any
+  special case; a crash does not, and a plugin that crashes three times in a row, each within a
+  minute of starting, is given up on: each key press or command then says `stopped after 3 crashes
+  in a row; :plugins restart NAME starts it again`. A crash after a minute of running starts the
+  count again. `:plugins` lists every plugin as `running`, `finished`, `crashed (exit status: 1)`
+  or `stopped after repeated crashes`, with how many times it was restarted, and `:plugins restart
+  <name>` stops a live process (a restart is not reported as a crash) or clears a stopped one and
+  starts a fresh process. A new process gets `init` again with the directory last shown, and has
+  none of the old one's memory. Only these two exact forms are the built-in; any other `plugins
+  ...` line still goes to the shell. Found by the tests: a respawned plugin's first change event
+  could be written before its `init`, because the writer chose between its queue and its mailbox
+  at random; the queue now always goes first. Tested with a property test over any spacing of
+  crashes, and end to end with the Rust fixture (one-shot respawn with a new pid, the three-try
+  limit, restart of a stopped and of a live plugin, event respawn for a listener and none for a
+  plugin with a key). Verified in the compiled binary through a PTY: a one-shot plugin answered
+  two key presses from two different processes, a crashing plugin was stopped after three presses
+  with the message above, `:plugins` showed both, and `:plugins restart` started the crasher again.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1487,8 +1510,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   built-in features stay native and untouched, and plugins in any language add to them. Nothing
   here lets a plugin replace or remove a built-in; a user who wants that rebinds or unbinds a key
   in config (or, later, a `disabled_actions` list), and a built-in wins a key conflict unless the
-  user remaps it. Still to do, cheapest first: a crash-restart
-  policy (a plugin gets one log line on an abnormal exit and is not restarted) and a plugin list;
+  user remaps it. Still to do, cheapest first:
   runtime `register_command` instead of config-only `commands`; and stable string names for the
   existing `Action`s so a plugin can invoke a built-in such as `paste` or `sort`. Expected cost:
   negligible binary size and nothing on the hot paths for anyone not using plugins; a plugin

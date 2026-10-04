@@ -21,12 +21,14 @@
 //! `kill_on_drop` has something alive to act on for the plugin's whole lifetime. The first task also
 //! drains a plugin's `Mailbox` of folded `dir_changed` and `selection_changed` events. A `get_state`
 //! request is answered by that second task straight from a `watch` channel the render loop
-//! publishes to each tick, so it never waits on the render thread.
+//! publishes to each tick, so it never waits on the render thread. A plugin whose process has
+//! ended is started again the next time something is meant for it (see `life`).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::runtime::Handle;
 
 use crossterm::event::KeyCode;
 use serde_json::json;
@@ -37,6 +39,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 
 use crate::error::PluginError;
+use crate::life::{self, Exit, Life, PluginInfo, PluginState, Verdict};
 use crate::mailbox::{Mailbox, Queued};
 use crate::protocol::{
     self, EventKind, Incoming, JobOutcome, LogLevel, PluginRequest, StateSnapshot, WireEntry,
@@ -51,13 +54,163 @@ pub struct LogMessage {
     pub message: String,
 }
 
+/// One process of a plugin: the lines to write to it, what is waiting for it, and how it ends.
+struct Process {
+    stdin_tx: UnboundedSender<String>,
+    mailbox: Arc<Mailbox>,
+    life: Arc<Life>,
+}
+
 struct RunningPlugin {
     name: String,
+    command: String,
+    args: Vec<String>,
+    handle: Handle,
     on_keys: Vec<KeyCode>,
     commands: Vec<String>,
     events: Vec<EventKind>,
-    stdin_tx: UnboundedSender<String>,
-    mailbox: Arc<Mailbox>,
+    process: Process,
+    /// Crashes in a row, each soon after starting (see `life::after_crash`).
+    crashes: u32,
+    /// How many times the host started the process again.
+    restarts: u32,
+    /// Set once the plugin has crashed too often; only `restart` clears it.
+    given_up: bool,
+    /// The status of the last crash, for `:plugins`.
+    last_crash: Option<String>,
+}
+
+impl RunningPlugin {
+    /// Whether a process is there to write to, starting a new one first if the last has ended and
+    /// the plugin has not crashed too often in a row. With `announce`, a plugin the host has given
+    /// up on says so, since a key or command that does nothing is otherwise a mystery.
+    fn ensure_alive(
+        &mut self,
+        logs_tx: &UnboundedSender<LogMessage>,
+        state_tx: &watch::Sender<StateSnapshot>,
+        announce: bool,
+    ) -> bool {
+        if self.given_up {
+            if announce {
+                self.say(
+                    logs_tx,
+                    LogLevel::Warn,
+                    format!(
+                        "stopped after {} crashes in a row; `:plugins restart {}` starts it again",
+                        life::MAX_QUICK_CRASHES,
+                        self.name
+                    ),
+                );
+            }
+            return false;
+        }
+        match self.process.life.exit() {
+            Exit::Running => return true,
+            Exit::Finished => self.crashes = 0,
+            Exit::Crashed { status, ran_for } => {
+                self.last_crash = Some(status);
+                match life::after_crash(self.crashes, ran_for) {
+                    Verdict::Respawn { crashes } => self.crashes = crashes,
+                    Verdict::GiveUp { crashes } => {
+                        self.crashes = crashes;
+                        self.given_up = true;
+                        return self.ensure_alive(logs_tx, state_tx, announce);
+                    }
+                }
+            }
+        }
+        match self.start_again(logs_tx, state_tx) {
+            Ok(()) => true,
+            // A plugin that cannot be started at all is given up on: a retry changes nothing.
+            Err(e) => {
+                self.given_up = true;
+                self.last_crash = Some(e.to_string());
+                self.say(logs_tx, LogLevel::Error, e.to_string());
+                false
+            }
+        }
+    }
+
+    /// Starts a fresh process in place of the last, in the directory last published.
+    fn start_again(
+        &mut self,
+        logs_tx: &UnboundedSender<LogMessage>,
+        state_tx: &watch::Sender<StateSnapshot>,
+    ) -> Result<(), PluginError> {
+        let cwd = state_tx.borrow().cwd.clone();
+        self.process = start(
+            &self.handle,
+            &self.name,
+            &self.command,
+            &self.args,
+            &cwd,
+            logs_tx,
+            state_tx.subscribe(),
+        )?;
+        self.restarts += 1;
+        Ok(())
+    }
+
+    /// Whether `event` may be written to the plugin now. A plugin only ever started by events
+    /// (no keys, no commands) has nothing else to bring it back, so one of those is started
+    /// again for an event; any other waits for a key or a command.
+    fn ready_for_event(
+        &mut self,
+        logs_tx: &UnboundedSender<LogMessage>,
+        state_tx: &watch::Sender<StateSnapshot>,
+    ) -> bool {
+        if self.process.life.exit() == Exit::Running {
+            return true;
+        }
+        self.on_keys.is_empty()
+            && self.commands.is_empty()
+            && self.ensure_alive(logs_tx, state_tx, false)
+    }
+
+    fn say(&self, logs_tx: &UnboundedSender<LogMessage>, level: LogLevel, message: String) {
+        let _ = logs_tx.send(LogMessage {
+            plugin: self.name.clone(),
+            level,
+            message,
+        });
+    }
+
+    fn send_command(&self, command: &str, args: Vec<String>, cwd: &Path, selection: &[PathBuf]) {
+        let event = protocol::HostEvent::new(
+            protocol::EVENT_COMMAND,
+            cwd.to_path_buf(),
+            selection.to_vec(),
+        )
+        .with_command(command, args);
+        let _ = self.process.stdin_tx.send(event.to_line());
+    }
+
+    fn info(&self) -> PluginInfo {
+        let crashed = || self.last_crash.clone().unwrap_or_default();
+        let state = if self.given_up {
+            PluginState::Stopped(crashed())
+        } else {
+            match self.process.life.exit() {
+                Exit::Running => PluginState::Running,
+                Exit::Finished => PluginState::Finished,
+                Exit::Crashed { status, .. } => PluginState::Crashed(status),
+            }
+        };
+        PluginInfo {
+            name: self.name.clone(),
+            state,
+            restarts: self.restarts,
+        }
+    }
+}
+
+/// How `PluginManager::restart` went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Restart {
+    NotFound,
+    Restarted,
+    /// The process could not be started; the reason.
+    Failed(String),
 }
 
 /// What a plugin is configured to answer: the keys that fire it, the `:` command words it
@@ -109,8 +262,8 @@ impl PluginManager {
     }
 
     /// Starts one plugin process, fires its `init` event, and registers it to fire `key` on each
-    /// of `triggers.keys` and `command` on each of `triggers.commands`. A failure to spawn (bad command, missing binary) is returned rather
-    /// than panicking — the caller decides whether that is fatal or just a warning, the same
+    /// of `triggers.keys` and `command` on each of `triggers.commands`. A failure to spawn (bad
+    /// command, missing binary) is returned rather than panicking — the caller decides whether that is fatal or just a warning, the same
     /// "one bad entry must never take the whole session down" rule `theming::Config::load`
     /// already follows for a malformed config file.
     pub fn spawn(
@@ -122,42 +275,6 @@ impl PluginManager {
         triggers: Triggers,
         cwd: &Path,
     ) -> Result<(), PluginError> {
-        let mut child = {
-            // `Command::spawn` registers the child with the calling thread's tokio reactor, so
-            // it needs `handle` bound as current for the duration of the call — this function
-            // itself runs outside any async context (it is called once at startup, synchronously,
-            // by `tui::App::with_plugins`).
-            let _guard = handle.enter();
-            Command::new(command)
-                .args(args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|source| PluginError::Spawn {
-                    name: name.to_string(),
-                    command: command.to_string(),
-                    source,
-                })?
-        };
-
-        let stdin = child.stdin.take().expect("spawned with a piped stdin");
-        let stdout = child.stdout.take().expect("spawned with a piped stdout");
-        let (stdin_tx, stdin_rx) = unbounded_channel::<String>();
-
-        let mailbox = Arc::new(Mailbox::default());
-        handle.spawn(write_loop(stdin, stdin_rx, Arc::clone(&mailbox)));
-        handle.spawn(read_loop(
-            name.to_string(),
-            stdout,
-            stdin_tx.clone(),
-            self.logs_tx.clone(),
-            self.state_tx.subscribe(),
-            handle.clone(),
-        ));
-        handle.spawn(reap(name.to_string(), child, self.logs_tx.clone()));
-
         // A plugin may ask for the state in answer to `init`, before the first tick has published
         // one, so until then the answer names at least the directory the session started in.
         self.state_tx.send_if_modified(|state| {
@@ -168,16 +285,28 @@ impl PluginManager {
             unset
         });
 
-        let init = protocol::HostEvent::new(protocol::EVENT_INIT, cwd.to_path_buf(), Vec::new());
-        let _ = stdin_tx.send(init.to_line());
-
+        let process = start(
+            handle,
+            name,
+            command,
+            args,
+            cwd,
+            &self.logs_tx,
+            self.state_tx.subscribe(),
+        )?;
         self.plugins.push(RunningPlugin {
             name: name.to_string(),
+            command: command.to_string(),
+            args: args.to_vec(),
+            handle: handle.clone(),
             on_keys: triggers.keys,
             commands: triggers.commands,
             events: triggers.events,
-            stdin_tx,
-            mailbox,
+            process,
+            crashes: 0,
+            restarts: 0,
+            given_up: false,
+            last_crash: None,
         });
         Ok(())
     }
@@ -186,17 +315,27 @@ impl PluginManager {
     /// selection (marks, or the single entry under the cursor — the same batch every built-in
     /// bulk action uses), and which key it was. When two plugins claim a key the one configured
     /// first gets it. Returns whether a plugin consumed the key, so the caller can tell a truly
-    /// unbound key apart from one a plugin handled.
-    pub fn dispatch_key(&self, code: KeyCode, cwd: &Path, selection: &[PathBuf]) -> bool {
-        let Some(plugin) = self.plugins.iter().find(|p| p.on_keys.contains(&code)) else {
+    /// unbound key apart from one a plugin handled. A plugin whose process has ended is started
+    /// again first (see `life`).
+    pub fn dispatch_key(&mut self, code: KeyCode, cwd: &Path, selection: &[PathBuf]) -> bool {
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins.iter_mut().find(|p| p.on_keys.contains(&code)) else {
             return false;
         };
-        let event =
-            protocol::HostEvent::new(protocol::EVENT_KEY, cwd.to_path_buf(), selection.to_vec())
-                .with_key(code);
-        // Sending into a channel whose reader already ended (the process died) is a silent
-        // no-op — the plugin is gone, so there is nothing left to notify.
-        let _ = plugin.stdin_tx.send(event.to_line());
+        if plugin.ensure_alive(logs_tx, state_tx, true) {
+            let event = protocol::HostEvent::new(
+                protocol::EVENT_KEY,
+                cwd.to_path_buf(),
+                selection.to_vec(),
+            )
+            .with_key(code);
+            let _ = plugin.process.stdin_tx.send(event.to_line());
+        }
         true
     }
 
@@ -204,40 +343,82 @@ impl PluginManager {
     /// same directory and selection a key event carries plus the arguments. Returns whether a
     /// plugin answered, so the caller can fall through to running the line as a shell command.
     pub fn dispatch_command(
-        &self,
+        &mut self,
         command: &str,
         args: Vec<String>,
         cwd: &Path,
         selection: &[PathBuf],
     ) -> bool {
-        match self
-            .plugins
-            .iter()
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins
+            .iter_mut()
             .find(|p| p.commands.iter().any(|word| word == command))
-        {
-            Some(plugin) => {
-                self.send_command(plugin, command, args, cwd, selection);
-                true
-            }
-            None => false,
+        else {
+            return false;
+        };
+        if plugin.ensure_alive(logs_tx, state_tx, true) {
+            plugin.send_command(command, args, cwd, selection);
         }
+        true
     }
 
     /// Runs `:plugin <name> [args]`: fires the named plugin whether or not it declared any key or
     /// command, with the command word `"plugin"`. Returns whether a plugin by that name exists.
     pub fn dispatch_named(
-        &self,
+        &mut self,
         name: &str,
         args: Vec<String>,
         cwd: &Path,
         selection: &[PathBuf],
     ) -> bool {
-        match self.plugins.iter().find(|p| p.name == name) {
-            Some(plugin) => {
-                self.send_command(plugin, "plugin", args, cwd, selection);
-                true
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins.iter_mut().find(|p| p.name == name) else {
+            return false;
+        };
+        if plugin.ensure_alive(logs_tx, state_tx, true) {
+            plugin.send_command("plugin", args, cwd, selection);
+        }
+        true
+    }
+
+    /// Every plugin's state, in the order they were configured, for `:plugins`.
+    pub fn summaries(&self) -> Vec<PluginInfo> {
+        self.plugins.iter().map(RunningPlugin::info).collect()
+    }
+
+    /// Stops the named plugin's process if it is still alive and starts a fresh one, forgetting
+    /// any crashes, so a plugin the host gave up on gets another go.
+    pub fn restart(&mut self, name: &str) -> Restart {
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins.iter_mut().find(|p| p.name == name) else {
+            return Restart::NotFound;
+        };
+        plugin.process.life.stop();
+        plugin.crashes = 0;
+        plugin.given_up = false;
+        plugin.last_crash = None;
+        match plugin.start_again(logs_tx, state_tx) {
+            Ok(()) => Restart::Restarted,
+            Err(e) => {
+                plugin.given_up = true;
+                plugin.last_crash = Some(e.to_string());
+                Restart::Failed(e.to_string())
             }
-            None => false,
         }
     }
 
@@ -251,7 +432,7 @@ impl PluginManager {
     /// state it replaces (the first snapshot ever published fires nothing). Call once per render
     /// tick; an unchanged snapshot is dropped, so a quiet browser does no work. Returns whether it
     /// replaced the previous one.
-    pub fn publish_state(&self, snapshot: StateSnapshot) -> bool {
+    pub fn publish_state(&mut self, snapshot: StateSnapshot) -> bool {
         let first = !self.published.swap(true, Ordering::Relaxed);
         let mut previous = None;
         let changed = self.state_tx.send_if_modified(|current| {
@@ -270,42 +451,61 @@ impl PluginManager {
     /// Fires `job_finished` at every plugin that subscribed to it, with the directory and marks
     /// as of the last published state. Jobs are rare and each one matters, so unlike the change
     /// events these are never folded together.
-    pub fn notify_job_finished(&self, kind: &str, outcome: JobOutcome) {
+    pub fn notify_job_finished(&mut self, kind: &str, outcome: JobOutcome) {
         let state = self.state_tx.borrow().clone();
-        for plugin in self.subscribed(EventKind::JobFinished) {
-            let event = protocol::HostEvent::new(
-                protocol::EVENT_JOB_FINISHED,
-                state.cwd.clone(),
-                state.marks.clone(),
-            )
-            .with_job(kind, outcome);
-            let _ = plugin.stdin_tx.send(event.to_line());
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        for plugin in plugins
+            .iter_mut()
+            .filter(|p| p.events.contains(&EventKind::JobFinished))
+        {
+            if plugin.ready_for_event(logs_tx, state_tx) {
+                let event = protocol::HostEvent::new(
+                    protocol::EVENT_JOB_FINISHED,
+                    state.cwd.clone(),
+                    state.marks.clone(),
+                )
+                .with_job(kind, outcome);
+                let _ = plugin.process.stdin_tx.send(event.to_line());
+            }
         }
     }
 
-    fn subscribed(&self, kind: EventKind) -> impl Iterator<Item = &RunningPlugin> {
-        self.plugins
-            .iter()
-            .filter(move |plugin| plugin.events.contains(&kind))
-    }
-
-    fn post_changes(&self, previous: &StateSnapshot, now: &StateSnapshot) {
+    fn post_changes(&mut self, previous: &StateSnapshot, now: &StateSnapshot) {
         let queued = |from: Option<PathBuf>, to: Option<PathBuf>| Queued {
             from,
             to,
             cwd: now.cwd.clone(),
             marks: now.marks.clone(),
         };
-        if previous.cwd != now.cwd {
-            for plugin in self.subscribed(EventKind::DirChanged) {
+        let dir_moved = previous.cwd != now.cwd;
+        let selection_moved = previous.cursor != now.cursor || previous.marks != now.marks;
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        for plugin in plugins.iter_mut() {
+            if dir_moved
+                && plugin.events.contains(&EventKind::DirChanged)
+                && plugin.ready_for_event(logs_tx, state_tx)
+            {
                 plugin
+                    .process
                     .mailbox
                     .post_dir(queued(Some(previous.cwd.clone()), Some(now.cwd.clone())));
             }
-        }
-        if previous.cursor != now.cursor || previous.marks != now.marks {
-            for plugin in self.subscribed(EventKind::SelectionChanged) {
+            if selection_moved
+                && plugin.events.contains(&EventKind::SelectionChanged)
+                && plugin.ready_for_event(logs_tx, state_tx)
+            {
                 plugin
+                    .process
                     .mailbox
                     .post_selection(queued(previous.cursor.clone(), now.cursor.clone()));
             }
@@ -315,23 +515,6 @@ impl PluginManager {
     /// The names of every running plugin, in the order they were configured.
     pub fn names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name.as_str()).collect()
-    }
-
-    fn send_command(
-        &self,
-        plugin: &RunningPlugin,
-        command: &str,
-        args: Vec<String>,
-        cwd: &Path,
-        selection: &[PathBuf],
-    ) {
-        let event = protocol::HostEvent::new(
-            protocol::EVENT_COMMAND,
-            cwd.to_path_buf(),
-            selection.to_vec(),
-        )
-        .with_command(command, args);
-        let _ = plugin.stdin_tx.send(event.to_line());
     }
 
     /// Drains every plugin's pending log lines. Call once per render tick; the caller decides
@@ -355,7 +538,10 @@ async fn write_loop(
     mailbox: Arc<Mailbox>,
 ) {
     loop {
+        // Biased towards the queue, whose first line is always `init`: a plugin must hear that
+        // before any change event, even one posted the instant it was started.
         let lines = tokio::select! {
+            biased;
             line = rx.recv() => match line {
                 Some(line) => vec![line],
                 None => break,
@@ -437,14 +623,34 @@ async fn read_loop(
 }
 
 /// Waits out the process so `kill_on_drop` has something alive to act on for its whole lifetime,
-/// and reports an abnormal exit (the common case — finishing its job and exiting 0 — stays quiet).
+/// records how it ended for `PluginManager` to find, and reports a crash (the common case,
+/// finishing its job and exiting 0, stays quiet, and so does a process the host stopped itself).
 async fn reap(
     plugin: String,
     mut child: tokio::process::Child,
     logs_tx: UnboundedSender<LogMessage>,
+    life: Arc<Life>,
 ) {
-    if let Ok(status) = child.wait().await
-        && !status.success()
+    let status = tokio::select! {
+        status = child.wait() => status,
+        () = life.stop_requested() => {
+            let _ = child.kill().await;
+            child.wait().await
+        }
+    };
+    let exit = match status {
+        Ok(status) if status.success() => Exit::Finished,
+        Ok(status) => Exit::Crashed {
+            status: status.to_string(),
+            ran_for: life.age(),
+        },
+        Err(e) => Exit::Crashed {
+            status: format!("could not wait for it: {e}"),
+            ran_for: life.age(),
+        },
+    };
+    if let Exit::Crashed { status, .. } = &exit
+        && !life.was_stopped_by_host()
     {
         let _ = logs_tx.send(LogMessage {
             plugin,
@@ -452,6 +658,68 @@ async fn reap(
             message: format!("exited: {status}"),
         });
     }
+    life.set_exit(exit);
+}
+
+/// Spawns one plugin process with the three tasks that drive it, and queues its `init` event.
+fn start(
+    handle: &Handle,
+    name: &str,
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    logs_tx: &UnboundedSender<LogMessage>,
+    state_rx: watch::Receiver<StateSnapshot>,
+) -> Result<Process, PluginError> {
+    let mut child = {
+        // `Command::spawn` registers the child with the calling thread's tokio reactor, so it
+        // needs `handle` bound as current for the duration of the call: this runs outside any
+        // async context, once at startup and again whenever a plugin is started anew.
+        let _guard = handle.enter();
+        Command::new(command)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|source| PluginError::Spawn {
+                name: name.to_string(),
+                command: command.to_string(),
+                source,
+            })?
+    };
+
+    let stdin = child.stdin.take().expect("spawned with a piped stdin");
+    let stdout = child.stdout.take().expect("spawned with a piped stdout");
+    let (stdin_tx, stdin_rx) = unbounded_channel::<String>();
+    let mailbox = Arc::new(Mailbox::default());
+    let life = Life::new();
+
+    handle.spawn(write_loop(stdin, stdin_rx, Arc::clone(&mailbox)));
+    handle.spawn(read_loop(
+        name.to_string(),
+        stdout,
+        stdin_tx.clone(),
+        logs_tx.clone(),
+        state_rx,
+        handle.clone(),
+    ));
+    handle.spawn(reap(
+        name.to_string(),
+        child,
+        logs_tx.clone(),
+        Arc::clone(&life),
+    ));
+
+    let init = protocol::HostEvent::new(protocol::EVENT_INIT, cwd.to_path_buf(), Vec::new());
+    let _ = stdin_tx.send(init.to_line());
+
+    Ok(Process {
+        stdin_tx,
+        mailbox,
+        life,
+    })
 }
 
 /// Runs one plugin-requested `file_ops` call synchronously against the local filesystem — always
@@ -523,7 +791,7 @@ mod tests {
 
     #[test]
     fn publishing_the_same_state_twice_reports_a_change_only_the_first_time() {
-        let manager = PluginManager::new();
+        let mut manager = PluginManager::new();
         let snapshot = StateSnapshot {
             cwd: PathBuf::from("/a"),
             ..StateSnapshot::default()

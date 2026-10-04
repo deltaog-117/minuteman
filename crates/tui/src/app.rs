@@ -37,7 +37,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
-use plugins::{EventKind, JobOutcome, PluginManager, StateSnapshot, Triggers};
+use plugins::{EventKind, JobOutcome, PluginManager, Restart, StateSnapshot, Triggers};
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
 use theming::{OpenRule, OpenWith, PluginSpec};
@@ -1796,6 +1796,28 @@ impl App {
                     });
                 }
             }
+            Ok(Some(Command::Plugins)) => {
+                self.status = Some(match self.plugins.summaries().as_slice() {
+                    [] => "no plugins are configured".to_string(),
+                    plugins => plugins
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                });
+            }
+            Ok(Some(Command::PluginRestart { name })) => {
+                self.status = Some(match self.plugins.restart(&name) {
+                    Restart::Restarted => format!("plugin {name}: restarted"),
+                    Restart::NotFound => match self.plugins.names().as_slice() {
+                        [] => format!("plugin {name}: no plugins are running"),
+                        running => {
+                            format!("plugin {name}: not found (running: {})", running.join(", "))
+                        }
+                    },
+                    Restart::Failed(why) => format!("plugin {name}: could not restart: {why}"),
+                });
+            }
             Ok(Some(Command::Shell(line))) if self.run_plugin_command(browser, &line) => {}
             Ok(Some(Command::Shell(line))) => self.spawn_shell_command(browser, line),
             Ok(Some(Command::Interactive(line))) if self.is_busy() => {
@@ -1815,7 +1837,7 @@ impl App {
     /// Hands `line` to the plugin that declared its first word as a `:` command, when there is
     /// one; returns whether one took it. Tried only after the built-ins, so a plugin can add
     /// commands but never replace `cd` or `q`, and before the line would run under `sh -c`.
-    fn run_plugin_command(&self, browser: &BrowserState, line: &str) -> bool {
+    fn run_plugin_command(&mut self, browser: &BrowserState, line: &str) -> bool {
         let Some(word) = line.split_whitespace().next() else {
             return false;
         };

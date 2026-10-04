@@ -20,14 +20,25 @@
 //! other language would have to get right — not two ends of the same Rust types agreeing with
 //! themselves.
 //!
-//! On `init` it logs "ready". On `key` it reads the directory it was told is the cwd, logs how
+//! On `init` it logs "ready pid=N". On `key` it reads the directory it was told is the cwd, logs how
 //! many entries it found, asks the host to create a marker file next to the first selected path
 //! (proving a plugin reaches real file operations, not just read-only queries), asks for the
 //! browser state with `get_state` and logs its cursor, and logs "done". It also logs each
 //! `dir_changed`, `selection_changed` and `job_finished` it is sent, as `name: from -> to` or
 //! `job_finished: kind outcome`.
+//!
+//! Three flags make it end on purpose, so the tests can play a one-shot plugin and a plugin in a
+//! crash loop: `--exit-on-init=N`, `--exit-after-key=N` and `--exit-after-event=N` exit with
+//! status N right at `init`, after finishing a `key`, or after logging a change or job event.
 
 use std::io::{self, BufRead, Write};
+
+/// The status asked for by `--<flag>=N`, if that flag was given.
+fn exit_code(flag: &str) -> Option<i32> {
+    std::env::args()
+        .find_map(|arg| arg.strip_prefix(&format!("--{flag}=")).map(str::to_string))
+        .and_then(|code| code.parse().ok())
+}
 
 fn main() {
     let stdin = io::stdin();
@@ -47,8 +58,22 @@ fn main() {
         };
 
         match name {
-            "init" => send_log(&mut stdout, "info", "ready"),
-            "key" => handle_key(&event, &mut stdout, &mut lines, &mut next_id),
+            "init" => {
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!("ready pid={}", std::process::id()),
+                );
+                if let Some(code) = exit_code("exit-on-init") {
+                    std::process::exit(code);
+                }
+            }
+            "key" => {
+                handle_key(&event, &mut stdout, &mut lines, &mut next_id);
+                if let Some(code) = exit_code("exit-after-key") {
+                    std::process::exit(code);
+                }
+            }
             "dir_changed" | "selection_changed" => {
                 let params = &event["params"];
                 send_log(
@@ -60,6 +85,9 @@ fn main() {
                         params["to"].as_str().unwrap_or("none")
                     ),
                 );
+                if let Some(code) = exit_code("exit-after-event") {
+                    std::process::exit(code);
+                }
             }
             "job_finished" => {
                 let params = &event["params"];
@@ -72,6 +100,9 @@ fn main() {
                         params["outcome"].as_str().unwrap_or("?")
                     ),
                 );
+                if let Some(code) = exit_code("exit-after-event") {
+                    std::process::exit(code);
+                }
             }
             _ => {}
         }

@@ -57,6 +57,12 @@ pub enum Command {
         name: String,
         args: Vec<String>,
     },
+    /// `:plugins`: lists every plugin and whether it is running.
+    Plugins,
+    /// `:plugins restart <name>`: starts a plugin's process afresh, forgetting its crashes.
+    PluginRestart {
+        name: String,
+    },
     /// A command line for `sh -c`, run in the browsed directory.
     Shell(String),
     /// A command line for `sh -c` that gets the real terminal — the program draws on it and reads
@@ -127,6 +133,17 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
                     args: words.collect(),
                 })),
                 None => Ok(Some(Command::Shell(line.into()))),
+            }
+        }
+        // Like `plugin`, only these two exact forms are the built-in; any other `plugins ...` line
+        // is left to whatever `plugins` program is on the path.
+        "plugins" if line[name.len()..].trim().is_empty() => Ok(Some(Command::Plugins)),
+        "plugins" if !uses_shell_syntax(line) => {
+            match split_words(line[name.len()..].trim())?.as_slice() {
+                [verb, plugin] if verb == "restart" => Ok(Some(Command::PluginRestart {
+                    name: plugin.clone(),
+                })),
+                _ => Ok(Some(Command::Shell(line.into()))),
             }
         }
         "cd" => {
@@ -350,6 +367,36 @@ mod tests {
             }))
         );
         assert!(parse("plugin 'unterminated").is_err());
+    }
+
+    #[test]
+    fn plugins_lists_and_plugins_restart_names_one() {
+        assert_eq!(parse("plugins"), Ok(Some(Command::Plugins)));
+        assert_eq!(
+            parse("plugins restart blame"),
+            Ok(Some(Command::PluginRestart {
+                name: "blame".into()
+            }))
+        );
+        assert_eq!(
+            parse("plugins restart 'my plugin'"),
+            Ok(Some(Command::PluginRestart {
+                name: "my plugin".into()
+            }))
+        );
+    }
+
+    #[test]
+    fn any_other_plugins_line_still_goes_to_the_shell() {
+        for line in [
+            "plugins restart",
+            "plugins restart a b",
+            "plugins stop a",
+            "plugins restart a | wc",
+            "plugins -l",
+        ] {
+            assert_eq!(parse(line), Ok(shell(line)), "{line}");
+        }
     }
 
     #[test]

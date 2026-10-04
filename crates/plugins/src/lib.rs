@@ -23,9 +23,11 @@
 
 pub mod error;
 pub mod host;
+mod life;
 mod mailbox;
 pub mod protocol;
 
 pub use error::PluginError;
-pub use host::{LogMessage, PluginManager, Triggers};
+pub use host::{LogMessage, PluginManager, Restart, Triggers};
+pub use life::{PluginInfo, PluginState};
 pub use protocol::{API_VERSION, EventKind, JobOutcome, LogLevel, StateSnapshot};

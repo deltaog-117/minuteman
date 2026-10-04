@@ -5670,6 +5670,67 @@ PTY (`pyte` for the screen, the harness answering the terminal probes): `l` into
 `entered sub`, `h` showed `entered tree`, and marking a file, yanking and pasting into the folder
 showed `copy completed`, with the file on disk.
 
+### Plugin Restart Policy: Respawn on Next Use (COA C)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** A plugin that exited got one log line if it crashed and nothing otherwise, but it stayed
+in the list, so `dispatch_key` found it, reported the key as handled and wrote into a dead channel.
+A key bound to it did nothing, with no word on why.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | No restart; show state, add `:plugins` and a manual restart | Rejected |
+| B | A supervisor task per plugin restarting on a crash with backoff | Rejected |
+| C | Start a plugin again the next time something is meant for it, with a crash-loop guard | Chosen |
+
+**Why C.** It fixes the visible bug with no background task and no timers. It also makes the
+one-shot style natural: the protocol is "read a line, print a line", so a script that handles one
+key press and exits is legitimate, and starting it per use is what its author expects. B only pays
+off for a plugin that does nothing but listen for events, and `:plugins restart` covers that until
+someone needs more; B can be built on the list and the guard that C adds.
+
+**Design.** `reap` now records how each process ended in a `Life` shared with the manager:
+running, finished (status 0) or crashed (the status text and how long it ran). Nothing watches for
+deaths; `ensure_alive` looks when a key, command or `:plugin` is about to be delivered, and for an
+event only when the plugin has no keys or commands, since otherwise nothing would ever bring a
+listener back. Finished resets the crash count and respawns. A crash goes through the pure
+`life::after_crash`: a crash after 60 s of running restarts the count at one, any other adds one,
+and the third in a row gives up. A plugin the host has given up on says so on each key or command,
+with the command that fixes it, because the original bug was exactly a key doing nothing; events
+to it are dropped silently so the status line is not flooded every tick. A process that cannot be
+started at all (the binary has gone) is given up on at once, since a retry changes nothing. Each
+process has its own queue, mailbox and `Life`, so nothing from a dead one is delivered to its
+successor, and the old writer ends when its sender is dropped. `restart` marks the old `Life`
+stopped and notifies `reap`, which kills the process and stays quiet about it. It then starts
+afresh with the crash count cleared. The manager's dispatch methods now take `&mut self`, as
+starting a process changes the plugin; every caller already held it mutably. The list and
+`restart` are `:plugins` and `:plugins restart <name>`, not `:plugin <name> restart` as first
+proposed, because that would take the word `restart` away from a plugin's own arguments.
+
+**A bug the tests found.** A respawned listener's first change event was sometimes written before
+its `init`, so the plugin never saw `init` and, in the test, exited on the event. The writer chose
+between its queue and its mailbox at random; the select is now biased towards the queue, whose
+first line is always `init`.
+
+**Trade-offs.** A plugin started again has none of the old process's memory and sees `init` again,
+which the docs now say. A process that dies in the instant before a key is sent is not noticed
+until `reap` has recorded it, so that one key can be lost; the next one starts it. A plugin with a
+key that has died misses events until a key or command brings it back. `names()` still lists every
+configured plugin, so the "running:" in an unknown-name message can include a stopped one.
+
+**Verification.** `scripts/check` passes. New tests cover the crash verdicts (the limit, the
+60-second reset, a property test over any spacing of crashes and over any long run), the list's
+wording, the `:plugins` parser (and that other `plugins` lines still go to the shell), and end to
+end tests with the fixture, which can now exit on purpose: a one-shot plugin answers two keys from
+two processes, a plugin that crashes at once is tried three times and then stopped (and keeps
+saying so), `restart` revives a stopped plugin and replaces a live one without a crash message and
+with the old process gone, a listener is started again by an event, and a plugin with a key is
+not. The real binary was run in a PTY with a one-shot and a crashing plugin: two key presses ran
+in pids 121333 and 121344, three presses of the crasher's key ended in the stopped message, which
+the next two repeated, `:plugins` read `oneshot: finished, restarted 1x; crasher: stopped after
+repeated crashes (exit status: 1), restarted 2x`, and `:plugins restart crasher` started it again.
+
 ---
 
 ## 🧠 Usage Guidelines

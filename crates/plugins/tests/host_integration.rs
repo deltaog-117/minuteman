@@ -24,7 +24,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
-use plugins::{EventKind, JobOutcome, PluginManager, StateSnapshot, Triggers};
+use plugins::{
+    EventKind, JobOutcome, PluginManager, PluginState, Restart, StateSnapshot, Triggers,
+};
 
 fn scratch_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -172,6 +174,7 @@ fn spawn_python_example(
 }
 
 /// Polls until a log line contains `needle`, or panics with everything seen after five seconds.
+#[track_caller]
 fn wait_for_log(manager: &mut PluginManager, needle: &str) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut seen = Vec::new();
@@ -560,6 +563,247 @@ fn a_python_plugin_reacts_to_directory_changes_and_finished_jobs() {
     wait_for_log(&mut manager, "entered photos");
     manager.notify_job_finished("move", JobOutcome::Cancelled);
     wait_for_log(&mut manager, "move cancelled");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The pid a fixture logged when it started, from the first "ready pid=N" in `seen`.
+fn pid_in(seen: &[String]) -> u32 {
+    seen.iter()
+        .find_map(|m| {
+            m.strip_prefix("ready pid=")
+                .and_then(|pid| pid.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no 'ready pid=' in {seen:?}"))
+}
+
+fn spawn_fixture_with(
+    runtime: &tokio::runtime::Runtime,
+    manager: &mut PluginManager,
+    dir: &std::path::Path,
+    flag: &str,
+    triggers: Triggers,
+) {
+    manager
+        .spawn(
+            runtime.handle(),
+            "fixture",
+            FIXTURE,
+            &[flag.to_string()],
+            triggers,
+            dir,
+        )
+        .unwrap();
+}
+
+fn on_key_b() -> Triggers {
+    Triggers {
+        keys: vec![KeyCode::Char('b')],
+        ..Triggers::default()
+    }
+}
+
+/// Polls until the only plugin is in a state `done` accepts, or panics with what it was.
+fn wait_for_state(manager: &PluginManager, done: impl Fn(&PluginState) -> bool) -> PluginState {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = manager.summaries().remove(0).state;
+        if done(&state) {
+            return state;
+        }
+        assert!(Instant::now() < deadline, "plugin stayed {state:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn is_gone(pid: u32) -> bool {
+    !std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+#[test]
+fn a_plugin_that_finished_is_started_again_by_its_next_key() {
+    let dir = scratch_dir("respawn-key");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_with(
+        &runtime,
+        &mut manager,
+        &dir,
+        "--exit-after-key=0",
+        on_key_b(),
+    );
+    let first = pid_in(&wait_for_log(&mut manager, "ready pid="));
+
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    wait_for_log(&mut manager, "cursor: ");
+    wait_for_state(&manager, |s| *s == PluginState::Finished);
+
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    let again = wait_for_log(&mut manager, "cursor: ");
+    assert_ne!(pid_in(&again), first, "the same process answered twice");
+    assert_eq!(manager.summaries()[0].restarts, 1);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugin_that_crashes_straight_away_gets_three_tries_and_then_the_host_stops() {
+    let dir = scratch_dir("respawn-loop");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_with(&runtime, &mut manager, &dir, "--exit-on-init=1", on_key_b());
+
+    for _ in 0..3 {
+        wait_for_state(&manager, |s| matches!(s, PluginState::Crashed(_)));
+        assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    }
+
+    let seen = wait_for_log(&mut manager, "stopped after 3 crashes in a row");
+    assert!(
+        seen.iter()
+            .any(|m| m.contains("`:plugins restart fixture`")),
+        "the message should say how to start it again; saw {seen:?}"
+    );
+    let info = manager.summaries().remove(0);
+    assert!(matches!(info.state, PluginState::Stopped(_)), "{info:?}");
+    assert_eq!(
+        info.restarts, 2,
+        "three runs in all: the first and two more"
+    );
+
+    // A stopped plugin stays stopped, and each key press says so rather than doing nothing.
+    assert!(manager.dispatch_key(KeyCode::Char('b'), &dir, &[]));
+    wait_for_log(&mut manager, "stopped after 3 crashes in a row");
+    assert_eq!(manager.summaries()[0].restarts, 2);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn restart_gives_a_stopped_plugin_another_go_and_clears_its_crashes() {
+    let dir = scratch_dir("respawn-restart-stopped");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_with(&runtime, &mut manager, &dir, "--exit-on-init=1", on_key_b());
+    for _ in 0..3 {
+        wait_for_state(&manager, |s| matches!(s, PluginState::Crashed(_)));
+        manager.dispatch_key(KeyCode::Char('b'), &dir, &[]);
+    }
+    wait_for_state(&manager, |s| matches!(s, PluginState::Stopped(_)));
+
+    assert_eq!(manager.restart("fixture"), Restart::Restarted);
+
+    // The new process crashes too, but the count began again, so the host is not stopped yet.
+    let state = wait_for_state(&manager, |s| !matches!(s, PluginState::Running));
+    assert!(matches!(state, PluginState::Crashed(_)), "{state:?}");
+    assert_eq!(manager.restart("no-such-plugin"), Restart::NotFound);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn restart_stops_a_plugin_that_is_still_running_and_says_nothing_about_it() {
+    let dir = scratch_dir("respawn-restart-running");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_listener(&runtime, &mut manager, &dir, Vec::new());
+    let first = pid_in(&wait_for_log(&mut manager, "ready pid="));
+
+    assert_eq!(manager.restart("fixture"), Restart::Restarted);
+
+    let second = pid_in(&wait_for_log(&mut manager, "ready pid="));
+    assert_ne!(first, second);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !is_gone(first) {
+        assert!(Instant::now() < deadline, "the old process is still alive");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        manager
+            .poll()
+            .iter()
+            .all(|m| !m.message.starts_with("exited")),
+        "stopping a plugin on purpose is not a crash"
+    );
+    assert_eq!(manager.summaries()[0].state, PluginState::Running);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugin_that_only_listens_is_started_again_by_the_next_event() {
+    let dir = scratch_dir("respawn-event");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_with(
+        &runtime,
+        &mut manager,
+        &dir,
+        "--exit-after-event=0",
+        Triggers {
+            events: vec![EventKind::DirChanged],
+            ..Triggers::default()
+        },
+    );
+    let first = pid_in(&wait_for_log(&mut manager, "ready pid="));
+    let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+    manager.publish_state(state_at(&a, None, &[]));
+    manager.publish_state(state_at(&b, None, &[]));
+    wait_for_log(
+        &mut manager,
+        &format!("dir_changed: {} -> {}", a.display(), b.display()),
+    );
+    wait_for_state(&manager, |s| *s == PluginState::Finished);
+
+    manager.publish_state(state_at(&c, None, &[]));
+
+    let seen = wait_for_log(
+        &mut manager,
+        &format!("dir_changed: {} -> {}", b.display(), c.display()),
+    );
+    assert!(
+        seen.iter().any(|m| m.starts_with("ready pid=")),
+        "the event should have started it again first; saw {seen:?}"
+    );
+    assert_ne!(pid_in(&seen), first);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugin_with_a_key_is_not_started_again_by_an_event() {
+    let dir = scratch_dir("respawn-event-keyed");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_with(
+        &runtime,
+        &mut manager,
+        &dir,
+        "--exit-after-event=0",
+        Triggers {
+            keys: vec![KeyCode::Char('b')],
+            events: vec![EventKind::DirChanged],
+            ..Triggers::default()
+        },
+    );
+    wait_for_log(&mut manager, "ready pid=");
+    manager.publish_state(state_at(&dir.join("a"), None, &[]));
+    manager.publish_state(state_at(&dir.join("b"), None, &[]));
+    wait_for_state(&manager, |s| *s == PluginState::Finished);
+
+    manager.publish_state(state_at(&dir.join("c"), None, &[]));
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert_eq!(manager.summaries()[0].restarts, 0);
+    assert!(
+        manager
+            .poll()
+            .iter()
+            .all(|m| !m.message.starts_with("ready"))
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

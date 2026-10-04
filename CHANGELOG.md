@@ -81,6 +81,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields are additive, so `API_VERSION` stays 1. `PluginManager::spawn` takes a `Triggers` value
   (keys and commands) instead of one optional key, and `PluginSpec.on_key` became `on_keys`.
   `:plugin` with an unknown name says so and lists the running plugins.
+- `plugins`, `tui`: a plugin whose process has ended is started again the next time something is
+  meant for it (a key, a `:` command, `:plugin <name>`, or an event for a plugin with no keys or
+  commands), where a key bound to a plugin that had exited used to do nothing, silently. Status 0
+  counts as finishing and starts again quietly; a plugin that crashes three times in a row, each
+  within a minute of starting, is given up on, and each key press or command then says so and how
+  to start it again. `:plugins` lists every plugin's state and how often it was restarted, and
+  `:plugins restart <name>` starts a fresh process (stopping a live one first), clearing a stopped
+  plugin's crashes; any other `plugins ...` line still goes to the shell. A new process gets
+  `init` again. New `PluginManager::summaries` and `restart`, `PluginInfo`, `PluginState` and
+  `Restart`; `dispatch_key`, `dispatch_command`, `dispatch_named`, `publish_state` and
+  `notify_job_finished` now take `&mut self`. A plugin's writer now always sends its queued
+  lines, `init` first, before a mailbox event.
 - `plugins`, `theming`, `tui`: a plugin can subscribe to events with `events = ["dir_changed",
   "selection_changed", "job_finished"]` in its `[[plugin]]` table (none by default, so existing
   plugins see nothing new). `dir_changed` and `selection_changed` carry `from` and `to`; a burst of
