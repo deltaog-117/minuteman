@@ -114,6 +114,9 @@ struct RawPluginSpec {
     #[serde(deserialize_with = "one_or_many")]
     on_key: Vec<String>,
     commands: Vec<String>,
+    /// The events (`dir_changed`, `selection_changed`, `job_finished`) the plugin wants to hear
+    /// about as they happen, on top of its keys and commands.
+    events: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +133,10 @@ pub struct PluginSpec {
     /// it). A blank word is dropped; a word that is also a built-in command never reaches the
     /// plugin, as the built-in is tried first.
     pub commands: Vec<String>,
+    /// The event names this plugin subscribed to, trimmed and with blanks dropped. Which names
+    /// exist is `plugins`' to say, so an unknown one is kept here and reported when the plugin
+    /// starts.
+    pub events: Vec<String>,
 }
 
 impl From<RawPluginSpec> for PluginSpec {
@@ -144,6 +151,12 @@ impl From<RawPluginSpec> for PluginSpec {
                 .into_iter()
                 .map(|word| word.trim().to_string())
                 .filter(|word| !word.is_empty() && !word.contains(char::is_whitespace))
+                .collect(),
+            events: raw
+                .events
+                .into_iter()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
                 .collect(),
         }
     }
@@ -1130,5 +1143,23 @@ mod tests {
             [KeyCode::Char('b'), KeyCode::Char('B')]
         );
         assert_eq!(config.plugins[0].commands, ["blame", "log"]);
+    }
+
+    #[test]
+    fn a_plugin_lists_the_events_it_wants_and_blank_names_are_dropped() {
+        let config = Config::from_sources(
+            Some(
+                "[[plugin]]\nname = \"p\"\ncommand = \"true\"\n\
+                 events = [\"dir_changed\", \" \", \" job_finished \", \"typo\"]\n\
+                 [[plugin]]\nname = \"q\"\ncommand = \"true\"\n",
+            ),
+            None,
+            None,
+        );
+        assert_eq!(
+            config.plugins[0].events,
+            ["dir_changed", "job_finished", "typo"]
+        );
+        assert!(config.plugins[1].events.is_empty());
     }
 }

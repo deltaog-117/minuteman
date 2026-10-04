@@ -23,7 +23,9 @@
 //! On `init` it logs "ready". On `key` it reads the directory it was told is the cwd, logs how
 //! many entries it found, asks the host to create a marker file next to the first selected path
 //! (proving a plugin reaches real file operations, not just read-only queries), asks for the
-//! browser state with `get_state` and logs its cursor, and logs "done".
+//! browser state with `get_state` and logs its cursor, and logs "done". It also logs each
+//! `dir_changed`, `selection_changed` and `job_finished` it is sent, as `name: from -> to` or
+//! `job_finished: kind outcome`.
 
 use std::io::{self, BufRead, Write};
 
@@ -47,6 +49,30 @@ fn main() {
         match name {
             "init" => send_log(&mut stdout, "info", "ready"),
             "key" => handle_key(&event, &mut stdout, &mut lines, &mut next_id),
+            "dir_changed" | "selection_changed" => {
+                let params = &event["params"];
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!(
+                        "{name}: {} -> {}",
+                        params["from"].as_str().unwrap_or("none"),
+                        params["to"].as_str().unwrap_or("none")
+                    ),
+                );
+            }
+            "job_finished" => {
+                let params = &event["params"];
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!(
+                        "job_finished: {} {}",
+                        params["kind"].as_str().unwrap_or("?"),
+                        params["outcome"].as_str().unwrap_or("?")
+                    ),
+                );
+            }
             _ => {}
         }
     }

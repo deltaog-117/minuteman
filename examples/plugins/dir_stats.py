@@ -25,12 +25,16 @@ Wire it up in config.toml:
     args = ["/path/to/dir_stats.py"]
     on_key = ["i", "I"]
     commands = ["stats"]
+    events = ["dir_changed", "job_finished"]
 
 Then `i` (or `I`, or `:stats`) shows how many files and folders the browsed directory holds and
 how many bytes the files add up to, and `:plugin dir-stats touch notes.txt` creates a file there,
 which shows a plugin doing real work through the host and not just reading.
 `:plugin dir-stats state` asks the host for the browser's state with `get_state` and shows the
-entry under the cursor, how many entries are marked and the sort and view.
+entry under the cursor, how many entries are marked and the sort and view. With `events` set, it
+also shows each directory you enter and each copy, move, delete and the like that finishes. A
+plugin has to ask for `dir_changed`, `selection_changed` and `job_finished`; a burst of cursor
+moves reaches it as one event from where it began to where it ended.
 
 The protocol is one JSON object per line on stdin/stdout (see the `plugins` crate). The host
 sends `event` notifications (`init` once, `key` and `command` as they happen); this program sends
@@ -120,6 +124,12 @@ def handle(message):
         log("info", f"[{params['key']}] {stats(params)}")
     elif name == "command":
         on_command(params)
+    elif name == "dir_changed":
+        log("info", f"entered {os.path.basename(params['to']) or params['to']}")
+    elif name == "selection_changed":
+        log("info", f"cursor on {os.path.basename(params['to']) if params['to'] else 'nothing'}")
+    elif name == "job_finished":
+        log("info", f"{params['kind']} {params['outcome']}")
 
 
 def main():

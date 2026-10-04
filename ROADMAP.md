@@ -1374,6 +1374,24 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   dir_stats.py` gained `:plugin dir-stats state`. Verified in the compiled binary through a PTY
   with two entries marked: the plugin reported `cursor=alpha.txt marks=2 sort=name view=list` and
   the browsed directory.
+- ✅ **Plugin events (stage 1.5, third cycle)** – a plugin that lists `events = ["dir_changed",
+  "selection_changed", "job_finished"]` in its `[[plugin]]` table hears about them as they happen;
+  one that lists none gets nothing new. The first two carry `from` and `to` (the old and new
+  directory, or cursor entry) beside the usual `cwd` and `selection` (the marks); `job_finished`
+  carries the `kind` (`copy`, `move`, `delete`, `trash`, `extract`, `compress`, `command`) and the
+  `outcome` (`completed`, `skipped`, `cancelled`, `failed`). Chosen as COA B: the events come from
+  diffing the snapshot `get_state` already publishes each tick, and each plugin has a mailbox that
+  holds at most one `dir_changed` and one `selection_changed`, folding a burst into one event from
+  where it began to where it ended (and none at all if a directory burst ended where it began).
+  The plugin's writer drains the mailbox, so a plugin that stops reading just stops receiving
+  intermediate positions, and holding `j` cannot build a queue behind a slow one. `job_finished`
+  is never folded and fires where a job truly ends: a batch paste is one job, and one paused on a
+  conflict prompt has not finished. Additive, so `API_VERSION` stays 1; an unknown event name is
+  reported on stderr and skipped. `examples/plugins/dir_stats.py` shows both. Tested with a
+  property test over any run of changes (always one event, first `from`, last `to`), a plugin that
+  never reads stdin being fed twenty thousand changes, and a real `python3` plugin. Verified in the
+  compiled binary through a PTY: entering and leaving a folder showed `entered sub` and `entered
+  tree`, and a marked file copied into the folder showed `copy completed`.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1469,8 +1487,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   built-in features stay native and untouched, and plugins in any language add to them. Nothing
   here lets a plugin replace or remove a built-in; a user who wants that rebinds or unbinds a key
   in config (or, later, a `disabled_actions` list), and a built-in wins a key conflict unless the
-  user remaps it. Still to do, cheapest first: a few events (`dir_changed`, `selection_changed`,
-  `job_finished`), batched or throttled so holding `j` cannot flood a slow plugin; a crash-restart
+  user remaps it. Still to do, cheapest first: a crash-restart
   policy (a plugin gets one log line on an abnormal exit and is not restarted) and a plugin list;
   runtime `register_command` instead of config-only `commands`; and stable string names for the
   existing `Action`s so a plugin can invoke a built-in such as `paste` or `sort`. Expected cost:

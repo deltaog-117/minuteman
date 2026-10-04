@@ -81,6 +81,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields are additive, so `API_VERSION` stays 1. `PluginManager::spawn` takes a `Triggers` value
   (keys and commands) instead of one optional key, and `PluginSpec.on_key` became `on_keys`.
   `:plugin` with an unknown name says so and lists the running plugins.
+- `plugins`, `theming`, `tui`: a plugin can subscribe to events with `events = ["dir_changed",
+  "selection_changed", "job_finished"]` in its `[[plugin]]` table (none by default, so existing
+  plugins see nothing new). `dir_changed` and `selection_changed` carry `from` and `to`; a burst of
+  changes waits in a per-plugin mailbox that holds one of each and reaches the plugin as a single
+  event from where the burst began to where it ended, so a slow or stuck plugin never builds a
+  queue and costs two slots of memory. `selection_changed` also fires when only the marks change.
+  `job_finished` carries the job's `kind` and `outcome` and fires once per job, not per item of a
+  batch paste, and not for one paused on a conflict prompt. Additive, so `API_VERSION` stays 1; an
+  unknown event name is reported on stderr and skipped. New `EventKind` and `JobOutcome`,
+  `PluginManager::notify_job_finished`, `Triggers::events` and `PluginSpec::events`;
+  `publish_state` now also posts the events, and the published marks are sorted. `tokio`'s
+  `macros` feature is now enabled for `plugins`. `dir_stats.py` reacts to `dir_changed` and
+  `job_finished`.
 - `plugins`, `tui`: a plugin can send a `get_state` request at any time and get back the browser's
   `cwd`, `cursor`, `marks`, `show_hidden`, `sort`, `sort_reversed` and `view`. The interface
   publishes the state once per tick (only while a plugin is running) and a plugin's reader answers

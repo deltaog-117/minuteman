@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
-use plugins::{PluginManager, StateSnapshot, Triggers};
+use plugins::{EventKind, JobOutcome, PluginManager, StateSnapshot, Triggers};
 
 fn scratch_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -57,6 +57,7 @@ fn a_key_event_reaches_the_plugin_and_its_file_op_reaches_the_real_filesystem() 
             Triggers {
                 keys: vec![KeyCode::Char('b')],
                 commands: Vec::new(),
+                ..Triggers::default()
             },
             &dir,
         )
@@ -100,6 +101,7 @@ fn a_key_with_no_bound_plugin_is_not_dispatched() {
             Triggers {
                 keys: vec![KeyCode::Char('b')],
                 commands: Vec::new(),
+                ..Triggers::default()
             },
             &dir,
         )
@@ -162,6 +164,7 @@ fn spawn_python_example(
             Triggers {
                 keys: vec![KeyCode::Char('i'), KeyCode::Char('I')],
                 commands: vec!["stats".to_string()],
+                ..Triggers::default()
             },
             dir,
         )
@@ -247,6 +250,7 @@ fn get_state_returns_what_the_host_last_published() {
             Triggers {
                 keys: vec![KeyCode::Char('b')],
                 commands: Vec::new(),
+                ..Triggers::default()
             },
             &dir,
         )
@@ -290,6 +294,7 @@ fn before_anything_is_published_get_state_still_names_the_start_directory() {
             Triggers {
                 keys: vec![KeyCode::Char('b')],
                 commands: Vec::new(),
+                ..Triggers::default()
             },
             &dir,
         )
@@ -330,6 +335,231 @@ fn a_python_plugin_reads_the_browser_state_with_get_state() {
             && line.contains("view=grid"),
         "unexpected state line: {line}"
     );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn spawn_listener(
+    runtime: &tokio::runtime::Runtime,
+    manager: &mut PluginManager,
+    dir: &std::path::Path,
+    events: Vec<EventKind>,
+) {
+    manager
+        .spawn(
+            runtime.handle(),
+            "fixture",
+            FIXTURE,
+            &[],
+            Triggers {
+                events,
+                ..Triggers::default()
+            },
+            dir,
+        )
+        .unwrap();
+}
+
+fn state_at(cwd: &std::path::Path, cursor: Option<&str>, marks: &[&str]) -> StateSnapshot {
+    StateSnapshot {
+        cwd: cwd.to_path_buf(),
+        cursor: cursor.map(|name| cwd.join(name)),
+        marks: marks.iter().map(|name| cwd.join(name)).collect(),
+        ..StateSnapshot::default()
+    }
+}
+
+#[test]
+fn a_subscribed_plugin_hears_the_cursor_and_directory_move() {
+    let dir = scratch_dir("events-move");
+    let elsewhere = dir.join("sub");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_listener(
+        &runtime,
+        &mut manager,
+        &dir,
+        vec![EventKind::DirChanged, EventKind::SelectionChanged],
+    );
+    wait_for_log(&mut manager, "ready");
+
+    // The first snapshot is the browser arriving, not a change.
+    manager.publish_state(state_at(&dir, Some("a"), &[]));
+    manager.publish_state(state_at(&dir, Some("b"), &[]));
+    wait_for_log(
+        &mut manager,
+        &format!(
+            "selection_changed: {} -> {}",
+            dir.join("a").display(),
+            dir.join("b").display()
+        ),
+    );
+
+    manager.publish_state(state_at(&elsewhere, Some("c"), &[]));
+    wait_for_log(
+        &mut manager,
+        &format!("dir_changed: {} -> {}", dir.display(), elsewhere.display()),
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_first_published_state_fires_no_event() {
+    let dir = scratch_dir("events-first");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_listener(
+        &runtime,
+        &mut manager,
+        &dir,
+        vec![EventKind::DirChanged, EventKind::SelectionChanged],
+    );
+    wait_for_log(&mut manager, "ready");
+
+    manager.publish_state(state_at(&dir, Some("a"), &["a"]));
+    // A later change is heard, and nothing from the first publish arrived before it.
+    manager.publish_state(state_at(&dir, Some("b"), &["a"]));
+    let seen = wait_for_log(&mut manager, "selection_changed");
+    assert_eq!(
+        seen.iter()
+            .filter(|m| m.starts_with("selection_changed"))
+            .count(),
+        1,
+        "saw {seen:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugin_that_did_not_subscribe_hears_nothing_and_a_change_of_marks_alone_is_heard() {
+    let dir = scratch_dir("events-optin");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut quiet = PluginManager::new();
+    spawn_listener(&runtime, &mut quiet, &dir, Vec::new());
+    wait_for_log(&mut quiet, "ready");
+    quiet.publish_state(state_at(&dir, Some("a"), &[]));
+    quiet.publish_state(state_at(&dir, Some("b"), &["b"]));
+    quiet.notify_job_finished("copy", JobOutcome::Completed);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        quiet.poll().is_empty(),
+        "an unsubscribed plugin got an event"
+    );
+
+    let mut manager = PluginManager::new();
+    spawn_listener(
+        &runtime,
+        &mut manager,
+        &dir,
+        vec![EventKind::SelectionChanged],
+    );
+    wait_for_log(&mut manager, "ready");
+    manager.publish_state(state_at(&dir, Some("a"), &[]));
+    manager.publish_state(state_at(&dir, Some("a"), &["a"]));
+    wait_for_log(
+        &mut manager,
+        &format!(
+            "selection_changed: {} -> {}",
+            dir.join("a").display(),
+            dir.join("a").display()
+        ),
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_subscribed_plugin_hears_each_job_that_finishes() {
+    let dir = scratch_dir("events-jobs");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_listener(&runtime, &mut manager, &dir, vec![EventKind::JobFinished]);
+    wait_for_log(&mut manager, "ready");
+
+    manager.notify_job_finished("copy", JobOutcome::Completed);
+    manager.notify_job_finished("delete", JobOutcome::Failed);
+    let mut seen = wait_for_log(&mut manager, "job_finished: delete failed");
+    seen.extend(manager.poll().into_iter().map(|m| m.message));
+
+    let jobs: Vec<_> = seen
+        .iter()
+        .filter(|m| m.starts_with("job_finished"))
+        .collect();
+    assert_eq!(
+        jobs,
+        [
+            "job_finished: copy completed",
+            "job_finished: delete failed"
+        ]
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugin_that_never_reads_cannot_stall_the_host_however_much_changes() {
+    let dir = scratch_dir("events-stuck");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    // `sleep` never reads its stdin, so once the pipe is full every write waits.
+    manager
+        .spawn(
+            runtime.handle(),
+            "stuck",
+            "sleep",
+            &["30".to_string()],
+            Triggers {
+                events: vec![EventKind::SelectionChanged],
+                ..Triggers::default()
+            },
+            &dir,
+        )
+        .unwrap();
+    let long_name = "x".repeat(2000);
+    manager.publish_state(state_at(&dir, Some("first"), &[]));
+
+    let started = Instant::now();
+    for i in 0..20_000 {
+        manager.publish_state(state_at(&dir, Some(&format!("{long_name}{i}")), &[]));
+    }
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "publishing blocked on a plugin that was not reading"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_python_plugin_reacts_to_directory_changes_and_finished_jobs() {
+    if !has_python() {
+        return;
+    }
+    let dir = scratch_dir("python-events");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    manager
+        .spawn(
+            runtime.handle(),
+            "dir-stats",
+            "python3",
+            &[PYTHON_EXAMPLE.to_string()],
+            Triggers {
+                events: vec![EventKind::DirChanged, EventKind::JobFinished],
+                ..Triggers::default()
+            },
+            &dir,
+        )
+        .unwrap();
+    wait_for_log(&mut manager, "ready");
+
+    manager.publish_state(state_at(&dir, None, &[]));
+    manager.publish_state(state_at(&dir.join("photos"), None, &[]));
+    wait_for_log(&mut manager, "entered photos");
+    manager.notify_job_finished("move", JobOutcome::Cancelled);
+    wait_for_log(&mut manager, "move cancelled");
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

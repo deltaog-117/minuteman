@@ -19,7 +19,9 @@
 //!
 //! - host -> plugin: always an `"event"` notification (no `id`, no reply expected), naming what
 //!   happened (`init`, sent once right after the process starts, or `key`, sent when the
-//!   plugin's configured key is pressed) plus the current directory and selection.
+//!   plugin's configured key is pressed) plus the current directory and selection. A plugin that
+//!   lists `dir_changed`, `selection_changed` or `job_finished` under `events` also gets those as
+//!   they happen; see `EventKind`.
 //! - plugin -> host: a request with an `id` (`read_dir`, `copy`, `mv`, `delete`, `create_dir`,
 //!   `create_file`, `touch`, `rename` — the same `file_ops` orchestration the built-in keys use —
 //!   and `get_state`, which asks for the browser's cwd, cursor, marks and view settings)
@@ -50,6 +52,68 @@ pub const EVENT_KEY: &str = "key";
 /// The event name a plugin gets when a `:` command it declared, or `:plugin <its name>`, is run.
 pub const EVENT_COMMAND: &str = "command";
 
+/// The event name a subscribed plugin gets when the browsed directory changes.
+pub const EVENT_DIR_CHANGED: &str = "dir_changed";
+/// The event name a subscribed plugin gets when the cursor entry or the marks change.
+pub const EVENT_SELECTION_CHANGED: &str = "selection_changed";
+/// The event name a subscribed plugin gets when a copy, move, delete or similar job ends.
+pub const EVENT_JOB_FINISHED: &str = "job_finished";
+
+/// The events a plugin must ask for (`events = [...]` in its `[[plugin]]` table) because, unlike
+/// `init`, `key` and `command`, they fire without the user addressing the plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    DirChanged,
+    SelectionChanged,
+    JobFinished,
+}
+
+impl EventKind {
+    /// The event as the wire and the config spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DirChanged => EVENT_DIR_CHANGED,
+            Self::SelectionChanged => EVENT_SELECTION_CHANGED,
+            Self::JobFinished => EVENT_JOB_FINISHED,
+        }
+    }
+
+    /// The event called `name`, or `None` for a word that names no event.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::DirChanged, Self::SelectionChanged, Self::JobFinished]
+            .into_iter()
+            .find(|kind| kind.name() == name)
+    }
+}
+
+/// How a background job ended, as a `job_finished` event reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobOutcome {
+    Completed,
+    /// Every item was skipped because its destination already existed.
+    Skipped,
+    Cancelled,
+    Failed,
+}
+
+/// What moved, on a `dir_changed` or `selection_changed` event. `from` and `to` are the old and
+/// new directory, or the old and new cursor entry (`null` for an empty directory). A burst of
+/// changes reaches a plugin as one event from where it began to where it ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Change {
+    pub from: Option<PathBuf>,
+    pub to: Option<PathBuf>,
+}
+
+/// What ended, on a `job_finished` event: `kind` is the verb (`copy`, `move`, `delete`, `trash`,
+/// `extract`, `compress` or `command`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Job {
+    pub kind: String,
+    pub outcome: JobOutcome,
+}
+
 /// A host -> plugin line: always a notification, never expects a reply.
 #[derive(Debug, Clone, Serialize)]
 pub struct HostEvent {
@@ -74,6 +138,13 @@ struct EventParams {
     /// The words after the command, split the way a shell splits plain arguments.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     args: Vec<String>,
+    /// Present on `dir_changed` and `selection_changed`; its `from` and `to` sit beside the
+    /// other params.
+    #[serde(flatten)]
+    change: Option<Change>,
+    /// Present on `job_finished`; its `kind` and `outcome` sit beside the other params.
+    #[serde(flatten)]
+    job: Option<Job>,
 }
 
 /// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
@@ -99,6 +170,8 @@ impl HostEvent {
                 key: None,
                 command: None,
                 args: Vec::new(),
+                change: None,
+                job: None,
             },
         }
     }
@@ -113,6 +186,21 @@ impl HostEvent {
     pub fn with_command(mut self, command: impl Into<String>, args: Vec<String>) -> Self {
         self.params.command = Some(command.into());
         self.params.args = args;
+        self
+    }
+
+    /// Records what moved on a `dir_changed` or `selection_changed` event.
+    pub fn with_change(mut self, from: Option<PathBuf>, to: Option<PathBuf>) -> Self {
+        self.params.change = Some(Change { from, to });
+        self
+    }
+
+    /// Records which job ended, and how, on a `job_finished` event.
+    pub fn with_job(mut self, kind: impl Into<String>, outcome: JobOutcome) -> Self {
+        self.params.job = Some(Job {
+            kind: kind.into(),
+            outcome,
+        });
         self
     }
 
@@ -132,8 +220,8 @@ pub struct StateSnapshot {
     pub cwd: PathBuf,
     /// The entry under the cursor, or `null` for an empty directory.
     pub cursor: Option<PathBuf>,
-    /// Every `v` mark, in no particular order. Marks are the only selection, so this is what a
-    /// built-in bulk action would act on.
+    /// Every `v` mark, sorted. Marks are the only selection, so this is what a built-in bulk
+    /// action would act on.
     pub marks: Vec<PathBuf>,
     pub show_hidden: bool,
     /// The sort key's name (`"name"`, `"size"`, `"modified"` or `"mode"`).
@@ -459,6 +547,51 @@ mod tests {
         assert!(params.get("key").is_none());
         assert!(params.get("command").is_none());
         assert!(params.get("args").is_none());
+    }
+
+    #[test]
+    fn event_names_round_trip_and_unknown_words_name_nothing() {
+        for kind in [
+            EventKind::DirChanged,
+            EventKind::SelectionChanged,
+            EventKind::JobFinished,
+        ] {
+            assert_eq!(EventKind::parse(kind.name()), Some(kind));
+        }
+        assert_eq!(EventKind::parse("key"), None);
+        assert_eq!(EventKind::parse(""), None);
+        assert_eq!(EventKind::parse("Dir_Changed"), None);
+    }
+
+    #[test]
+    fn a_change_event_carries_from_and_to_beside_the_other_params() {
+        let event = HostEvent::new(EVENT_DIR_CHANGED, PathBuf::from("/b"), Vec::new())
+            .with_change(Some(PathBuf::from("/a")), Some(PathBuf::from("/b")));
+        let params = &event_json(&event)["params"];
+        assert_eq!(params["name"], "dir_changed");
+        assert_eq!(params["from"], "/a");
+        assert_eq!(params["to"], "/b");
+        assert!(params.get("kind").is_none());
+    }
+
+    #[test]
+    fn a_change_to_or_from_no_entry_is_null_not_absent() {
+        let event = HostEvent::new(EVENT_SELECTION_CHANGED, PathBuf::from("/"), Vec::new())
+            .with_change(None, Some(PathBuf::from("/a")));
+        let params = &event_json(&event)["params"];
+        assert!(params["from"].is_null());
+        assert_eq!(params["to"], "/a");
+    }
+
+    #[test]
+    fn a_job_event_carries_the_kind_and_outcome() {
+        let event = HostEvent::new(EVENT_JOB_FINISHED, PathBuf::from("/"), Vec::new())
+            .with_job("copy", JobOutcome::Cancelled);
+        let params = &event_json(&event)["params"];
+        assert_eq!(params["name"], "job_finished");
+        assert_eq!(params["kind"], "copy");
+        assert_eq!(params["outcome"], "cancelled");
+        assert!(params.get("from").is_none());
     }
 
     #[test]

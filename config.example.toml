@@ -134,6 +134,10 @@ interactive_commands = [
 #   - `commands`: `:` command words it answers (`commands = ["blame"]` makes `:blame a.rs` fire
 #     it with the arguments). A built-in such as `cd` or `q` is tried first and always wins.
 #   - `:plugin <name> [args]` fires the plugin with that `name`, whatever else it declares.
+# A plugin can also ask to hear about things as they happen with `events`, a list of any of
+# "dir_changed" and "selection_changed" (each with `from` and `to`; a burst of cursor moves
+# arrives as one event from where it began to where it ended, and marks changing counts too) and
+# "job_finished" (the job's `kind` and `outcome`). It hears none unless it lists them.
 # Omit all of them for a plugin that only ever acts on its `init` event. A complete worked example
 # in Python, with no dependencies, is `examples/plugins/dir_stats.py`.
 # [[plugin]]
@@ -142,6 +146,7 @@ interactive_commands = [
 # args = ["~/.config/minuteman/plugins/dir_stats.py"]
 # on_key = ["i", "I"]
 # commands = ["stats"]
+# events = ["dir_changed", "job_finished"]
 
 [panels]
 # How many of the miller columns are drawn: "three" (the default — parent | current | preview)

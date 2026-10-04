@@ -18,12 +18,15 @@
 //! queue (so firing an event never blocks the caller), a second reads its stdout line by line and
 //! either runs a `file_ops` call on the blocking pool and replies, or forwards a `log` line to
 //! `PluginManager::poll`, and a third waits on the process so an abnormal exit gets reported and
-//! `kill_on_drop` has something alive to act on for the plugin's whole lifetime. A `get_state`
+//! `kill_on_drop` has something alive to act on for the plugin's whole lifetime. The first task also
+//! drains a plugin's `Mailbox` of folded `dir_changed` and `selection_changed` events. A `get_state`
 //! request is answered by that second task straight from a `watch` channel the render loop
 //! publishes to each tick, so it never waits on the render thread.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::KeyCode;
 use serde_json::json;
@@ -34,7 +37,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 
 use crate::error::PluginError;
-use crate::protocol::{self, Incoming, LogLevel, PluginRequest, StateSnapshot, WireEntry};
+use crate::mailbox::{Mailbox, Queued};
+use crate::protocol::{
+    self, EventKind, Incoming, JobOutcome, LogLevel, PluginRequest, StateSnapshot, WireEntry,
+};
 
 /// One line to show the user, from a plugin's own `log` notification or the host's diagnostics
 /// about it (a malformed line, an abnormal exit).
@@ -49,15 +55,19 @@ struct RunningPlugin {
     name: String,
     on_keys: Vec<KeyCode>,
     commands: Vec<String>,
+    events: Vec<EventKind>,
     stdin_tx: UnboundedSender<String>,
+    mailbox: Arc<Mailbox>,
 }
 
-/// What a plugin is configured to answer: the keys that fire it and the `:` command words it
-/// declared. Both may be empty, for a plugin only ever started by `:plugin <name>`.
+/// What a plugin is configured to answer: the keys that fire it, the `:` command words it
+/// declared and the events it asked to hear about. All may be empty, for a plugin only ever
+/// started by `:plugin <name>`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Triggers {
     pub keys: Vec<KeyCode>,
     pub commands: Vec<String>,
+    pub events: Vec<EventKind>,
 }
 
 /// Owns every configured plugin process for the running session: spawns them, fires key and
@@ -75,6 +85,9 @@ pub struct PluginManager {
     logs_rx: UnboundedReceiver<LogMessage>,
     /// The latest browser state, shared with every plugin's reader (see `publish_state`).
     state_tx: watch::Sender<StateSnapshot>,
+    /// Whether the interface has published at least once; the first publish is the browser
+    /// arriving, not a change, so it fires no event.
+    published: AtomicBool,
 }
 
 impl Default for PluginManager {
@@ -85,6 +98,7 @@ impl Default for PluginManager {
             logs_tx,
             logs_rx,
             state_tx: watch::channel(StateSnapshot::default()).0,
+            published: AtomicBool::new(false),
         }
     }
 }
@@ -132,7 +146,8 @@ impl PluginManager {
         let stdout = child.stdout.take().expect("spawned with a piped stdout");
         let (stdin_tx, stdin_rx) = unbounded_channel::<String>();
 
-        handle.spawn(write_loop(stdin, stdin_rx));
+        let mailbox = Arc::new(Mailbox::default());
+        handle.spawn(write_loop(stdin, stdin_rx, Arc::clone(&mailbox)));
         handle.spawn(read_loop(
             name.to_string(),
             stdout,
@@ -160,7 +175,9 @@ impl PluginManager {
             name: name.to_string(),
             on_keys: triggers.keys,
             commands: triggers.commands,
+            events: triggers.events,
             stdin_tx,
+            mailbox,
         });
         Ok(())
     }
@@ -229,17 +246,70 @@ impl PluginManager {
         self.plugins.is_empty()
     }
 
-    /// Makes `snapshot` what a plugin's `get_state` returns from now on. Call once per render
+    /// Makes `snapshot` what a plugin's `get_state` returns from now on, and leaves a
+    /// `dir_changed` or `selection_changed` for each plugin subscribed to what differs from the
+    /// state it replaces (the first snapshot ever published fires nothing). Call once per render
     /// tick; an unchanged snapshot is dropped, so a quiet browser does no work. Returns whether it
     /// replaced the previous one.
     pub fn publish_state(&self, snapshot: StateSnapshot) -> bool {
-        self.state_tx.send_if_modified(|current| {
-            let changed = *current != snapshot;
-            if changed {
-                *current = snapshot;
+        let first = !self.published.swap(true, Ordering::Relaxed);
+        let mut previous = None;
+        let changed = self.state_tx.send_if_modified(|current| {
+            if *current == snapshot {
+                return false;
             }
-            changed
-        })
+            previous = Some(std::mem::replace(current, snapshot.clone()));
+            true
+        });
+        if let (false, Some(previous)) = (first, previous) {
+            self.post_changes(&previous, &snapshot);
+        }
+        changed
+    }
+
+    /// Fires `job_finished` at every plugin that subscribed to it, with the directory and marks
+    /// as of the last published state. Jobs are rare and each one matters, so unlike the change
+    /// events these are never folded together.
+    pub fn notify_job_finished(&self, kind: &str, outcome: JobOutcome) {
+        let state = self.state_tx.borrow().clone();
+        for plugin in self.subscribed(EventKind::JobFinished) {
+            let event = protocol::HostEvent::new(
+                protocol::EVENT_JOB_FINISHED,
+                state.cwd.clone(),
+                state.marks.clone(),
+            )
+            .with_job(kind, outcome);
+            let _ = plugin.stdin_tx.send(event.to_line());
+        }
+    }
+
+    fn subscribed(&self, kind: EventKind) -> impl Iterator<Item = &RunningPlugin> {
+        self.plugins
+            .iter()
+            .filter(move |plugin| plugin.events.contains(&kind))
+    }
+
+    fn post_changes(&self, previous: &StateSnapshot, now: &StateSnapshot) {
+        let queued = |from: Option<PathBuf>, to: Option<PathBuf>| Queued {
+            from,
+            to,
+            cwd: now.cwd.clone(),
+            marks: now.marks.clone(),
+        };
+        if previous.cwd != now.cwd {
+            for plugin in self.subscribed(EventKind::DirChanged) {
+                plugin
+                    .mailbox
+                    .post_dir(queued(Some(previous.cwd.clone()), Some(now.cwd.clone())));
+            }
+        }
+        if previous.cursor != now.cursor || previous.marks != now.marks {
+            for plugin in self.subscribed(EventKind::SelectionChanged) {
+                plugin
+                    .mailbox
+                    .post_selection(queued(previous.cursor.clone(), now.cursor.clone()));
+            }
+        }
     }
 
     /// The names of every running plugin, in the order they were configured.
@@ -276,11 +346,26 @@ impl PluginManager {
 }
 
 /// Writes every queued line to the plugin's stdin, in order, until the queue's sender side (the
-/// `PluginManager` and every event fired through it) is gone or the pipe itself breaks.
-async fn write_loop(mut stdin: ChildStdin, mut rx: UnboundedReceiver<String>) {
-    while let Some(line) = rx.recv().await {
-        if stdin.write_all(line.as_bytes()).await.is_err() {
-            break;
+/// `PluginManager` and every event fired through it) is gone or the pipe itself breaks. Whatever
+/// has been folded into the plugin's mailbox is written whenever the queue is idle; a write that
+/// waits on a full pipe holds both back, which is what lets the mailbox keep folding.
+async fn write_loop(
+    mut stdin: ChildStdin,
+    mut rx: UnboundedReceiver<String>,
+    mailbox: Arc<Mailbox>,
+) {
+    loop {
+        let lines = tokio::select! {
+            line = rx.recv() => match line {
+                Some(line) => vec![line],
+                None => break,
+            },
+            () = mailbox.posted() => mailbox.take_lines(),
+        };
+        for line in lines {
+            if stdin.write_all(line.as_bytes()).await.is_err() {
+                return;
+            }
         }
     }
 }

@@ -37,7 +37,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
-use plugins::{PluginManager, StateSnapshot, Triggers};
+use plugins::{EventKind, JobOutcome, PluginManager, StateSnapshot, Triggers};
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
 use theming::{OpenRule, OpenWith, PluginSpec};
@@ -599,6 +599,20 @@ impl App {
                 Triggers {
                     keys: spec.on_keys,
                     commands: spec.commands,
+                    events: spec
+                        .events
+                        .iter()
+                        .filter_map(|name| {
+                            let kind = EventKind::parse(name);
+                            if kind.is_none() {
+                                eprintln!(
+                                    "minuteman: plugin {}: unknown event '{name}'",
+                                    spec.name
+                                );
+                            }
+                            kind
+                        })
+                        .collect(),
                 },
                 cwd,
             ) {
@@ -783,10 +797,13 @@ impl App {
     pub fn poll_plugins(&mut self, browser: &BrowserState, view: &str) {
         if !self.plugins.is_empty() {
             let sort = browser.sort();
+            let mut marks = browser.marked_paths();
+            // A set has no order of its own; sorting keeps an unchanged set from looking changed.
+            marks.sort();
             self.plugins.publish_state(StateSnapshot {
                 cwd: browser.current_dir().to_path_buf(),
                 cursor: browser.selected_entry().map(|entry| entry.path.clone()),
-                marks: browser.marked_paths(),
+                marks,
                 show_hidden: browser.show_hidden(),
                 sort: sort.key.label().to_string(),
                 sort_reversed: sort.reversed,
@@ -870,6 +887,14 @@ impl App {
             browser.reload(vfs)?;
             browser.prune_marks(vfs);
             if let BulkKind::Shell { command, .. } = bulk.kind {
+                self.plugins.notify_job_finished(
+                    "command",
+                    if result.is_ok() {
+                        JobOutcome::Completed
+                    } else {
+                        JobOutcome::Failed
+                    },
+                );
                 self.status = Some(match result {
                     Ok(outcome) => shell_status(&command, &outcome),
                     Err(e) => format!("could not run '{command}': {e}"),
@@ -922,6 +947,8 @@ impl App {
         match result {
             Ok(Outcome::Completed | Outcome::Skipped) if cancelled => {
                 browser.reload(vfs)?;
+                self.plugins
+                    .notify_job_finished(past_label, JobOutcome::Cancelled);
                 self.status = Some(format!("{past_label} cancelled"));
             }
             Ok(Outcome::Completed) => {
@@ -957,6 +984,8 @@ impl App {
                     (false, 0) => String::new(),
                     (false, n) => format!(" ({n} could not be tracked, so not undoable)"),
                 };
+                self.plugins
+                    .notify_job_finished(past_label, JobOutcome::Completed);
                 self.status = Some(format!("{past_label} complete{caveat}"));
             }
             Ok(Outcome::Skipped) => {
@@ -970,9 +999,15 @@ impl App {
                 {
                     return Ok(());
                 }
+                self.plugins
+                    .notify_job_finished(past_label, JobOutcome::Skipped);
                 self.status = Some(format!("{past_label} skipped"));
             }
-            Err(FileOpsError::Cancelled) => self.status = Some(format!("{past_label} cancelled")),
+            Err(FileOpsError::Cancelled) => {
+                self.plugins
+                    .notify_job_finished(past_label, JobOutcome::Cancelled);
+                self.status = Some(format!("{past_label} cancelled"));
+            }
             Err(FileOpsError::Vfs(VfsError::AlreadyExists(existing))) => match bulk.kind {
                 BulkKind::Paste {
                     clip,
@@ -991,12 +1026,16 @@ impl App {
                 // No prompt for these: overwriting could clobber a whole extracted tree, so the
                 // user is told what is in the way and can remove or rename it.
                 BulkKind::Extract | BulkKind::Compress => {
+                    self.plugins
+                        .notify_job_finished(past_label, JobOutcome::Failed);
                     self.status = Some(format!(
                         "{past_label} failed: {} already exists",
                         existing.display()
                     ));
                 }
                 BulkKind::Delete { .. } | BulkKind::Trash { .. } | BulkKind::Shell { .. } => {
+                    self.plugins
+                        .notify_job_finished(past_label, JobOutcome::Failed);
                     self.status = Some(format!("{past_label} failed: unexpected conflict"));
                 }
             },
@@ -1008,6 +1047,8 @@ impl App {
                     browser.reload(vfs)?;
                     browser.prune_marks(vfs);
                 }
+                self.plugins
+                    .notify_job_finished(past_label, JobOutcome::Failed);
                 self.status = Some(format!("{past_label} failed: {e}"));
             }
         }

@@ -5619,6 +5619,57 @@ folder, `pyte` for the screen, the harness answering the terminal probes includi
 with two entries marked, `:plugin dir-stats state` showed `cursor=alpha.txt marks=2 sort=name
 view=list`. The status line cuts a long message, so the example puts the short fields first.
 
+### Plugin Events: Diffed Snapshots and a Folding Mailbox (COA B)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** After `get_state` a plugin could ask where the user was, but not be told when that
+changed. The roadmap asked for `dir_changed`, `selection_changed` and `job_finished`, "batched or
+throttled so holding `j` cannot flood a slow plugin".
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Diff the snapshot once per tick and queue the events on the plugin's existing queue | Rejected |
+| B | A, with a latest-wins mailbox per plugin that the writer drains | Chosen |
+| C | Push from every place the cursor or directory changes | Rejected |
+
+**Why B.** A caps the rate at one event per tick but the queue is unbounded, so a plugin that
+takes a second per event would still fall behind forever, which is the failure the roadmap named.
+C is exact, but the cursor moves from keys, the mouse, search, undo, the live refresh and more,
+and one missed site is a silent bug; the snapshot is already the one place that sees every change.
+
+**Design.** `publish_state` compares the new snapshot with the one it replaces inside
+`send_if_modified`, and posts to the mailbox of each plugin subscribed to what differs. The very
+first publish fires nothing, since it is the browser arriving. `dir_changed` fires when `cwd`
+differs; `selection_changed` when the cursor or the marks do, so a mark made without moving is
+heard, and a directory change normally brings both. The mailbox (`plugins::mailbox`) holds one
+`dir_changed` and one `selection_changed`; a new one keeps the earlier `from`, and a directory
+burst that ends where it began is dropped. The plugin's writer task now selects between its line
+queue and the mailbox, so a write that waits on a full pipe holds both back while the mailbox keeps
+folding: a stuck plugin costs two slots of memory with no timers and no thread. Events are opt-in
+(`events` in `[[plugin]]`, held as plain strings in `theming` and parsed by `plugins::EventKind`
+at spawn, where an unknown name goes to stderr) so an existing plugin sees no new traffic.
+`job_finished` is posted from the terminal branches of `poll_bulk`, not from a wrapper around it,
+because a batch paste re-spawns itself and a conflict prompt pauses it, and neither is the job
+ending; it goes through the ordinary queue and is never folded. Marks are now sorted when
+published: they come out of a `HashSet`, and an unstable order would have made every tick look like
+a change.
+
+**Trade-offs.** A plugin sees where the cursor settled, not each step, and the order of a folded
+event against a queued line (a `command` fired in the same instant) is not guaranteed. Delivery is
+at most one tick behind. `job_finished` reports `completed` for a `:` command that ran and exited
+non-zero; the exit status is in the status line, not the event.
+
+**Verification.** `scripts/check` passes. New tests cover the event names, the `from`/`to` and job
+shapes (null for no entry), the config list, the mailbox (a burst folds to one, a round trip
+cancels, marks alone are delivered, directory first), a property test over any run of changes, and
+end-to-end tests with the Rust fixture and a real `python3`: moves heard, nothing for the first
+publish, nothing without a subscription, jobs in order, and 20,000 changes of 2 KB each published
+at a plugin that never reads, in well under the five seconds allowed. The real binary was run in a
+PTY (`pyte` for the screen, the harness answering the terminal probes): `l` into a folder showed
+`entered sub`, `h` showed `entered tree`, and marking a file, yanking and pasting into the folder
+showed `copy completed`, with the file on disk.
+
 ---
 
 ## 🧠 Usage Guidelines
