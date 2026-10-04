@@ -319,16 +319,16 @@ impl BrowserState {
     }
 
     /// Index of the first entry (top to bottom) whose name contains `query`, case-insensitively.
-    /// Always searches from the top rather than from the current position, so backspacing a `/`
-    /// search back to a shorter query re-finds the same match deterministically.
+    /// The index of the best fuzzy match for `query` among the entries on screen: its letters in
+    /// order, not necessarily side by side (see `search`). Always ranks the whole listing rather
+    /// than searching from the current position, so backspacing a `/` search back to a shorter
+    /// query re-finds the same match deterministically.
     pub fn find_match(&self, query: &str) -> Option<usize> {
-        if query.is_empty() {
-            return None;
-        }
-        let needle = query.to_lowercase();
-        self.current_entries
-            .iter()
-            .position(|e| e.name.to_lowercase().contains(&needle))
+        let query = search::Query::new(query)?;
+        let best = search::rank_entries(&query, &self.current_entries)
+            .into_iter()
+            .next()?;
+        self.current_entries.iter().position(|e| e.path == best)
     }
 
     /// Jumps directly to `path` (resolved by `Vfs::resolve_typed`, so a relative one is taken from the
@@ -995,6 +995,11 @@ mod tests {
         let state = BrowserState::new(&vfs, root.clone()).unwrap();
 
         assert_eq!(state.find_match("SUB"), Some(0));
+        assert_eq!(
+            state.find_match("sb"),
+            Some(0),
+            "letters in order are enough"
+        );
         assert_eq!(state.find_match("nope"), None);
         assert_eq!(state.find_match(""), None);
 

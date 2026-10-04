@@ -73,6 +73,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-02 | Browsing Archives | A read-only `Vfs` wrapper (`vfs_archive`) addressed by a `!` suffix on the archive path (COA A), over extracting to a temporary folder (B) and a zip-only first cut (C) | ✅ Confirmed |
 | 2026-10-02 | Filmstrip View | A `V` view cycle with a thumbnail strip drawn from a pool-filled cache of finished protocols (COA B, filmstrip first, grid second), over a grid only (A) and a bigger preview only (C) | ✅ Confirmed |
 | 2026-10-02 | Grid and Details Views | A grid of framed tiles and a flat details table added to the `V` cycle, the filmstrip kept and its strip rebuilt from the same tile (COA A, with the filmstrip kept as asked) | ✅ Confirmed |
+| 2026-10-04 | Fuzzy Search | Own subsequence scorer; nearest level first, best matches within it, top 20 to step through (COA A), over ranking the whole walk (B) and a matcher crate (C) | ✅ Confirmed |
 | 2026-10-04 | Sorting, Local Time, Icons, Page Keys, Prompt Editing | Sort kept in `BrowserState` and applied when a listing is stored; `chrono` for local time (A); a shared `LineEdit` for prompts (A) | ✅ Confirmed |
 | 2026-10-04 | Background Folder Moves and Remembered View | A planned-then-applied move loaded on the blocking pool with a 40 ms grace, old folder kept until it arrives (COA A), over an empty target shown at once (B) and a worker-thread browser (C); the view saved in `local.toml` | ✅ Confirmed |
 | 2026-10-04 | Default Theme Source | The terminal's own palette (OSC 4/10/11), mapped with contrast lifting, over a static palette (A) and a palette file (C) | ✅ Confirmed |
@@ -5184,6 +5185,62 @@ binary was driven in a PTY through `pyte` with the terminal probe answered in fu
 click, a double-click into a folder and `h` back, an empty folder), details (title row, date, mode,
 size, full width, `j`, a click), the filmstrip's framed tiles, and back to the columns. Not tried: a
 real kitty, photographs rather than test images, or a remote folder.
+
+### Fuzzy Search: A Scorer of Our Own, Nearest Level First (COA A)
+
+**Date:** 2026-10-04 · **Author:** deltaog-117
+
+**Context.** `/` found the first entry whose name contained the text. With letters allowed to be
+apart, "first" stops being an answer: `ae` matches nearly everything, so matches have to be ranked.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Own scorer; finish the nearest level that has a match and answer with its best, as a short list | Chosen |
+| B | Own scorer, ranked over the whole walk with a depth penalty (like `fzf`) | Rejected: always scans up to the 200,000-entry cap, so answers are slower and move while typing |
+| C | A matcher crate (`nucleo-matcher`) with A's walk | Rejected: a new dependency that is not available offline, for scoring that is about a hundred lines |
+
+**Scoring.** A name's score is the best placement of the typed letters over it, found by dynamic
+programming: each letter earns a base, a bonus for sitting next to the previous letter, a bonus at
+the start of the name or of a word (after a separator, or a capital after a lowercase letter) and a
+small one for matching case; skipped characters and a late first letter cost a little. A name that
+holds the whole text as one piece gets a bonus larger than anything the placement can earn, so a
+real substring always outranks a scattered match however well that one is placed; that is what keeps
+`aer` finding `aerend` before `a-e-r`. Among equal scores the shorter name wins, then the listing's
+order. The row of the table is filled with a running best of the gap-discounted earlier scores
+instead of looking back at every earlier column, which makes a name cost letters times characters.
+My first version of that recurrence had a slip (`previous[j - 2] - GAP * 0`, which dropped the
+gap cost of the nearest skipped letter); it was found on re-reading the derivation, before any test
+ran, and the ordering tests then passed with the corrected line.
+
+**Speed.** Most names in a big folder do not match, so the check that the letters appear in order
+runs first and does not allocate, with an ASCII fast path for lowercasing; that took a name that
+fails from about 0.7 µs to 0.1 µs in a release build. A full walk of 200,000 entries that all match
+takes about 130 ms. A debug build is ten times slower, which only the tests see.
+
+**Walk.** The queue is breadth first, so levels arrive in order; when the first directory of the
+next level is reached and the last level had a hit, the answer is that level's best 20. The entry
+limit stops a walk partway through a level that already has hits with those hits, rather than
+saying nothing found. The first level is the folder on screen, so `rank_entries` ranks the loaded
+listing and the answer shows at once with no walk.
+
+**Stepping.** The app keeps the kept matches and a position; `Down`/`Ctrl-N` and `Up`/`Ctrl-P` move
+through them, wrapping, and a match in another folder is reached the way a search hit already was.
+`n` cannot step after `Enter` because it is Create. The status note reads `2/14`, with a `+` when
+more were found than kept, and says nothing for a single match.
+
+**Verification.** `scripts/check` passes. Tests cover the scorer (order, adjacency, word starts,
+case, whole piece beating scattered, multibyte names), the walk (the best of a level winning over
+the first met, the kept limit, the entry limit keeping what was found, nearest depth by property
+test, matches best first by property test), and the prompt (finding by subsequence here and below,
+the best in a folder winning over an earlier one, stepping and wrapping with arrows and with
+`Ctrl`, nothing to step on a single match, stepping across folders with `Esc` still going home,
+retyping after stepping). The real binary was driven in a terminal emulator: `/aernd` selected
+`aerend.txt`, `/aerend` chose it over a scattered name listed first, `/report` stepped 1/3, 2/3,
+3/3 and wrapped with the arrows and with `Ctrl-N`/`Ctrl-P`, `Enter` kept the cursor, and `/qtrbdg`
+found `deep/er/quarterly-budget.md`, with `Esc` returning to where it began. Not tried: a remote
+folder, a very large tree, or names in scripts without case.
+
+---
 
 ### Sorting, Local Time, Grid Icons, Page Keys and Prompt Editing
 

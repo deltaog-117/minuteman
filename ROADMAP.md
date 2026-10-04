@@ -1290,6 +1290,26 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   (a shared `LineEdit`, over a cursor field per prompt and an end-of-line-only Ctrl-W/U). The sort
   keys are `,` and `<`: `o` and `s`, the natural picks, are deliberately unbound by an existing
   test of freed keys.
+- ✅ **Fuzzy `/` search, ranked, with stepping** – `/` now matches a name that holds the typed
+  letters in order, not necessarily side by side (`aernd` finds `aerend`), and ranks the matches.
+  A name's score (`Query::score`) is the best way of laying the letters over it: a run side by side,
+  a letter at the start of a name or after `.`, `_`, `-` or a space (or a capital after a
+  lowercase letter), and a matching capital score higher, gaps and leading gaps lower, and a name
+  that holds the whole text as one piece beats every name that does not; among equal fits the
+  shorter name wins. It is a dynamic program filled with a running best, so a name costs one pass
+  of letters times characters, and the "letters in order" check runs first without allocating
+  (about 0.1 µs for a name that fails and under 1 µs for one that matches, in a release build, so
+  200,000 entries cost well under half a second). The walk keeps its nearest-first rule but now
+  finishes the nearest level that has any match before answering (`find_below`), so the best of
+  that level wins rather than the first met; if the entry limit stops it partway through such a
+  level, what was found so far is the answer. The answer is the best 20 (`Outcome::Found` carries a
+  list). The first level is the folder already on screen, ranked at once from the loaded listing
+  (`rank_entries`) with no walk. While the prompt is open `Down`/`Ctrl-N` and `Up`/`Ctrl-P` step
+  through the kept matches, wrapping, crossing folders if they are in different ones, and the
+  status line shows `2/14` (a `+` when more were found than kept); `Esc` still returns to where
+  the search began. Chosen as COA A (nearest level first, ranked within it) over ranking across the
+  whole walk with a depth penalty (B, always scans up to the cap so answers are slower and move
+  while typing) and a matcher crate (C, a new dependency that is not available offline).
 
 ## 🟡 Medium Priority (Important)
 
@@ -1417,10 +1437,12 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   option for the starting measure; key hints that follow rebound keys (they are fixed text, and
   `a`, `r`, `PageUp`, `PageDown`, `Home` and `End` are not configurable); refresh when the live
   refresh sees a change.
-- **Fuzzy ranking for `/` search** – search now finds the nearest substring match anywhere below
-  the directory. Still missing: subsequence matching (`aernd` finding `aerend`), ranking by match
-  quality rather than depth alone, and stepping through further matches (`n`/`N`, or the arrows
-  while the prompt is open).
+- **Search, follow-ups** – a match deeper than the nearest level that has any is never offered,
+  however good (the walk answers with the first level that matches); only the best 20 are kept;
+  stepping works while the prompt is open but not after `Enter` (`n` is Create, so a further key
+  would be needed); the scoring weights are hand-tuned, not learned from use; a query is matched
+  against the name only, not the path (`src/main` does not find `src/main.rs`); and there is no
+  smart-case switch or exact-match mode.
 - **Prompt editing, follow-ups** – the password prompts (extract, compress) still only append and
   delete the last character, with no cursor; the `/`, `:` and rename prompts have no history of
   what was typed before, no `Tab` completion of a path, and no selection or paste of more than a

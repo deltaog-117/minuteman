@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `browser`: `BrowserState::find_match` uses the same fuzzy ranking as the `/` search.
 - `tui`: modified, accessed and created times are shown in the machine's time zone instead of UTC
   (Inspect writes the offset, e.g. `+02:00`; the details column title is now `Modified`). `tui`
   depends on `chrono` directly, already built for the trash crate.
@@ -61,6 +62,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`, `browser`: `/` is now a fuzzy search. A name matches when it holds the typed letters in
+  order (`aernd` finds `aerend`), and matches are ranked: letters side by side, at the start of a
+  name or a word, and in the same case score higher, and a name containing the whole text beats any
+  that does not. The nearest folder with any match still wins, now by its best match instead of its
+  first. While the prompt is open `Down`/`Ctrl-N` and `Up`/`Ctrl-P` step through the best 20
+  matches and the status line shows the position (`2/14`). New `browser::search::rank_entries` and
+  `KEPT`; `Outcome::Found` carries a ranked list; `Query::score` replaces the substring test.
 - `tui`, `browser`: the folder can be ordered. `,` cycles the order (name, size largest first,
   modified newest first, permissions) and `<` reverses it, both rebindable as `sort` and
   `sort_reverse`; in the details view the ordering column's title ends in an arrow and clicking a

@@ -14,9 +14,12 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Finds the nearest entry whose name contains a query, looking in a directory first and then in
-//! every directory beneath it, one level at a time — so `aerend` typed in `~` lands on
-//! `~/Desktop/aerend` before `~/Desktop/old/backup/aerend`.
+//! Fuzzy search for an entry by name, nearest first: it looks in a directory, then in every
+//! directory beneath it one level at a time, and answers with the best-scoring matches of the
+//! first level that has any. So `aerend` typed in `~` lands on `~/Desktop/aerend` before
+//! `~/Desktop/old/backup/aerend`, and within a level a tighter match (`aerend`) beats a looser one
+//! (`a-e-r-e-n-d`). A name matches when it holds the typed letters in order, not necessarily side
+//! by side: `aernd` finds `aerend`.
 //!
 //! Everything goes through `Vfs::list_dir`, one directory per call, and `cancel` is checked
 //! between calls. That is what lets the caller run this off the render thread and drop a stale
@@ -27,25 +30,176 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use shared::Vfs;
+use shared::{DirEntryInfo, Vfs};
 
 use crate::is_hidden;
 
-/// What to look for: a non-empty, case-insensitive substring of an entry's name. Non-empty by
-/// construction, because an empty query matches everything and would "find" the first entry of
-/// the directory it started in.
+/// How many of the best matches a search keeps, for stepping through with the arrow keys.
+pub const KEPT: usize = 20;
+
+/// What to look for: a non-empty run of letters that must appear, in order, in an entry's name.
+/// Non-empty by construction, because an empty query matches everything and would "find" the
+/// first entry of the directory it started in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Query(String);
+pub struct Query {
+    /// As typed, for the small bonus a matching capital earns.
+    typed: Vec<char>,
+    lower: Vec<char>,
+}
+
+// Scoring. A name's score is the best way of laying the typed letters over it; higher is better.
+// Only the differences matter, and the weights are tuned so that: a run of letters side by side
+// beats scattered ones, a letter at the start of a name or of a word beats one in the middle, and
+// any name holding the whole query as one piece beats every name that does not.
+const MATCH: i32 = 16;
+const ADJACENT: i32 = 12;
+const WORD_START: i32 = 10;
+const NAME_START: i32 = 8;
+const SAME_CASE: i32 = 2;
+const GAP: i32 = 1;
+const LEADING_GAP: i32 = 1;
+const LEADING_GAP_CAP: i32 = 6;
+const WHOLE_PIECE: i32 = 1_000;
+/// Stands for "cannot be matched this way"; far enough below any score to survive additions.
+const NONE: i32 = i32::MIN / 4;
+
+fn fold(c: char) -> char {
+    // Nearly every name is ASCII, and the general path builds an iterator per character.
+    if c.is_ascii() {
+        c.to_ascii_lowercase()
+    } else {
+        c.to_lowercase().next().unwrap_or(c)
+    }
+}
+
+fn is_separator(c: char) -> bool {
+    matches!(c, '.' | '_' | '-' | ' ' | '/' | '(' | '[')
+}
 
 impl Query {
     /// `None` for an empty `text`.
     pub fn new(text: &str) -> Option<Self> {
-        (!text.is_empty()).then(|| Self(text.to_lowercase()))
+        let typed: Vec<char> = text.chars().collect();
+        if typed.is_empty() {
+            return None;
+        }
+        let lower = typed.iter().copied().map(fold).collect();
+        Some(Self { typed, lower })
     }
 
     pub fn matches(&self, name: &str) -> bool {
-        name.to_lowercase().contains(&self.0)
+        self.score(name).is_some()
     }
+
+    /// How well `name` fits, or `None` if it does not hold the letters in order. Capitals in the
+    /// query count only as a small bonus, so `README` still finds `readme`.
+    pub fn score(&self, name: &str) -> Option<i32> {
+        // Most names in a big folder fail here, so it must not allocate.
+        if !self.is_subsequence_of(name.chars().map(fold)) {
+            return None;
+        }
+        let chars: Vec<char> = name.chars().collect();
+        let lower: Vec<char> = chars.iter().copied().map(fold).collect();
+
+        let m = self.lower.len();
+        let n = lower.len();
+        // `previous[j]`: the best score with the letters so far laid out and the last of them on
+        // `name[j]`. Each row is filled left to right with a running best of the gap-discounted
+        // scores before it, so a name costs `m * n`, not `m * n * n`.
+        let mut previous = vec![NONE; n];
+        for (i, &want) in self.lower.iter().enumerate() {
+            let mut current = vec![NONE; n];
+            let mut gapped = NONE;
+            for j in 0..n {
+                // `gapped` = best of `previous[k] - (j - 1 - k) * GAP` for `k <= j - 2`.
+                if j >= 2 {
+                    gapped = (gapped - GAP).max(previous[j - 2] - GAP);
+                } else {
+                    gapped = NONE;
+                }
+                if lower[j] != want {
+                    continue;
+                }
+                let before = if i == 0 {
+                    -(j as i32).min(LEADING_GAP_CAP) * LEADING_GAP
+                } else {
+                    let adjacent = if j >= 1 && previous[j - 1] > NONE {
+                        previous[j - 1] + ADJACENT
+                    } else {
+                        NONE
+                    };
+                    adjacent.max(gapped)
+                };
+                if before <= NONE {
+                    continue;
+                }
+                let mut here = MATCH + before;
+                if j == 0 {
+                    here += NAME_START;
+                }
+                if j == 0
+                    || is_separator(chars[j - 1])
+                    || (chars[j - 1].is_lowercase() && chars[j].is_uppercase())
+                {
+                    here += WORD_START;
+                }
+                if chars[j] == self.typed[i] {
+                    here += SAME_CASE;
+                }
+                current[j] = here;
+            }
+            previous = current;
+        }
+
+        let best = previous.into_iter().max().filter(|&score| score > NONE)?;
+        let whole = lower
+            .windows(m)
+            .any(|window| window == self.lower.as_slice());
+        // Among equal fits the shorter name is the closer one.
+        Some(best + if whole { WHOLE_PIECE } else { 0 } - n as i32)
+    }
+
+    fn is_subsequence_of(&self, folded: impl Iterator<Item = char>) -> bool {
+        let mut wanted = self.lower.iter();
+        let mut next = wanted.next();
+        for c in folded {
+            if Some(&c) == next {
+                next = wanted.next();
+            }
+        }
+        next.is_none()
+    }
+}
+
+/// One scored candidate: the score, its position in the order it was met (so equal scores keep
+/// the listing's order), and where it is.
+type Scored = (i32, usize, PathBuf);
+
+/// The best `KEPT` of `scored`, best first.
+fn best(mut scored: Vec<Scored>) -> Vec<PathBuf> {
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .take(KEPT)
+        .map(|(_, _, path)| path)
+        .collect()
+}
+
+/// The best matches among `entries` — one directory's listing, as the browser holds it — best
+/// first and at most `KEPT`. This is what a search's first level is, so a hit right here shows at
+/// once, without a walk.
+pub fn rank_entries(query: &Query, entries: &[DirEntryInfo]) -> Vec<PathBuf> {
+    best(
+        entries
+            .iter()
+            .enumerate()
+            .filter_map(|(order, entry)| {
+                query
+                    .score(&entry.name)
+                    .map(|score| (score, order, entry.path.clone()))
+            })
+            .collect(),
+    )
 }
 
 /// Bounds on one search, so a search from `/` can't walk the whole disk. Depth counts directory
@@ -69,22 +223,21 @@ impl Default for Limits {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Found(PathBuf),
+    /// The best matches of the nearest level that had any, best first; never empty.
+    Found(Vec<PathBuf>),
     /// Nothing matched. `truncated` says a limit stopped the walk early, so a match may exist
     /// beyond it.
-    NotFound {
-        truncated: bool,
-    },
+    NotFound { truncated: bool },
     /// `cancel` was set before the walk finished.
     Cancelled,
 }
 
-/// Breadth-first search of `root` for the first entry matching `query`. Within a directory,
-/// entries are examined in listing order (directories first, then by name), which is the order
-/// the browser shows them, so a match in `root` itself is the one the cursor would reach first.
-/// A directory that can't be listed is skipped, as it would be by `find`. Hidden entries are
-/// neither matched nor entered unless `show_hidden`, so a search can't land on something the
-/// user has chosen not to see.
+/// Breadth-first search of `root` for entries matching `query`. A level is finished before the
+/// answer is given, so the best match of the nearest level wins, not merely the first one met. A
+/// directory that can't be listed is skipped, as it would be by `find`. Hidden entries are neither
+/// matched nor entered unless `show_hidden`, so a search can't land on something the user has
+/// chosen not to see. If the entry limit stops the walk partway through a level that already
+/// has matches, those are the answer.
 pub fn find_below(
     vfs: &dyn Vfs,
     root: &Path,
@@ -94,10 +247,19 @@ pub fn find_below(
     cancel: &AtomicBool,
 ) -> Outcome {
     let mut queue = VecDeque::from([(root.to_path_buf(), 1)]);
+    let mut level = 1;
+    let mut hits: Vec<Scored> = Vec::new();
     let mut listed = 0usize;
     let mut truncated = false;
 
     while let Some((dir, depth)) = queue.pop_front() {
+        if depth > level {
+            // The level before this one is done; if it had any match, that is the answer.
+            if !hits.is_empty() {
+                return Outcome::Found(best(hits));
+            }
+            level = depth;
+        }
         if cancel.load(Ordering::Relaxed) {
             return Outcome::Cancelled;
         }
@@ -110,10 +272,13 @@ pub fn find_below(
             }
             listed += 1;
             if listed > limits.max_entries {
-                return Outcome::NotFound { truncated: true };
+                return match hits.is_empty() {
+                    true => Outcome::NotFound { truncated: true },
+                    false => Outcome::Found(best(hits)),
+                };
             }
-            if query.matches(&entry.name) {
-                return Outcome::Found(entry.path);
+            if let Some(score) = query.score(&entry.name) {
+                hits.push((score, hits.len(), entry.path.clone()));
             }
             if entry.is_dir {
                 match depth < limits.max_depth {
@@ -123,7 +288,10 @@ pub fn find_below(
             }
         }
     }
-    Outcome::NotFound { truncated }
+    match hits.is_empty() {
+        true => Outcome::NotFound { truncated },
+        false => Outcome::Found(best(hits)),
+    }
 }
 
 #[cfg(test)]
@@ -253,7 +421,16 @@ mod tests {
     }
 
     fn found(path: &str) -> Outcome {
-        Outcome::Found(PathBuf::from("/root").join(path))
+        Outcome::Found(vec![PathBuf::from("/root").join(path)])
+    }
+
+    fn found_all(paths: &[&str]) -> Outcome {
+        Outcome::Found(
+            paths
+                .iter()
+                .map(|path| PathBuf::from("/root").join(path))
+                .collect(),
+        )
     }
 
     #[test]
@@ -271,6 +448,76 @@ mod tests {
     }
 
     #[test]
+    fn letters_must_appear_in_order_but_need_not_touch() {
+        let query = Query::new("aernd").unwrap();
+        assert!(query.matches("aerend"));
+        assert!(query.matches("a-e-r-n-d.txt"));
+        assert!(!query.matches("dnreaa"), "right letters, wrong order");
+        assert!(!query.matches("aern"), "a letter is missing");
+        assert!(
+            !Query::new("aa").unwrap().matches("a"),
+            "a letter is used once"
+        );
+    }
+
+    fn score(query: &str, name: &str) -> i32 {
+        Query::new(query)
+            .unwrap()
+            .score(name)
+            .expect("should match")
+    }
+
+    #[test]
+    fn a_tighter_fit_scores_higher() {
+        assert!(
+            score("aerend", "aerend") > score("aerend", "aerend.txt"),
+            "shorter wins"
+        );
+        assert!(
+            score("aer", "aerend") > score("aer", "a-e-r"),
+            "side by side beats scattered"
+        );
+        assert!(score("rend", "aerend") > score("rend", "r_e_n_d"));
+        assert!(
+            score("ab", "ab_cd") > score("ab", "xab_cd"),
+            "the start of a name beats the middle"
+        );
+    }
+
+    #[test]
+    fn a_word_start_beats_the_middle_of_a_word() {
+        assert!(
+            score("nt", "my-notes") > score("nt", "mynotes"),
+            "after a separator"
+        );
+        assert!(
+            score("mn", "myNotes") > score("mn", "mynotes"),
+            "a capital after lowercase"
+        );
+    }
+
+    #[test]
+    fn a_whole_piece_beats_any_scattered_match() {
+        // The scattered name has every bonus going for it; the whole-piece one still wins.
+        assert!(score("test", "xx_test_xx") > score("test", "t-e-s-t"));
+        assert!(score("note", "my-notebook") > score("note", "n_o_t_e"));
+    }
+
+    #[test]
+    fn a_matching_capital_is_a_small_bonus_not_a_requirement() {
+        assert!(score("README", "README") > score("README", "readme"));
+        assert!(Query::new("README").unwrap().matches("readme"));
+        assert!(Query::new("readme").unwrap().matches("README"));
+    }
+
+    #[test]
+    fn multibyte_names_score_without_panicking() {
+        assert!(Query::new("日語").unwrap().matches("日本語.txt"));
+        assert!(Query::new("é").unwrap().matches("café"));
+        assert!(!Query::new("z").unwrap().matches("日本語"));
+    }
+
+    #[test]
     fn a_match_in_the_root_itself_wins() {
         let mut tree = TreeVfs::default();
         tree.add("deep/er/aerend", true);
@@ -279,6 +526,92 @@ mod tests {
             search(&tree, "aerend", false, Limits::default()),
             found("aerend.txt")
         );
+    }
+
+    #[test]
+    fn within_a_level_the_best_match_comes_first_and_the_rest_follow_in_order() {
+        let mut tree = TreeVfs::default();
+        // Listed in this order (dirs first, then by name): a_b_c_d, abcd, abcdef.
+        tree.add("a_b_c_d", false);
+        tree.add("abcd", false);
+        tree.add("abcdef", false);
+        assert_eq!(
+            search(&tree, "abcd", false, Limits::default()),
+            found_all(&["abcd", "abcdef", "a_b_c_d"])
+        );
+    }
+
+    #[test]
+    fn the_whole_nearest_level_is_ranked_not_just_the_first_hit_met() {
+        let mut tree = TreeVfs::default();
+        // `a` sorts first, but its match is looser than the one in `z` at the same depth.
+        tree.add("a/x_t_a_r_g_e_t", false);
+        tree.add("z/target", false);
+        assert_eq!(
+            search(&tree, "target", false, Limits::default()),
+            found_all(&["z/target", "a/x_t_a_r_g_e_t"])
+        );
+    }
+
+    #[test]
+    fn only_the_best_few_are_kept() {
+        let mut tree = TreeVfs::default();
+        for i in 0..50 {
+            tree.add(&format!("file{i:02}"), false);
+        }
+        let Outcome::Found(hits) = search(&tree, "file", false, Limits::default()) else {
+            panic!("expected hits");
+        };
+        assert_eq!(hits.len(), KEPT);
+        assert_eq!(
+            hits[0],
+            PathBuf::from("/root/file00"),
+            "equal fits keep listing order"
+        );
+    }
+
+    #[test]
+    fn running_into_the_entry_limit_keeps_the_matches_already_found() {
+        let mut tree = TreeVfs::default();
+        for name in ["aa", "ab", "ac", "ad", "ae"] {
+            tree.add(name, false);
+        }
+        let tight = Limits {
+            max_entries: 3,
+            ..Limits::default()
+        };
+        assert_eq!(
+            search(&tree, "a", false, tight),
+            found_all(&["aa", "ab", "ac"])
+        );
+    }
+
+    #[test]
+    fn rank_entries_orders_one_listing_like_the_walk_would() {
+        let entry = |name: &str| DirEntryInfo {
+            name: name.into(),
+            path: PathBuf::from("/d").join(name),
+            is_dir: false,
+            size: 0,
+            modified: None,
+            mode: None,
+        };
+        let entries = [
+            entry("a_b_c_d"),
+            entry("zzz"),
+            entry("abcd"),
+            entry("abcdef"),
+        ];
+        let query = Query::new("abcd").unwrap();
+        assert_eq!(
+            rank_entries(&query, &entries),
+            [
+                PathBuf::from("/d/abcd"),
+                PathBuf::from("/d/abcdef"),
+                PathBuf::from("/d/a_b_c_d")
+            ]
+        );
+        assert!(rank_entries(&Query::new("q").unwrap(), &entries).is_empty());
     }
 
     #[test]
@@ -417,10 +750,19 @@ mod tests {
                 .collect();
 
             match search(&tree, &needle, true, Limits::default()) {
-                Outcome::Found(hit) => {
-                    prop_assert!(query.matches(&name_of(&hit)));
+                Outcome::Found(hits) => {
+                    prop_assert!(!hits.is_empty() && hits.len() <= KEPT);
                     let nearest = all_matches.iter().map(|e| depth(&e.path)).min().unwrap();
-                    prop_assert_eq!(depth(&hit), nearest);
+                    for hit in &hits {
+                        prop_assert!(query.matches(&name_of(hit)));
+                        prop_assert_eq!(depth(hit), nearest);
+                    }
+                    // Best first: scores never rise down the list.
+                    let scores: Vec<i32> = hits
+                        .iter()
+                        .map(|hit| query.score(&name_of(hit)).unwrap())
+                        .collect();
+                    prop_assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]));
                 }
                 Outcome::NotFound { truncated } => {
                     prop_assert!(!truncated);

@@ -37,7 +37,13 @@ pub enum SearchState {
     #[default]
     Idle,
     Searching,
-    Found,
+    /// On match `position` (counting from 0) of `total` kept; `more` says the search found more
+    /// than it kept.
+    Found {
+        position: usize,
+        total: usize,
+        more: bool,
+    },
     /// Nothing matched; `truncated` says a search limit stopped the walk early.
     NotFound {
         truncated: bool,
@@ -46,12 +52,25 @@ pub enum SearchState {
 
 impl SearchState {
     /// A short note to show in front of the query, if this state has one.
-    pub fn note(self) -> Option<&'static str> {
+    pub fn note(self) -> Option<String> {
         match self {
-            SearchState::Idle | SearchState::Found => None,
-            SearchState::Searching => Some("searching…"),
-            SearchState::NotFound { truncated: false } => Some("no match"),
-            SearchState::NotFound { truncated: true } => Some("no match (search limit reached)"),
+            SearchState::Idle => None,
+            // With a single match there is nothing to step to, so nothing to say.
+            SearchState::Found { total: 0 | 1, .. } => None,
+            SearchState::Found {
+                position,
+                total,
+                more,
+            } => Some(format!(
+                "{}/{total}{} ↑↓",
+                position + 1,
+                if more { "+" } else { "" }
+            )),
+            SearchState::Searching => Some("searching…".into()),
+            SearchState::NotFound { truncated: false } => Some("no match".into()),
+            SearchState::NotFound { truncated: true } => {
+                Some("no match (search limit reached)".into())
+            }
         }
     }
 }
@@ -148,7 +167,7 @@ mod tests {
         );
         assert_eq!(
             wait_for(&mut job),
-            Outcome::Found(root.join("a").join("b").join("aerend.md"))
+            Outcome::Found(vec![root.join("a").join("b").join("aerend.md")])
         );
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -191,7 +210,18 @@ mod tests {
     #[test]
     fn only_a_search_in_progress_or_a_miss_has_a_note() {
         assert_eq!(SearchState::Idle.note(), None);
-        assert_eq!(SearchState::Found.note(), None);
+        let found = |position, total, more| SearchState::Found {
+            position,
+            total,
+            more,
+        };
+        assert_eq!(
+            found(0, 1, false).note(),
+            None,
+            "one match: nothing to step to"
+        );
+        assert_eq!(found(1, 14, false).note().as_deref(), Some("2/14 ↑↓"));
+        assert_eq!(found(0, 20, true).note().as_deref(), Some("1/20+ ↑↓"));
         assert!(SearchState::Searching.note().is_some());
         assert_ne!(
             SearchState::NotFound { truncated: false }.note(),

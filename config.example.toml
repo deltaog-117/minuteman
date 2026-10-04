@@ -194,9 +194,13 @@ create = ["n"]
 # Unbound by default (Alt+n opens a shell too). Opens the first shell pane in the current directory (the key again does nothing once one is
 # already open — split instead). Alt+m closes the pane under the pointer.
 shell = []
-# Finds the nearest entry whose name contains what you type, looking in this directory first and
-# then in every directory below it, and jumps there as you type. Enter stays where the search
-# landed, Esc goes back to where it started.
+# Fuzzy search: finds the entries whose names hold the letters you type in order (not necessarily
+# side by side, so `aernd` finds `aerend`), looking in this directory first and then in every
+# directory below it, and jumps to the best match of the nearest folder that has any as you type.
+# Names where the letters sit together, start a word or the name, or the whole text appears as one
+# piece rank higher. While the prompt is open, Down or Ctrl-N goes to the next match and Up or
+# Ctrl-P to the previous (the status line shows 2/14). Enter stays where the search landed, Esc
+# goes back to where it started.
 search = ["/"]
 # Opens the :-command prompt. ":q"/":q!"/":qa"/":qa!"/":quit" all exit (there's no unsaved-buffer
 # or multi-window state for the vim-style "!"/"a" spellings to mean anything different),

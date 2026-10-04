@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use browser::search::{Outcome as SearchOutcome, Query};
+use browser::search::{KEPT, Outcome as SearchOutcome, Query, rank_entries};
 use browser::{BrowserState, MovePlan};
 use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
@@ -490,6 +490,10 @@ pub struct App {
     /// slow one (another machine) takes the background route.
     nav_grace: Duration,
     search_state: SearchState,
+    /// What the `/` search found, best first, for stepping through with the arrow keys, and which
+    /// of them the cursor is on.
+    search_matches: Vec<PathBuf>,
+    search_position: usize,
     plugins: PluginManager,
     /// The filesystem being browsed. Every feature reaches a browsed path through this, and the
     /// background jobs take a clone, so a backend other than the local disk needs no change here.
@@ -524,6 +528,8 @@ impl App {
             nav: None,
             nav_grace: Duration::from_millis(40),
             search_state: SearchState::Idle,
+            search_matches: Vec::new(),
+            search_position: 0,
             plugins: PluginManager::new(),
             vfs,
             caps_lock: false,
@@ -1398,6 +1404,23 @@ impl App {
                     }
                     self.end_search();
                 }
+                // Through the kept matches, best first, wrapping round at either end.
+                KeyCode::Down => {
+                    self.step_search(vfs, browser, 1);
+                    self.prompt = Some(Prompt::SearchInput { buffer, origin });
+                }
+                KeyCode::Up => {
+                    self.step_search(vfs, browser, -1);
+                    self.prompt = Some(Prompt::SearchInput { buffer, origin });
+                }
+                KeyCode::Char(c @ ('n' | 'p'))
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    self.step_search(vfs, browser, if c == 'n' { 1 } else { -1 });
+                    self.prompt = Some(Prompt::SearchInput { buffer, origin });
+                }
                 _ => {
                     // Only a change to the text starts a new search; moving the cursor does not.
                     if buffer.edit(key) {
@@ -1513,6 +1536,7 @@ impl App {
         origin: &SearchOrigin,
     ) {
         self.search_job = None;
+        self.search_matches.clear();
         let Some(query) = Query::new(text) else {
             self.search_state = SearchState::Idle;
             if let Err(e) = Self::restore_origin(vfs, browser, origin) {
@@ -1521,12 +1545,15 @@ impl App {
             return;
         };
 
-        if browser.current_dir() == origin.dir
-            && let Some(index) = browser.find_match(text)
-        {
-            browser.select_index(index);
-            self.search_state = SearchState::Found;
-            return;
+        // The first level of the walk is the listing already on screen, so a match right here
+        // shows at once.
+        if browser.current_dir() == origin.dir {
+            let here = rank_entries(&query, browser.current_entries());
+            if !here.is_empty() {
+                self.search_matches = here;
+                self.show_search_match(vfs, browser, 0);
+                return;
+            }
         }
         self.search_job = Some(SearchJob::start(
             &self.handle,
@@ -1541,7 +1568,40 @@ impl App {
     /// Ends the `/` prompt's search, cancelling a walk still in flight.
     fn end_search(&mut self) {
         self.search_job = None;
+        self.search_matches.clear();
         self.search_state = SearchState::Idle;
+    }
+
+    /// Puts the cursor on the `position`th kept match, going to its folder if it is elsewhere.
+    fn show_search_match(&mut self, vfs: &dyn Vfs, browser: &mut BrowserState, position: usize) {
+        let Some(path) = self.search_matches.get(position).cloned() else {
+            return;
+        };
+        self.search_state = match browser.reveal(vfs, &path) {
+            Ok(()) => {
+                self.search_position = position;
+                SearchState::Found {
+                    position,
+                    total: self.search_matches.len(),
+                    more: self.search_matches.len() >= KEPT,
+                }
+            }
+            Err(e) => {
+                self.status = Some(format!("search: could not open {}: {e}", path.display()));
+                SearchState::Idle
+            }
+        };
+    }
+
+    /// Moves to the next (`+1`) or previous (`-1`) kept match, wrapping round at either end. Does
+    /// nothing with fewer than two.
+    fn step_search(&mut self, vfs: &dyn Vfs, browser: &mut BrowserState, by: isize) {
+        let total = self.search_matches.len();
+        if total < 2 {
+            return;
+        }
+        let next = (self.search_position as isize + by).rem_euclid(total as isize) as usize;
+        self.show_search_match(vfs, browser, next);
     }
 
     /// Returns the browser to where a search began: its directory, then its cursor.
@@ -1564,17 +1624,16 @@ impl App {
             return;
         };
         self.search_job = None;
-        self.search_state = match outcome {
-            SearchOutcome::Found(path) => match browser.reveal(vfs, &path) {
-                Ok(()) => SearchState::Found,
-                Err(e) => {
-                    self.status = Some(format!("search: could not open {}: {e}", path.display()));
-                    SearchState::Idle
-                }
-            },
-            SearchOutcome::NotFound { truncated } => SearchState::NotFound { truncated },
-            SearchOutcome::Cancelled => SearchState::Idle,
-        };
+        match outcome {
+            SearchOutcome::Found(paths) => {
+                self.search_matches = paths;
+                self.show_search_match(vfs, browser, 0);
+            }
+            SearchOutcome::NotFound { truncated } => {
+                self.search_state = SearchState::NotFound { truncated };
+            }
+            SearchOutcome::Cancelled => self.search_state = SearchState::Idle,
+        }
     }
 
     /// The command waiting for the terminal, if a `:` command asked for one.
@@ -3800,6 +3859,157 @@ mod tests {
         assert!(f.app.prompt.is_none());
         assert_eq!(f.browser.current_dir(), f.root.join("a").join("b"));
         assert_eq!(f.selected_name(), "aerend.md");
+    }
+
+    fn touch_files(f: &Fixture, names: &[&str]) {
+        for name in names {
+            std::fs::write(f.root.join(name), b"").unwrap();
+        }
+    }
+
+    #[test]
+    fn letters_in_order_find_a_name_without_them_being_side_by_side() {
+        let mut f = Fixture::new("search-fuzzy-here");
+        touch_files(&f, &["aerend.txt", "zzz.txt"]);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aernd");
+        assert!(
+            f.app.search_job.is_none(),
+            "it is in the folder already open"
+        );
+        assert_eq!(f.selected_name(), "aerend.txt");
+
+        // And a walk finds one further down the same way.
+        let mut f = Fixture::new("search-fuzzy-deep");
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+        f.app.begin_search(&f.browser);
+        f.type_text("aernd");
+        f.wait_for_search();
+        assert_eq!(f.selected_name(), "aerend.md");
+    }
+
+    #[test]
+    fn the_best_match_in_a_folder_wins_over_one_listed_earlier() {
+        let mut f = Fixture::new("search-ranked");
+        // Listed in this order, so a first-match search would stop on the scattered one.
+        touch_files(&f, &["a_e_r_e_n_d.txt", "aerend.txt"]);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aerend");
+        assert_eq!(f.selected_name(), "aerend.txt");
+    }
+
+    fn note(f: &Fixture) -> String {
+        f.app
+            .status_line()
+            .split(' ')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn the_arrows_step_through_the_matches_and_wrap_round() {
+        use crossterm::event::KeyModifiers as M;
+        let mut f = Fixture::new("search-step");
+        touch_files(
+            &f,
+            &["other.txt", "report-1.txt", "report-2.txt", "report-3.txt"],
+        );
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("report");
+        assert_eq!(f.selected_name(), "report-1.txt");
+        assert_eq!(note(&f), "1/3");
+
+        press_key(&mut f, KeyCode::Down, M::NONE);
+        assert_eq!(
+            (f.selected_name(), note(&f)),
+            ("report-2.txt".into(), "2/3".into())
+        );
+        press_key(&mut f, KeyCode::Down, M::NONE);
+        press_key(&mut f, KeyCode::Down, M::NONE);
+        assert_eq!(f.selected_name(), "report-1.txt", "wrapped past the last");
+        press_key(&mut f, KeyCode::Up, M::NONE);
+        assert_eq!(
+            f.selected_name(),
+            "report-3.txt",
+            "wrapped back past the first"
+        );
+
+        press_key(&mut f, KeyCode::Char('p'), M::CONTROL);
+        assert_eq!(f.selected_name(), "report-2.txt");
+        press_key(&mut f, KeyCode::Char('n'), M::CONTROL);
+        assert_eq!(f.selected_name(), "report-3.txt");
+        assert!(f.app.prompt.is_some(), "stepping leaves the prompt open");
+    }
+
+    #[test]
+    fn a_single_match_has_nothing_to_step_to_and_says_nothing() {
+        use crossterm::event::KeyModifiers as M;
+        let mut f = Fixture::new("search-single");
+        touch_files(&f, &["only-this.txt", "zzz.txt"]);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("only");
+        press_key(&mut f, KeyCode::Down, M::NONE);
+        press_key(&mut f, KeyCode::Up, M::NONE);
+        assert_eq!(f.selected_name(), "only-this.txt");
+        assert!(
+            f.app.status_line().starts_with("/only"),
+            "{}",
+            f.app.status_line()
+        );
+    }
+
+    #[test]
+    fn stepping_can_cross_folders_and_escape_still_goes_home() {
+        use crossterm::event::KeyModifiers as M;
+        let mut f = Fixture::new("search-step-dirs");
+        std::fs::create_dir_all(f.root.join("a")).unwrap();
+        std::fs::create_dir_all(f.root.join("z")).unwrap();
+        std::fs::write(f.root.join("a").join("target-a"), b"").unwrap();
+        std::fs::write(f.root.join("z").join("target-z"), b"").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        let started_on = f.selected_name();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("target");
+        f.wait_for_search();
+        assert_eq!(f.browser.current_dir(), f.root.join("a"));
+        press_key(&mut f, KeyCode::Down, M::NONE);
+        assert_eq!(f.browser.current_dir(), f.root.join("z"));
+        assert_eq!(f.selected_name(), "target-z");
+
+        f.press(KeyCode::Esc);
+        assert_eq!(f.browser.current_dir(), f.root);
+        assert_eq!(f.selected_name(), started_on);
+    }
+
+    #[test]
+    fn typing_more_after_stepping_searches_again_from_where_it_began() {
+        use crossterm::event::KeyModifiers as M;
+        let mut f = Fixture::new("search-step-retype");
+        touch_files(&f, &["report-1.txt", "report-2.txt", "notes.txt"]);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("report");
+        press_key(&mut f, KeyCode::Down, M::NONE);
+        assert_eq!(f.selected_name(), "report-2.txt");
+        f.type_text("-1");
+        assert_eq!(
+            f.selected_name(),
+            "report-1.txt",
+            "the new text starts a new ranking"
+        );
+        assert_eq!(note(&f), "/report-1", "one match left, so no step counter");
     }
 
     #[test]
