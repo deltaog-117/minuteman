@@ -24,7 +24,7 @@
 use std::ops::Range;
 
 use ratatui::layout::{Margin, Position, Rect, Size};
-use theming::ColumnLayout;
+use theming::{ColumnLayout, Shape};
 
 use crate::browser_mouse::BrowserLayout;
 
@@ -75,14 +75,21 @@ impl ViewMode {
 /// The layout every view's mouse handling and drawing agree on. Everything but the details view
 /// is the ordinary three-column split; the details view puts one full-width list in place of the
 /// columns (the parent and preview get zero-width rectangles, which nothing hit-tests or draws),
-/// with a single row above it for the column titles.
+/// with a single row above it for the column titles. `shape` sets the gaps between the columns
+/// and around the whole browser, so a click lands where the gapped layout was drawn.
 pub fn browser_layout(
     area: Rect,
     columns: ColumnLayout,
     show_hud: bool,
     mode: ViewMode,
+    shape: Shape,
 ) -> BrowserLayout {
-    let base = BrowserLayout::split(area, columns, show_hud);
+    let base = BrowserLayout::split_spaced(
+        inset(area, shape.gaps_out.cells()),
+        columns,
+        show_hud,
+        shape.gaps_in.cells(),
+    );
     if mode != ViewMode::Details {
         return base;
     }
@@ -99,6 +106,18 @@ pub fn browser_layout(
         preview: Rect::new(body.right(), body.y, 0, body.height),
         ..base
     }
+}
+
+/// `area` less `gaps_out` cells at the left and right and half as many rows at the top and
+/// bottom (a cell is about twice as tall as it is wide). A small terminal gets smaller gaps
+/// rather than a browser too small to use.
+fn inset(area: Rect, gaps_out: u16) -> Rect {
+    // The smallest browser still worth drawing: a few letters per column and a few rows.
+    const MIN_WIDTH: u16 = 20;
+    const MIN_HEIGHT: u16 = 6;
+    let horizontal = gaps_out.min(area.width.saturating_sub(MIN_WIDTH) / 2);
+    let vertical = (gaps_out / 2).min(area.height.saturating_sub(MIN_HEIGHT) / 2);
+    area.inner(Margin::new(horizontal, vertical))
 }
 
 /// The area the three columns fill, between the header and the status bar.
@@ -406,12 +425,24 @@ mod tests {
     #[test]
     fn a_page_is_what_the_view_shows_at_once() {
         let area = Rect::new(0, 0, 120, 40);
-        let list = browser_layout(area, ColumnLayout::default(), true, ViewMode::List);
+        let list = browser_layout(
+            area,
+            ColumnLayout::default(),
+            true,
+            ViewMode::List,
+            Shape::default(),
+        );
         assert_eq!(
             page_size(ViewMode::List, &list),
             usize::from(list.current.height - 2)
         );
-        let grid = browser_layout(area, ColumnLayout::default(), true, ViewMode::Grid);
+        let grid = browser_layout(
+            area,
+            ColumnLayout::default(),
+            true,
+            ViewMode::Grid,
+            Shape::default(),
+        );
         assert_eq!(
             page_size(ViewMode::Grid, &grid),
             GridLayout::split(body_of(&grid)).capacity()
@@ -421,6 +452,7 @@ mod tests {
             ColumnLayout::default(),
             true,
             ViewMode::List,
+            Shape::default(),
         );
         assert!(page_size(ViewMode::List, &tiny) >= 1);
         for view in [
@@ -533,8 +565,20 @@ mod tests {
     #[test]
     fn the_details_layout_is_one_full_width_list_under_a_title_row() {
         let area = Rect::new(0, 0, 120, 40);
-        let list = browser_layout(area, ColumnLayout::ThreePane, true, ViewMode::List);
-        let details = browser_layout(area, ColumnLayout::ThreePane, true, ViewMode::Details);
+        let list = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::List,
+            Shape::default(),
+        );
+        let details = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::Details,
+            Shape::default(),
+        );
         let body = body_of(&list);
         assert_eq!(details.current.width, body.width);
         assert_eq!(details.current.bottom(), body.bottom());
@@ -556,7 +600,7 @@ mod tests {
         let base = BrowserLayout::split(area, ColumnLayout::ThreePane, true);
         for mode in [ViewMode::List, ViewMode::Grid, ViewMode::Filmstrip] {
             assert_eq!(
-                browser_layout(area, ColumnLayout::ThreePane, true, mode),
+                browser_layout(area, ColumnLayout::ThreePane, true, mode, Shape::default()),
                 base
             );
         }
@@ -610,6 +654,81 @@ mod tests {
             grid.entry_at(0, 3, Position::new(tile.x + 2, tile.y + 2)),
             None
         );
+    }
+
+    fn gapped(gaps_in: i64, gaps_out: i64) -> Shape {
+        Shape {
+            gaps_in: theming::Gap::clamped(gaps_in),
+            gaps_out: theming::Gap::clamped(gaps_out),
+            ..Shape::default()
+        }
+    }
+
+    #[test]
+    fn gaps_open_space_between_the_columns_and_at_the_edges() {
+        let area = Rect::new(0, 0, 120, 40);
+        let flat = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::List,
+            Shape::default(),
+        );
+        let spaced = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::List,
+            gapped(2, 4),
+        );
+        assert_eq!(flat.current.x, flat.parent.right(), "no gap by default");
+        assert_eq!(spaced.current.x - spaced.parent.right(), 2);
+        assert_eq!(spaced.preview.x - spaced.current.right(), 2);
+        assert_eq!(spaced.header, Rect::new(4, 2, 112, 1));
+        assert_eq!(spaced.status.bottom(), 38);
+        assert_eq!(spaced.preview.right(), 116);
+    }
+
+    #[test]
+    fn a_small_terminal_gets_smaller_outer_gaps_not_an_unusable_browser() {
+        let area = Rect::new(0, 0, 24, 8);
+        let layout = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::List,
+            gapped(0, 8),
+        );
+        let body = body_of(&layout);
+        assert!(body.width >= 20 && layout.status.height == 1, "{layout:?}");
+    }
+
+    proptest! {
+        /// Whatever the size and the gaps, the browser's pieces stay on screen and never overlap,
+        /// and no gaps at all is exactly the layout from before gaps existed.
+        #[test]
+        fn gaps_never_push_a_pane_off_screen_or_into_another(
+            w in 0u16..300, h in 0u16..100, gaps_in in -2i64..8, gaps_out in -2i64..12,
+            two in any::<bool>(), hud in any::<bool>(),
+        ) {
+            let area = Rect::new(0, 0, w, h);
+            let columns = if two { ColumnLayout::TwoPane } else { ColumnLayout::ThreePane };
+            let layout = browser_layout(area, columns, hud, ViewMode::List, gapped(gaps_in, gaps_out));
+            let panes = [layout.header, layout.parent, layout.current, layout.preview, layout.status];
+            for pane in panes {
+                prop_assert!(pane.area() == 0 || area.contains(pane.as_position()), "{pane:?}");
+                prop_assert!(pane.right() <= area.right() && pane.bottom() <= area.bottom());
+            }
+            for (i, a) in panes.iter().enumerate() {
+                for b in &panes[i + 1..] {
+                    prop_assert!(a.area() == 0 || b.area() == 0 || !a.intersects(*b), "{a:?} {b:?}");
+                }
+            }
+            prop_assert_eq!(
+                browser_layout(area, columns, hud, ViewMode::List, Shape::default()),
+                BrowserLayout::split(area, columns, hud)
+            );
+        }
     }
 
     proptest! {

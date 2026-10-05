@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::appearance::{Font, RawFont, RawStyles, Styles};
 use crate::keymap::{KeyMap, RawKeyMap, parse_key};
 use crate::panels::{PanelsConfig, RawPanels};
+use crate::shape::RawShape;
 use crate::theme::{RawTheme, Theme};
 use crate::ui::{RawUi, Ui};
 
@@ -226,6 +227,9 @@ fn default_interactive_commands() -> Vec<String> {
 #[serde(default)]
 pub(crate) struct RawAppearance {
     pub(crate) theme: RawTheme,
+    /// Its own table in the file, since a shape is not a color, but resolved as part of the theme
+    /// (see `RawTheme::shape`).
+    pub(crate) shape: RawShape,
     pub(crate) ui: RawUi,
     pub(crate) style: RawStyles,
     pub(crate) font: RawFont,
@@ -247,8 +251,8 @@ pub struct RawLocal {
     pub style: RawStyles,
     /// The appearance popup's "Font" category — see `Config::local_font`.
     pub font: RawFont,
-    /// Themes saved from the appearance popup's "Save theme" row, each a full color snapshot
-    /// (see [`RawTheme::from_theme`]) rather than an overlay — a saved theme must still look the
+    /// Themes saved from the appearance popup's "Save theme" row, each a full snapshot of colors
+    /// and shape (see [`RawTheme::from_theme`]) rather than an overlay — a saved theme must still look the
     /// same after `theme`/`config.toml` change around it.
     pub custom_themes: Vec<CustomTheme>,
     /// The name of `custom_themes` entry `theme` currently matches (or started from, before it
@@ -426,11 +430,20 @@ impl Config {
         let appearance: RawAppearance = parse("appearance.toml", appearance);
         let local: RawLocal = parse("local.toml", local);
 
+        let appearance_theme = RawTheme {
+            shape: appearance.theme.shape.clone().overlay(appearance.shape),
+            ..appearance.theme
+        };
         let theme = config
             .theme
-            .overlay(appearance.theme)
+            .overlay(appearance_theme)
             .overlay(local.theme.clone());
-        let theme_is_customized = theme != RawTheme::default();
+        // Only colors and frames count: a `[shape]` alone says nothing about the palette, so the
+        // colors still follow the terminal.
+        let theme_is_customized = RawTheme {
+            shape: RawShape::default(),
+            ..theme.clone()
+        } != RawTheme::default();
         let panels: PanelsConfig = config.panels.overlay(local.panels.clone()).into();
 
         Self {
@@ -554,6 +567,7 @@ mod tests {
     use super::*;
     use crate::appearance::Mods;
     use crate::panels::PanelsConfig;
+    use crate::shape::{BORDER_STYLES, Gap, Shape, TitleAlign};
     use crate::ui::GlyphSet;
 
     #[test]
@@ -698,6 +712,24 @@ mod tests {
         assert_eq!(config.ui, Ui::default());
         assert_eq!(config.styles, Styles::default());
         assert_eq!(config.font, Font::default());
+    }
+
+    /// Every `[shape]` field and frame style must be spelled out in the example too.
+    #[test]
+    fn the_appearance_example_documents_every_shape_field_and_frame_style() {
+        let text = include_str!("../../../appearance.example.toml");
+        let example: RawAppearance = toml::from_str(text).expect("the example parses");
+        assert_eq!(
+            example.shape,
+            RawShape::from_shape(&Shape::default()),
+            "every field set, to its default"
+        );
+        for style in BORDER_STYLES {
+            assert!(
+                text.contains(&format!("\"{style}\"")),
+                "{style} is not documented"
+            );
+        }
     }
 
     /// Every `[style]` element the code knows must be spelled out in the example, so a new
@@ -928,6 +960,69 @@ mod tests {
         assert_eq!(parsed, local);
         let resolved: Theme = parsed.custom_themes[0].theme.clone().into();
         assert_eq!(resolved, Theme::named("dracula"));
+    }
+
+    #[test]
+    fn a_saved_theme_carries_its_shape_and_an_older_one_without_it_still_loads() {
+        let mut theme = Theme::named("nord");
+        theme.shape.gaps_in = Gap::clamped(3);
+        theme.shape.shadow = true;
+        let local = RawLocal {
+            custom_themes: vec![CustomTheme {
+                name: "airy".into(),
+                theme: RawTheme::from_theme(&theme),
+            }],
+            ..Default::default()
+        };
+        let parsed: RawLocal = toml::from_str(&toml::to_string(&local).unwrap()).unwrap();
+        assert_eq!(Theme::from(parsed.custom_themes[0].theme.clone()), theme);
+
+        // Saved before themes had a shape: no `shape` table at all.
+        let config = Config::from_sources(
+            None,
+            None,
+            Some(
+                "[[custom_themes]]\nname = \"old\"\n[custom_themes.theme]\naccent_fg = \"#ff8800\"\n",
+            ),
+        );
+        let old: Theme = config.local_custom_themes[0].theme.clone().into();
+        assert_eq!(old.shape, Shape::default());
+    }
+
+    #[test]
+    fn the_shape_table_reaches_the_theme_without_pinning_its_colors() {
+        let config = Config::from_sources(
+            None,
+            Some("[shape]\ngaps_in = 2\ntitle_align = \"center\"\n"),
+            None,
+        );
+        assert_eq!(config.theme.shape.gaps_in.cells(), 2);
+        assert_eq!(config.theme.shape.title_align, TitleAlign::Center);
+        assert!(
+            !config.theme_is_customized,
+            "a shape alone must leave the colors to follow the terminal"
+        );
+        // Re-resolved at startup from the merged table, as `main` does.
+        assert_eq!(
+            Theme::from(config.merged_theme.clone()).shape,
+            config.theme.shape
+        );
+    }
+
+    #[test]
+    fn local_toml_shape_wins_over_appearance_toml_per_field() {
+        let config = Config::from_sources(
+            None,
+            Some("[shape]\ngaps_in = 2\nshadow = true\n"),
+            Some("[theme.shape]\ngaps_in = 4\n"),
+        );
+        assert_eq!(config.theme.shape.gaps_in.cells(), 4);
+        assert!(
+            config.theme.shape.shadow,
+            "a field only the lower file sets shows through"
+        );
+        assert_eq!(config.local_theme.shape.gaps_in, Some(4));
+        assert_eq!(config.local_theme.shape.shadow, None);
     }
 
     #[test]

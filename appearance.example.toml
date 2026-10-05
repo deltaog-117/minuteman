@@ -2,8 +2,8 @@
 #
 # Copy this file to ~/.config/minuteman/appearance.toml (or print it with
 # `minuteman init-appearance > ~/.config/minuteman/appearance.toml`) and edit what you want to
-# change. Everything visual lives here: colors, glyphs, text styles (bold, italic, ...) and the
-# font. Anything left out keeps its built-in default (shown below) — a partial file, a missing
+# change. Everything visual lives here: colors, shape, glyphs, text styles (bold, italic, ...) and
+# the font. Anything left out keeps its built-in default (shown below) — a partial file, a missing
 # file, and even a file that fails to parse are all fine: Minuteman falls back per-field rather
 # than refusing to start. Keybindings are in config.toml, not here.
 
@@ -58,12 +58,35 @@ status_fg = "#7a80b8"
 # Status bar: the segments' background, and the color of destructive prompts (delete, overwrite).
 bar_bg = "#1a1f3d"
 danger_fg = "#ff3860"
-# Frame style: "rounded", "plain", "double", or "thick".
+# Frame style: "rounded", "plain", "double", "thick", "dashed", "thick-dashed", "block" (a heavy
+# half-block frame drawn outside the pane), "block-inside" (the same, drawn inside), or "none" (no
+# visible frame; the pane keeps its place, so nothing shifts). The [shape] table below holds the
+# rest of the shape; this one stays here because the built-in palettes set it.
 border_type = "rounded"
 # Edge between status-bar segments: "arrow" draws Powerline arrows (they need a Powerline/Nerd
 # Font — without one they show as missing-glyph boxes), "flat" uses plain dividers, and "auto"
 # picks arrows exactly when [ui] glyphs is "nerd".
 separator = "auto"
+
+# ---------------------------------------------------------------------------------------------
+# [shape] — gaps, titles and effects
+# ---------------------------------------------------------------------------------------------
+[shape]
+# A terminal draws whole cells, so gaps are counted in cells and there is no rounding, blur or
+# transparency beyond the frame styles above. A saved theme (the appearance popup's Theme page)
+# keeps its shape along with its colors. Numbers outside a range are moved to its nearest end.
+
+# Blank cells between the side-by-side panes, 0 to 4.
+gaps_in = 0
+# Blank cells between the interface and the left and right screen edges, 0 to 8; half as many
+# rows at the top and bottom, since a cell is about twice as tall as it is wide.
+gaps_out = 0
+# Where pane titles sit on the top border: "left", "center" or "right".
+title_align = "left"
+# Floating panels (menus, popups, the shell box) cast a shadow on what is under them.
+shadow = false
+# The panes without focus (the parent and preview columns) are drawn dimmed.
+dim_inactive = false
 
 # ---------------------------------------------------------------------------------------------
 # [ui] — glyphs

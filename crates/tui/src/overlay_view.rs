@@ -26,8 +26,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use theming::{Config, Hsv, Theme};
 
 use crate::appearance_popup::{
-    self, AppearancePopup, AppearanceView, ManageView, PICKER_EXTRA_LINES, Row as AppearanceRow,
-    RowKind as AppearanceRowKind, SV_BOX_HEIGHT, SaveView, View as AppearanceViewLevel,
+    self, AppearancePopup, AppearanceView, ManageView, PICKER_EXTRA_LINES, Page,
+    Row as AppearanceRow, RowKind as AppearanceRowKind, SV_BOX_HEIGHT, SaveView,
 };
 use crate::compress_popup::{CompressPopup, Row as CompressRow};
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
@@ -42,21 +42,16 @@ use crate::style;
 const PANEL_MAX_WIDTH: u16 = 76;
 /// Width of the label column ("Permissions" is the longest label) plus a gap.
 const LABEL_COLUMN: usize = 13;
-/// The appearance popup's own, wider label column: its category labels (`Border & separator ›`),
-/// long element names (`Syntax: function`) and saved themes' own names would all be cut off at
-/// `LABEL_COLUMN`.
+/// The appearance popup's own, wider label column: its long row labels (`Dim unfocused panes`,
+/// `Syntax: function`) and saved themes' own names would all be cut off at `LABEL_COLUMN`.
 const APPEARANCE_LABEL_COLUMN: usize = 22;
 
 /// A bordered frame with no title, in the same border style as the panes.
 fn frame_block(config: &Config) -> Block<'static> {
-    let block = Block::default()
+    Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(style::color(&config.theme.border_focused_fg)));
-    if glyphs::of(config).ascii_borders {
-        block.border_set(glyphs::ASCII_BORDER)
-    } else {
-        block.border_type(style::border_type(&config.theme.border_type))
-    }
+        .border_style(Style::default().fg(style::color(&config.theme.border_focused_fg)))
+        .border_set(style::frame_set(config))
 }
 
 /// Draws `menu` and its open submenu, if any, over whatever is underneath.
@@ -157,6 +152,7 @@ fn render_rows(
     config: &Config,
 ) {
     let theme = &config.theme;
+    style::cast_shadow(frame.buffer_mut(), rect, config);
     frame.render_widget(Clear, rect);
     let block = frame_block(config);
     let inner = block.inner(rect);
@@ -267,6 +263,7 @@ pub fn compress_hit(
 pub fn render_compress(frame: &mut Frame<'_>, popup: &CompressPopup, config: &Config) {
     let theme = &config.theme;
     let area = compress_area(frame.area(), popup);
+    style::cast_shadow(frame.buffer_mut(), area, config);
     frame.render_widget(Clear, area);
     let block = style::themed_block(config, &popup.title(), true);
     frame.render_widget(block, area);
@@ -398,6 +395,7 @@ pub fn extract_hit(frame: Rect, popup: &ExtractPopup, at: ratatui::layout::Posit
 pub fn render_extract(frame: &mut Frame<'_>, popup: &ExtractPopup, config: &Config) {
     let theme = &config.theme;
     let area = extract_area(frame.area(), popup);
+    style::cast_shadow(frame.buffer_mut(), area, config);
     frame.render_widget(Clear, area);
     let block = style::themed_block(config, &popup.title(), true);
     frame.render_widget(block, area);
@@ -511,6 +509,7 @@ pub fn render_inspect(frame: &mut Frame<'_>, view: &InspectView, config: &Config
     let theme = &config.theme;
     let rows = view.rows();
     let area = panel_area(frame.area(), rows.len());
+    style::cast_shadow(frame.buffer_mut(), area, config);
     frame.render_widget(Clear, area);
     let block = style::themed_block(config, &format!("inspect: {}", view.title()), true);
     let inner = block.inner(area).inner(Margin::new(1, 0));
@@ -548,6 +547,7 @@ pub fn render_settings(
     let theme = &config.theme;
     let rows = popup.rows();
     let area = panel_area(frame.area(), rows.len());
+    style::cast_shadow(frame.buffer_mut(), area, config);
     frame.render_widget(Clear, area);
     let block = style::themed_block(config, "settings", true);
     let inner = block.inner(area).inner(Margin::new(1, 0));
@@ -671,13 +671,14 @@ fn hue_strip_line(hsv: Hsv, width: u16, ascii: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Draws the appearance popup: one row per setting, the cursor's row highlighted the same way a
-/// selected file is. A color row carries a live swatch of its own value next to it. The row being
-/// edited shows its in-progress buffer (or, in picker mode, its HSV sliders) instead of its
-/// committed value, and the "Save theme" flow — an update-or-new choice, then a name — takes over
-/// the hint line while it's open. `Reset to defaults` is styled like a destructive action, the
-/// same as `Delete` in the right-click menu. Session-only to draw; what it's drawing may already
-/// be saved to `local.toml` by the time this runs (`main` persists on every commit).
+/// Draws the appearance popup like a settings window: the pages down the left, numbered for their
+/// keys, with the chosen one lit; the chosen page's rows on the right, the cursor's row highlighted
+/// the same way a selected file is. A color row carries a live swatch of its own value next to it.
+/// The row being edited shows its in-progress buffer (or, in picker mode, its HSV readout and the
+/// picker under the rows) instead of its committed value, and the save, rename and delete flows
+/// take over the hint line while they're open. `Reset to defaults` is styled like a destructive
+/// action, the same as `Delete` in the right-click menu. Every change is already saved to
+/// `local.toml` by the time this draws it (`main` persists on every commit).
 pub fn render_appearance(
     frame: &mut Frame<'_>,
     popup: &AppearancePopup,
@@ -692,19 +693,12 @@ pub fn render_appearance(
     } else {
         0
     };
-    let area = panel_area(frame.area(), rows.len() + extra);
+    let area = panel_area(frame.area(), popup.panel_rows() + extra);
+    style::cast_shadow(frame.buffer_mut(), area, config);
     frame.render_widget(Clear, area);
-    let title = match popup.view() {
-        AppearanceViewLevel::Root => "appearance".to_string(),
-        AppearanceViewLevel::Category(cat) => {
-            format!("appearance: {}", cat.label().trim_end_matches(" ›"))
-        }
-    };
-    let block = style::themed_block(config, &title, true);
-    let inner = block.inner(area).inner(Margin::new(1, 0));
-    frame.render_widget(block, area);
+    frame.render_widget(style::themed_block(config, "appearance", true), area);
+    let areas = appearance_popup::areas(area);
 
-    let value_width = usize::from(inner.width).saturating_sub(APPEARANCE_LABEL_COLUMN);
     let label_style = style::styled(
         Style::default().fg(style::color(&theme.accent_fg)),
         config.styles.title,
@@ -718,12 +712,36 @@ pub fn render_appearance(
         .bg(style::color(&theme.selection_bg))
         .fg(style::color(&theme.file_fg));
     let hint_style = Style::default().fg(style::color(&theme.border_fg));
+    let page_style = Style::default().fg(style::color(&theme.title_fg));
 
-    let editing_row = popup.editing_row();
     let ascii = glyphs::of(config).ascii_borders;
     let caret = if ascii { "_" } else { "▏" };
     let swatch_glyph = if ascii { "##" } else { "██" };
 
+    let mut pages = vec![Line::raw("")];
+    pages.extend(Page::ALL.iter().enumerate().map(|(i, page)| {
+        let text = pad_to(
+            &format!(" {} {}", i + 1, page.label()),
+            usize::from(appearance_popup::SIDEBAR_WIDTH),
+        );
+        if *page == popup.page() {
+            Line::styled(text, label_style.patch(selected_style))
+        } else {
+            Line::styled(text, page_style)
+        }
+    }));
+    frame.render_widget(Paragraph::new(pages), areas.sidebar);
+    let bar = if ascii { "|" } else { "│" };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(bar, hint_style);
+            usize::from(areas.divider.height)
+        ]),
+        areas.divider,
+    );
+
+    let value_width = usize::from(areas.content.width).saturating_sub(APPEARANCE_LABEL_COLUMN);
+    let editing_row = popup.editing_row();
     let mut lines = vec![Line::raw("")];
     lines.extend(rows.iter().enumerate().map(|(i, row)| {
         let base = if i == popup.cursor() {
@@ -745,9 +763,9 @@ pub fn render_appearance(
             AppearanceRow::SavedTheme(index) => (
                 popup.saved_name(index).unwrap_or_default(),
                 if popup.saved_name(index) == view.active_custom_theme {
-                    "active"
+                    "yours, active"
                 } else {
-                    ""
+                    "yours"
                 },
             ),
             other => (other.label(), ""),
@@ -792,74 +810,68 @@ pub fn render_appearance(
     }));
     lines.push(Line::raw(""));
     if let Some(hsv) = editing_picker {
-        let box_width = appearance_popup::SV_BOX_WIDTH.min(inner.width);
+        let box_width = appearance_popup::SV_BOX_WIDTH.min(areas.content.width);
         lines.extend(sv_box_lines(hsv, box_width, ascii));
         lines.push(Line::raw(""));
         lines.push(hue_strip_line(hsv, box_width, ascii));
         lines.push(Line::raw(""));
         lines.push(Line::styled(picker_readout(hsv), value_style));
     }
+    frame.render_widget(Paragraph::new(lines), areas.content);
+
     let editing_is_color = editing_row
         .map(|row| matches!(row.kind(), Some(AppearanceRowKind::Color)))
         .unwrap_or(false);
-    let managing_hint = match popup.manage_view() {
-        Some(ManageView::Rename(buffer)) => Some(Line::from(vec![
+    let on_saved_theme = matches!(rows.get(popup.cursor()), Some(AppearanceRow::SavedTheme(_)));
+    let hint = match (popup.manage_view(), popup.save_view()) {
+        (Some(ManageView::Rename(buffer)), _) => Line::from(vec![
             Span::styled("rename to: ", label_style),
             Span::styled(
                 format!("{buffer}{caret}  enter saves, Esc cancels"),
                 value_style,
             ),
-        ])),
-        Some(ManageView::ConfirmDelete(name)) => Some(Line::styled(
+        ]),
+        (Some(ManageView::ConfirmDelete(name)), _) => Line::styled(
             format!("delete '{name}'?  y: delete   n/Esc: keep"),
             hint_style,
-        )),
-        None => None,
-    };
-    let in_saved_themes = matches!(
-        popup.view(),
-        AppearanceViewLevel::Category(appearance_popup::Category::SavedThemes)
-    );
-    lines.push(match popup.save_view() {
-        _ if managing_hint.is_some() => managing_hint.expect("checked by the guard"),
-        Some(SaveView::Choice(name)) => Line::styled(
+        ),
+        (None, Some(SaveView::Choice(name))) => Line::styled(
             format!("u: update '{name}'   n: save as new   Esc: cancel"),
             hint_style,
         ),
-        Some(SaveView::Name(buffer)) => Line::from(vec![
+        (None, Some(SaveView::Name(buffer))) => Line::from(vec![
             Span::styled("name: ", label_style),
             Span::styled(
                 format!("{buffer}{caret}  enter saves, Esc cancels"),
                 value_style,
             ),
         ]),
-        None if editing_picker.is_some() => Line::styled(
-            "click/drag the square or the hue bar, arrows move, [ ] adjusts hue, tab for hex, \
-             enter confirms, Esc cancels",
+        (None, None) if editing_picker.is_some() => Line::styled(
+            "click or drag the colors, arrows move, [ ] hue, tab for hex, enter confirms",
             hint_style,
         ),
-        None if editing_row.is_some() && editing_is_color => Line::styled(
+        (None, None) if editing_row.is_some() && editing_is_color => Line::styled(
             "type to edit, tab for the color picker, enter confirms, Esc cancels",
             hint_style,
         ),
-        None if editing_row.is_some() => {
+        (None, None) if editing_row.is_some() => {
             Line::styled("type to edit, enter confirms, Esc cancels", hint_style)
         }
-        None if in_saved_themes && popup.rows().len() == 1 => Line::styled(
-            "nothing saved yet — use \"Save theme\" on the main screen, Esc goes back",
+        (None, None) => Line::styled(
+            match popup.page() {
+                Page::Theme if on_saved_theme => {
+                    "enter applies, r renames, d deletes, tab/1-5 pages, Esc closes"
+                }
+                Page::Theme => "enter applies a palette or saves the look, tab/1-5 pages",
+                Page::Colors => "enter edits a color, tab/1-5 pages, Esc closes",
+                Page::Shape => "h/l change, H/L by five, enter flips or cycles, tab/1-5 pages",
+                Page::Text => "enter edits: bold, italic, dim, underline, reverse, strikethrough",
+                Page::Font => "enter edits or cycles; the font feeds `minuteman init-terminal`",
+            },
             hint_style,
         ),
-        None if in_saved_themes => Line::styled(
-            "enter applies, r renames, d deletes, Esc goes back",
-            hint_style,
-        ),
-        None => Line::styled(
-            "j/k moves, enter opens/edits/cycles, a click acts, Esc back/closes — session only, \
-             not saved",
-            hint_style,
-        ),
-    });
-    frame.render_widget(Paragraph::new(lines), inner);
+    };
+    frame.render_widget(Paragraph::new(hint), areas.hint);
 }
 
 #[cfg(test)]
@@ -994,6 +1006,89 @@ mod tests {
             .draw(|frame| render_menu(frame, &menu, &config()))
             .unwrap();
         assert!(screen_text(&terminal).contains("Inspect"));
+    }
+
+    fn draw_appearance(width: u16, height: u16, popup: &AppearancePopup) -> Terminal<TestBackend> {
+        let mut config = config();
+        config.theme.shape.gaps_in = theming::Gap::clamped(2);
+        config.theme.shape.shadow = true;
+        let font = theming::Font::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_appearance(
+                    frame,
+                    popup,
+                    &AppearanceView {
+                        theme: &config.theme,
+                        glyphs: config.ui.glyphs,
+                        styles: &config.styles,
+                        font: &font,
+                        active_preset: Some("neon"),
+                        active_custom_theme: None,
+                    },
+                    &config,
+                );
+            })
+            .unwrap();
+        terminal
+    }
+
+    #[test]
+    fn the_appearance_popup_lists_its_pages_beside_the_chosen_pages_rows() {
+        let mut popup = AppearancePopup::new();
+        popup.set_page(Page::Shape);
+        let terminal = draw_appearance(100, 40, &popup);
+        let text = screen_text(&terminal);
+        for (i, page) in Page::ALL.iter().enumerate() {
+            assert!(
+                text.contains(&format!("{} {}", i + 1, page.label())),
+                "{text}"
+            );
+        }
+        assert!(
+            text.contains("Gap between panes") && text.contains("2 cells"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Popup shadows") && text.contains("on"),
+            "{text}"
+        );
+        assert!(
+            text.contains("h/l change"),
+            "the Shape page's own hint: {text}"
+        );
+
+        // A row and a page are where `hit` says they are.
+        let area = panel_area(Rect::new(0, 0, 100, 40), popup.panel_rows());
+        let areas = appearance_popup::areas(area);
+        let row_line: String = (areas.content.x..areas.content.right())
+            .map(|x| {
+                terminal.backend().buffer()[(x, areas.content.y + 3)]
+                    .symbol()
+                    .to_string()
+            })
+            .collect();
+        assert!(row_line.starts_with("Gap between panes"), "{row_line:?}");
+        assert_eq!(
+            appearance_popup::hit(
+                area,
+                popup.rows().len(),
+                Position::new(areas.content.x, areas.content.y + 3)
+            ),
+            appearance_popup::Hit::Row(2)
+        );
+    }
+
+    #[test]
+    fn the_appearance_popup_fits_any_screen_without_panicking() {
+        let mut popup = AppearancePopup::new();
+        for page in Page::ALL {
+            popup.set_page(page);
+            for (w, h) in [(0, 0), (1, 1), (12, 4), (30, 10), (80, 24), (200, 60)] {
+                draw_appearance(w, h, &popup);
+            }
+        }
     }
 
     fn compress_form() -> CompressPopup {

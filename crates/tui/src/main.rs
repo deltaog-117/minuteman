@@ -800,13 +800,16 @@ fn main() -> Result<()> {
 /// The theme in effect for the running session, before any in-progress (uncommitted) appearance
 /// edit is previewed on top: `local_theme.name`, if the appearance popup ever picked one, wins as
 /// the base palette over `config.theme`; either way, `local_theme`'s other fields (colors, border
-/// style, separator) layer on top of that base.
+/// style, separator, shape) layer on top of that base. A picked palette replaces the colors only:
+/// the shape from `appearance.toml` stays underneath it.
 fn effective_theme(config: &Config, local_theme: &RawTheme) -> Theme {
-    let base = local_theme
-        .name
-        .as_deref()
-        .map(Theme::named)
-        .unwrap_or_else(|| config.theme.clone());
+    let base = local_theme.name.as_deref().map_or_else(
+        || config.theme.clone(),
+        |name| Theme {
+            shape: config.theme.shape,
+            ..Theme::named(name)
+        },
+    );
     base.overlay_raw(local_theme)
 }
 
@@ -926,15 +929,14 @@ fn apply_appearance_outcome(
         let ui = effective_ui(config, local_ui);
         let styles = effective_styles(config, local_style);
         let font = effective_font(config, local_font);
-        let theme_name = appearance_popup::theme_name(local_theme.name.as_deref(), &theme);
         AppearanceView {
             theme: &theme,
             glyphs: ui.glyphs,
             styles: &styles,
             font: &font,
-            theme_name,
             // Never actually read: `current_value` is only called for an editable/cycle row, and
-            // `Row::SaveTheme` is neither.
+            // the Theme page's rows are neither.
+            active_preset: None,
             active_custom_theme: None,
         }
         .value(row)
@@ -996,6 +998,53 @@ fn apply_appearance_outcome(
                 local_bookmarks,
                 app,
             );
+        }
+        AppearanceOutcome::Toggle(row) => {
+            let shape = effective_theme(config, local_theme).shape;
+            appearance_popup::toggle(local_theme, row, &shape);
+            persist_local(
+                local_theme,
+                local_ui,
+                local_panels,
+                local_style,
+                local_font,
+                local_custom_themes,
+                local_active_custom_theme,
+                local_bookmarks,
+                app,
+            );
+        }
+        AppearanceOutcome::Step(row, delta) => {
+            let shape = effective_theme(config, local_theme).shape;
+            appearance_popup::step(local_theme, row, &shape, delta);
+            persist_local(
+                local_theme,
+                local_ui,
+                local_panels,
+                local_style,
+                local_font,
+                local_custom_themes,
+                local_active_custom_theme,
+                local_bookmarks,
+                app,
+            );
+        }
+        AppearanceOutcome::ApplyPreset(name) => {
+            *local_theme = appearance_popup::apply_preset(local_theme, name);
+            // The live look is a built-in palette now, not a saved theme drifting from one.
+            *local_active_custom_theme = None;
+            persist_local(
+                local_theme,
+                local_ui,
+                local_panels,
+                local_style,
+                local_font,
+                local_custom_themes,
+                local_active_custom_theme,
+                local_bookmarks,
+                app,
+            );
+            app.status = Some(format!("applied palette '{name}'"));
         }
         AppearanceOutcome::Reset => {
             *local_theme = RawTheme::default();
@@ -1346,6 +1395,7 @@ fn run(
                 panels.columns,
                 panels.show_hud,
                 view_mode,
+                effective_theme(config, &local_theme).shape,
             );
             if let Some(row) = browser_drag::edge_scroll(
                 active.pointer,
@@ -1397,6 +1447,7 @@ fn run(
                 panels.columns,
                 panels.show_hud,
                 view_mode,
+                effective_theme(config, &local_theme).shape,
             );
             grid_top = GridLayout::split(body_of(&layout)).follow(
                 grid_top,
@@ -1518,6 +1569,7 @@ fn run(
                                     panels.columns,
                                     panels.show_hud,
                                     view_mode,
+                                    effective_theme(config, &local_theme).shape,
                                     browser,
                                     current_list.offset(),
                                     shell_box,
@@ -1659,7 +1711,8 @@ fn run(
                     } else {
                         0
                     };
-                    let popup_area = overlay_view::panel_area(frame_area, row_count + extra);
+                    let popup_area =
+                        overlay_view::panel_area(frame_area, popup_ref.panel_rows() + extra);
                     let pos = Position::new(mouse.column, mouse.row);
                     // While a color row is in picker mode, a click/drag inside the gradient
                     // square or the hue strip sets the color directly; missing both areas falls
@@ -1678,6 +1731,13 @@ fn run(
                                     match appearance_popup::hit(popup_area, row_count, pos) {
                                         AppearanceHit::Row(i) => {
                                             appearance.as_mut().expect("checked above").click_row(i)
+                                        }
+                                        AppearanceHit::Page(i) => {
+                                            appearance
+                                                .as_mut()
+                                                .expect("checked above")
+                                                .click_page(i);
+                                            AppearanceOutcome::Stay
                                         }
                                         AppearanceHit::Outside => AppearanceOutcome::Close,
                                         AppearanceHit::Inert => AppearanceOutcome::Stay,
@@ -1714,10 +1774,16 @@ fn run(
                                 {
                                     appearance.as_mut().expect("checked above").click_row(i)
                                 }
-                                AppearanceHit::Outside => AppearanceOutcome::Close,
-                                AppearanceHit::Row(_) | AppearanceHit::Inert => {
+                                AppearanceHit::Page(i)
+                                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
+                                {
+                                    appearance.as_mut().expect("checked above").click_page(i);
                                     AppearanceOutcome::Stay
                                 }
+                                AppearanceHit::Outside => AppearanceOutcome::Close,
+                                AppearanceHit::Row(_)
+                                | AppearanceHit::Page(_)
+                                | AppearanceHit::Inert => AppearanceOutcome::Stay,
                             };
                             apply_appearance_outcome(
                                 outcome,
@@ -1811,8 +1877,13 @@ fn run(
                     && app.prompt.is_none()
                 {
                     let panels = effective_panels(config, &local_panels);
-                    let layout =
-                        browser_layout(frame_area, panels.columns, panels.show_hud, view_mode);
+                    let layout = browser_layout(
+                        frame_area,
+                        panels.columns,
+                        panels.show_hud,
+                        view_mode,
+                        effective_theme(config, &local_theme).shape,
+                    );
                     let film = FilmstripLayout::split(body_of(&layout));
                     let len = browser.current_entries().len();
                     let window =
@@ -1857,8 +1928,13 @@ fn run(
                     && app.prompt.is_none()
                 {
                     let panels = effective_panels(config, &local_panels);
-                    let layout =
-                        browser_layout(frame_area, panels.columns, panels.show_hud, view_mode);
+                    let layout = browser_layout(
+                        frame_area,
+                        panels.columns,
+                        panels.show_hud,
+                        view_mode,
+                        effective_theme(config, &local_theme).shape,
+                    );
                     // A click on the header's path jumps to that segment's directory. Only worked
                     // out for the buttons that act on it, since it lays the header out again.
                     let crumb_dir = if panels.show_hud
@@ -2746,6 +2822,7 @@ fn run(
                         panels.columns,
                         panels.show_hud,
                         view_mode,
+                        effective_theme(config, &local_theme).shape,
                     );
                     browser.select_index(jump_target(
                         browser.selected_index(),
@@ -2776,6 +2853,7 @@ fn run(
                             panels.columns,
                             panels.show_hud,
                             view_mode,
+                            effective_theme(config, &local_theme).shape,
                         );
                         let grid = GridLayout::split(body_of(&layout));
                         browser.select_index(grid.step(
@@ -3103,6 +3181,7 @@ fn drop_target(
     columns: theming::ColumnLayout,
     show_hud: bool,
     view_mode: ViewMode,
+    shape: theming::Shape,
     browser: &BrowserState,
     list_offset: usize,
     shell_box: Option<Rect>,
@@ -3110,7 +3189,7 @@ fn drop_target(
     sources: &[PathBuf],
 ) -> browser_drag::Target {
     let hit = browser_mouse::hit_test(
-        &browser_layout(frame_area, columns, show_hud, view_mode),
+        &browser_layout(frame_area, columns, show_hud, view_mode, shape),
         pointer,
         Listing::unscrolled(browser.parent_entries().len()),
         Listing {
@@ -3317,6 +3396,7 @@ fn draw(
         config.panels.columns,
         config.panels.show_hud,
         view_mode,
+        config.theme.shape,
     );
     let (header_row, status_row) = (layout.header, layout.status);
     // The filmstrip replaces the three columns with one big preview over a strip of thumbnails,
@@ -3351,6 +3431,7 @@ fn draw(
             config.panels.columns,
             config.panels.show_hud,
             view_mode,
+            config.theme.shape,
             browser,
             current_state.offset(),
             shell_box,
@@ -3482,6 +3563,13 @@ fn draw(
         );
     }
 
+    // The side columns, dimmed so the active one stands out. The filmstrip's big preview is what
+    // that view is for, so it stays bright.
+    if config.theme.shape.dim_inactive && filmstrip.is_none() {
+        style::dim(frame.buffer_mut(), columns[0]);
+        style::dim(frame.buffer_mut(), columns[2]);
+    }
+
     if let Some(tiles) = &grid {
         grid_view::render(
             frame,
@@ -3557,7 +3645,9 @@ fn draw(
         size,
     }) = shell
     {
-        panes.render(frame, shell_area(frame.area(), offset, size), config);
+        let area = shell_area(frame.area(), offset, size);
+        style::cast_shadow(frame.buffer_mut(), area, config);
+        panes.render(frame, area, config);
     }
     if let Some(view) = usage {
         disk_usage_view::render(frame, view, config);
@@ -3614,7 +3704,11 @@ fn draw(
         // `styles` already carry `local_theme`/`local_ui`/`local_style` (and any in-progress
         // edit's live preview) — nothing more to layer for those. `font` is the one exception
         // (see `draw`'s own doc above), so it's resolved here instead.
-        let theme_name = appearance_popup::theme_name(local_theme.name.as_deref(), &config.theme);
+        // A saved theme being shown is what the Theme page marks, not the palette it began from.
+        let active_preset = local_active_custom_theme
+            .is_none()
+            .then(|| appearance_popup::active_preset(local_theme.name.as_deref(), &config.theme))
+            .flatten();
         let font = effective_font(config, local_font);
         overlay_view::render_appearance(
             frame,
@@ -3624,7 +3718,7 @@ fn draw(
                 glyphs: config.ui.glyphs,
                 styles: &config.styles,
                 font: &font,
-                theme_name,
+                active_preset,
                 active_custom_theme: local_active_custom_theme,
             },
             config,

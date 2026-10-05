@@ -24,6 +24,7 @@ pub mod config;
 pub mod keymap;
 pub mod palette;
 pub mod panels;
+pub mod shape;
 pub mod theme;
 pub mod ui;
 
@@ -36,5 +37,6 @@ pub use config::{
 pub use keymap::{Action, KeyMap};
 pub use palette::TerminalPalette;
 pub use panels::{ColumnLayout, PanelsConfig, RawPanels};
+pub use shape::{BORDER_STYLES, Gap, RawShape, Shape, TitleAlign};
 pub use theme::{RawTheme, Theme};
 pub use ui::{GlyphSet, RawUi, Ui};

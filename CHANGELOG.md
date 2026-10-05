@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`: the appearance popup (`a`) is laid out like a settings window: five pages down the left
+  (Theme, Colors, Shape, Text, Font), switched with `Tab`/`Shift+Tab`, `1`–`5` or a click, and the
+  chosen page's rows on the right. The Theme page lists the built-in palettes and the saved themes
+  together, with "Save current look" and "Reset to defaults"; choosing a palette now replaces any
+  colors changed by hand (it used to keep them) and keeps the shape. `Esc` closes the popup from
+  any page. The hint line no longer says changes are session-only, as they have been saved since
+  `local.toml` existed.
 - `tui`: marking with `v` is now the only way to choose entries. Yank, cut, trash, delete,
   compress and extract — from the keys, the right-click menu and the `:` commands — act on the
   marks and nothing else, where the menu and the commands used to fall back to the row under the
@@ -73,6 +80,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `theming`, `tui`: a shape for the look. `[shape]` in `appearance.toml` sets `gaps_in` (blank cells
+  between panes, 0–4), `gaps_out` (to the left and right screen edges, 0–8, half as many rows at
+  the top and bottom), `title_align` (`left`, `center`, `right`), `shadow` (menus, popups and the
+  shell box cast a shadow) and `dim_inactive` (the parent and preview columns are drawn dim).
+  Out-of-range numbers are clamped and unknown names fall back, and a small terminal gets smaller
+  outer gaps. `border_type` accepts `dashed`, `thick-dashed`, `block`, `block-inside` and `none`.
+  The shape is part of the theme (`Theme::shape`, `RawTheme::shape`), so a saved theme stores it and
+  brings it back; a saved theme from before has the default shape. A `[shape]` alone does not stop
+  the colors following the terminal. The appearance popup's Shape page edits all of it live.
 - `plugins`, `theming`, `tui`: a plugin can be bound to several keys (`on_key = ["b", "B"]`; a single
   string still works), can declare `:` commands (`commands = ["blame"]`, tried after the built-ins
   so a plugin adds commands but never replaces `cd` or `q`, and only for a line that uses no shell

@@ -21,11 +21,14 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders};
 use shared::DirEntryInfo;
-use theming::{Config, Mods, Styles, Theme};
+use theming::{Config, Mods, Styles, Theme, TitleAlign};
 
 /// Whether the terminal advertises 24-bit color. Read once — `COLORTERM` can't change under a
 /// running process, and this is consulted for every colored cell.
@@ -131,12 +134,78 @@ pub fn color(name: &str) -> Color {
     parse_color(name, truecolor())
 }
 
+/// The ratatui frame for one of `theming::BORDER_STYLES`; anything else, `none` included (it has
+/// no `BorderType`, see [`frame_set`]), is drawn rounded.
 pub fn border_type(name: &str) -> BorderType {
     match name.to_lowercase().as_str() {
         "plain" => BorderType::Plain,
         "double" => BorderType::Double,
         "thick" => BorderType::Thick,
+        "dashed" => BorderType::LightDoubleDashed,
+        "thick-dashed" => BorderType::HeavyDoubleDashed,
+        "block" => BorderType::QuadrantOutside,
+        "block-inside" => BorderType::QuadrantInside,
         _ => BorderType::Rounded,
+    }
+}
+
+/// The symbols every frame is drawn with. `none` is blanks rather than no border at all, so a
+/// pane keeps its one-cell frame and its rows stay exactly where the mouse code looks for them.
+pub fn frame_set(config: &Config) -> border::Set<'static> {
+    let name = &config.theme.border_type;
+    if name.eq_ignore_ascii_case("none") {
+        border::EMPTY
+    } else if crate::glyphs::of(config).ascii_borders {
+        crate::glyphs::ASCII_BORDER
+    } else {
+        border_type(name).to_border_set()
+    }
+}
+
+fn title_alignment(align: TitleAlign) -> Alignment {
+    match align {
+        TitleAlign::Left => Alignment::Left,
+        TitleAlign::Center => Alignment::Center,
+        TitleAlign::Right => Alignment::Right,
+    }
+}
+
+/// Dims every cell of `area`, for `[shape] dim_inactive`. Cells an image protocol owns are left
+/// alone: their content is an escape sequence, not text a terminal attribute could fade.
+pub fn dim(buf: &mut Buffer, area: Rect) {
+    for pos in area.intersection(buf.area).positions() {
+        let cell = &mut buf[pos];
+        if cell.diff_option == CellDiffOption::None {
+            cell.modifier.insert(Modifier::DIM);
+        }
+    }
+}
+
+/// The shadow a floating panel casts on what is already drawn, when `[shape] shadow` is on: two
+/// columns down its right side and one row under it, both offset by one, as if lit from the top
+/// left. Call it once whatever is under the panel has been drawn; it never touches the panel's own
+/// cells.
+pub fn cast_shadow(buf: &mut Buffer, panel: Rect, config: &Config) {
+    if !config.theme.shape.shadow {
+        return;
+    }
+    // Black from outside the 16 themed slots: a terminal that sets slot 0 to its own background
+    // would otherwise make the shadow invisible.
+    let shade = if truecolor() {
+        Color::Rgb(0, 0, 0)
+    } else {
+        Color::Indexed(16)
+    };
+    let right = Rect::new(panel.right(), panel.y.saturating_add(1), 2, panel.height);
+    let below = Rect::new(panel.x.saturating_add(2), panel.bottom(), panel.width, 1);
+    for rect in [right, below] {
+        for pos in rect.intersection(buf.area).positions() {
+            let cell = &mut buf[pos];
+            if cell.diff_option == CellDiffOption::None {
+                cell.bg = shade;
+                cell.modifier.insert(Modifier::DIM);
+            }
+        }
     }
 }
 
@@ -176,17 +245,14 @@ pub fn themed_block_with_border(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border));
+        .border_style(Style::default().fg(border))
+        .border_set(frame_set(config))
+        .title_alignment(title_alignment(theme.shape.title_align));
     // A frame with no name (a grid tile) stays a plain line rather than gaining two blanks.
-    let block = if title.is_empty() {
+    if title.is_empty() {
         block
     } else {
         block.title(Line::from(Span::styled(format!(" {title} "), title_style)))
-    };
-    if crate::glyphs::of(config).ascii_borders {
-        block.border_set(crate::glyphs::ASCII_BORDER)
-    } else {
-        block.border_type(border_type(&theme.border_type))
     }
 }
 
@@ -368,6 +434,92 @@ mod tests {
         assert_eq!(border_type("PLAIN"), BorderType::Plain);
         assert_eq!(border_type("thick"), BorderType::Thick);
         assert_eq!(border_type("wobbly"), BorderType::Rounded);
+    }
+
+    fn config_with(border: &str, shape: theming::RawShape) -> Config {
+        let mut config = Config::from_sources(None, None, None);
+        config.theme.border_type = border.to_string();
+        config.theme.shape = config.theme.shape.overlay_raw(&shape);
+        config
+    }
+
+    #[test]
+    fn every_listed_frame_style_draws_differently() {
+        let sets: Vec<border::Set<'static>> = theming::BORDER_STYLES
+            .iter()
+            .map(|name| frame_set(&config_with(name, Default::default())))
+            .collect();
+        for (i, a) in sets.iter().enumerate() {
+            for b in &sets[i + 1..] {
+                assert_ne!(a, b, "two styles share one frame");
+            }
+        }
+        assert_eq!(sets.last(), Some(&border::EMPTY), "none is listed last");
+    }
+
+    #[test]
+    fn a_frame_drawn_without_lines_keeps_its_rows_in_place() {
+        let config = config_with("none", Default::default());
+        let block = themed_block(&config, "pane", false);
+        let area = Rect::new(0, 0, 20, 6);
+        assert_eq!(block.inner(area), Rect::new(1, 1, 18, 4));
+    }
+
+    #[test]
+    fn titles_follow_the_shape_alignment() {
+        let shape = theming::RawShape {
+            title_align: Some("right".into()),
+            ..Default::default()
+        };
+        let config = config_with("rounded", shape);
+        let area = Rect::new(0, 0, 20, 3);
+        let mut buf = Buffer::empty(area);
+        ratatui::widgets::Widget::render(themed_block(&config, "ab", false), area, &mut buf);
+        let top: String = (0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(top.ends_with(" ab ╮"), "{top:?}");
+    }
+
+    #[test]
+    fn a_shadow_falls_beside_and_under_the_panel_only_when_switched_on() {
+        let area = Rect::new(0, 0, 12, 8);
+        let panel = Rect::new(2, 1, 5, 3);
+        let mut buf = Buffer::empty(area);
+        cast_shadow(&mut buf, panel, &config_with("rounded", Default::default()));
+        assert_eq!(buf, Buffer::empty(area), "off by default");
+
+        cast_shadow(&mut buf, panel, &config_with("rounded", shape_on()));
+        let shaded = |x: u16, y: u16| buf[(x, y)].modifier.contains(Modifier::DIM);
+        assert!(shaded(7, 2) && shaded(8, 4), "right of the panel");
+        assert!(shaded(4, 4) && shaded(6, 4), "under the panel");
+        assert!(!shaded(7, 1), "the top right corner stays lit");
+        assert!(
+            !shaded(2, 4) && !shaded(3, 4),
+            "the bottom left corner stays lit"
+        );
+        assert!(
+            panel
+                .positions()
+                .all(|pos| !buf[pos].modifier.contains(Modifier::DIM)),
+            "never on the panel itself"
+        );
+    }
+
+    #[test]
+    fn a_shadow_at_the_screen_edge_is_clipped_not_a_panic() {
+        let area = Rect::new(0, 0, 10, 5);
+        let config = config_with("rounded", shape_on());
+        let mut buf = Buffer::empty(area);
+        cast_shadow(&mut buf, area, &config);
+        cast_shadow(&mut buf, Rect::new(8, 3, 2, 2), &config);
+        dim(&mut buf, Rect::new(5, 2, 50, 50));
+        assert!(buf[(9, 4)].modifier.contains(Modifier::DIM));
+    }
+
+    fn shape_on() -> theming::RawShape {
+        theming::RawShape {
+            shadow: Some(true),
+            ..Default::default()
+        }
     }
 
     #[test]

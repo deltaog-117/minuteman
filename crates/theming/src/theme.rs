@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 use crate::palette::TerminalPalette;
+use crate::shape::{RawShape, Shape};
 
 /// What the startup probe learned about the terminal.
 struct TerminalProbe {
@@ -79,6 +80,9 @@ pub struct Theme {
     /// arrows; needs a Powerline/Nerd Font), or `"auto"` (arrows exactly when the glyph set is
     /// `nerd`).
     pub separator: String,
+    /// Gaps, title placement and effects: everything about the look that isn't a color. Part of
+    /// the theme so a saved theme brings its shape back with its colors.
+    pub shape: Shape,
 }
 
 impl Theme {
@@ -238,6 +242,7 @@ impl Theme {
                 .separator
                 .clone()
                 .unwrap_or_else(|| self.separator.clone()),
+            shape: self.shape.overlay_raw(&overrides.shape),
         }
     }
 
@@ -268,6 +273,7 @@ impl Theme {
             danger_fg: "red".into(),
             border_type: "plain".into(),
             separator: "auto".into(),
+            shape: Shape::default(),
         }
     }
 
@@ -298,6 +304,7 @@ impl Theme {
             danger_fg: "red".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
+            shape: Shape::default(),
         }
     }
 
@@ -329,6 +336,7 @@ impl Theme {
             danger_fg: "#f38ba8".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
+            shape: Shape::default(),
         }
     }
 
@@ -362,6 +370,7 @@ impl Theme {
             danger_fg: "#d20f39".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
+            shape: Shape::default(),
         }
     }
 
@@ -395,6 +404,7 @@ impl Theme {
             danger_fg: "#bf616a".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
+            shape: Shape::default(),
         }
     }
 }
@@ -428,6 +438,7 @@ impl Default for Theme {
             danger_fg: "#ff3860".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
+            shape: Shape::default(),
         }
     }
 }
@@ -464,6 +475,10 @@ pub struct RawTheme {
     pub danger_fg: Option<String>,
     pub border_type: Option<String>,
     pub separator: Option<String>,
+    /// `[shape]` from `appearance.toml` (see `Config::from_sources`), or a saved theme's shape.
+    /// Left out of the file when nothing in it is set.
+    #[serde(skip_serializing_if = "RawShape::is_empty")]
+    pub shape: RawShape,
 }
 
 impl RawTheme {
@@ -498,6 +513,7 @@ impl RawTheme {
             danger_fg: Some(theme.danger_fg.clone()),
             border_type: Some(theme.border_type.clone()),
             separator: Some(theme.separator.clone()),
+            shape: RawShape::from_shape(&theme.shape),
         }
     }
 
@@ -530,6 +546,7 @@ impl RawTheme {
             danger_fg: top.danger_fg.or(self.danger_fg),
             border_type: top.border_type.or(self.border_type),
             separator: top.separator.or(self.separator),
+            shape: self.shape.overlay(top.shape),
         }
     }
 }

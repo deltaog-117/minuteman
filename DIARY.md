@@ -80,6 +80,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-04 | Background Folder Moves and Remembered View | A planned-then-applied move loaded on the blocking pool with a 40 ms grace, old folder kept until it arrives (COA A), over an empty target shown at once (B) and a worker-thread browser (C); the view saved in `local.toml` | ✅ Confirmed |
 | 2026-10-04 | Default Theme Source | The terminal's own palette (OSC 4/10/11), mapped with contrast lifting, over a static palette (A) and a palette file (C) | ✅ Confirmed |
 | 2026-10-04 | Plugin Triggers (stage 1.5, first cycle) | Several keys, declared `:` commands and `:plugin <name>` on the existing process host, plus a Python example (COA A); state/events (B) and action names (C) deferred | ✅ Confirmed |
+| 2026-10-05 | Appearance Shape and Paged Popup | A typed `Shape` inside `Theme`, gaps applied in the shared `browser_layout`, and the popup rebuilt as a page list beside rows (COA B); a Shape category in the old popup (A) and shape presets only (C) rejected | ✅ Confirmed |
 
 ---
 
@@ -5794,6 +5795,82 @@ again. The real binary was run in a PTY: a plugin with no `commands` answered `:
 was told `cd=that is a built-in command | hello=ok | a b=a command name is one or more letters,
 digits, '-', '_', '.' or '+'`, `:hello world` reached it with its argument, and `:cd /tmp` was
 still the built-in.
+
+---
+
+### Appearance Shape and a Paged Appearance Popup (COA B)
+
+**Date:** 2026-10-05 · **Author:** deltaog-117
+
+**Context.** The look could only change colors, glyphs, text styles and four frame styles. The goal
+was to change its shape too (frames, spacing, effects), edited in a settings window like a
+Hyprland appearance configurator, with saved themes keeping the shape. A terminal draws whole
+cells, so Hyprland's pixel settings map only partly: rounding becomes the frame style, border width
+becomes the frame weight, gaps are counted in cells, the shadow is drawn with cell colors, and
+dimming uses the dim attribute. Blur and opacity have no equivalent.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A Shape category in the existing two-level popup, `[shape]` in its own table | Rejected |
+| B | A, plus the popup rebuilt as pages beside rows, and saved themes keeping the shape | Chosen |
+| C | Named shape presets on one row, everything else by hand in the file | Rejected |
+
+**Why B.** It was the user's choice: the point was a configurator that works like the one on the
+desktop, which A gets only halfway (no page list, themes without shape) and C not at all (no live
+fine-tuning).
+
+**Where the shape lives.** Inside `Theme`, as `Theme::shape` and `RawTheme::shape`, not as a
+fourth `local_*` table beside it. `border_type` and `separator` were already shape settings
+inside the theme, and putting the rest there too means a saved theme (a `RawTheme` snapshot),
+`local.toml`, the live preview, Reset and the "update or new" comparison all carry the shape with
+no new state threaded through `main`. A separate table would have needed a new argument on
+`persist_local`, `apply_appearance_outcome` and every call to them. The file still has its own
+`[shape]` table, merged into the theme when loading, since a gap is not a color. Three places
+compare themes and needed care: `theme_is_customized` ignores the shape, so a `[shape]` alone
+keeps the colors following the terminal; `active_preset` compares colors only, so changing the
+shape never makes a palette look inactive; and `effective_theme` keeps the configured shape under
+a palette picked in the popup, which before replaced the whole base theme.
+
+**Types.** A gap is `Gap<const MAX: u8>`, which can only be built through `clamped`, so a negative
+or huge number from the file or a held key cannot reach the layout. `TitleAlign` is an enum with a
+fallback on unknown names. `border_type` stays a string, as before; `none` maps to blank frame
+symbols rather than no frame, so every pane keeps its one-cell border and `list_area`'s row
+arithmetic is unchanged.
+
+**Layout.** The gaps are applied in `view_mode::browser_layout`, which drawing, the drag and drop
+target and every mouse handler already call, so the gapped columns and the rows a click resolves
+to cannot disagree. `gaps_out` uses half as many rows as columns, because a cell is about twice as
+tall as it is wide, and shrinks on a small terminal so the browser stays at least 20 by 6.
+
+**The window.** `Page` replaces `Category`/`View`; pages switch with `Tab`/`Shift+Tab`, a number or
+a click, and the popup is sized for the longest page so it never resizes while switching. The
+Theme page merges the old Theme row, the Saved themes category and the two action rows. A preset
+now replaces hand-picked colors (the old Theme row kept them on top of the new palette, which made
+"pick dracula" not look like dracula) while keeping the frame style, separator and shape, which
+belong to the Shape page. The save, rename, delete and color-picker flows are unchanged. Geometry
+is one pure `areas` function used by drawing and by `hit`.
+
+**Trade-offs.** Dimming has no strength setting, since the dim attribute is on or off. The shadow is
+black from the 256-color cube rather than ANSI black, which a terminal may set to its own
+background; on a light theme it is heavy. A saved theme from before shapes existed resolves to the
+default shape. Choosing a palette now drops hand-picked colors, a change from before.
+
+**Verification.** `scripts/check` passes. New property tests: a gap is always in range and stepping
+undoes itself, a saved shape resolves back to itself over any base, the top table wins per field
+and a raw shape survives TOML; the gapped layout never puts a pane off screen or over another,
+and no gaps is exactly the old layout; the popup's page list, divider, rows and hint never
+overlap, and `hit` never names a missing page or row. Unit tests cover the new frame styles (all
+different, `none` keeping the inner area), title alignment, the shadow's placement and clipping,
+the example file documenting every shape field and style, and the popup's keys, steps, toggles and
+preset rule. The real binary was run in a PTY through `pyte` with a throwaway config folder: 23
+checks passed, covering the five pages, frames at columns 5, 22/25, 58/61 and 94 with
+`gaps_in = 2` and `gaps_out = 5`, a click on `charlie.txt` selecting it, every change written at
+once, the saved theme's shape table, a palette keeping the gaps, Reset dropping them and the saved
+theme bringing them back, the shadow appearing with a popup and going with it, and a click on
+"2 Colors". The harness had to answer the startup probes' Device Attributes and status queries,
+as a real terminal does. Release binary: +40,360 bytes (+0.28%), measured by building `HEAD` and
+the change in two worktrees at paths of the same length, since panic locations embed the source
+path and a longer path alone made the first measurement wrong.
 
 ---
 

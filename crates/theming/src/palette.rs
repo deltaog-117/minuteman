@@ -82,6 +82,7 @@ impl Theme {
             danger_fg: text(ansi(1)),
             border_type: "rounded".into(),
             separator: "auto".into(),
+            shape: crate::shape::Shape::default(),
         }
     }
 }

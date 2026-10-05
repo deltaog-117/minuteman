@@ -1438,6 +1438,29 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   with no `commands` answered `:state`, one that asked for `cd`, `hello` and `a b` was told that
   `cd` is built in, got `hello`, and was told what a name may hold, `:hello world` reached it with
   its argument, and `:cd /tmp` was still the built-in.
+- ✅ **Appearance shape and a settings-window appearance popup (COA B)** – the look now has a
+  shape as well as colors: a `[shape]` table in `appearance.toml` sets the blank cells between the
+  panes (`gaps_in`, 0–4) and to the screen edge (`gaps_out`, 0–8 columns and half as many rows),
+  where pane titles sit (`title_align`), a shadow under menus, popups and the shell box (`shadow`)
+  and dimmed parent and preview columns (`dim_inactive`). `border_type` gained `dashed`,
+  `thick-dashed`, `block`, `block-inside` and `none` (blank frame symbols, so a pane keeps its cell
+  and the mouse code its rows). New `theming::shape` holds a typed `Shape` (gaps are a `Gap<MAX>`
+  that can only be built clamped) inside `Theme`, so every saved theme now stores its shape along
+  with its colors, and `local.toml`, live preview and Reset carry it with no new state. A `[shape]`
+  alone does not pin the colors, so they still follow the terminal. The gaps are applied in
+  `view_mode::browser_layout`, which drawing and every mouse handler already share, so clicks land
+  on the gapped rows. The appearance popup was rebuilt like a desktop settings window: five pages
+  down the left (Theme, Colors, Shape, Text, Font), switched with `Tab`/`Shift+Tab`, `1`–`5` or a
+  click, and the chosen page's rows on the right. The Theme page lists the built-in palettes and
+  your saved themes together (a palette replaces the colors and keeps the shape); the Shape page
+  steps numbers with `h`/`l` (`H`/`L` by five) and flips switches with `Enter`. Chosen as COA B
+  (shape plus the window rebuild plus themes that keep their shape) over a Shape category in the
+  old two-level popup (A) and named shape presets only (C). +40 KB (+0.28%) on the release binary,
+  no new dependency. Verified in the compiled binary through a PTY: the five pages, the gaps (frames
+  at the expected columns, two blank rows on top), a click still selecting the row it was drawn on,
+  each change in `local.toml` at once, a saved theme holding a shape table, a palette keeping the
+  gaps, Reset dropping them and the saved theme bringing them back, and the shadow appearing and
+  going with a popup.
 
 ## 🟡 Medium Priority (Important)
 

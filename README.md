@@ -32,9 +32,13 @@ trash, and a stable multi-language sandboxed plugin system). Native SSH/SFTP bro
 - 🔹 **Interactive shell overlay** – `Alt+n` drops you into a real, fully interactive `$SHELL` in the
   browsed directory; `exit` returns to the TUI exactly where you left it, not Ranger's
   auto-close-after-one-command.
-- 🔹 **The whole look in one file** – `appearance.toml` holds colors, glyphs, per-element text
-  styles (bold, italic, dim, underline, ...) and your font; `mman init-appearance` prints a
-  commented starting point. Directories and executables are bold by default, like Ranger's.
+- 🔹 **The whole look in one file** – `appearance.toml` holds colors, the shape (frame style, gaps
+  between panes and to the screen edge, title position, popup shadows, dimmed unfocused panes),
+  glyphs, per-element text styles (bold, italic, dim, underline, ...) and your font;
+  `mman init-appearance` prints a commented starting point. Directories and executables are bold
+  by default, like Ranger's.
+- 🔹 **An appearance window** – `a` opens a settings window with five pages (Theme, Colors, Shape,
+  Text, Font) that applies every change at once. A theme you save keeps its colors and its shape.
 - 🔹 **Glyph sets that match your font** – `[ui] glyphs = "nerd"` adds file-type icons and
   Powerline arrows (with a Nerd Font); `"unicode"` (default) needs nothing special; `"ascii"` is
   for a Linux console. `mman glyphs` previews them, and
@@ -262,7 +266,7 @@ file, a missing file, even one that fails to parse never stops Minuteman from st
 
 - **`config.toml`** — keybindings. Copy [`config.example.toml`](config.example.toml) as a starting
   point.
-- **`appearance.toml`** — the whole look: colors, glyphs, text styles and the font. Print a fully
+- **`appearance.toml`** — the whole look: colors, shape, glyphs, text styles and the font. Print a fully
   commented starting point with `mman init-appearance > ~/.config/minuteman/appearance.toml`
   (it's [`appearance.example.toml`](appearance.example.toml)).
 - **`local.toml`** — written by Minuteman itself, not by you: whatever the settings popup
@@ -317,13 +321,21 @@ leader = ["space"]
 
 ## 🎨 Appearance
 
-`appearance.toml` has four tables. Everything left out keeps its default.
+`appearance.toml` has five tables. Everything left out keeps its default.
 
 ```toml
 [theme]   # colors: a built-in palette (see below) plus per-field overrides
 name = "neon"
 border_focused_fg = "#00f0ff"   # the active pane; see appearance.example.toml for every field
 dir_fg = "#00d9ff"
+border_type = "rounded"         # frame style, see Shape below
+
+[shape]   # gaps, title position and effects
+gaps_in = 1                    # blank cells between panes, 0 to 4
+gaps_out = 2                   # to the left/right screen edge (half as many rows), 0 to 8
+title_align = "center"         # "left" | "center" | "right"
+shadow = true                  # menus, popups and the shell box cast a shadow
+dim_inactive = true            # the parent and preview columns are drawn dim
 
 [ui]      # glyphs
 glyphs = "unicode"             # "unicode" | "nerd" (icons + Powerline arrows) | "ascii"
@@ -365,11 +377,27 @@ the seven entry kinds (`dir`, `source`, `config`, `doc`, `archive`, `media`, `ot
 `breadcrumb_current`, `pill`, `mode`, `status_name`, `status`, `hint_key`, `hint_label` and
 `message`; the example file says what each covers.
 
+**Shape.** A terminal draws whole cells, so there is no pixel rounding, blur or transparency:
+the shape is the frame style, the gaps (counted in cells) and two effects drawn with cell
+attributes. `border_type` picks the frame: `rounded`, `plain`, `double`, `thick`, `dashed`,
+`thick-dashed`, `block` (a heavy half-block frame), `block-inside`, or `none` (no visible lines;
+the panes keep their place). It stays under `[theme]`, where the built-in palettes set it; the
+rest is `[shape]`. A gap or a title position the file gets wrong falls back rather than failing,
+and a small terminal gets smaller outer gaps instead of an unusable browser.
+
+**The appearance window** (`a`) lists its pages on the left — `Tab`/`Shift+Tab`, `1`–`5` or a
+click switch them — and the chosen page's rows on the right. **Theme** lists the built-in
+palettes and the themes you saved (`Enter` applies one, `r` renames and `d` deletes yours), "Save
+current look" and "Reset to defaults". Picking a palette replaces the colors and keeps the shape.
+A saved theme stores the colors *and* the shape, so applying it brings both back. **Colors** edits
+each color as text or with a color picker (`Tab`), **Shape** steps the gaps with `h`/`l` (`H`/`L`
+by five) and flips the effects with `Enter`, **Text** edits the per-element styles and **Font**
+the glyph set and the font for `init-terminal`.
+
 **A `[theme]` or `[ui]` left in `config.toml`** (where they used to live) still works, but
 anything `appearance.toml` sets wins, field by field — and anything saved from the appearance
-popup (`a`; Theme, plus six colors, border style, separator and glyphs, with a row to reset back
-to whatever was in effect before) wins over both, until changed again from inside it. See
-`local.toml` above.
+window wins over both, until changed again from inside it (Reset goes back to whatever was in
+effect before). See `local.toml` above.
 
 ### Fonts and glyphs
 

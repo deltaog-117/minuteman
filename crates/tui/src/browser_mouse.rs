@@ -49,11 +49,20 @@ pub struct BrowserLayout {
 }
 
 impl BrowserLayout {
+    /// The layout without gaps — what the tests measure the gapped one against; the app always
+    /// goes through `view_mode::browser_layout`.
+    #[cfg(test)]
+    pub fn split(area: Rect, columns: ColumnLayout, show_hud: bool) -> Self {
+        Self::split_spaced(area, columns, show_hud, 0)
+    }
+
     /// `columns` picks 20/40/40 (parent | current | preview) or, with the parent column removed,
     /// an even 50/50 split that gives its width to `current`/`preview` instead of leaving it
     /// blank. `show_hud` reclaims the header row's height (rather than just leaving it empty)
     /// when it's hidden; the status row never shrinks the same way, since prompts always need it.
-    pub fn split(area: Rect, columns: ColumnLayout, show_hud: bool) -> Self {
+    /// `gap` blank cells go between the side-by-side columns (`[shape] gaps_in`), which share
+    /// what the gaps leave in the same proportions.
+    pub fn split_spaced(area: Rect, columns: ColumnLayout, show_hud: bool, gap: u16) -> Self {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -67,6 +76,7 @@ impl BrowserLayout {
             ColumnLayout::ThreePane => {
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
+                    .spacing(gap)
                     .constraints([
                         Constraint::Percentage(20),
                         Constraint::Percentage(40),
@@ -78,6 +88,7 @@ impl BrowserLayout {
             ColumnLayout::TwoPane => {
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
+                    .spacing(gap)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(mid);
                 // Zero-width, so `Rect::contains` never resolves a click into it and `draw` skips
