@@ -30,7 +30,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Clear, Paragraph};
 use theming::Config;
 
-use crate::{gradient, style};
+use crate::style;
 
 /// How long the splash stays up on its own before clearing itself.
 pub const DURATION: Duration = Duration::from_millis(900);
@@ -84,13 +84,8 @@ pub fn render(frame: &mut Frame<'_>, frame_area: Rect, splash: &BootSplash, conf
     let block = style::themed_block(config, "", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if config.gradient_borders {
-        gradient::paint(
-            frame.buffer_mut(),
-            area,
-            style::color(&theme.accent_fg),
-            style::color(&theme.border_focused_fg),
-        );
+    if theme.shape.gradient.on_focused() {
+        style::paint_gradient(frame.buffer_mut(), area, config);
     }
 
     let dim = style::color(&theme.border_fg);

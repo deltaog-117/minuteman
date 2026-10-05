@@ -14,8 +14,9 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Paints a two-color gradient around a rect's border and title, in one continuous sweep starting
-//! at the top-left corner — part of the cinematic layer, alongside `anim`'s time-based curves.
+//! Paints a two-color gradient over a rect's border and title — once around it from the top-left
+//! corner, around and back, left to right, or top to bottom (`theming::GradientFlow`) — part of
+//! the cinematic layer, alongside `anim`'s time-based curves.
 //!
 //! This deliberately recolors every cell along the perimeter, title text included, rather than
 //! trying to tell a border glyph from a title glyph: the effect is meant to read as one ribbon of
@@ -25,6 +26,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use theming::GradientFlow;
 
 use crate::style::blend_rgb;
 
@@ -70,18 +72,34 @@ fn perimeter_len(area: Rect) -> usize {
     2 * (area.width as usize + area.height as usize - 2)
 }
 
-/// Recolors `area`'s perimeter in `buf` as a gradient from `from` to `to`. A no-op wherever
-/// [`blend_rgb`] can't blend the two colors (anything but two resolved `Color::Rgb` values) — the
-/// caller's flat border color is left exactly as `Block` already drew it.
-pub fn paint(buf: &mut Buffer, area: Rect, from: Color, to: Color) {
+/// How far along the gradient the `index`th of `total` perimeter cells, at `(x, y)` in `area`, is:
+/// `0.0` is `from`, `1.0` is `to`.
+fn position(flow: GradientFlow, index: usize, total: usize, (x, y): (u16, u16), area: Rect) -> f64 {
+    match flow {
+        GradientFlow::Around => fraction(index, total),
+        // Up to `to` at the cell halfway round, then back, so the first and last cells match.
+        GradientFlow::Mirror => 1.0 - (2.0 * fraction(index, total) - 1.0).abs(),
+        GradientFlow::Across => fraction(usize::from(x - area.x), usize::from(area.width)),
+        GradientFlow::Down => fraction(usize::from(y - area.y), usize::from(area.height)),
+    }
+}
+
+/// Recolors `area`'s perimeter in `buf` as a gradient from `from` to `to`, running as `flow` says.
+/// A no-op wherever [`blend_rgb`] can't blend the two colors (anything but two resolved
+/// `Color::Rgb` values) — the caller's flat border color is left exactly as `Block` already drew
+/// it.
+pub fn paint(buf: &mut Buffer, area: Rect, from: Color, to: Color, flow: GradientFlow) {
     let cells = perimeter_cells(area);
     let total = cells.len();
-    for (i, (x, y)) in cells.into_iter().enumerate() {
-        if !buf.area.contains(ratatui::layout::Position::new(x, y)) {
+    for (i, cell) in cells.into_iter().enumerate() {
+        if !buf
+            .area
+            .contains(ratatui::layout::Position::new(cell.0, cell.1))
+        {
             continue;
         }
-        if let Some(color) = blend_rgb(from, to, fraction(i, total)) {
-            buf[(x, y)].set_fg(color);
+        if let Some(color) = blend_rgb(from, to, position(flow, i, total, cell, area)) {
+            buf[cell].set_fg(color);
         }
     }
 }
@@ -147,7 +165,13 @@ mod tests {
         for cell in buf.content.iter_mut() {
             cell.set_fg(Color::Reset);
         }
-        paint(&mut buf, area, Color::White, Color::Rgb(0, 0, 0));
+        paint(
+            &mut buf,
+            area,
+            Color::White,
+            Color::Rgb(0, 0, 0),
+            GradientFlow::Around,
+        );
         for cell in buf.content.iter() {
             assert_eq!(cell.fg, Color::Reset);
         }
@@ -158,7 +182,7 @@ mod tests {
         let area = Rect::new(0, 0, 6, 4);
         let mut buf = Buffer::empty(area);
         let (from, to) = (Color::Rgb(0, 0, 0), Color::Rgb(255, 200, 100));
-        paint(&mut buf, area, from, to);
+        paint(&mut buf, area, from, to, GradientFlow::Around);
         let cells = perimeter_cells(area);
         let first = cells[0];
         let last = *cells.last().expect("area is at least 2x2");
@@ -169,7 +193,85 @@ mod tests {
         );
     }
 
+    const FROM: Color = Color::Rgb(0, 0, 0);
+    const TO: Color = Color::Rgb(200, 100, 50);
+
+    fn painted(area: Rect, flow: GradientFlow) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        paint(&mut buf, area, FROM, TO, flow);
+        buf
+    }
+
+    #[test]
+    fn across_runs_from_the_left_edge_to_the_right_edge() {
+        let area = Rect::new(3, 2, 8, 5);
+        let buf = painted(area, GradientFlow::Across);
+        for y in area.top()..area.bottom() {
+            assert_eq!(buf[(area.left(), y)].fg, FROM);
+            assert_eq!(buf[(area.right() - 1, y)].fg, TO);
+        }
+        assert_eq!(
+            buf[(5, 2)].fg,
+            buf[(5, 6)].fg,
+            "a column is one color, top and bottom"
+        );
+    }
+
+    #[test]
+    fn down_runs_from_the_top_edge_to_the_bottom_edge() {
+        let area = Rect::new(0, 0, 7, 4);
+        let buf = painted(area, GradientFlow::Down);
+        for x in area.left()..area.right() {
+            assert_eq!(buf[(x, 0)].fg, FROM);
+            assert_eq!(buf[(x, 3)].fg, TO);
+        }
+    }
+
+    #[test]
+    fn mirror_reaches_the_end_color_halfway_and_comes_back_without_a_seam() {
+        let area = Rect::new(0, 0, 6, 4); // 16 perimeter cells
+        let buf = painted(area, GradientFlow::Mirror);
+        let cells = perimeter_cells(area);
+        assert_eq!(buf[cells[0]].fg, FROM);
+        assert_eq!(
+            buf[*cells.last().unwrap()].fg,
+            FROM,
+            "both ends of the sweep match"
+        );
+        let middle = cells.len() / 2;
+        assert!(
+            [buf[cells[middle - 1]].fg, buf[cells[middle]].fg]
+                .iter()
+                .all(|&c| c != FROM),
+            "the far side is toward the end color"
+        );
+    }
+
     proptest::proptest! {
+        /// Every flow keeps each painted cell between the two colors, channel by channel, and
+        /// never paints outside the frame's edge.
+        #[test]
+        fn every_flow_stays_between_its_two_colors_and_on_the_edge(
+            w in 0u16..30, h in 0u16..20, flow in 0usize..4,
+        ) {
+            let area = Rect::new(1, 1, w, h);
+            let screen = Rect::new(0, 0, 40, 30);
+            let flow = GradientFlow::parse(GradientFlow::NAMES[flow]).unwrap();
+            let mut buf = Buffer::empty(screen);
+            paint(&mut buf, area, FROM, TO, flow);
+            let edge: std::collections::HashSet<_> = perimeter_cells(area).into_iter().collect();
+            for pos in screen.positions() {
+                let fg = buf[pos].fg;
+                if !edge.contains(&(pos.x, pos.y)) {
+                    proptest::prop_assert_eq!(fg, Color::Reset);
+                } else if let Color::Rgb(r, g, b) = fg {
+                    proptest::prop_assert!(r <= 200 && g <= 100 && b <= 50);
+                } else {
+                    proptest::prop_assert!(false, "an edge cell was left unpainted: {fg:?}");
+                }
+            }
+        }
+
         #[test]
         fn perimeter_never_leaves_the_area_or_panics(
             x in 0u16..50, y in 0u16..50, w in 0u16..30, h in 0u16..30,

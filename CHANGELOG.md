@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `theming`: `gradient_borders` in `config.toml` is superseded by `[shape] gradient`; `false` still
+  turns the gradient off unless `appearance.toml` or the popup sets `gradient`. The
+  `Config::gradient_borders` field is removed; read `config.theme.shape.gradient` instead.
 - `tui`: the appearance popup (`a`) is laid out like a settings window: five pages down the left
   (Theme, Colors, Shape, Text, Font), switched with `Tab`/`Shift+Tab`, `1`–`5` or a click, and the
   chosen page's rows on the right. The Theme page lists the built-in palettes and the saved themes
@@ -80,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `theming`, `tui`: a configurable border gradient. `gradient_from` and `gradient_to` under
+  `[theme]` take a color or `accent`/`focused` (the defaults, which follow `accent_fg` and
+  `border_focused_fg`); `[shape] gradient` sets which frames get it (`off`, `focused`, `panes`,
+  `all`) and `gradient_flow` which way it runs (`around`, `mirror`, `across`, `down`). The
+  appearance popup edits all four (the ends on the Colors page, the rest on the Shape page) and a
+  saved theme keeps them. `Theme::resolve` turns the two keywords into colors.
 - `theming`, `tui`: a shape for the look. `[shape]` in `appearance.toml` sets `gaps_in` (blank cells
   between panes, 0–4), `gaps_out` (to the left and right screen edges, 0–8, half as many rows at
   the top and bottom), `title_align` (`left`, `center`, `right`), `shadow` (menus, popups and the

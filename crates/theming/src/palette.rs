@@ -80,6 +80,8 @@ impl Theme {
             status_fg: text(mix(bg, fg, 0.7)),
             bar_bg: "reset".into(),
             danger_fg: text(ansi(1)),
+            gradient_from: "accent".into(),
+            gradient_to: "focused".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
             shape: crate::shape::Shape::default(),

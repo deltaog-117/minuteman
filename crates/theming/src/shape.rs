@@ -15,8 +15,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! The shape of the interface, apart from its colors: the space between the panes and around the
-//! screen's edge, where pane titles sit, and the shadow and dimming effects — the `[shape]` table
-//! of `appearance.toml`.
+//! screen's edge, where pane titles sit, the shadow and dimming effects, and where and which way
+//! the border gradient runs — the `[shape]` table of `appearance.toml`.
 //!
 //! A shape is part of a [`Theme`](crate::Theme) (its `shape` field), so a saved theme brings its
 //! shape back with its colors. The frame style itself (`border_type`) and the status bar's
@@ -104,6 +104,101 @@ impl TitleAlign {
     }
 }
 
+/// Which frames the border gradient is painted on. Each choice includes the ones before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GradientScope {
+    Off,
+    /// The pane keystrokes act on, as Minuteman has always drawn it.
+    #[default]
+    Focused,
+    /// Every file column, focused or not.
+    Panes,
+    /// The file columns and the floating panels (menus, popups).
+    All,
+}
+
+impl GradientScope {
+    /// The names `parse` accepts, in the order the appearance popup cycles them.
+    pub const NAMES: [&'static str; 4] = ["off", "focused", "panes", "all"];
+
+    /// Parses a config value (case-insensitive). `None` for anything unrecognised, so the caller
+    /// can fall back rather than fail startup on a typo.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_lowercase().as_str() {
+            "off" | "none" => Some(Self::Off),
+            "focused" => Some(Self::Focused),
+            "panes" => Some(Self::Panes),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Focused => "focused",
+            Self::Panes => "panes",
+            Self::All => "all",
+        }
+    }
+
+    /// Whether the focused pane (and the startup splash) get the gradient.
+    pub fn on_focused(self) -> bool {
+        self != Self::Off
+    }
+
+    /// Whether the panes without focus get it too.
+    pub fn on_panes(self) -> bool {
+        matches!(self, Self::Panes | Self::All)
+    }
+
+    /// Whether menus and popups get it too.
+    pub fn on_floating(self) -> bool {
+        self == Self::All
+    }
+}
+
+/// Which way the border gradient runs from its start color to its end color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GradientFlow {
+    /// Once around the frame, clockwise from the top-left corner, as Minuteman has always drawn
+    /// it: the two ends meet at that corner.
+    #[default]
+    Around,
+    /// Around the frame to the end color at the opposite point and back, so there is no seam.
+    Mirror,
+    /// From the left edge to the right edge.
+    Across,
+    /// From the top edge to the bottom edge.
+    Down,
+}
+
+impl GradientFlow {
+    /// The names `parse` accepts, in the order the appearance popup cycles them.
+    pub const NAMES: [&'static str; 4] = ["around", "mirror", "across", "down"];
+
+    /// Parses a config value (case-insensitive). `None` for anything unrecognised, so the caller
+    /// can fall back rather than fail startup on a typo.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_lowercase().as_str() {
+            "around" => Some(Self::Around),
+            "mirror" => Some(Self::Mirror),
+            "across" => Some(Self::Across),
+            "down" => Some(Self::Down),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Around => "around",
+            Self::Mirror => "mirror",
+            Self::Across => "across",
+            Self::Down => "down",
+        }
+    }
+}
+
 /// The resolved shape: every field set, every number in range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Shape {
@@ -118,6 +213,10 @@ pub struct Shape {
     pub shadow: bool,
     /// Whether the panes that don't have focus are drawn dimmed, so the active one stands out.
     pub dim_inactive: bool,
+    /// Which frames get the border gradient (its colors are the theme's `gradient_from` and
+    /// `gradient_to`).
+    pub gradient: GradientScope,
+    pub gradient_flow: GradientFlow,
 }
 
 impl Shape {
@@ -135,6 +234,16 @@ impl Shape {
                 .unwrap_or(self.title_align),
             shadow: overrides.shadow.unwrap_or(self.shadow),
             dim_inactive: overrides.dim_inactive.unwrap_or(self.dim_inactive),
+            gradient: overrides
+                .gradient
+                .as_deref()
+                .and_then(GradientScope::parse)
+                .unwrap_or(self.gradient),
+            gradient_flow: overrides
+                .gradient_flow
+                .as_deref()
+                .and_then(GradientFlow::parse)
+                .unwrap_or(self.gradient_flow),
         }
     }
 }
@@ -150,6 +259,8 @@ pub struct RawShape {
     pub title_align: Option<String>,
     pub shadow: Option<bool>,
     pub dim_inactive: Option<bool>,
+    pub gradient: Option<String>,
+    pub gradient_flow: Option<String>,
 }
 
 impl RawShape {
@@ -162,6 +273,8 @@ impl RawShape {
             title_align: top.title_align.or(self.title_align),
             shadow: top.shadow.or(self.shadow),
             dim_inactive: top.dim_inactive.or(self.dim_inactive),
+            gradient: top.gradient.or(self.gradient),
+            gradient_flow: top.gradient_flow.or(self.gradient_flow),
         }
     }
 
@@ -179,6 +292,8 @@ impl RawShape {
             title_align: Some(shape.title_align.name().to_string()),
             shadow: Some(shape.shadow),
             dim_inactive: Some(shape.dim_inactive),
+            gradient: Some(shape.gradient.name().to_string()),
+            gradient_flow: Some(shape.gradient_flow.name().to_string()),
         }
     }
 }
@@ -201,6 +316,12 @@ mod tests {
         assert_eq!((shape.gaps_in.cells(), shape.gaps_out.cells()), (0, 0));
         assert_eq!(shape.title_align, TitleAlign::Left);
         assert!(!shape.shadow && !shape.dim_inactive);
+        assert_eq!(
+            shape.gradient,
+            GradientScope::Focused,
+            "the gradient was always on"
+        );
+        assert_eq!(shape.gradient_flow, GradientFlow::Around);
     }
 
     #[test]
@@ -233,6 +354,41 @@ mod tests {
     }
 
     #[test]
+    fn gradient_names_parse_back_to_themselves() {
+        for name in GradientScope::NAMES {
+            assert_eq!(
+                GradientScope::parse(name).map(GradientScope::name),
+                Some(name)
+            );
+        }
+        for name in GradientFlow::NAMES {
+            assert_eq!(
+                GradientFlow::parse(name).map(GradientFlow::name),
+                Some(name)
+            );
+        }
+        assert_eq!(GradientScope::parse("sideways"), None);
+    }
+
+    #[test]
+    fn each_gradient_scope_includes_the_ones_before_it() {
+        use GradientScope::*;
+        let rows: Vec<(bool, bool, bool)> = [Off, Focused, Panes, All]
+            .iter()
+            .map(|s| (s.on_focused(), s.on_panes(), s.on_floating()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (false, false, false),
+                (true, false, false),
+                (true, true, false),
+                (true, true, true)
+            ]
+        );
+    }
+
+    #[test]
     fn an_empty_raw_shape_serializes_to_nothing() {
         assert!(RawShape::default().is_empty());
         assert_eq!(toml::to_string(&RawShape::default()).unwrap(), "");
@@ -245,15 +401,23 @@ mod tests {
             0..TitleAlign::NAMES.len(),
             any::<bool>(),
             any::<bool>(),
+            0..GradientScope::NAMES.len(),
+            0..GradientFlow::NAMES.len(),
         )
-            .prop_map(|(gaps_in, gaps_out, align, shadow, dim_inactive)| Shape {
-                gaps_in: Gap::clamped(gaps_in),
-                gaps_out: Gap::clamped(gaps_out),
-                title_align: TitleAlign::parse(TitleAlign::NAMES[align])
-                    .expect("listed names parse"),
-                shadow,
-                dim_inactive,
-            })
+            .prop_map(
+                |(gaps_in, gaps_out, align, shadow, dim_inactive, scope, flow)| Shape {
+                    gaps_in: Gap::clamped(gaps_in),
+                    gaps_out: Gap::clamped(gaps_out),
+                    title_align: TitleAlign::parse(TitleAlign::NAMES[align])
+                        .expect("listed names parse"),
+                    shadow,
+                    dim_inactive,
+                    gradient: GradientScope::parse(GradientScope::NAMES[scope])
+                        .expect("listed names parse"),
+                    gradient_flow: GradientFlow::parse(GradientFlow::NAMES[flow])
+                        .expect("listed names parse"),
+                },
+            )
     }
 
     fn any_raw() -> impl Strategy<Value = RawShape> {
@@ -263,14 +427,28 @@ mod tests {
             proptest::option::of("[a-zA-Z]{0,8}"),
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<bool>()),
+            proptest::option::of("[a-z]{0,8}"),
+            proptest::option::of("[a-z]{0,8}"),
         )
             .prop_map(
-                |(gaps_in, gaps_out, title_align, shadow, dim_inactive)| RawShape {
+                |(
                     gaps_in,
                     gaps_out,
                     title_align,
                     shadow,
                     dim_inactive,
+                    gradient,
+                    gradient_flow,
+                )| {
+                    RawShape {
+                        gaps_in,
+                        gaps_out,
+                        title_align,
+                        shadow,
+                        dim_inactive,
+                        gradient,
+                        gradient_flow,
+                    }
                 },
             )
     }

@@ -58,6 +58,11 @@ status_fg = "#7a80b8"
 # Status bar: the segments' background, and the color of destructive prompts (delete, overwrite).
 bar_bg = "#1a1f3d"
 danger_fg = "#ff3860"
+# The border gradient's two ends (where and which way it runs is set under [shape]). A color, or
+# "accent" / "focused" to follow accent_fg / border_focused_fg above. Blending needs true color;
+# elsewhere the frame keeps its plain color.
+gradient_from = "accent"
+gradient_to = "focused"
 # Frame style: "rounded", "plain", "double", "thick", "dashed", "thick-dashed", "block" (a heavy
 # half-block frame drawn outside the pane), "block-inside" (the same, drawn inside), or "none" (no
 # visible frame; the pane keeps its place, so nothing shifts). The [shape] table below holds the
@@ -87,6 +92,12 @@ title_align = "left"
 shadow = false
 # The panes without focus (the parent and preview columns) are drawn dimmed.
 dim_inactive = false
+# Which frames get the border gradient: "off", "focused" (the pane keystrokes act on), "panes"
+# (every file column) or "all" (the columns and the menus and popups).
+gradient = "focused"
+# Which way it runs: "around" (once around the frame from the top-left corner), "mirror" (around
+# and back, so the ends meet without a seam), "across" (left to right) or "down" (top to bottom).
+gradient_flow = "around"
 
 # ---------------------------------------------------------------------------------------------
 # [ui] — glyphs

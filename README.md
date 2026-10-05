@@ -336,6 +336,8 @@ gaps_out = 2                   # to the left/right screen edge (half as many row
 title_align = "center"         # "left" | "center" | "right"
 shadow = true                  # menus, popups and the shell box cast a shadow
 dim_inactive = true            # the parent and preview columns are drawn dim
+gradient = "panes"             # border gradient on: "off" | "focused" | "panes" | "all"
+gradient_flow = "mirror"       # "around" | "mirror" | "across" | "down"
 
 [ui]      # glyphs
 glyphs = "unicode"             # "unicode" | "nerd" (icons + Powerline arrows) | "ascii"
@@ -385,13 +387,22 @@ the panes keep their place). It stays under `[theme]`, where the built-in palett
 rest is `[shape]`. A gap or a title position the file gets wrong falls back rather than failing,
 and a small terminal gets smaller outer gaps instead of an unusable browser.
 
+**Border gradient.** The frames can be painted as a gradient from `gradient_from` to
+`gradient_to` (under `[theme]`, so a saved theme keeps them). Each is a color, or `"accent"` /
+`"focused"` to follow `accent_fg` / `border_focused_fg`, which is the default. `[shape] gradient`
+says which frames get it: the focused pane (the default), every file column, or those plus menus
+and popups. `gradient_flow` says which way it runs: once around the frame, around and back with
+no seam, left to right, or top to bottom. Blending needs true color (`COLORTERM=truecolor`);
+elsewhere frames keep their plain color. The old `gradient_borders = false` in `config.toml`
+still turns it off when `appearance.toml` doesn't set `gradient`.
+
 **The appearance window** (`a`) lists its pages on the left — `Tab`/`Shift+Tab`, `1`–`5` or a
 click switch them — and the chosen page's rows on the right. **Theme** lists the built-in
 palettes and the themes you saved (`Enter` applies one, `r` renames and `d` deletes yours), "Save
 current look" and "Reset to defaults". Picking a palette replaces the colors and keeps the shape.
 A saved theme stores the colors *and* the shape, so applying it brings both back. **Colors** edits
 each color as text or with a color picker (`Tab`), **Shape** steps the gaps with `h`/`l` (`H`/`L`
-by five) and flips the effects with `Enter`, **Text** edits the per-element styles and **Font**
+by five), flips the effects with `Enter` and cycles the gradient's scope and direction, **Text** edits the per-element styles and **Font**
 the glyph set and the font for `init-terminal`.
 
 **A `[theme]` or `[ui]` left in `config.toml`** (where they used to live) still works, but

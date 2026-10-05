@@ -945,7 +945,14 @@ fn apply_appearance_outcome(
         AppearanceOutcome::Stay => {}
         AppearanceOutcome::Close => *appearance = None,
         AppearanceOutcome::WantEdit(row) => {
-            let current = current_value(row, local_theme, local_ui, local_style, local_font);
+            let mut current = current_value(row, local_theme, local_ui, local_style, local_font);
+            // A gradient end set to `accent`/`focused` starts the edit from the color it stands
+            // for, so the picker opens on it rather than on white; typing the keyword keeps it.
+            if matches!(row.kind(), Some(AppearanceRowKind::Color)) {
+                current = effective_theme(config, local_theme)
+                    .resolve(&current)
+                    .to_string();
+            }
             if let Some(popup) = appearance.as_mut() {
                 popup.begin_edit(current);
             }
@@ -3527,13 +3534,8 @@ fn draw(
             columns[1],
             current_state,
         );
-        if config.gradient_borders {
-            gradient::paint(
-                frame.buffer_mut(),
-                columns[1],
-                style::color(&config.theme.accent_fg),
-                style::color(&config.theme.border_focused_fg),
-            );
+        if config.theme.shape.gradient.on_focused() {
+            style::paint_gradient(frame.buffer_mut(), columns[1], config);
         }
         hud::render_scrollbar(
             frame,
@@ -3561,6 +3563,17 @@ fn draw(
             filmstrip.is_some(),
             config,
         );
+    }
+
+    // The side columns' gradient, once both are drawn. A parent column lit as the drop target for
+    // "up a level" keeps its plain frame, which is what marks it.
+    if config.theme.shape.gradient.on_panes() {
+        let parent = (!drop_up).then_some(columns[0]);
+        for pane in parent.into_iter().chain([columns[2]]) {
+            if pane.width > 0 {
+                style::paint_gradient(frame.buffer_mut(), pane, config);
+            }
+        }
     }
 
     // The side columns, dimmed so the active one stands out. The filmstrip's big preview is what

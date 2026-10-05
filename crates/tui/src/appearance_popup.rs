@@ -38,8 +38,8 @@
 use crossterm::event::KeyCode;
 use ratatui::layout::{Margin, Position, Rect};
 use theming::{
-    BORDER_STYLES, CustomTheme, Font, GlyphSet, Hsv, RawTheme, STYLE_ELEMENTS, Shape, Styles,
-    Theme, TitleAlign, hex_to_hsv,
+    BORDER_STYLES, CustomTheme, Font, GlyphSet, GradientFlow, GradientScope, Hsv, RawTheme,
+    STYLE_ELEMENTS, Shape, Styles, Theme, TitleAlign, hex_to_hsv,
 };
 
 /// The built-in palettes the Theme page lists, in order. `catppuccin-latte` isn't here — it's
@@ -124,6 +124,9 @@ pub enum Row {
     StatusText,
     StatusBar,
     Danger,
+    /// The border gradient's ends: a color or the `accent`/`focused` keyword.
+    GradientFrom,
+    GradientTo,
     /// The frame style. Lives on `Page::Shape`, like the rest of the shape rows below.
     BorderType,
     TitleAlign,
@@ -131,6 +134,10 @@ pub enum Row {
     GapsOut,
     Shadow,
     DimInactive,
+    /// Which frames get the border gradient.
+    Gradient,
+    /// Which way the border gradient runs.
+    GradientFlow,
     /// The status bar's segment edges.
     Separator,
     /// Lives on `Page::Font`.
@@ -152,8 +159,8 @@ pub enum Row {
     Reset,
 }
 
-/// `Page::Colors`' 22 rows, in `Theme`'s own field order.
-const COLOR_ROWS: [Row; 22] = [
+/// `Page::Colors`' 24 rows, in `Theme`'s own field order.
+const COLOR_ROWS: [Row; 24] = [
     Row::Selection,
     Row::SelectionText,
     Row::Border,
@@ -176,16 +183,20 @@ const COLOR_ROWS: [Row; 22] = [
     Row::StatusText,
     Row::StatusBar,
     Row::Danger,
+    Row::GradientFrom,
+    Row::GradientTo,
 ];
 
 /// `Page::Shape`'s rows: the frame and its title, then the spacing, then the effects.
-const SHAPE_ROWS: [Row; 7] = [
+const SHAPE_ROWS: [Row; 9] = [
     Row::BorderType,
     Row::TitleAlign,
     Row::GapsIn,
     Row::GapsOut,
     Row::Shadow,
     Row::DimInactive,
+    Row::Gradient,
+    Row::GradientFlow,
     Row::Separator,
 ];
 
@@ -231,12 +242,16 @@ impl Row {
             Row::StatusText => "Status text",
             Row::StatusBar => "Status bar",
             Row::Danger => "Danger",
+            Row::GradientFrom => "Gradient start",
+            Row::GradientTo => "Gradient end",
             Row::BorderType => "Border style",
             Row::TitleAlign => "Title position",
             Row::GapsIn => "Gap between panes",
             Row::GapsOut => "Gap to the edge",
             Row::Shadow => "Popup shadows",
             Row::DimInactive => "Dim unfocused panes",
+            Row::Gradient => "Border gradient",
+            Row::GradientFlow => "Gradient direction",
             Row::Separator => "Bar separator",
             Row::Glyphs => "Glyphs",
             Row::StyleElement(i) => STYLE_ELEMENTS.get(i).copied().unwrap_or("?"),
@@ -252,6 +267,8 @@ impl Row {
         match self {
             Row::BorderType => Some(RowKind::Cycle(&BORDER_STYLES)),
             Row::TitleAlign => Some(RowKind::Cycle(&TitleAlign::NAMES)),
+            Row::Gradient => Some(RowKind::Cycle(&GradientScope::NAMES)),
+            Row::GradientFlow => Some(RowKind::Cycle(&GradientFlow::NAMES)),
             Row::Separator => Some(RowKind::Cycle(&["flat", "arrow", "auto"])),
             Row::Glyphs => Some(RowKind::Cycle(&["unicode", "nerd", "ascii"])),
             Row::GapsIn | Row::GapsOut => Some(RowKind::Step),
@@ -279,7 +296,9 @@ impl Row {
             | Row::SyntaxType
             | Row::StatusText
             | Row::StatusBar
-            | Row::Danger => Some(RowKind::Color),
+            | Row::Danger
+            | Row::GradientFrom
+            | Row::GradientTo => Some(RowKind::Color),
         }
     }
 }
@@ -334,12 +353,16 @@ impl AppearanceView<'_> {
             Row::StatusText => self.theme.status_fg.clone(),
             Row::StatusBar => self.theme.bar_bg.clone(),
             Row::Danger => self.theme.danger_fg.clone(),
+            Row::GradientFrom => self.theme.gradient_from.clone(),
+            Row::GradientTo => self.theme.gradient_to.clone(),
             Row::BorderType => self.theme.border_type.clone(),
             Row::TitleAlign => shape.title_align.name().to_string(),
             Row::GapsIn => cells(shape.gaps_in.cells()),
             Row::GapsOut => cells(shape.gaps_out.cells()),
             Row::Shadow => on_off(shape.shadow),
             Row::DimInactive => on_off(shape.dim_inactive),
+            Row::Gradient => shape.gradient.name().to_string(),
+            Row::GradientFlow => shape.gradient_flow.name().to_string(),
             Row::Separator => self.theme.separator.clone(),
             Row::Glyphs => glyph_name(self.glyphs).to_string(),
             Row::StyleElement(i) => self
@@ -404,6 +427,8 @@ pub fn preview(theme: &Theme, row: Row, value: &str) -> Theme {
         Row::StatusText => theme.status_fg = value.to_string(),
         Row::StatusBar => theme.bar_bg = value.to_string(),
         Row::Danger => theme.danger_fg = value.to_string(),
+        Row::GradientFrom => theme.gradient_from = value.to_string(),
+        Row::GradientTo => theme.gradient_to = value.to_string(),
         Row::Preset(_)
         | Row::BorderType
         | Row::TitleAlign
@@ -411,6 +436,8 @@ pub fn preview(theme: &Theme, row: Row, value: &str) -> Theme {
         | Row::GapsOut
         | Row::Shadow
         | Row::DimInactive
+        | Row::Gradient
+        | Row::GradientFlow
         | Row::Separator
         | Row::Glyphs
         | Row::StyleElement(_)
@@ -469,8 +496,12 @@ pub fn commit(overrides: &mut RawTheme, row: Row, value: String) {
         Row::StatusText => overrides.status_fg = Some(value),
         Row::StatusBar => overrides.bar_bg = Some(value),
         Row::Danger => overrides.danger_fg = Some(value),
+        Row::GradientFrom => overrides.gradient_from = Some(value),
+        Row::GradientTo => overrides.gradient_to = Some(value),
         Row::BorderType => overrides.border_type = Some(value),
         Row::TitleAlign => overrides.shape.title_align = Some(value),
+        Row::Gradient => overrides.shape.gradient = Some(value),
+        Row::GradientFlow => overrides.shape.gradient_flow = Some(value),
         Row::Separator => overrides.separator = Some(value),
         Row::Preset(_)
         | Row::GapsIn
@@ -1760,6 +1791,10 @@ mod tests {
         assert_eq!(view.value(Row::GapsOut), "4 cells");
         assert_eq!(view.value(Row::Shadow), "off");
         assert_eq!(view.value(Row::DimInactive), "on");
+        assert_eq!(view.value(Row::Gradient), "focused");
+        assert_eq!(view.value(Row::GradientFlow), "around");
+        assert_eq!(view.value(Row::GradientFrom), "accent");
+        assert_eq!(view.value(Row::GradientTo), "focused");
         assert_eq!(view.value(Row::Glyphs), "nerd");
         assert_eq!(view.value(Row::SaveTheme), "new theme");
         assert_eq!(
@@ -1802,6 +1837,11 @@ mod tests {
         assert_eq!(previewed.accent_fg, "#123456");
         assert_eq!(previewed.border_focused_fg, theme.border_focused_fg);
 
+        assert_eq!(
+            preview(&theme, Row::GradientTo, "#00ff00").gradient_to,
+            "#00ff00"
+        );
+
         // A cycle/action/non-theme row is a no-op for `preview`.
         assert_eq!(preview(&theme, Row::BorderType, "whatever"), theme);
         assert_eq!(preview(&theme, Row::StyleElement(0), "whatever"), theme);
@@ -1824,15 +1864,21 @@ mod tests {
 
         commit(&mut overrides, Row::Separator, "arrow".into());
         commit(&mut overrides, Row::TitleAlign, "center".into());
+        commit(&mut overrides, Row::Gradient, "all".into());
+        commit(&mut overrides, Row::GradientFlow, "mirror".into());
+        commit(&mut overrides, Row::GradientFrom, "#ff0000".into());
 
         // A non-`RawTheme` row is a no-op here.
         commit(&mut overrides, Row::FontFamily, "Iosevka".into());
         let mut expected = RawTheme {
             danger_fg: Some("#ff0000".into()),
             separator: Some("arrow".into()),
+            gradient_from: Some("#ff0000".into()),
             ..RawTheme::default()
         };
         expected.shape.title_align = Some("center".into());
+        expected.shape.gradient = Some("all".into());
+        expected.shape.gradient_flow = Some("mirror".into());
         assert_eq!(overrides, expected);
     }
 

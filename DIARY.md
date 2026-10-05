@@ -81,6 +81,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-04 | Default Theme Source | The terminal's own palette (OSC 4/10/11), mapped with contrast lifting, over a static palette (A) and a palette file (C) | ✅ Confirmed |
 | 2026-10-04 | Plugin Triggers (stage 1.5, first cycle) | Several keys, declared `:` commands and `:plugin <name>` on the existing process host, plus a Python example (COA A); state/events (B) and action names (C) deferred | ✅ Confirmed |
 | 2026-10-05 | Appearance Shape and Paged Popup | A typed `Shape` inside `Theme`, gaps applied in the shared `browser_layout`, and the popup rebuilt as a page list beside rows (COA B); a Shape category in the old popup (A) and shape presets only (C) rejected | ✅ Confirmed |
+| 2026-10-05 | Configurable Border Gradient | Colors with `accent`/`focused` keywords in `[theme]`, scope and direction in `[shape]`, the old switch kept beneath (COA B); a moved switch alone (A) rejected, an animated gradient (C) deferred to the roadmap | ✅ Confirmed |
 
 ---
 
@@ -5871,6 +5872,66 @@ theme bringing them back, the shadow appearing with a popup and going with it, a
 as a real terminal does. Release binary: +40,360 bytes (+0.28%), measured by building `HEAD` and
 the change in two worktrees at paths of the same length, since panic locations embed the source
 path and a longer path alone made the first measurement wrong.
+
+---
+
+### Configurable Border Gradient (COA B)
+
+**Date:** 2026-10-05 · **Author:** deltaog-117
+
+**Context.** The border gradient was a `gradient_borders` switch in `config.toml`: fixed colors
+(accent to focused border), one sweep around the focused pane, read once at startup. With the
+look now edited live and saved as themes, the gradient was the one piece of it outside both.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Move the switch into `[shape]` and the Shape page, nothing else | Rejected |
+| B | A, plus the two colors, where it applies and which way it runs | Chosen |
+| C | B, plus a gradient turning around the frame on the animation tick | Deferred |
+
+**Why B.** A only moves a switch. C redraws on every tick even when nothing changes, works against
+the quieter looks the appearance work has been heading toward, and its speed setting belongs on a
+Motion page that does not exist yet, so it went to the roadmap as a future item.
+
+**Design.** The ends are theme colors, `gradient_from` and `gradient_to`, so a saved theme keeps
+them and a palette pick resets them. They default to the keywords `accent` and `focused`, which
+`Theme::resolve` turns into `accent_fg` and `border_focused_fg` at drawing time, the same idea as
+`selection_fg = "keep"`. Literal copies of the two colors would have changed what users see:
+anyone with a custom accent in `appearance.toml` would have had the gradient snap back to the
+palette's. The keyword also means a saved theme's gradient follows that theme's own accent. Where
+it applies and which way it runs are shape settings, `GradientScope` (`off`, `focused`, `panes`,
+`all`, each including the ones before it) and `GradientFlow` (`around`, `mirror`, `across`,
+`down`), so a palette pick keeps them. The old switch survives as the lowest layer: `false`
+becomes `gradient = "off"` beneath `appearance.toml` and `local.toml`, and like any shape setting
+it does not stop the colors following the terminal. `Config::gradient_borders` was removed rather
+than kept beside the new setting, where it could contradict it.
+
+**Drawing.** `style::paint_gradient` resolves the ends and calls `gradient::paint`, which takes the
+flow; `mirror` is `1 - |2t - 1|` along the perimeter, and `across`/`down` use a cell's column or
+row instead of its place on the perimeter. The focused column is still painted before its
+scrollbar, as before. With `panes`, the side columns are painted once both are drawn and before
+`dim_inactive` dims them; a parent column lit as the "up a level" drop target keeps its plain frame,
+since that is what marks it. With `all`, each popup and menu paints its frame right after drawing
+it. In the popup, editing an end set to a keyword starts from the color it stands for, so the
+picker opens on it rather than on white, and the swatch shows the resolved color.
+
+**Trade-offs.** `panes` gives every column the same gradient, so the focused pane is marked only by
+its title and by `dim_inactive` if that is on. Grid tiles and the shell panes are not painted: the
+tiles would be noise, and the shell panes already animate their own border on a focus change.
+Without true color nothing blends and frames stay flat, as before.
+
+**Verification.** `scripts/check` passes. New tests: each flow's endpoints (`across` and `down`
+one color per edge, `mirror` meeting itself), a property test that every flow paints only the
+frame's edge and stays between its two colors, the scope order, name round trips, keyword
+resolution (following a changed accent, kept by a saved snapshot), the old switch beneath
+`appearance.toml` and not pinning the colors, and the popup's new rows. The real binary was run in
+a PTY through `pyte`, reading each frame cell's truecolor value: 39 shades along the focused frame
+and one along the parent's bottom edge by default, gradients on the side columns with `panes`, one
+color per side edge (`ff2bd6`, `00f0ff`) with `across`, `ff0000` on the left edge after setting
+the start, a gradient on the popup's own frame with `all`, flat frames with `off`, all four in
+`local.toml`, and `gradient_borders = false` in `config.toml` still giving flat frames. The earlier
+shape scenario still passes all 23 checks. The release binary was not re-measured; this adds no
+dependency.
 
 ---
 

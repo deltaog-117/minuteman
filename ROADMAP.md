@@ -1461,6 +1461,23 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   each change in `local.toml` at once, a saved theme holding a shape table, a palette keeping the
   gaps, Reset dropping them and the saved theme bringing them back, and the shadow appearing and
   going with a popup.
+- ✅ **Configurable border gradient (COA B)** – the gradient that used to be one `config.toml`
+  switch (accent to focused-border color, once around the focused pane, restart to change) is
+  now part of the look. `gradient_from`/`gradient_to` in `[theme]` take a color or the keywords
+  `accent`/`focused` (the default, so nothing changes until asked, and a palette or saved theme
+  follows its own accent); `[shape] gradient` picks which frames get it (`off`, `focused`,
+  `panes` for every file column, `all` adding menus and popups) and `gradient_flow` which way it
+  runs (`around` as before, `mirror` around and back without a seam, `across`, `down`). The
+  Colors page edits the two ends (a keyword's edit starts from the color it stands for, and its
+  swatch shows that color), the Shape page cycles the other two, and a saved theme keeps all
+  four. `gradient_borders = false` in `config.toml` still means `off` beneath anything the
+  appearance files set, and `Config::gradient_borders` is gone in favour of
+  `theme.shape.gradient`. Chosen as COA B over moving the switch alone (A) and a moving gradient
+  (C, kept below as a future item). Verified in the compiled binary through a PTY by reading the
+  truecolor value of each frame cell: a gradient on the focused frame and a flat parent by
+  default, gradients on the side columns with `panes`, one color per side edge with `across`, a
+  red left edge after setting the start to `#ff0000`, a gradient on the popup's own frame with
+  `all`, flat frames with `off`, all four in `local.toml`, and the old switch still turning it off.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1636,6 +1653,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   A scrollable output pane (or a pager) would make `:ls -l` or `:git status` usable.
 - **Cancel a `:` command's whole process tree** – `Esc` kills the `sh` it started but not a
   process that shell already forked into the background.
+- **Animated border gradient (COA C from the gradient cycle)** – the gradient slowly turning
+  around the frame on the existing animation tick, with a speed setting. Belongs on a future
+  Motion page with the other animations (focus fade, typewriter preview, splash), each with an
+  on/off and a speed, like a desktop's animation settings. Costs a redraw on every tick even when
+  idle, so it must be off by default and stop while the terminal is unfocused.
 - **Byte-level/percentage progress for large single files** – current progress is one tick per
   *file*, so a single huge file shows no movement until it's done. Needs `Vfs::copy_file` to
   support a streaming copy with periodic callbacks instead of one atomic `std::fs::copy` call.

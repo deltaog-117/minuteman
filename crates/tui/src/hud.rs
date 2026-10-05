@@ -1115,7 +1115,6 @@ mod tests {
             show_hidden: false,
             view: None,
             boot_splash: true,
-            gradient_borders: true,
             typewriter_preview: true,
             system_hud: false,
             interactive_commands: Vec::new(),

@@ -157,6 +157,7 @@ fn render_rows(
     let block = frame_block(config);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    style::paint_floating_gradient(frame.buffer_mut(), rect, config);
 
     let width = usize::from(inner.width);
     let lines: Vec<Line<'_>> = rows
@@ -267,6 +268,7 @@ pub fn render_compress(frame: &mut Frame<'_>, popup: &CompressPopup, config: &Co
     frame.render_widget(Clear, area);
     let block = style::themed_block(config, &popup.title(), true);
     frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
     let inner = compress_inner(area);
 
     let label_style = style::styled(
@@ -399,6 +401,7 @@ pub fn render_extract(frame: &mut Frame<'_>, popup: &ExtractPopup, config: &Conf
     frame.render_widget(Clear, area);
     let block = style::themed_block(config, &popup.title(), true);
     frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
     let inner = extract_inner(area);
 
     let label_style = style::styled(
@@ -514,6 +517,7 @@ pub fn render_inspect(frame: &mut Frame<'_>, view: &InspectView, config: &Config
     let block = style::themed_block(config, &format!("inspect: {}", view.title()), true);
     let inner = block.inner(area).inner(Margin::new(1, 0));
     frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
 
     let value_width = usize::from(inner.width).saturating_sub(LABEL_COLUMN);
     let label_style = style::styled(
@@ -552,6 +556,7 @@ pub fn render_settings(
     let block = style::themed_block(config, "settings", true);
     let inner = block.inner(area).inner(Margin::new(1, 0));
     frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
 
     let value_width = usize::from(inner.width).saturating_sub(LABEL_COLUMN);
     let label_style = style::styled(
@@ -697,6 +702,7 @@ pub fn render_appearance(
     style::cast_shadow(frame.buffer_mut(), area, config);
     frame.render_widget(Clear, area);
     frame.render_widget(style::themed_block(config, "appearance", true), area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
     let areas = appearance_popup::areas(area);
 
     let label_style = style::styled(
@@ -796,7 +802,9 @@ pub fn render_appearance(
         let value_area = if is_color {
             spans.push(Span::styled(
                 format!("{swatch_glyph} "),
-                Style::default().fg(style::color(&swatch_hex)).patch(base),
+                Style::default()
+                    .fg(style::color(view.theme.resolve(&swatch_hex)))
+                    .patch(base),
             ));
             value_width.saturating_sub(SWATCH_WIDTH)
         } else {
@@ -863,7 +871,7 @@ pub fn render_appearance(
                     "enter applies, r renames, d deletes, tab/1-5 pages, Esc closes"
                 }
                 Page::Theme => "enter applies a palette or saves the look, tab/1-5 pages",
-                Page::Colors => "enter edits a color, tab/1-5 pages, Esc closes",
+                Page::Colors => "enter edits; gradient ends also take accent or focused",
                 Page::Shape => "h/l change, H/L by five, enter flips or cycles, tab/1-5 pages",
                 Page::Text => "enter edits: bold, italic, dim, underline, reverse, strikethrough",
                 Page::Font => "enter edits or cycles; the font feeds `minuteman init-terminal`",

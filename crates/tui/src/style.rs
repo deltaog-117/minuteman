@@ -170,6 +170,29 @@ fn title_alignment(align: TitleAlign) -> Alignment {
     }
 }
 
+/// The border gradient's two ends, with the `accent`/`focused` keywords resolved.
+pub fn gradient_ends(theme: &Theme) -> (Color, Color) {
+    (
+        color(theme.resolve(&theme.gradient_from)),
+        color(theme.resolve(&theme.gradient_to)),
+    )
+}
+
+/// Paints the border gradient over `area`'s frame, in the theme's colors and direction. Call it
+/// once the frame is drawn; whether this frame gets one at all is the caller's to check against
+/// `[shape] gradient`.
+pub fn paint_gradient(buf: &mut Buffer, area: Rect, config: &Config) {
+    let (from, to) = gradient_ends(&config.theme);
+    crate::gradient::paint(buf, area, from, to, config.theme.shape.gradient_flow);
+}
+
+/// [`paint_gradient`] for a menu or popup: only when `[shape] gradient` reaches floating panels.
+pub fn paint_floating_gradient(buf: &mut Buffer, area: Rect, config: &Config) {
+    if config.theme.shape.gradient.on_floating() {
+        paint_gradient(buf, area, config);
+    }
+}
+
 /// Dims every cell of `area`, for `[shape] dim_inactive`. Cells an image protocol owns are left
 /// alone: their content is an escape sequence, not text a terminal attribute could fade.
 pub fn dim(buf: &mut Buffer, area: Rect) {
@@ -513,6 +536,34 @@ mod tests {
         cast_shadow(&mut buf, Rect::new(8, 3, 2, 2), &config);
         dim(&mut buf, Rect::new(5, 2, 50, 50));
         assert!(buf[(9, 4)].modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn floating_panels_get_the_gradient_only_when_the_scope_reaches_them() {
+        if !truecolor() {
+            return; // hex colors are quantized and cannot blend; nothing to see
+        }
+        let area = Rect::new(0, 0, 10, 4);
+        for (scope, painted) in [("focused", false), ("panes", false), ("all", true)] {
+            let shape = theming::RawShape {
+                gradient: Some(scope.into()),
+                ..Default::default()
+            };
+            let config = config_with("rounded", shape);
+            let mut buf = Buffer::empty(area);
+            paint_floating_gradient(&mut buf, area, &config);
+            assert_eq!(buf[(0, 0)].fg != Color::Reset, painted, "{scope}");
+        }
+    }
+
+    #[test]
+    fn the_gradient_ends_follow_the_keywords() {
+        let mut config = config_with("rounded", Default::default());
+        config.theme.accent_fg = "red".into();
+        config.theme.border_focused_fg = "blue".into();
+        assert_eq!(gradient_ends(&config.theme), (Color::Red, Color::Blue));
+        config.theme.gradient_from = "green".into();
+        assert_eq!(gradient_ends(&config.theme).0, Color::Green);
     }
 
     fn shape_on() -> theming::RawShape {

@@ -37,6 +37,6 @@ pub use config::{
 pub use keymap::{Action, KeyMap};
 pub use palette::TerminalPalette;
 pub use panels::{ColumnLayout, PanelsConfig, RawPanels};
-pub use shape::{BORDER_STYLES, Gap, RawShape, Shape, TitleAlign};
+pub use shape::{BORDER_STYLES, Gap, GradientFlow, GradientScope, RawShape, Shape, TitleAlign};
 pub use theme::{RawTheme, Theme};
 pub use ui::{GlyphSet, RawUi, Ui};

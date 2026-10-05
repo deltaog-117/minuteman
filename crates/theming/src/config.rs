@@ -184,7 +184,8 @@ struct RawConfig {
     view: Option<String>,
     /// `None` when absent, for the same reason as `alt_tap`.
     boot_splash: Option<bool>,
-    /// `None` when absent, for the same reason as `alt_tap`.
+    /// The border gradient's switch from before `[shape] gradient`; only `false` changes anything
+    /// (it means `gradient = "off"` unless the appearance files say otherwise).
     gradient_borders: Option<bool>,
     /// `None` when absent, for the same reason as `alt_tap`.
     typewriter_preview: Option<bool>,
@@ -334,11 +335,6 @@ pub struct Config {
     pub view: Option<String>,
     /// Whether a brief, dismissible splash shows before the browser on startup.
     pub boot_splash: bool,
-    /// Whether the focused pane's border and title are painted as a gradient instead of one flat
-    /// color. Falls back to the flat look on its own wherever the two endpoint colors can't be
-    /// blended (see `style::blend_rgb`), so this only ever adds to the flat rendering, never
-    /// replaces it with something broken.
-    pub gradient_borders: bool,
     /// Whether the text preview streams in from the top, line by line, the first time a file is
     /// selected (not on every redraw, and not once the pane has been scrolled).
     pub typewriter_preview: bool,
@@ -434,8 +430,17 @@ impl Config {
             shape: appearance.theme.shape.clone().overlay(appearance.shape),
             ..appearance.theme
         };
-        let theme = config
-            .theme
+        // `gradient_borders = false` predates `[shape] gradient`. It still switches the gradient
+        // off, beneath any `gradient` set in `appearance.toml` or saved from the popup.
+        let legacy = RawTheme {
+            shape: RawShape {
+                gradient: (config.gradient_borders == Some(false)).then(|| "off".to_string()),
+                ..RawShape::default()
+            },
+            ..RawTheme::default()
+        };
+        let theme = legacy
+            .overlay(config.theme)
             .overlay(appearance_theme)
             .overlay(local.theme.clone());
         // Only colors and frames count: a `[shape]` alone says nothing about the palette, so the
@@ -458,7 +463,6 @@ impl Config {
             show_hidden: config.show_hidden.unwrap_or(false),
             view: local.view.clone().or(config.view),
             boot_splash: config.boot_splash.unwrap_or(false),
-            gradient_borders: config.gradient_borders.unwrap_or(true),
             typewriter_preview: config.typewriter_preview.unwrap_or(true),
             system_hud: config.system_hud.unwrap_or(false),
             interactive_commands: config
@@ -567,7 +571,7 @@ mod tests {
     use super::*;
     use crate::appearance::Mods;
     use crate::panels::PanelsConfig;
-    use crate::shape::{BORDER_STYLES, Gap, Shape, TitleAlign};
+    use crate::shape::{BORDER_STYLES, Gap, GradientScope, Shape, TitleAlign};
     use crate::ui::GlyphSet;
 
     #[test]
@@ -677,10 +681,38 @@ mod tests {
     }
 
     #[test]
-    fn gradient_borders_defaults_on_and_can_be_switched_off() {
-        assert!(Config::from_sources(None, None, None).gradient_borders);
+    fn the_old_gradient_switch_still_works_beneath_the_shape_table() {
+        let gradient = |config: Option<&str>, appearance: Option<&str>| {
+            Config::from_sources(config, appearance, None)
+                .theme
+                .shape
+                .gradient
+        };
+        assert_eq!(
+            gradient(None, None),
+            GradientScope::Focused,
+            "on by default"
+        );
+        assert_eq!(
+            gradient(Some("gradient_borders = true\n"), None),
+            GradientScope::Focused
+        );
+        assert_eq!(
+            gradient(Some("gradient_borders = false\n"), None),
+            GradientScope::Off
+        );
+        assert_eq!(
+            gradient(
+                Some("gradient_borders = false\n"),
+                Some("[shape]\ngradient = \"all\"\n")
+            ),
+            GradientScope::All,
+            "appearance.toml wins over the old switch"
+        );
         assert!(
-            !Config::from_sources(Some("gradient_borders = false\n"), None, None).gradient_borders
+            !Config::from_sources(Some("gradient_borders = false\n"), None, None)
+                .theme_is_customized,
+            "the old switch leaves the colors following the terminal"
         );
     }
 

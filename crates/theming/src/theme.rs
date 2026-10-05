@@ -74,6 +74,11 @@ pub struct Theme {
     pub bar_bg: String,
     /// Destructive-action prompts (delete, overwrite) in the status bar.
     pub danger_fg: String,
+    /// Where the border gradient starts: a color, or `"accent"` / `"focused"` to follow
+    /// `accent_fg` / `border_focused_fg` (see [`Theme::resolve`]).
+    pub gradient_from: String,
+    /// Where the border gradient ends, with the same two keywords.
+    pub gradient_to: String,
     /// `"rounded"`, `"plain"`, `"double"`, or `"thick"`.
     pub border_type: String,
     /// Edge between status-bar segments: `"flat"` (works in any font), `"arrow"` (Powerline
@@ -139,6 +144,18 @@ impl Theme {
     pub fn is_dark(r: u8, g: u8, b: u8) -> bool {
         let luminance = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
         luminance < 128.0
+    }
+
+    /// `value` with the keywords a gradient color may use replaced by the colors they name:
+    /// `"accent"` is `accent_fg` and `"focused"` is `border_focused_fg`. Keywords keep a gradient
+    /// following those two when they change, so a saved theme or a palette never needs its own
+    /// copy of them. Anything else is returned as it is.
+    pub fn resolve<'a>(&'a self, value: &'a str) -> &'a str {
+        match value.trim().to_lowercase().as_str() {
+            "accent" => &self.accent_fg,
+            "focused" => &self.border_focused_fg,
+            _ => value,
+        }
     }
 
     /// Layers `overrides` on top of `self`, field by field — for live, in-session edits (the
@@ -234,6 +251,14 @@ impl Theme {
                 .danger_fg
                 .clone()
                 .unwrap_or_else(|| self.danger_fg.clone()),
+            gradient_from: overrides
+                .gradient_from
+                .clone()
+                .unwrap_or_else(|| self.gradient_from.clone()),
+            gradient_to: overrides
+                .gradient_to
+                .clone()
+                .unwrap_or_else(|| self.gradient_to.clone()),
             border_type: overrides
                 .border_type
                 .clone()
@@ -271,6 +296,8 @@ impl Theme {
             status_fg: "gray".into(),
             bar_bg: "reset".into(),
             danger_fg: "red".into(),
+            gradient_from: "accent".into(),
+            gradient_to: "focused".into(),
             border_type: "plain".into(),
             separator: "auto".into(),
             shape: Shape::default(),
@@ -302,6 +329,8 @@ impl Theme {
             status_fg: "yellow".into(),
             bar_bg: "reset".into(),
             danger_fg: "red".into(),
+            gradient_from: "accent".into(),
+            gradient_to: "focused".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
             shape: Shape::default(),
@@ -334,6 +363,8 @@ impl Theme {
             status_fg: "#a6adc8".into(),
             bar_bg: "#181825".into(),
             danger_fg: "#f38ba8".into(),
+            gradient_from: "accent".into(),
+            gradient_to: "focused".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
             shape: Shape::default(),
@@ -368,6 +399,8 @@ impl Theme {
             status_fg: "#6c6f85".into(),
             bar_bg: "#e6e9ef".into(),
             danger_fg: "#d20f39".into(),
+            gradient_from: "accent".into(),
+            gradient_to: "focused".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
             shape: Shape::default(),
@@ -402,6 +435,8 @@ impl Theme {
             status_fg: "#81a1c1".into(),
             bar_bg: "#3b4252".into(),
             danger_fg: "#bf616a".into(),
+            gradient_from: "accent".into(),
+            gradient_to: "focused".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
             shape: Shape::default(),
@@ -436,6 +471,8 @@ impl Default for Theme {
             status_fg: "#7a80b8".into(),
             bar_bg: "#1a1f3d".into(),
             danger_fg: "#ff3860".into(),
+            gradient_from: "accent".into(),
+            gradient_to: "focused".into(),
             border_type: "rounded".into(),
             separator: "auto".into(),
             shape: Shape::default(),
@@ -473,6 +510,8 @@ pub struct RawTheme {
     pub status_fg: Option<String>,
     pub bar_bg: Option<String>,
     pub danger_fg: Option<String>,
+    pub gradient_from: Option<String>,
+    pub gradient_to: Option<String>,
     pub border_type: Option<String>,
     pub separator: Option<String>,
     /// `[shape]` from `appearance.toml` (see `Config::from_sources`), or a saved theme's shape.
@@ -511,6 +550,8 @@ impl RawTheme {
             status_fg: Some(theme.status_fg.clone()),
             bar_bg: Some(theme.bar_bg.clone()),
             danger_fg: Some(theme.danger_fg.clone()),
+            gradient_from: Some(theme.gradient_from.clone()),
+            gradient_to: Some(theme.gradient_to.clone()),
             border_type: Some(theme.border_type.clone()),
             separator: Some(theme.separator.clone()),
             shape: RawShape::from_shape(&theme.shape),
@@ -544,6 +585,8 @@ impl RawTheme {
             status_fg: top.status_fg.or(self.status_fg),
             bar_bg: top.bar_bg.or(self.bar_bg),
             danger_fg: top.danger_fg.or(self.danger_fg),
+            gradient_from: top.gradient_from.or(self.gradient_from),
+            gradient_to: top.gradient_to.or(self.gradient_to),
             border_type: top.border_type.or(self.border_type),
             separator: top.separator.or(self.separator),
             shape: self.shape.overlay(top.shape),
@@ -561,6 +604,24 @@ impl From<RawTheme> for Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_keywords_follow_the_colors_they_name() {
+        let mut theme = Theme::named("dracula");
+        assert_eq!(theme.resolve(&theme.gradient_from), theme.accent_fg);
+        assert_eq!(theme.resolve(&theme.gradient_to), theme.border_focused_fg);
+        theme.accent_fg = "#123456".into();
+        assert_eq!(
+            theme.resolve("Accent"),
+            "#123456",
+            "a changed accent is followed"
+        );
+        assert_eq!(theme.resolve("#abcdef"), "#abcdef");
+        assert_eq!(theme.resolve("red"), "red");
+        // A snapshot keeps the keywords, so a saved theme follows its own accent.
+        let saved: Theme = RawTheme::from_theme(&theme).into();
+        assert_eq!(saved.gradient_from, "accent");
+    }
 
     #[test]
     fn default_raw_theme_resolves_to_default_palette() {

@@ -49,10 +49,10 @@ show_hidden = false
 # since it would land on a row hidden behind it), and it clears itself after under a second.
 boot_splash = false
 
-# Paints the focused pane's border and title as a gradient (from the theme's accent color to its
-# focused-border color) instead of one flat color. Falls back to the flat look on its own on a
-# terminal or theme where the two colors can't be blended (a named color, or one quantized to the
-# 256-color palette), so this is safe to leave on everywhere.
+# The border gradient's old switch. The gradient is now part of the look: where it is painted and
+# which way it runs are `gradient` and `gradient_flow` under [shape] in appearance.toml, its colors
+# `gradient_from` and `gradient_to` under [theme], and the appearance popup (a) edits all four.
+# `false` here still turns it off wherever appearance.toml doesn't set `gradient`.
 gradient_borders = true
 
 # The text preview streams in from the top, line by line, the first time a file is selected — not
