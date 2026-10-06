@@ -1479,6 +1479,24 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   red left edge after setting the start to `#ff0000`, a gradient on the popup's own frame with
   `all`, flat frames with `off`, all four in `local.toml`, and the old switch still turning it off.
 
+- ✅ **Plugin `run_action` and `list_actions` (stage 1.5, sixth cycle)** – a plugin can send
+  `run_action {name}` and Minuteman does what the key bound to that action does, confirmations
+  included; `list_actions` answers with every name. A name is the word that binds the action under
+  `[keys]` (`paste`, `sort`, `undo`, `hidden`, ...), so a user and a plugin call an action the same
+  thing. The request is one more turn of the render loop, not a second dispatcher. `theming::Action` gained `ALL`, `name`,
+  `from_name` and `waits_for_key`; `plugins::actions` hands a request to the render thread as an
+  `ActionRequest` and waits, and `tui::plugin_action` decides whether it may run. The browser's own
+  key handling was lifted into one `Browse` step that a key press and a plugin's action both enter,
+  so a plugin's `paste` is the `p` key's paste and no action is written twice. It runs only while
+  the user is plainly browsing: a popup or view, a prompt, a chord, a focused shell or a running
+  job refuses it and the plugin is told which. The chord starters (`bookmark_jump`, `bookmark_set`,
+  `leader`) are refused and left out of `list_actions`. The reply is held until the tick has
+  published the state the action left, so `get_state` straight after it sees that state. Additive,
+  so `API_VERSION` stays 1. `examples/plugins/dir_stats.py` gains `:plugin dir-stats run ACTION`
+  and `actions`. Tested with a check that every name binds exactly its action, properties over any
+  name a plugin might send, the refusal of every action in every mode, and end to end with the
+  fixture and a real `python3`.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -1596,8 +1614,8 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   ~13.9 MB release build), `wasmi` about +1 to 2 MB but slower — spike both before choosing.
   Deferred until plugins have users asking for hooks and someone wants to share a plugin with
   others; building it earlier is guessing at an API that must then be kept stable.
-- **Action registry, as its own cycle (optional)** – the string names and a `run_action` entry
-  point from stage 1.5, plus a `disabled_actions` config list, are useful without any plugin
+- **Action registry, as its own cycle (optional)** – the string names and `run_action` entry
+  point now exist for plugins (see the sixth stage 1.5 cycle above); what remains is a `disabled_actions` config list, useful without any plugin
   (uniform keys, menus and `:` commands, easier tests). Pure addition: the existing `match` on
   `Action` stays and is routed through it, with a test first proving every default key still
   triggers what it did. Actions that open prompts or wait for a second key (`BookmarkJump`,

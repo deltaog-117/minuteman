@@ -25,7 +25,9 @@
 //! - plugin -> host: a request with an `id` (`read_dir`, `copy`, `mv`, `delete`, `create_dir`,
 //!   `create_file`, `touch`, `rename` — the same `file_ops` orchestration the built-in keys use —
 //!   `get_state`, which asks for the browser's cwd, cursor, marks and view settings, and
-//!   `register_command`/`unregister_command`, which add and remove a `:` command word)
+//!   `register_command`/`unregister_command`, which add and remove a `:` command word, and
+//!   `run_action`, which runs one of the interface's own actions by name, such as `paste` or
+//!   `sort`, with `list_actions` naming them)
 //!   gets exactly one reply line carrying that same `id`; a `log` notification (no `id`) is
 //!   fire-and-forget and surfaces as the status bar message.
 //!
@@ -270,6 +272,12 @@ pub enum PluginRequest {
     UnregisterCommand {
         name: String,
     },
+    /// Runs one of the interface's own actions by its stable name, as its key would.
+    RunAction {
+        name: String,
+    },
+    /// Asks for the name of every action `run_action` can run; takes no parameters.
+    ListActions,
     ReadDir {
         path: PathBuf,
     },
@@ -345,6 +353,12 @@ impl PluginRequest {
                     .map_err(bad)?
                     .name,
             }),
+            "run_action" => Ok(Self::RunAction {
+                name: serde_json::from_value::<NameParams>(params)
+                    .map_err(bad)?
+                    .name,
+            }),
+            "list_actions" => Ok(Self::ListActions),
             "read_dir" => Ok(Self::ReadDir {
                 path: serde_json::from_value::<PathParams>(params)
                     .map_err(bad)?
@@ -672,6 +686,31 @@ mod tests {
                 other => panic!("expected a get_state request for {line}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn run_action_takes_a_name_and_list_actions_takes_nothing() {
+        let run = r#"{"jsonrpc":"2.0","id":1,"method":"run_action","params":{"name":"paste"}}"#;
+        assert!(matches!(
+            parse_line(run).unwrap(),
+            Incoming::Request {
+                request: PluginRequest::RunAction { ref name },
+                ..
+            } if name == "paste"
+        ));
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"list_actions"}"#;
+        assert!(matches!(
+            parse_line(list).unwrap(),
+            Incoming::Request {
+                request: PluginRequest::ListActions,
+                ..
+            }
+        ));
+        let nameless = r#"{"jsonrpc":"2.0","id":3,"method":"run_action","params":{}}"#;
+        assert_eq!(
+            parse_line(nameless).unwrap_err().id,
+            Some(serde_json::json!(3))
+        );
     }
 
     #[test]

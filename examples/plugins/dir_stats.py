@@ -35,7 +35,11 @@ Then `i` (or `I`, or `:stats`) shows how many files and folders the browsed dire
 how many bytes the files add up to, and `:plugin dir-stats touch notes.txt` creates a file there,
 which shows a plugin doing real work through the host and not just reading.
 `:plugin dir-stats state` asks the host for the browser's state with `get_state` and shows the
-entry under the cursor, how many entries are marked and the sort and view. With `events` set, it
+entry under the cursor, how many entries are marked and the sort and view.
+`:plugin dir-stats run sort` runs one of Minuteman's own actions by name with `run_action`, the
+same as pressing its key (`sort`, `paste`, `undo`, `hidden`, ...), and `:plugin dir-stats
+actions` lists every name with `list_actions`. An action runs only while you are plainly
+browsing; with a prompt, popup or job in the way the host refuses it and says why. With `events` set, it
 also shows each directory you enter and each copy, move, delete and the like that finishes. A
 plugin has to ask for `dir_changed`, `selection_changed` and `job_finished`; a burst of cursor
 moves reaches it as one event from where it began to where it ended.
@@ -107,11 +111,20 @@ def on_command(params):
             f"state: cursor={cursor} marks={len(state['marks'])} sort={state['sort']} "
             f"view={state['view']} cwd={state['cwd']}",
         )
+    elif command == "plugin" and args[:1] == ["run"] and len(args) == 2:
+        request("run_action", {"name": args[1]})
+        log("info", f"ran {args[1]}")
+    elif command == "plugin" and args == ["actions"]:
+        log("info", "actions: " + " ".join(request("list_actions", {})))
     elif command == "plugin" and args[:1] == ["touch"] and len(args) == 2:
         request("create_file", {"path": f"{params['cwd']}/{args[1]}"})
         log("info", f"created {args[1]}")
     else:
-        log("warn", "try :stats, :plugin dir-stats state or :plugin dir-stats touch NAME")
+        log(
+            "warn",
+            "try :stats, :plugin dir-stats state, :plugin dir-stats touch NAME, "
+            ":plugin dir-stats run ACTION or :plugin dir-stats actions",
+        )
 
 
 def handle(message):

@@ -1051,3 +1051,119 @@ fn a_python_plugin_registers_its_own_command_with_no_config() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Waits for the plugin's next `run_action` to reach the render thread's side.
+#[track_caller]
+fn wait_for_action(manager: &mut PluginManager) -> plugins::ActionRequest {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(request) = manager.take_action() {
+            return request;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("no run_action arrived");
+}
+
+#[test]
+fn a_run_action_waits_for_the_interface_and_hears_whether_it_ran() {
+    let dir = scratch_dir("run-action");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--run-action=paste", "--run-action=sort"],
+        Triggers::default(),
+    );
+
+    let paste = wait_for_action(&mut manager);
+    assert_eq!((paste.plugin(), paste.name()), ("fixture", "paste"));
+    // The plugin is blocked on the reply, so its second request cannot have been sent yet.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(manager.take_action().is_none());
+    paste.ran();
+    wait_for_log(&mut manager, "run paste: ok");
+
+    wait_for_action(&mut manager).refuse("a prompt is open");
+    wait_for_log(
+        &mut manager,
+        "run sort: cannot run 'sort': a prompt is open",
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn list_actions_answers_with_the_declared_names_without_the_interface() {
+    let dir = scratch_dir("list-actions");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    manager.declare_actions(["paste".to_string(), "sort".to_string()]);
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--list-actions"],
+        Triggers::default(),
+    );
+
+    wait_for_log(&mut manager, "actions: paste,sort");
+    assert!(manager.take_action().is_none());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_run_action_the_interface_drops_is_answered_with_an_error() {
+    let dir = scratch_dir("run-action-dropped");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--run-action=quit"],
+        Triggers::default(),
+    );
+
+    drop(wait_for_action(&mut manager));
+    wait_for_log(
+        &mut manager,
+        "run quit: the interface closed before running it",
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_python_plugin_runs_an_action_by_name_and_lists_them() {
+    if !has_python() {
+        return;
+    }
+    let dir = scratch_dir("python-actions");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    manager.declare_actions(["paste".to_string(), "sort".to_string()]);
+    spawn_python_example(&runtime, &mut manager, &dir);
+    wait_for_log(&mut manager, "ready");
+
+    assert!(manager.dispatch_named("dir-stats", vec!["actions".into()], &dir, &[]));
+    wait_for_log(&mut manager, "actions: paste sort");
+
+    assert!(manager.dispatch_named("dir-stats", vec!["run".into(), "sort".into()], &dir, &[]));
+    let request = wait_for_action(&mut manager);
+    assert_eq!((request.plugin(), request.name()), ("dir-stats", "sort"));
+    request.ran();
+    wait_for_log(&mut manager, "ran sort");
+
+    assert!(manager.dispatch_named("dir-stats", vec!["run".into(), "paste".into()], &dir, &[]));
+    wait_for_action(&mut manager).refuse("a job is running");
+    wait_for_log(&mut manager, "cannot run 'paste': a job is running");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

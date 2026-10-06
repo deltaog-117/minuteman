@@ -30,6 +30,8 @@
 //! `--register=WORD` (repeatable) asks the host at `init` for `:WORD`, and logs `register WORD: ok`
 //! or the host's refusal; `--unregister-on-key=WORD` gives it up again on a `key`, logging
 //! `unregister WORD: ok` or the refusal. A `command` event is logged as `command: WORD args...`.
+//! `--list-actions` asks at `init` for the actions it may run and logs `actions: a,b,...`, and
+//! `--run-action=NAME` (repeatable) then runs each, logging `run NAME: ok` or the refusal.
 //! Because it takes the next line on stdin as a request's reply, a test must wait for these logs
 //! before sending it anything else.
 //!
@@ -97,6 +99,38 @@ fn main() {
                     );
                     let outcome = result.map_or_else(|e| e, |_| "ok".to_string());
                     send_log(&mut stdout, "info", &format!("register {word}: {outcome}"));
+                }
+                if std::env::args().any(|arg| arg == "--list-actions") {
+                    let result = send_request(
+                        &mut stdout,
+                        &mut lines,
+                        &mut next_id,
+                        "list_actions",
+                        serde_json::json!({}),
+                    );
+                    let names: Vec<String> = result
+                        .ok()
+                        .and_then(|v| v.as_array().cloned())
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect();
+                    send_log(
+                        &mut stdout,
+                        "info",
+                        &format!("actions: {}", names.join(",")),
+                    );
+                }
+                for action in flag_values("run-action") {
+                    let result = send_request(
+                        &mut stdout,
+                        &mut lines,
+                        &mut next_id,
+                        "run_action",
+                        serde_json::json!({ "name": action }),
+                    );
+                    let outcome = result.map_or_else(|e| e, |_| "ok".to_string());
+                    send_log(&mut stdout, "info", &format!("run {action}: {outcome}"));
                 }
                 if let Some(code) = exit_code("exit-on-init") {
                     std::process::exit(code);

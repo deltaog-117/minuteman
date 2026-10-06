@@ -46,6 +46,7 @@ mod nav_job;
 mod open;
 mod osc52;
 mod overlay_view;
+mod plugin_action;
 mod popup_shell;
 mod preview_hook;
 mod preview_view;
@@ -102,6 +103,7 @@ use extract_popup::ExtractPopup;
 use file_ops::archive::Format;
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect::InspectView;
+use plugin_action::Browse;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
@@ -1517,24 +1519,40 @@ fn run(
         } else {
             Duration::from_millis(100)
         };
-        if !event::poll(poll_timeout)? {
-            continue;
+        // A plugin's `run_action` takes a turn of its own, in place of a terminal event, and goes
+        // through the same handling as the key bound to it (see `plugin_action`).
+        let mut browse = None;
+        if let Some(request) = app.take_plugin_action() {
+            let modal_open = usage.is_some()
+                || inspect.is_some()
+                || menu.is_some()
+                || trash_view.is_some()
+                || compress.is_some()
+                || extract.is_some()
+                || settings.is_some()
+                || appearance.is_some();
+            browse = plugin_action::accept(request, mode, modal_open);
         }
-
-        let event = event::read()?;
+        let event = if browse.is_some() {
+            None
+        } else if event::poll(poll_timeout)? {
+            Some(event::read()?)
+        } else {
+            continue;
+        };
         // Any event dismisses the boot splash outright, ahead of every other handler below —
         // including a resize, so a terminal maximized right at startup doesn't leave a stale
         // splash rect on screen. A key goes on to do its job, so typing at launch is never lost
         // to the splash; a click would land on whatever sits hidden behind it, so it only
         // dismisses.
-        if boot_splash.is_some() {
+        if event.is_some() && boot_splash.is_some() {
             boot_splash = None;
-            if matches!(event, Event::Mouse(_)) {
+            if matches!(event, Some(Event::Mouse(_))) {
                 continue;
             }
         }
         match event {
-            Event::Resize(cols, rows) => {
+            Some(Event::Resize(cols, rows)) => {
                 if let Some(panes) = shells.as_ref() {
                     panes.resize(shell_area(
                         Rect::new(0, 0, cols, rows),
@@ -1543,7 +1561,7 @@ fn run(
                     ))?;
                 }
             }
-            Event::Mouse(mouse) => {
+            Some(Event::Mouse(mouse)) => {
                 // Alt held for a drag or click is a gesture, not a tap; plain motion is not.
                 if !matches!(mouse.kind, MouseEventKind::Moved) {
                     alt_tap_armed = false;
@@ -2300,7 +2318,7 @@ fn run(
                     _ => {}
                 }
             }
-            Event::Key(key) => {
+            Some(Event::Key(key)) => {
                 // Kept in sync on every key event, modal views and prompts included, so the
                 // header pill never lags behind what the next keystroke will actually do.
                 app.set_caps_lock(key.state.contains(KeyEventState::CAPS_LOCK));
@@ -2840,189 +2858,204 @@ fn run(
                     continue;
                 }
 
-                // In the grid the cursor moves in two dimensions: the arrows go one tile sideways
-                // (they are `Leave`/`Enter` elsewhere; `h`, `l` and `enter` still go up and in),
-                // and whatever is bound to move down or up goes a whole row.
-                if view_mode == ViewMode::Grid {
-                    let step = match key.code {
-                        KeyCode::Left => Some(Step::Left),
-                        KeyCode::Right => Some(Step::Right),
-                        code => match config.keys.resolve(code) {
-                            Some(Action::MoveDown) => Some(Step::Down),
-                            Some(Action::MoveUp) => Some(Step::Up),
-                            _ => None,
-                        },
-                    };
-                    if let Some(step) = step {
-                        let panels = effective_panels(config, &local_panels);
-                        let layout = browser_layout(
-                            terminal.size()?.into(),
-                            panels.columns,
-                            panels.show_hud,
-                            view_mode,
-                            effective_theme(config, &local_theme).shape,
-                        );
-                        let grid = GridLayout::split(body_of(&layout));
-                        browser.select_index(grid.step(
-                            browser.selected_index(),
-                            browser.current_entries().len(),
-                            step,
-                        ));
-                        continue;
-                    }
-                }
-
-                match config.keys.resolve(key.code) {
-                    Some(Action::Quit) => return Ok(()),
-                    // Without `--cwd-file` (a bare `minuteman` run) there's nobody to hand the
-                    // directory to, so this degrades to a plain quit rather than doing nothing.
-                    Some(Action::QuitToCwd) => {
-                        // A folder on another machine is not one the shell can `cd` into.
-                        if let Some(file) = cwd_file
-                            && !vfs_ssh::is_remote(browser.current_dir())
-                        {
-                            cli::write_cwd_file(file, browser.current_dir())?;
-                        }
-                        return Ok(());
-                    }
-                    Some(Action::MoveDown) => browser.move_down(),
-                    Some(Action::MoveUp) => browser.move_up(),
-                    // A folder opens; a file opens with its rule or the desktop's default, the
-                    // way `l` does on a file in Ranger.
-                    Some(Action::Enter) => match browser.selected_entry() {
-                        Some(entry) if !entry.is_dir => {
-                            let path = entry.path.clone();
-                            open_file(app, browser, vfs, &path);
-                        }
-                        _ => {
-                            if let Some(plan) = browser.plan_enter() {
-                                app.begin_move(browser, plan, None, "cannot open");
-                            }
-                        }
-                    },
-                    Some(Action::Leave) => {
-                        if let Some(plan) = browser.plan_leave() {
-                            app.begin_move(browser, plan, None, "cannot open");
-                        }
-                    }
-                    Some(Action::Yank) if app.require_marks(browser) => app.yank(browser),
-                    Some(Action::Cut) if app.require_marks(browser) => app.cut(browser),
-                    Some(Action::Paste) => app.begin_paste(browser),
-                    Some(Action::Compress) if app.require_marks(browser) => {
-                        compress = app.begin_compress_form(browser);
-                    }
-                    Some(Action::Extract) if app.require_marks(browser) => {
-                        extract = app.begin_extract_form(browser);
-                    }
-                    Some(Action::Undo) => app.undo(browser, vfs)?,
-                    Some(Action::Redo) => app.redo(browser, vfs)?,
-                    Some(Action::Delete) if app.require_marks(browser) => app.begin_trash(browser),
-                    Some(Action::DeletePermanently) if app.require_marks(browser) => {
-                        app.begin_delete_permanently(browser)
-                    }
-                    Some(Action::Rename) => app.begin_rename(browser),
-                    Some(Action::Create) => app.begin_create(),
-                    Some(Action::Search) => app.begin_search(browser),
-                    Some(Action::Command) => app.begin_command(),
-                    Some(Action::Cancel) => app.cancel_all(browser),
-                    Some(Action::Select) => browser.toggle_mark(),
-                    // A directory bookmark, distinct from `Select`'s per-file marks above — the
-                    // status bar names what the next key does (see `hud::hints`); the register
-                    // itself is read back in the `pending_bookmark` block up above.
-                    Some(Action::BookmarkJump) => pending_bookmark = Some(BookmarkChord::Jump),
-                    Some(Action::BookmarkSet) => pending_bookmark = Some(BookmarkChord::Set),
-                    Some(Action::TrashView) => trash_view = Some(app.begin_trash_view()),
-                    Some(Action::DiskUsage) => {
-                        usage = Some(app.begin_disk_usage(browser.current_dir().to_path_buf()));
-                    }
-                    Some(Action::Appearance) => {
-                        appearance = Some(AppearancePopup::new());
-                    }
-                    Some(Action::PreviewDown) => previews.text.scroll_half_pages(1),
-                    Some(Action::PreviewUp) => previews.text.scroll_half_pages(-1),
-                    Some(Action::Sort) => {
-                        let sort = Sort {
-                            key: browser.sort().key.cycled(),
-                            reversed: false,
-                        };
-                        browser.set_sort(sort);
-                        app.status = Some(format!("sorted by {}", sort.describe()));
-                    }
-                    Some(Action::SortReverse) => {
-                        let current = browser.sort();
-                        let sort = Sort {
-                            reversed: !current.reversed,
-                            ..current
-                        };
-                        browser.set_sort(sort);
-                        app.status = Some(format!("sorted by {}", sort.describe()));
-                    }
-                    Some(Action::CycleView) => {
-                        view_mode = view_mode.cycled();
-                        if !matches!(view_mode, ViewMode::Grid | ViewMode::Filmstrip) {
-                            // The pictures belong to the grid and the strip; a folder of photos
-                            // should not stay in memory behind a list.
-                            previews.thumbs.clear();
-                        }
-                        grid_top = 0;
-                        app.status = Some(match Config::save_view(view_mode.label()) {
-                            Ok(()) => format!("view: {}", view_mode.label()),
-                            Err(e) => format!("view: {} (not saved: {e})", view_mode.label()),
-                        });
-                    }
-                    Some(Action::ToggleHidden) => {
-                        let shown = browser.toggle_hidden(vfs)?;
-                        app.status = Some(
-                            if shown {
-                                "hidden files shown"
-                            } else {
-                                "hidden files hidden"
-                            }
-                            .into(),
-                        );
-                    }
-                    // Starts the resize/move chord for shell panes (see `pending_leader` and
-                    // `ShellChordMode`). Stays inert — same as before panes existed to chord
-                    // against — whenever no shell is open.
-                    Some(Action::Leader) => {
-                        if shells.is_some() {
-                            // The status bar lists what can follow (see `hud::hints`).
-                            pending_leader = true;
-                        }
-                    }
-                    // Guarded explicitly rather than relying on it being unreachable while panes
-                    // are already open (the branch above handles that case) — opening a second
-                    // tree here would silently drop the running one without closing it. Use a
-                    // split instead once a shell is already open.
-                    Some(Action::Shell) if shells.is_none() => {
-                        match fresh_shell_box(
-                            browser.current_dir(),
-                            terminal.size()?.into(),
-                            &mut shell_offset,
-                            &mut shell_size,
-                        ) {
-                            Ok(panes) => {
-                                shells = Some(panes);
-                                shell_focused = true;
-                            }
-                            Err(e) => app.status = Some(format!("failed to start shell: {e}")),
-                        }
-                    }
-                    Some(
-                        Action::Yank
-                        | Action::Cut
-                        | Action::Delete
-                        | Action::DeletePermanently
-                        | Action::Compress
-                        | Action::Extract,
-                    ) => {}
-                    Some(Action::Shell) => {}
-                    None => {
-                        app.dispatch_plugin_key(key.code, browser);
-                    }
-                }
+                browse = Some(Browse::Key(key.code));
             }
             _ => {}
+        }
+
+        let Some(browse) = browse else {
+            continue;
+        };
+        let (action, key_code) = match browse {
+            Browse::Key(code) => (config.keys.resolve(code), Some(code)),
+            Browse::Plugin(action, request) => {
+                app.ran_plugin_action(request);
+                (Some(action), None)
+            }
+        };
+
+        // In the grid the cursor moves in two dimensions: the arrows go one tile sideways
+        // (they are `Leave`/`Enter` elsewhere; `h`, `l` and `enter` still go up and in),
+        // and whatever is bound to move down or up goes a whole row.
+        if view_mode == ViewMode::Grid {
+            let step = match key_code {
+                Some(KeyCode::Left) => Some(Step::Left),
+                Some(KeyCode::Right) => Some(Step::Right),
+                _ => match action {
+                    Some(Action::MoveDown) => Some(Step::Down),
+                    Some(Action::MoveUp) => Some(Step::Up),
+                    _ => None,
+                },
+            };
+            if let Some(step) = step {
+                let panels = effective_panels(config, &local_panels);
+                let layout = browser_layout(
+                    terminal.size()?.into(),
+                    panels.columns,
+                    panels.show_hud,
+                    view_mode,
+                    effective_theme(config, &local_theme).shape,
+                );
+                let grid = GridLayout::split(body_of(&layout));
+                browser.select_index(grid.step(
+                    browser.selected_index(),
+                    browser.current_entries().len(),
+                    step,
+                ));
+                continue;
+            }
+        }
+
+        match action {
+            Some(Action::Quit) => return Ok(()),
+            // Without `--cwd-file` (a bare `minuteman` run) there's nobody to hand the
+            // directory to, so this degrades to a plain quit rather than doing nothing.
+            Some(Action::QuitToCwd) => {
+                // A folder on another machine is not one the shell can `cd` into.
+                if let Some(file) = cwd_file
+                    && !vfs_ssh::is_remote(browser.current_dir())
+                {
+                    cli::write_cwd_file(file, browser.current_dir())?;
+                }
+                return Ok(());
+            }
+            Some(Action::MoveDown) => browser.move_down(),
+            Some(Action::MoveUp) => browser.move_up(),
+            // A folder opens; a file opens with its rule or the desktop's default, the
+            // way `l` does on a file in Ranger.
+            Some(Action::Enter) => match browser.selected_entry() {
+                Some(entry) if !entry.is_dir => {
+                    let path = entry.path.clone();
+                    open_file(app, browser, vfs, &path);
+                }
+                _ => {
+                    if let Some(plan) = browser.plan_enter() {
+                        app.begin_move(browser, plan, None, "cannot open");
+                    }
+                }
+            },
+            Some(Action::Leave) => {
+                if let Some(plan) = browser.plan_leave() {
+                    app.begin_move(browser, plan, None, "cannot open");
+                }
+            }
+            Some(Action::Yank) if app.require_marks(browser) => app.yank(browser),
+            Some(Action::Cut) if app.require_marks(browser) => app.cut(browser),
+            Some(Action::Paste) => app.begin_paste(browser),
+            Some(Action::Compress) if app.require_marks(browser) => {
+                compress = app.begin_compress_form(browser);
+            }
+            Some(Action::Extract) if app.require_marks(browser) => {
+                extract = app.begin_extract_form(browser);
+            }
+            Some(Action::Undo) => app.undo(browser, vfs)?,
+            Some(Action::Redo) => app.redo(browser, vfs)?,
+            Some(Action::Delete) if app.require_marks(browser) => app.begin_trash(browser),
+            Some(Action::DeletePermanently) if app.require_marks(browser) => {
+                app.begin_delete_permanently(browser)
+            }
+            Some(Action::Rename) => app.begin_rename(browser),
+            Some(Action::Create) => app.begin_create(),
+            Some(Action::Search) => app.begin_search(browser),
+            Some(Action::Command) => app.begin_command(),
+            Some(Action::Cancel) => app.cancel_all(browser),
+            Some(Action::Select) => browser.toggle_mark(),
+            // A directory bookmark, distinct from `Select`'s per-file marks above — the
+            // status bar names what the next key does (see `hud::hints`); the register
+            // itself is read back in the `pending_bookmark` block up above.
+            Some(Action::BookmarkJump) => pending_bookmark = Some(BookmarkChord::Jump),
+            Some(Action::BookmarkSet) => pending_bookmark = Some(BookmarkChord::Set),
+            Some(Action::TrashView) => trash_view = Some(app.begin_trash_view()),
+            Some(Action::DiskUsage) => {
+                usage = Some(app.begin_disk_usage(browser.current_dir().to_path_buf()));
+            }
+            Some(Action::Appearance) => {
+                appearance = Some(AppearancePopup::new());
+            }
+            Some(Action::PreviewDown) => previews.text.scroll_half_pages(1),
+            Some(Action::PreviewUp) => previews.text.scroll_half_pages(-1),
+            Some(Action::Sort) => {
+                let sort = Sort {
+                    key: browser.sort().key.cycled(),
+                    reversed: false,
+                };
+                browser.set_sort(sort);
+                app.status = Some(format!("sorted by {}", sort.describe()));
+            }
+            Some(Action::SortReverse) => {
+                let current = browser.sort();
+                let sort = Sort {
+                    reversed: !current.reversed,
+                    ..current
+                };
+                browser.set_sort(sort);
+                app.status = Some(format!("sorted by {}", sort.describe()));
+            }
+            Some(Action::CycleView) => {
+                view_mode = view_mode.cycled();
+                if !matches!(view_mode, ViewMode::Grid | ViewMode::Filmstrip) {
+                    // The pictures belong to the grid and the strip; a folder of photos
+                    // should not stay in memory behind a list.
+                    previews.thumbs.clear();
+                }
+                grid_top = 0;
+                app.status = Some(match Config::save_view(view_mode.label()) {
+                    Ok(()) => format!("view: {}", view_mode.label()),
+                    Err(e) => format!("view: {} (not saved: {e})", view_mode.label()),
+                });
+            }
+            Some(Action::ToggleHidden) => {
+                let shown = browser.toggle_hidden(vfs)?;
+                app.status = Some(
+                    if shown {
+                        "hidden files shown"
+                    } else {
+                        "hidden files hidden"
+                    }
+                    .into(),
+                );
+            }
+            // Starts the resize/move chord for shell panes (see `pending_leader` and
+            // `ShellChordMode`). Stays inert — same as before panes existed to chord
+            // against — whenever no shell is open.
+            Some(Action::Leader) => {
+                if shells.is_some() {
+                    // The status bar lists what can follow (see `hud::hints`).
+                    pending_leader = true;
+                }
+            }
+            // Guarded explicitly rather than relying on it being unreachable while panes
+            // are already open (the branch above handles that case) — opening a second
+            // tree here would silently drop the running one without closing it. Use a
+            // split instead once a shell is already open.
+            Some(Action::Shell) if shells.is_none() => {
+                match fresh_shell_box(
+                    browser.current_dir(),
+                    terminal.size()?.into(),
+                    &mut shell_offset,
+                    &mut shell_size,
+                ) {
+                    Ok(panes) => {
+                        shells = Some(panes);
+                        shell_focused = true;
+                    }
+                    Err(e) => app.status = Some(format!("failed to start shell: {e}")),
+                }
+            }
+            Some(
+                Action::Yank
+                | Action::Cut
+                | Action::Delete
+                | Action::DeletePermanently
+                | Action::Compress
+                | Action::Extract,
+            ) => {}
+            Some(Action::Shell) => {}
+            None => {
+                if let Some(code) = key_code {
+                    app.dispatch_plugin_key(code, browser);
+                }
+            }
         }
     }
 }

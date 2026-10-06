@@ -21,8 +21,10 @@
 //! `kill_on_drop` has something alive to act on for the plugin's whole lifetime. The first task also
 //! drains a plugin's `Mailbox` of folded `dir_changed` and `selection_changed` events. A `get_state`
 //! request is answered by that second task straight from a `watch` channel the render loop
-//! publishes to each tick, so it never waits on the render thread. A plugin whose process has
-//! ended is started again the next time something is meant for it (see `life`).
+//! publishes to each tick, so it never waits on the render thread. A `run_action` request is the
+//! one that does: it is handed to the render thread (see `actions`) and answered from there. A
+//! plugin whose process has ended is started again the next time something is meant for it (see
+//! `life`).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -38,6 +40,7 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 
+use crate::actions::{ActionLink, ActionRequest};
 use crate::error::PluginError;
 use crate::life::{self, Exit, Life, PluginInfo, PluginState, Verdict};
 use crate::mailbox::{Mailbox, Queued};
@@ -70,6 +73,7 @@ struct RunningPlugin {
     on_keys: Vec<KeyCode>,
     events: Vec<EventKind>,
     registry: SharedRegistry,
+    actions: ActionLink,
     process: Process,
     /// Crashes in a row, each soon after starting (see `life::after_crash`).
     crashes: u32,
@@ -149,6 +153,7 @@ impl RunningPlugin {
                 logs_tx: logs_tx.clone(),
                 state_rx: state_tx.subscribe(),
                 registry: self.registry.clone(),
+                actions: self.actions.clone(),
             },
         )?;
         self.restarts += 1;
@@ -210,11 +215,13 @@ impl RunningPlugin {
 }
 
 /// What a plugin's process is connected to besides its own pipes: where its log lines go, the
-/// published state it reads, and the command registry it writes.
+/// published state it reads, the command registry it writes and the way to the interface's
+/// actions.
 struct Wiring {
     logs_tx: UnboundedSender<LogMessage>,
     state_rx: watch::Receiver<StateSnapshot>,
     registry: SharedRegistry,
+    actions: ActionLink,
 }
 
 /// How `PluginManager::restart` went.
@@ -253,6 +260,9 @@ pub struct PluginManager {
     state_tx: watch::Sender<StateSnapshot>,
     /// Who answers which `:` command word, shared with every plugin's reader.
     registry: SharedRegistry,
+    /// Where every plugin's reader sends `run_action`, and the names `list_actions` answers.
+    actions: ActionLink,
+    actions_rx: UnboundedReceiver<ActionRequest>,
     /// Whether the interface has published at least once; the first publish is the browser
     /// arriving, not a change, so it fires no event.
     published: AtomicBool,
@@ -261,12 +271,15 @@ pub struct PluginManager {
 impl Default for PluginManager {
     fn default() -> Self {
         let (logs_tx, logs_rx) = unbounded_channel();
+        let (actions_tx, actions_rx) = unbounded_channel();
         Self {
             plugins: Vec::new(),
             logs_tx,
             logs_rx,
             state_tx: watch::channel(StateSnapshot::default()).0,
             registry: SharedRegistry::default(),
+            actions: ActionLink::new(actions_tx),
+            actions_rx,
             published: AtomicBool::new(false),
         }
     }
@@ -320,6 +333,7 @@ impl PluginManager {
                 logs_tx: self.logs_tx.clone(),
                 state_rx: self.state_tx.subscribe(),
                 registry: self.registry.clone(),
+                actions: self.actions.clone(),
             },
         )?;
         self.plugins.push(RunningPlugin {
@@ -330,6 +344,7 @@ impl PluginManager {
             on_keys: triggers.keys,
             events: triggers.events,
             registry: self.registry.clone(),
+            actions: self.actions.clone(),
             process,
             crashes: 0,
             restarts: 0,
@@ -455,6 +470,19 @@ impl PluginManager {
     /// before spawning, so a plugin's config cannot get ahead of them.
     pub fn reserve_commands(&mut self, words: impl IntoIterator<Item = String>) {
         self.registry.lock().reserve(words);
+    }
+
+    /// Declares the names of the interface's actions a plugin may run with `run_action`, which
+    /// `list_actions` answers with in this order. Call before spawning, like `reserve_commands`:
+    /// a plugin started earlier keeps the list it was given.
+    pub fn declare_actions(&mut self, names: impl IntoIterator<Item = String>) {
+        self.actions = self.actions.with_names(names.into_iter().collect());
+    }
+
+    /// The oldest `run_action` waiting for the render thread, if any. Call once per render tick
+    /// and answer what it returns; a plugin waits for that answer before it sends anything else.
+    pub fn take_action(&mut self) -> Option<ActionRequest> {
+        self.actions_rx.try_recv().ok()
     }
 
     /// Whether no plugin is running, so a caller can skip building a snapshot nobody will read.
@@ -593,17 +621,22 @@ async fn write_loop(
 
 /// Reads the plugin's stdout one line at a time: a `log` notification is forwarded to
 /// `logs_tx`, a `get_state` request is answered at once from `state_rx`, a `register_command` or
-/// `unregister_command` at once from `registry`, any other request is
+/// `unregister_command` at once from `registry`, a `run_action` once the render thread has run it
+/// (`list_actions` at once from `actions`), any other request is
 /// executed on the blocking pool and replied to over `stdin_tx`, and a malformed line is reported the same way `log` is (with a reply if it carried an `id`).
 async fn read_loop(
     plugin: String,
     stdout: ChildStdout,
     stdin_tx: UnboundedSender<String>,
-    logs_tx: UnboundedSender<LogMessage>,
-    state_rx: watch::Receiver<StateSnapshot>,
-    registry: SharedRegistry,
+    wiring: Wiring,
     handle: tokio::runtime::Handle,
 ) {
+    let Wiring {
+        logs_tx,
+        state_rx,
+        registry,
+        actions,
+    } = wiring;
     let mut lines = BufReader::new(stdout).lines();
     loop {
         let next = match lines.next_line().await {
@@ -644,6 +677,8 @@ async fn read_loop(
                         .unregister(&plugin, &name)
                         .map(|()| json!({ "unregistered": name }))
                         .map_err(|e| format!("cannot unregister '{name}': {e}")),
+                    PluginRequest::RunAction { name } => actions.run(&plugin, name).await,
+                    PluginRequest::ListActions => Ok(actions.list()),
                     request => match handle.spawn_blocking(move || execute(request)).await {
                         Ok(result) => result,
                         Err(e) => Err(format!("request task panicked: {e}")),
@@ -717,11 +752,7 @@ fn start(
     cwd: &Path,
     wiring: Wiring,
 ) -> Result<Process, PluginError> {
-    let Wiring {
-        logs_tx,
-        state_rx,
-        registry,
-    } = wiring;
+    let logs_tx = wiring.logs_tx.clone();
     let mut child = {
         // `Command::spawn` registers the child with the calling thread's tokio reactor, so it
         // needs `handle` bound as current for the duration of the call: this runs outside any
@@ -752,17 +783,10 @@ fn start(
         name.to_string(),
         stdout,
         stdin_tx.clone(),
-        logs_tx.clone(),
-        state_rx,
-        registry,
+        wiring,
         handle.clone(),
     ));
-    handle.spawn(reap(
-        name.to_string(),
-        child,
-        logs_tx.clone(),
-        Arc::clone(&life),
-    ));
+    handle.spawn(reap(name.to_string(), child, logs_tx, Arc::clone(&life)));
 
     let init = protocol::HostEvent::new(protocol::EVENT_INIT, cwd.to_path_buf(), Vec::new());
     let _ = stdin_tx.send(init.to_line());
@@ -779,12 +803,12 @@ fn start(
 fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
     let vfs = LocalVfs;
     match request {
-        // `read_loop` answers this one from the published snapshot and never gets here.
+        // `read_loop` answers these itself and never sends them here.
         PluginRequest::GetState
         | PluginRequest::RegisterCommand { .. }
-        | PluginRequest::UnregisterCommand { .. } => {
-            Err("answered by the host's reader, not here".to_string())
-        }
+        | PluginRequest::UnregisterCommand { .. }
+        | PluginRequest::RunAction { .. }
+        | PluginRequest::ListActions => Err("answered by the host's reader, not here".to_string()),
         PluginRequest::ReadDir { path } => vfs
             .list_dir(&path)
             .map(|entries| json!(entries.iter().map(WireEntry::from).collect::<Vec<_>>()))
@@ -843,6 +867,7 @@ mod tests {
         assert!(!manager.dispatch_named("x", Vec::new(), Path::new("/"), &[]));
         assert!(manager.names().is_empty());
         assert!(manager.is_empty());
+        assert!(manager.take_action().is_none());
     }
 
     #[test]

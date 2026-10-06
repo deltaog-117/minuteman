@@ -141,6 +141,12 @@ interactive_commands = [
 # A plugin can also add `:` commands while it runs, with a `register_command` request, so
 # `commands` is only needed to have a word answered before the plugin has started. A built-in
 # command or a word another plugin has is refused, and the plugin is told why.
+# A plugin can run Minuteman's own actions with a `run_action` request naming one, by the same
+# word that binds it under [keys] below (`paste`, `sort`, `undo`, `hidden`, ...; `list_actions`
+# names them all). It does exactly what the key does, confirmations included, but only while you
+# are plainly browsing: with a prompt, popup, chord, focused shell or running job in the way it is
+# refused and the plugin is told why. The chord starters (`bookmark_jump`, `bookmark_set`,
+# `leader`) cannot be run this way, as they wait for a second key.
 # A plugin may exit whenever it likes: it is started again the next time a key, command or
 # `:plugin <name>` reaches it (or, if it has no keys or commands, an event). One that crashes
 # three times in a row is left alone until `:plugins restart <name>`; `:plugins` lists them all.

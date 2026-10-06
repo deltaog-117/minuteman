@@ -19,8 +19,10 @@
 //! can read a line and print one — no compile step, no host-side bindings per language. Each
 //! plugin fires on its configured keys and `:` commands (or `:plugin <name>`) and can call back into `read_dir`/`copy`/`mv`/`delete`/
 //! `create_dir`/`create_file`/`touch`/`rename` — the same `file_ops` orchestration the built-in
-//! keys use, so a plugin reaches real core operations, not a bolted-on extras API.
+//! keys use, so a plugin reaches real core operations, not a bolted-on extras API — and run the
+//! interface's own actions by name with `run_action`.
 
+mod actions;
 pub mod error;
 pub mod host;
 mod life;
@@ -28,6 +30,7 @@ mod mailbox;
 pub mod protocol;
 mod registry;
 
+pub use actions::ActionRequest;
 pub use error::PluginError;
 pub use host::{LogMessage, PluginManager, Restart, Triggers};
 pub use life::{PluginInfo, PluginState};

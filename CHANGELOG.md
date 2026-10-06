@@ -116,6 +116,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without waiting on the render thread. Additive, so `API_VERSION` stays 1. New
   `PluginManager::reserve_commands`; `tui::command::BUILTIN_WORDS` lists the reserved words and a
   test keeps it in step with `parse`. `dir_stats.py` registers `:state`.
+- `plugins`, `tui`, `theming`: a plugin can run one of Minuteman's own actions with a `run_action`
+  request (`{"name": "paste"}`) and list them with `list_actions`. A name is the word that binds the
+  action under `[keys]` (`paste`, `sort`, `undo`, `hidden`, ...); the action does what its key does,
+  confirmations included. It runs only while the user is plainly browsing: a popup or view, a prompt,
+  a chord, a focused shell or a running job refuses it, and the reply says which. The chord starters
+  (`bookmark_jump`, `bookmark_set`, `leader`) are refused and not listed. Additive, so `API_VERSION`
+  stays 1. New `theming::Action::{ALL, name, from_name, waits_for_key}`, `plugins::ActionRequest` and
+  `PluginManager::declare_actions`; action names are now part of the plugin API. `dir_stats.py` gains
+  `:plugin dir-stats run ACTION` and `:plugin dir-stats actions`.
 - `plugins`, `tui`: a plugin whose process has ended is started again the next time something is
   meant for it (a key, a `:` command, `:plugin <name>`, or an event for a plugin with no keys or
   commands), where a key bound to a plugin that had exited used to do nothing, silently. Status 0

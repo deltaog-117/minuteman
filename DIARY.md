@@ -82,6 +82,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-04 | Plugin Triggers (stage 1.5, first cycle) | Several keys, declared `:` commands and `:plugin <name>` on the existing process host, plus a Python example (COA A); state/events (B) and action names (C) deferred | ✅ Confirmed |
 | 2026-10-05 | Appearance Shape and Paged Popup | A typed `Shape` inside `Theme`, gaps applied in the shared `browser_layout`, and the popup rebuilt as a page list beside rows (COA B); a Shape category in the old popup (A) and shape presets only (C) rejected | ✅ Confirmed |
 | 2026-10-05 | Configurable Border Gradient | Colors with `accent`/`focused` keywords in `[theme]`, scope and direction in `[shape]`, the old switch kept beneath (COA B); a moved switch alone (A) rejected, an animated gradient (C) deferred to the roadmap | ✅ Confirmed |
+| 2026-10-06 | Plugin `run_action` | One more turn of the render loop that enters the browser's own key handling as a `Browse` step, not a second dispatcher for plugins | ✅ Confirmed |
 
 ---
 
@@ -5932,6 +5933,57 @@ the start, a gradient on the popup's own frame with `all`, flat frames with `off
 `local.toml`, and `gradient_borders = false` in `config.toml` still giving flat frames. The earlier
 shape scenario still passes all 23 checks. The release binary was not re-measured; this adds no
 dependency.
+
+---
+
+### Plugin `run_action`: The Browser's Own Handling, Entered by a Plugin
+
+**Date:** 2026-10-06 · **Author:** deltaog-117
+
+**Context.** Plugins could read and change files and ask for state, but could not do what a key does:
+sort, paste, undo, toggle hidden files. The roadmap's action registry item asked for string names
+and a `run_action` entry point.
+
+**Approach.** The render loop takes a plugin's request as a turn of its own and runs it through the
+same handling as a key. An action works on state only the render thread holds: the browser, the
+open popups, the clipboard and the prompts. Running it on the plugin's reader thread would need all
+of that behind locks, and a second dispatcher for plugins would write every action twice and let the
+two drift, so that a plugin's `paste` skipped a confirmation the key shows. This way the action is
+the key's action by construction, and what the user would be asked is still asked.
+
+**Design.** `theming::Action` gained `ALL`, `name`, `from_name` and `waits_for_key`. The names are
+the `[keys]` words, so the vocabulary is the one users already know, and they are now part of the
+plugin API and never change once released. `name` is an exhaustive `match`, so a new variant fails
+to compile until named; `ALL` is a plain array a test checks, since the compiler cannot. The
+plugin's reader parses `run_action` and `list_actions`; `list_actions` is answered at once from
+names the interface declared at startup (`declare_actions`), and `run_action` becomes an
+`ActionRequest` carrying a one-shot reply channel, queued for the render thread. `main.rs` took the
+body of its key handling into one step that takes a `Browse`, either a key press resolved through
+the keymap or an action a plugin asked for, so both go through the same `match`. A plugin turn
+replaces the wait for a terminal event rather than adding to it, so a plugin's request is not
+delayed by an idle terminal. `plugin_action::accept` decides first: an unknown name, a chord
+starter, an open popup or view, a prompt, a chord waiting, a focused shell or a running job each
+refuse with a reason, so the user's own state always wins. After an action runs, its reply waits
+until `poll_plugins` has published the state it left, so a plugin that asks `get_state` right after
+the reply does not see the old one. Dropping a request unanswered tells the plugin the interface
+closed.
+
+**Trade-offs.** An action that opens a prompt (`rename`, `create`, `sort`) is run and leaves the
+prompt open for the user, and the plugin gets `ran`, not the prompt's outcome; arguments to an
+action wait for the prompt to be split from the operation. The chord starters are refused because
+they would leave the interface waiting for a key nobody will press. A plugin cannot run an action
+while the user is in the middle of something, which is by design and means it must be ready to be
+told no. The key handling moved as a whole, so the diff of `main.rs` is large while its behaviour is
+meant to be the same.
+
+**Verification.** `scripts/check` passes. New tests cover that every action's name is the config key
+that binds it, that names are distinct and round trip, that only the chord starters wait for a key,
+and properties over any name a plugin might send (exact match only: no case folding, no prefix, no
+trimming); that plain browsing runs every listed action and that every other mode and any open popup
+refuses each one with the reason named; the request shapes; and end to end with the fixture and a
+real `python3`: a request waits for the interface and hears whether it ran, `list_actions` is
+answered without the interface, a dropped request gets an error, and the Python example runs an
+action by name and lists them.
 
 ---
 

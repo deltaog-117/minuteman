@@ -37,7 +37,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
-use plugins::{EventKind, JobOutcome, PluginManager, Restart, StateSnapshot, Triggers};
+use plugins::{
+    ActionRequest, EventKind, JobOutcome, PluginManager, Restart, StateSnapshot, Triggers,
+};
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
 use theming::{OpenRule, OpenWith, PluginSpec};
@@ -495,6 +497,8 @@ pub struct App {
     search_matches: Vec<PathBuf>,
     search_position: usize,
     plugins: PluginManager,
+    /// Plugin actions run since the last tick, answered once it has published what they left.
+    ran_actions: Vec<ActionRequest>,
     /// The filesystem being browsed. Every feature reaches a browsed path through this, and the
     /// background jobs take a clone, so a backend other than the local disk needs no change here.
     vfs: Arc<dyn Vfs>,
@@ -533,8 +537,10 @@ impl App {
             plugins: {
                 let mut plugins = PluginManager::new();
                 plugins.reserve_commands(command::BUILTIN_WORDS.iter().map(ToString::to_string));
+                plugins.declare_actions(crate::plugin_action::runnable_names());
                 plugins
             },
+            ran_actions: Vec::new(),
             vfs,
             caps_lock: false,
         }
@@ -795,8 +801,8 @@ impl App {
     }
 
     /// Surfaces every plugin's pending `log` line as the status message (last one wins, the same
-    /// way every other status write already behaves), and publishes the browser's state for
-    /// plugins to read with `get_state`; `view` is the view's name, which lives outside `App`.
+    /// way every other status write already behaves), publishes the browser's state for
+    /// plugins to read with `get_state`, and then answers the actions run since the last call; `view` is the view's name, which lives outside `App`.
     /// Call once per render tick.
     pub fn poll_plugins(&mut self, browser: &BrowserState, view: &str) {
         if !self.plugins.is_empty() {
@@ -814,9 +820,23 @@ impl App {
                 view: view.to_string(),
             });
         }
+        for request in self.ran_actions.drain(..) {
+            request.ran();
+        }
         for message in self.plugins.poll() {
             self.status = Some(format!("[{}] {}", message.plugin, message.message));
         }
+    }
+
+    /// The oldest action a plugin asked to run, if any (see `plugin_action::accept`).
+    pub fn take_plugin_action(&mut self) -> Option<ActionRequest> {
+        self.plugins.take_action()
+    }
+
+    /// Holds `request`, whose action has just run, until the next `poll_plugins` has published
+    /// the state it left: a plugin that reads `get_state` after the reply then sees that state.
+    pub fn ran_plugin_action(&mut self, request: ActionRequest) {
+        self.ran_actions.push(request);
     }
 
     /// Fires the plugin bound to `code`, if any is configured, with the current marks (or the

@@ -107,6 +107,104 @@ pub enum Action {
     Leader,
 }
 
+impl Action {
+    /// Every action, in the order `[keys]` lists them. A new variant goes here too: `name` will
+    /// not compile without it, but this list would silently leave it out of `from_name` and of
+    /// what a plugin's `list_actions` offers.
+    pub const ALL: [Action; 34] = [
+        Action::MoveDown,
+        Action::MoveUp,
+        Action::Enter,
+        Action::Leave,
+        Action::Quit,
+        Action::QuitToCwd,
+        Action::Yank,
+        Action::Cut,
+        Action::Paste,
+        Action::Compress,
+        Action::Extract,
+        Action::Undo,
+        Action::Redo,
+        Action::Delete,
+        Action::DeletePermanently,
+        Action::Rename,
+        Action::Create,
+        Action::Shell,
+        Action::Search,
+        Action::Command,
+        Action::Cancel,
+        Action::Select,
+        Action::ToggleHidden,
+        Action::PreviewDown,
+        Action::PreviewUp,
+        Action::CycleView,
+        Action::TrashView,
+        Action::Sort,
+        Action::SortReverse,
+        Action::DiskUsage,
+        Action::Appearance,
+        Action::BookmarkJump,
+        Action::BookmarkSet,
+        Action::Leader,
+    ];
+
+    /// The action's stable name: the same word that binds it under `[keys]` in `config.toml`, so
+    /// a user and a plugin call it the same thing. Part of the plugin API, so a name never
+    /// changes once released.
+    pub fn name(self) -> &'static str {
+        match self {
+            Action::MoveDown => "move_down",
+            Action::MoveUp => "move_up",
+            Action::Enter => "enter",
+            Action::Leave => "leave",
+            Action::Quit => "quit",
+            Action::QuitToCwd => "quit_to_cwd",
+            Action::Yank => "yank",
+            Action::Cut => "cut",
+            Action::Paste => "paste",
+            Action::Compress => "compress",
+            Action::Extract => "extract",
+            Action::Undo => "undo",
+            Action::Redo => "redo",
+            Action::Delete => "delete",
+            Action::DeletePermanently => "delete_permanently",
+            Action::Rename => "rename",
+            Action::Create => "create",
+            Action::Shell => "shell",
+            Action::Search => "search",
+            Action::Command => "command",
+            Action::Cancel => "cancel",
+            Action::Select => "select",
+            Action::ToggleHidden => "hidden",
+            Action::PreviewDown => "preview_down",
+            Action::PreviewUp => "preview_up",
+            Action::CycleView => "cycle_view",
+            Action::TrashView => "trash_view",
+            Action::Sort => "sort",
+            Action::SortReverse => "sort_reverse",
+            Action::DiskUsage => "disk_usage",
+            Action::Appearance => "appearance",
+            Action::BookmarkJump => "bookmark_jump",
+            Action::BookmarkSet => "bookmark_set",
+            Action::Leader => "leader",
+        }
+    }
+
+    /// The action called `name` (see `name`), matched exactly.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|action| action.name() == name)
+    }
+
+    /// Whether the action only starts a chord whose second key does the work, so running it
+    /// without a key to follow would leave the interface waiting on the user for nothing.
+    pub fn waits_for_key(self) -> bool {
+        matches!(
+            self,
+            Action::BookmarkJump | Action::BookmarkSet | Action::Leader
+        )
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct RawKeyMap {
@@ -425,6 +523,69 @@ mod tests {
     fn unrecognised_key_strings_are_skipped_not_fatal() {
         assert_eq!(parse_key("ctrl-something-weird"), None);
         assert_eq!(parse_key(""), None);
+    }
+
+    /// A plugin names an action by the word that binds it in `[keys]`; binding a free key under
+    /// each name alone must reach exactly that action, or the two vocabularies have drifted.
+    #[test]
+    fn every_action_name_is_the_config_key_that_binds_it() {
+        for action in Action::ALL {
+            let raw: RawKeyMap = toml::from_str(&format!("{} = [\"F\"]", action.name()))
+                .unwrap_or_else(|e| panic!("{} did not parse: {e}", action.name()));
+            let keymap: KeyMap = raw.into();
+            assert_eq!(
+                keymap.resolve(KeyCode::Char('F')),
+                Some(action),
+                "{}",
+                action.name()
+            );
+        }
+    }
+
+    #[test]
+    fn action_names_are_distinct_and_round_trip() {
+        let mut names: Vec<&str> = Action::ALL.iter().map(|a| a.name()).collect();
+        for action in Action::ALL {
+            assert_eq!(Action::from_name(action.name()), Some(action));
+        }
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), Action::ALL.len());
+    }
+
+    #[test]
+    fn only_the_chord_starters_wait_for_a_key() {
+        let waiting: Vec<&str> = Action::ALL
+            .into_iter()
+            .filter(|a| a.waits_for_key())
+            .map(Action::name)
+            .collect();
+        assert_eq!(waiting, ["bookmark_jump", "bookmark_set", "leader"]);
+    }
+
+    proptest::proptest! {
+        /// Whatever a plugin sends, a name resolves only to the action that owns it, exactly:
+        /// no case folding, no prefix, no trimming.
+        #[test]
+        fn from_name_accepts_exactly_the_listed_names(name in "\\PC{0,20}") {
+            match Action::from_name(&name) {
+                Some(action) => proptest::prop_assert_eq!(action.name(), name.as_str()),
+                None => proptest::prop_assert!(Action::ALL.iter().all(|a| a.name() != name)),
+            }
+        }
+
+        #[test]
+        fn a_listed_name_changed_in_any_way_is_not_a_name(
+            index in 0..Action::ALL.len(),
+            suffix in "[ A-Za-z_]{1,4}",
+        ) {
+            let name = Action::ALL[index].name();
+            let altered = format!("{name}{suffix}");
+            proptest::prop_assert!(
+                Action::from_name(&altered).is_none_or(|a| a.name() == altered)
+            );
+            proptest::prop_assert_eq!(Action::from_name(&name.to_uppercase()), None);
+        }
     }
 
     /// `d` (lowercase) is `cut`, and bookmark-set lives on a different key so it never shadows it.
