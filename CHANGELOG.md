@@ -116,6 +116,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without waiting on the render thread. Additive, so `API_VERSION` stays 1. New
   `PluginManager::reserve_commands`; `tui::command::BUILTIN_WORDS` lists the reserved words and a
   test keeps it in step with `parse`. `dir_stats.py` registers `:state`.
+- `plugins`: benchmarks for what a plugin costs, in `crates/plugins/tests/plugin_cost.rs`, ignored
+  by default and run with `cargo test --release -p plugins --test plugin_cost -- --ignored
+  --nocapture --test-threads=1`. They measure the time to start a plugin, the round trip of
+  `list_actions`, `get_state` and `run_action`, and the per-tick cost with no plugin configured. The
+  test fixture takes a new `--bench=METHOD:N` flag for them.
 - `plugins`, `tui`, `theming`: a plugin can run one of Minuteman's own actions with a `run_action`
   request (`{"name": "paste"}`) and list them with `list_actions`. A name is the word that binds the
   action under `[keys]` (`paste`, `sort`, `undo`, `hidden`, ...); the action does what its key does,

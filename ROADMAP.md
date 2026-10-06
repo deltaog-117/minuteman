@@ -1497,6 +1497,20 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   name a plugin might send, the refusal of every action in every mode, and end to end with the
   fixture and a real `python3`.
 
+- ✅ **Plugin system, stage 1.5 closed (seventh cycle)** – every additive hook the stage promised
+  now exists (keys, `:` commands, `get_state`, events, restart, `register_command`, `run_action`),
+  and the cost estimates the stage made are measured. The model stays additive: built-in features
+  are native and untouched, a plugin cannot replace or remove one, and a user who wants a built-in
+  gone rebinds or unbinds its key (a `disabled_actions` list remains under the action registry
+  item). Measured on a Ryzen 5 5500U, release build, with new `#[ignore]`d benchmarks in
+  `crates/plugins/tests/plugin_cost.rs` (three runs, the figures held within about 20%): a plugin
+  is ready about 0.9 ms after `spawn` for a Rust program and about 23 ms for the Python example,
+  nearly all of it the interpreter; one request and its reply cost 14 to 22 µs (`list_actions`,
+  `get_state` and `run_action` alike, the last with the host answering it); and a browser with no
+  plugin configured spends about 22 ns per tick on the manager, with no thread or process. So the
+  estimates held: a few ms to start, well under a millisecond per call, nothing for anyone who does
+  not use plugins. There is no stored baseline, so the 5% gate is a manual comparison of two runs.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -1587,15 +1601,6 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   SFTP v3 gives times in whole seconds and no inode, link count or allocated size, so Inspect
   leaves those out. `ssh://host/~` is not expanded. The `openssh` crate is Unix only, and this was
   not built or tried on Windows.
-- **Plugin system, stage 1.5 — remaining additive hooks (next)** – the plugin model is additive:
-  built-in features stay native and untouched, and plugins in any language add to them. Nothing
-  here lets a plugin replace or remove a built-in; a user who wants that rebinds or unbinds a key
-  in config (or, later, a `disabled_actions` list), and a built-in wins a key conflict unless the
-  user remaps it. Still to do: stable string names for the
-  existing `Action`s so a plugin can invoke a built-in such as `paste` or `sort`. Expected cost:
-  negligible binary size and nothing on the hot paths for anyone not using plugins; a plugin
-  costs a process, a few ms to spawn (off the first-key path) and a sub-millisecond round trip per
-  call. These are estimates: measure against the benchmarks after the cycle.
 - **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed, opt-in** – a second, sandboxed
   plugin tier alongside the stage-1 out-of-process JSON-RPC host (see Completed): a plugin
   compiled to WASM gets no ambient filesystem/network/process access by default, only what a

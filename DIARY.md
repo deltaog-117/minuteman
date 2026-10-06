@@ -83,6 +83,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-05 | Appearance Shape and Paged Popup | A typed `Shape` inside `Theme`, gaps applied in the shared `browser_layout`, and the popup rebuilt as a page list beside rows (COA B); a Shape category in the old popup (A) and shape presets only (C) rejected | ✅ Confirmed |
 | 2026-10-05 | Configurable Border Gradient | Colors with `accent`/`focused` keywords in `[theme]`, scope and direction in `[shape]`, the old switch kept beneath (COA B); a moved switch alone (A) rejected, an animated gradient (C) deferred to the roadmap | ✅ Confirmed |
 | 2026-10-06 | Plugin `run_action` | One more turn of the render loop that enters the browser's own key handling as a `Browse` step, not a second dispatcher for plugins | ✅ Confirmed |
+| 2026-10-06 | Plugin Cost Benchmarks | Ignored benchmark tests beside the integration tests, run by hand with `--release`, no stored baseline (COA A); a criterion bench (B) and a docs-only close-out (C) rejected | ✅ Confirmed |
 
 ---
 
@@ -5984,6 +5985,54 @@ refuses each one with the reason named; the request shapes; and end to end with 
 real `python3`: a request waits for the interface and hears whether it ran, `list_actions` is
 answered without the interface, a dropped request gets an error, and the Python example runs an
 action by name and lists them.
+
+---
+
+### Plugin Cost Benchmarks: Ignored Tests Beside the Integration Tests (COA A)
+
+**Date:** 2026-10-06 · **Author:** deltaog-117
+
+**Context.** Stage 1.5 promised that plugins cost nothing to anyone not using them, a few
+milliseconds to start and a sub-millisecond round trip per call, and said these were estimates to
+measure after the stage. With `run_action` the stage had nothing left to add, so this cycle measures
+them and closes it.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | `#[ignore]`d benchmark tests in `plugins/tests`, run by hand with `--release` | Chosen |
+| B | A criterion bench in `plugins/benches` | Rejected |
+| C | Fix the roadmap text and leave the estimates unmeasured | Rejected |
+
+**Why A.** It is how the project already benchmarks (the disk-usage and archive figures come from
+ignored tests), it adds no dependency, and it answers the question with numbers. B's saved baselines
+suit CI, but spawning a process per iteration is noisy enough that its statistics would not earn the
+new dev-dependency. C would have left the promise open.
+
+**Design.** `tests/plugin_cost.rs` has three benchmarks. `spawn_to_first_log` times the call to
+`spawn` until the plugin's `ready` log is polled, a median of 25 starts, for the Rust fixture and for
+`dir_stats.py` under `python3`. `request_round_trips` has the fixture send 2000 back-to-back
+`list_actions`, `get_state` or `run_action` requests and reports the mean, the host answering each
+`run_action` as the render thread would. `an_empty_manager_costs_nothing_per_tick` calls what the
+render tick calls on a manager with no plugin a million times. The waits spin on `poll` rather than
+sleeping, since a sleep would be larger than what is measured. The fixture gained one flag,
+`--bench=METHOD:N`, that sends the N requests at `init` and logs when it is done; timing stays in the
+test, so the fixture still writes its JSON by hand.
+
+**Results.** On a Ryzen 5 5500U, release build, three runs: about 0.9 ms to start the Rust fixture
+(up to 1.25 ms on the noisiest run) and 23 to 31 ms for the Python example, almost all of it the
+interpreter's own start; 14 to 22 µs per request and reply, with no meaningful difference between
+the three methods; 22 ns per tick for an empty manager. The estimates held, with room: the round
+trip is far under the millisecond that was budgeted, and a user with no plugins pays a few
+instructions.
+
+**Trade-offs.** The numbers are one machine's and include the fixture's own scheduling, so they bound
+the cost rather than state it exactly. The round trip is measured with the render thread answering
+in a tight loop; in the real interface a `run_action` waits for the next tick (up to 100 ms), which
+is a property of the tick and not of the protocol. With no stored baseline the 5% rule is applied by
+running twice and comparing, which suits a feature this small. `get_state` is measured against the
+snapshot's default value, not a large directory's, so its cost with many marks is not covered.
+
+**Verification.** `scripts/check` passes; the benchmarks are ignored there and were run by hand.
 
 ---
 

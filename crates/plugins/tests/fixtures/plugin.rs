@@ -32,6 +32,8 @@
 //! `unregister WORD: ok` or the refusal. A `command` event is logged as `command: WORD args...`.
 //! `--list-actions` asks at `init` for the actions it may run and logs `actions: a,b,...`, and
 //! `--run-action=NAME` (repeatable) then runs each, logging `run NAME: ok` or the refusal.
+//! `--bench=METHOD:N` (repeatable) sends N back-to-back `METHOD` requests (`get_state`,
+//! `list_actions` or `run_action`, which asks for `paste`) at `init`, then logs `bench METHOD done`.
 //! Because it takes the next line on stdin as a request's reply, a test must wait for these logs
 //! before sending it anything else.
 //!
@@ -131,6 +133,24 @@ fn main() {
                     );
                     let outcome = result.map_or_else(|e| e, |_| "ok".to_string());
                     send_log(&mut stdout, "info", &format!("run {action}: {outcome}"));
+                }
+                // Timing is the test's job; here the plugin only keeps asking, back to back.
+                for spec in flag_values("bench") {
+                    let (method, count) = spec.split_once(':').unwrap_or((&spec, "1"));
+                    let params = match method {
+                        "run_action" => serde_json::json!({ "name": "paste" }),
+                        _ => serde_json::json!({}),
+                    };
+                    for _ in 0..count.parse().unwrap_or(1) {
+                        let _ = send_request(
+                            &mut stdout,
+                            &mut lines,
+                            &mut next_id,
+                            method,
+                            params.clone(),
+                        );
+                    }
+                    send_log(&mut stdout, "info", &format!("bench {method} done"));
                 }
                 if let Some(code) = exit_code("exit-on-init") {
                     std::process::exit(code);
