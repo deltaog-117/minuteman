@@ -1510,6 +1510,24 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   plugin configured spends about 22 ns per tick on the manager, with no thread or process. So the
   estimates held: a few ms to start, well under a millisecond per call, nothing for anyone who does
   not use plugins. There is no stored baseline, so the 5% gate is a manual comparison of two runs.
+- ✅ **Fuzzy finder on `f` (COA A)** – a panel over the browser that lists every entry below the
+  current directory, ranked as you type, with the highlighted entry previewed beside it. It keeps a
+  flat index of the tree (`browser::finder::walk`, nearest level first, through `Vfs::list_dir`
+  only, on the blocking pool as `tui::finder_job`) and re-ranks it on every keystroke
+  (`Ranking`, which scores each entry once and only scores what arrived since). The score is the
+  `/` search's own (`Query::score`) applied to the path: a match on the entry's name earns a bonus
+  of 500, so `main` puts `src/main.rs` above `domain/a/i/n.rs`, and a typed path (`src/main`)
+  matches across folders. Results fill in while the walk runs, so it opens at once on a large
+  tree; the walk is cancelled when the panel closes. The preview reuses the browser's pipelines
+  (text, hex, archive listing, image, folder listing) through `preview_subject`, the way the trash
+  browser does, and the panel is laid out by `trash_view::layout`. `Enter` closes it with the
+  browser's cursor on the entry (`BrowserState::reveal`), so `l` then opens or enters it. Chosen as
+  COA A (one source, the index behind a ranking type) over modes for directories, content and marks
+  in one popup (B, too large for one cycle; `Ranking` and the popup are built so a second source
+  can be added) and shelling out to `fd` and `fzf` (C, two external programs, nothing on a remote
+  or archive mount, no theme or preview). Measured only by tests: ranking is property-tested
+  (every result matches, no more than the limit, best first), the walk, the job, the popup's keys
+  and the drawn panel have unit tests; it has not been timed on a large tree.
 
 ## 🟡 Medium Priority (Important)
 
@@ -1654,6 +1672,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   would be needed); the scoring weights are hand-tuned, not learned from use; a query is matched
   against the name only, not the path (`src/main` does not find `src/main.rs`); and there is no
   smart-case switch or exact-match mode.
+- **Fuzzy finder, follow-ups** – the letters that matched are not highlighted in a result (the
+  scorer returns a score, not positions); the index skips only hidden entries, not what a
+  `.gitignore` names, so `target/` and `node_modules/` count toward the 200,000-entry limit and
+  can crowd out what is wanted (they are walked last, being deep); `Enter` shows the entry and does
+  not open it, and a directory result is not entered; no multi-select into the marks; no other
+  sources (directories only, file contents, recent folders, marks, plugin actions); results are
+  capped at 200 listed; the index is rebuilt each time the finder opens, with no cache between
+  openings; no smart-case or exact-match switch; the `/` search still matches the name only.
 - **Trash browser, follow-ups** – no sort order other than newest first, no search or filter, no
   preview below 100 columns or on a platform whose trash layout is not the freedesktop one, a
   picture is never scaled up in the pane (as in the browser's own column), no mouse marking (a click selects the row; `v` marks it), restore

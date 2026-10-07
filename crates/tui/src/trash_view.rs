@@ -586,7 +586,7 @@ pub fn deleted_cell(secs: i64) -> String {
 
 /// `path` cut from the left to fit `width`, keeping the end, which is the part that tells folders
 /// apart.
-fn elide_left(path: &str, width: usize) -> String {
+pub(crate) fn elide_left(path: &str, width: usize) -> String {
     if text_width(path) <= width {
         return path.to_string();
     }

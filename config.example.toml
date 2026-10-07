@@ -237,6 +237,14 @@ shell = []
 # Ctrl-P to the previous (the status line shows 2/14). Enter stays where the search landed, Esc
 # goes back to where it started.
 search = ["/"]
+# Fuzzy finder: a panel listing every entry below this directory (hidden ones only while they are
+# shown), ranked as you type, with a preview of the highlighted one beside it. Type letters that
+# appear in order (`rdme` finds `README.md`), or part of a path (`src/main`); a match on the name
+# itself ranks above one spread over the folders. Down or Ctrl-N and Up or Ctrl-P move through the
+# results, Ctrl-D and Ctrl-U scroll the preview, Enter closes the panel with the cursor on the
+# entry in the browser, Esc closes it. Every other key is typed into the query, so j and k are
+# letters here. Entries are indexed in the background, so it opens at once on a big tree.
+find = ["f"]
 # Opens the :-command prompt. ":q"/":q!"/":qa"/":qa!"/":quit" all exit (there's no unsaved-buffer
 # or multi-window state for the vim-style "!"/"a" spellings to mean anything different),
 # ":cd <path>" jumps to a directory,

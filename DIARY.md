@@ -6036,6 +6036,61 @@ snapshot's default value, not a large directory's, so its cost with many marks i
 
 ---
 
+### Fuzzy Finder on `f` (COA A)
+
+**Date:** 2026-10-07 · **Author:** deltaog-117
+
+**Context.** `/` jumps the cursor to the nearest good match by name. What was missing is the
+other way to find a file, which is to see the candidates: a list ranked as you type, over the
+whole tree below, with a look at each one before going to it, as in Neovim's Telescope.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A popup over a background index of the tree, ranked by path, with a preview, built on the existing scorer and popup patterns | Chosen |
+| B | A: plus modes in one popup (directories, content grep, marks, history, multi-select) | Rejected for this cycle |
+| C | Run `fd` and `fzf` in the shell overlay | Rejected |
+
+**Decision.** `browser::finder` holds what is pure: `Candidate` (a path, its path below the root
+and whether it is a folder), `score` (the `/` search's `Query::score` applied to the path, with a
+bonus when the name itself matches), `Ranking` (a running ranking of a growing index) and `walk`
+(the nearest-level-first walk, which hands each directory's entries to a callback). In `tui`,
+`finder_job` runs the walk on the blocking pool, `finder_popup` is the pure state (query, index,
+results, selection), and `finder_view` draws it. `main` owns the preview pipelines, so it draws the
+preview pane from `FinderPopup::preview_subject`, the way it does for the trash browser, and
+`finder_view` borrows `trash_view::layout` to split the panel. `Action::Find` is bound to `f`.
+
+**Why this way.** A flat index and a ranking, not `find_below`'s nearest-level answer, because the
+point is to see several candidates and narrow them by typing; the index is built once and each
+keystroke only scores it again. `Ranking` scores each entry once and only the new entries as the
+walk delivers them, and `set_query` starts over, so a walk still running costs one pass in total.
+Entries reach the popup as the walk lists directories, so the panel is usable at once on a large
+tree and the walk stops when the panel closes (dropping the job sets its cancel flag, as for `/`).
+Everything goes through `Vfs::list_dir`, so the finder works on a remote machine and inside an
+archive, which `fd` and `fzf` would not (C). Matching the path as well as the name gives `src/main`
+a meaning; a 500 point bonus for a name match keeps `main` finding `src/main.rs` ahead of a path
+that merely holds the letters. The popup and its `Ranking` are the only places that know there is
+one source of entries, so a second source (B) is an addition and not a rewrite.
+
+**Trade-offs.** Every key but the arrows and `Ctrl-N`/`Ctrl-P` goes to the query, so `j` and `k`
+are letters and `Ctrl-D`/`Ctrl-U` scroll the preview in place of `J`/`K`. `Enter` shows the entry in
+the browser and does not open it, because opening goes through the browser's own handling (the
+associations, the `Open with` rules), which this cycle left alone. The index is capped at 16 levels
+and 200,000 entries, shared with `/`, and does not read `.gitignore`, so a project with a large
+`target/` can fill the cap, though the walk reaches such a folder last. The matched letters are not
+highlighted because the scorer returns a score and not positions; adding positions means a
+backtracking pass through the scoring table that must agree with it exactly. `trash_view::elide_left`
+became `pub(crate)` to be reused, the only change to existing code besides the new action and the
+wiring in `main`.
+
+**Verification.** `scripts/check` passes (1256 tests). New tests: ranking properties (every result
+matches, at most the limit, best first, the match count agrees with the index), incremental ranking
+agreeing with scoring all at once, the walk (nearest level first, hidden entries, both limits,
+cancellation), the job and its cancel flag, the popup's keys and preview subject, and the drawn
+panel on a range of screen sizes including none. It has not been run by hand in a real terminal and
+has not been timed on a large tree.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

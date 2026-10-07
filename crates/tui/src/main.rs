@@ -31,6 +31,9 @@ mod disk_usage;
 mod disk_usage_view;
 mod extract_popup;
 mod filmstrip_view;
+mod finder_job;
+mod finder_popup;
+mod finder_view;
 mod git_status;
 mod glyphs;
 mod gradient;
@@ -101,6 +104,7 @@ use crossterm::terminal::{
 use disk_usage::DiskUsageView;
 use extract_popup::ExtractPopup;
 use file_ops::archive::Format;
+use finder_popup::{FinderPopup, Outcome as FinderOutcome};
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect::InspectView;
 use plugin_action::Browse;
@@ -394,6 +398,8 @@ struct Overlay<'a> {
     compress: Option<&'a CompressPopup>,
     extract: Option<&'a ExtractPopup>,
     appearance: Option<&'a AppearancePopup>,
+    /// The fuzzy finder, a panel over the browser while open.
+    finder: Option<&'a FinderPopup>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
     /// `effective_panels`/`effective_styles`.
@@ -1310,6 +1316,8 @@ fn run(
     // The appearance popup (`a`, or "Appearance…" on blank space's right-click menu) while one is
     // open; modal too.
     let mut appearance: Option<AppearancePopup> = None;
+    // The fuzzy finder (`f`) while one is open; modal too.
+    let mut finder: Option<FinderPopup> = None;
     // `local.toml`'s three tables, seeded from what `Config::load` already parsed from it (so a
     // save this session correctly carries forward whatever an earlier session saved) and mutated
     // live by the two popups; `effective_theme`/`effective_ui`/`effective_panels` layer each onto
@@ -1346,6 +1354,9 @@ fn run(
         if let Some(view) = trash_view.as_mut() {
             view.poll();
         }
+        if let Some(popup) = finder.as_mut() {
+            popup.poll();
+        }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
         // browser steps aside until it exits. Checked here, once per turn of the loop, because
         // the app that recognised the command doesn't own the terminal.
@@ -1363,9 +1374,14 @@ fn run(
         app.poll_hud(browser, Instant::now());
         app.poll_plugins(browser, view_mode.label());
         // While the trash browser is open the preview follows its cursor, not the browser's.
-        match trash_view.as_ref() {
-            Some(view) => previews.update(view.preview_subject().as_ref(), &config.preview_hooks),
-            None => previews.update(browser.selected_entry(), &config.preview_hooks),
+        match (trash_view.as_ref(), finder.as_ref()) {
+            (Some(view), _) => {
+                previews.update(view.preview_subject().as_ref(), &config.preview_hooks)
+            }
+            (None, Some(popup)) => {
+                previews.update(popup.preview_subject().as_ref(), &config.preview_hooks)
+            }
+            (None, None) => previews.update(browser.selected_entry(), &config.preview_hooks),
         }
 
         if let Some(mut panes) = shells.take() {
@@ -1492,6 +1508,7 @@ fn run(
                     compress: compress.as_ref(),
                     extract: extract.as_ref(),
                     appearance: appearance.as_ref(),
+                    finder: finder.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
                     local_panels: &local_panels,
@@ -1530,7 +1547,8 @@ fn run(
                 || compress.is_some()
                 || extract.is_some()
                 || settings.is_some()
-                || appearance.is_some();
+                || appearance.is_some()
+                || finder.is_some();
             browse = plugin_action::accept(request, mode, modal_open);
         }
         let event = if browse.is_some() {
@@ -1678,6 +1696,33 @@ fn run(
                         kind => {
                             if let Some(wheel) = Wheel::of(kind) {
                                 view.move_by(browser_mouse::wheel_rows(wheel));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Some(popup) = finder.as_mut() {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let pointer = Position::new(mouse.column, mouse.row);
+                            let places = finder_view::layout(frame_area);
+                            match trash_view::row_at(
+                                &places,
+                                popup.top().get(),
+                                popup.result_count(),
+                                pointer,
+                            ) {
+                                Some(row) => popup.move_to(row),
+                                // A click off the panel closes it, as it does a menu.
+                                None if !finder_view::area(frame_area).contains(pointer) => {
+                                    finder = None;
+                                }
+                                None => {}
+                            }
+                        }
+                        kind => {
+                            if let Some(wheel) = Wheel::of(kind) {
+                                popup.move_by(browser_mouse::wheel_rows(wheel));
                             }
                         }
                     }
@@ -2464,6 +2509,27 @@ fn run(
                     }
                     continue;
                 }
+                if let Some(popup) = finder.as_mut() {
+                    // The preview scrolls with `Ctrl`-`D`/`Ctrl`-`U`, since every letter and the
+                    // browser's own keys for it are text in the query.
+                    let half = key.modifiers.contains(KeyModifiers::CONTROL);
+                    match key.code {
+                        KeyCode::Char('d') if half => previews.text.scroll_half_pages(1),
+                        KeyCode::Char('u') if half => previews.text.scroll_half_pages(-1),
+                        _ => match popup.key(key) {
+                            FinderOutcome::Stay => {}
+                            FinderOutcome::Close => finder = None,
+                            FinderOutcome::Reveal(path) => {
+                                finder = None;
+                                match browser.reveal(vfs, &path) {
+                                    Ok(()) => app.status = None,
+                                    Err(e) => app.status = Some(format!("cannot show it: {e}")),
+                                }
+                            }
+                        },
+                    }
+                    continue;
+                }
                 if inspect.is_some() {
                     if matches!(
                         key.code,
@@ -2957,6 +3023,7 @@ fn run(
             Some(Action::Rename) => app.begin_rename(browser),
             Some(Action::Create) => app.begin_create(),
             Some(Action::Search) => app.begin_search(browser),
+            Some(Action::Find) => finder = Some(app.begin_finder(browser)),
             Some(Action::Command) => app.begin_command(),
             Some(Action::Cancel) => app.cancel_all(browser),
             Some(Action::Select) => browser.toggle_mark(),
@@ -3380,6 +3447,7 @@ fn draw(
         compress,
         extract,
         appearance,
+        finder,
         local_theme,
         local_ui,
         local_panels,
@@ -3726,6 +3794,29 @@ fn draw(
     }
     if let Some(view) = inspect {
         overlay_view::render_inspect(frame, view, config);
+    }
+    if let Some(popup) = finder {
+        finder_view::render(frame, popup, config);
+        if let Some(area) = finder_view::layout(frame.area()).preview {
+            let subject = popup.preview_subject();
+            // A folder is listed once per frame, as a folder in the browser's preview is.
+            let children: Option<Vec<DirEntryInfo>> = subject
+                .as_ref()
+                .filter(|entry| entry.is_dir)
+                .map(|entry| vfs.list_dir(&entry.path).unwrap_or_default());
+            draw_preview_pane(
+                frame,
+                area,
+                PreviewSubject {
+                    is_file: subject.as_ref().is_some_and(|entry| !entry.is_dir),
+                    children: children.as_deref(),
+                    label: subject.as_ref().map_or("", |entry| entry.name.as_str()),
+                },
+                previews,
+                false,
+                config,
+            );
+        }
     }
     if let Some(popup) = settings {
         overlay_view::render_settings(

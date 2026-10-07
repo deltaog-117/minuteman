@@ -57,6 +57,9 @@ pub enum Action {
     Shell,
     /// Opens the incremental filename-search prompt (`/`).
     Search,
+    /// Opens the fuzzy finder (`f`): every entry below the browsed directory, ranked as you type,
+    /// with a preview of the one under the cursor.
+    Find,
     /// Opens the `:`-command prompt.
     Command,
     /// Cancels everything pending in one press, wherever the cursor is: the yanked or cut
@@ -111,7 +114,7 @@ impl Action {
     /// Every action, in the order `[keys]` lists them. A new variant goes here too: `name` will
     /// not compile without it, but this list would silently leave it out of `from_name` and of
     /// what a plugin's `list_actions` offers.
-    pub const ALL: [Action; 34] = [
+    pub const ALL: [Action; 35] = [
         Action::MoveDown,
         Action::MoveUp,
         Action::Enter,
@@ -131,6 +134,7 @@ impl Action {
         Action::Create,
         Action::Shell,
         Action::Search,
+        Action::Find,
         Action::Command,
         Action::Cancel,
         Action::Select,
@@ -172,6 +176,7 @@ impl Action {
             Action::Create => "create",
             Action::Shell => "shell",
             Action::Search => "search",
+            Action::Find => "find",
             Action::Command => "command",
             Action::Cancel => "cancel",
             Action::Select => "select",
@@ -227,6 +232,7 @@ pub struct RawKeyMap {
     pub create: Vec<String>,
     pub shell: Vec<String>,
     pub search: Vec<String>,
+    pub find: Vec<String>,
     pub command: Vec<String>,
     pub cancel: Vec<String>,
     pub select: Vec<String>,
@@ -266,6 +272,7 @@ impl Default for RawKeyMap {
             create: vec!["n".into()],
             shell: vec![],
             search: vec!["/".into()],
+            find: vec!["f".into()],
             command: vec![":".into()],
             cancel: vec!["c".into()],
             select: vec!["v".into()],
@@ -339,6 +346,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.create, Action::Create);
         bind_all(&raw.shell, Action::Shell);
         bind_all(&raw.search, Action::Search);
+        bind_all(&raw.find, Action::Find);
         bind_all(&raw.command, Action::Command);
         bind_all(&raw.cancel, Action::Cancel);
         bind_all(&raw.select, Action::Select);
@@ -419,6 +427,7 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('n')), Some(Action::Create));
         assert_eq!(keymap.resolve(KeyCode::Char('s')), None);
         assert_eq!(keymap.resolve(KeyCode::Char('/')), Some(Action::Search));
+        assert_eq!(keymap.resolve(KeyCode::Char('f')), Some(Action::Find));
         assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
         assert_eq!(keymap.resolve(KeyCode::Char('c')), Some(Action::Cancel));
         assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));

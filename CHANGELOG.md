@@ -83,6 +83,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `browser`, `theming`, `tui`: a fuzzy finder on `f` (`find` under `[keys]`). A panel opens over
+  the browser listing every entry below the current directory, ranked as you type, with a preview
+  of the highlighted one beside it on a screen 100 columns or wider. Letters in order match
+  (`rdme` finds `README.md`) and so does part of a path (`src/main` finds `src/main.rs`); a match on
+  the name itself ranks above one spread over the folders. `Down`/`Ctrl-N` and `Up`/`Ctrl-P` move
+  through the results, `Ctrl-D`/`Ctrl-U` scroll the preview, a click selects a row and the wheel
+  moves, `Enter` closes the panel with the browser's cursor on the entry, and `Esc` or a click
+  outside closes it. Every other key goes to the query, so `j` and `k` are letters there. The tree
+  is indexed in the background, up to 16 levels and 200,000 entries, and the results fill in
+  while it runs; hidden entries are left out unless the browser is showing them. It reads only
+  through `Vfs::list_dir`, so it works on a remote machine and inside an archive. New:
+  `browser::finder` (`Candidate`, `Ranking`, `walk`, `score`) and `Action::Find`.
 - `theming`, `tui`: a configurable border gradient. `gradient_from` and `gradient_to` under
   `[theme]` take a color or `accent`/`focused` (the defaults, which follow `accent_fg` and
   `border_focused_fg`); `[shape] gradient` sets which frames get it (`off`, `focused`, `panes`,

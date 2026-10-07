@@ -16,6 +16,7 @@
 
 //! Miller-column navigation state and logic — no rendering, no I/O beyond the `Vfs` trait.
 
+pub mod finder;
 pub mod search;
 pub mod sort;
 

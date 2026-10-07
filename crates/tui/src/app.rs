@@ -50,6 +50,7 @@ use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::disk_usage::DiskUsageView;
 use crate::extract_popup::{self, ExtractPopup};
+use crate::finder_popup::FinderPopup;
 use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
 use crate::line_edit::LineEdit;
@@ -557,6 +558,17 @@ impl App {
 
     pub fn begin_disk_usage(&self, path: PathBuf) -> DiskUsageView {
         DiskUsageView::open(self.handle.clone(), Arc::clone(&self.vfs), path)
+    }
+
+    /// The fuzzy finder over everything below the browsed directory, hidden entries only if the
+    /// browser is showing them.
+    pub fn begin_finder(&self, browser: &BrowserState) -> FinderPopup {
+        FinderPopup::open(
+            &self.handle,
+            Arc::clone(&self.vfs),
+            browser.current_dir().to_path_buf(),
+            browser.show_hidden(),
+        )
     }
 
     /// Turns the status bar's git segment on or off (`git_status` in `config.toml`).

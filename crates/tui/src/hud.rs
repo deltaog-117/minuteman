@@ -739,6 +739,7 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
         Mode::Normal => vec![
             bound(Action::Shell, "shell"),
             bound(Action::Search, "search"),
+            bound(Action::Find, "find"),
             bound(Action::Command, "cli"),
             bound(Action::Select, "mark"),
             bound(Action::ToggleHidden, "hidden"),
