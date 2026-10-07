@@ -1528,6 +1528,18 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   or archive mount, no theme or preview). Measured only by tests: ranking is property-tested
   (every result matches, no more than the limit, best first), the walk, the job, the popup's keys
   and the drawn panel have unit tests; it has not been timed on a large tree.
+- ✅ **Fuzzy finder off the render thread** – the finder's ranking and index moved to an engine on
+  the blocking pool (`tui::finder_job`), so a large tree such as `/` no longer stutters, and what it
+  lists is unchanged. Measured on a Ryzen 5 5500U, release build, 200,000 synthetic paths
+  (`crates/browser/tests/finder_cost.rs`, ignored, run by hand): the first letter costs about 190 ms
+  of scoring in total, which used to block the interface on that keystroke and now runs in slices of
+  2048 entries of about 2 ms each; the next letters narrow from the previous matches, in 64 ms for
+  `ab`, 12 ms for `abc` and 3 ms for `abcd`; deleting a letter returns to its kept result at once;
+  choosing the best 200 of 58,000 matches takes 1.5 ms. The render thread now only sends the query
+  and takes the newest snapshot. A folder's preview is read in the background, once per selection
+  and limited to 300 entries, in place of a `list_dir` on every frame. The ranking is exact:
+  a property test types and deletes letters in any order, with the index growing and the work cut
+  into tiny slices, and requires the same results as ranking from scratch.
 
 ## 🟡 Medium Priority (Important)
 

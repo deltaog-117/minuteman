@@ -14,39 +14,84 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Runs `browser::finder::walk` on the blocking pool so opening the fuzzy finder on a big tree
-//! never freezes the render loop. The walk sends each directory's entries as it lists them, so
-//! the finder has results to show while it is still indexing. Dropping the job sets its cancel
-//! flag, so closing the finder stops the walk at the next directory.
+//! Everything the fuzzy finder does that costs time, off the render thread. Two jobs run on the
+//! blocking pool: one walks the tree (`browser::finder::walk`) and sends each directory's entries
+//! as it lists them; the other, the engine, owns the index and the ranking, takes in those entries
+//! and every change of query, and sends back a `Snapshot` of the best results. The render thread
+//! therefore never scores anything: it sends a query, and shows the newest snapshot it has.
+//!
+//! The engine works in small slices and looks at its queue between them, so a new letter typed
+//! while a large index is still being scored takes over within a few milliseconds instead of
+//! waiting for the old query to finish. Snapshots are sent at most every `INTERVAL`, with the
+//! first one after a query change sent at once. Dropping the job cancels the walk, which ends the
+//! engine, because the engine stops when every sender of its queue is gone.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
+use std::time::{Duration, Instant};
 
-use browser::finder::{Candidate, Walked, walk};
-use browser::search::Limits;
+use browser::finder::{Candidate, Ranking, SHOWN, Walked, walk};
+use browser::search::{Limits, Query};
 use shared::Vfs;
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-enum Message {
-    Batch(Vec<Candidate>),
-    Finished(Walked),
+/// How many entries the engine scores between looks at its queue: a few milliseconds of work, so
+/// that is also the longest a new query waits to be noticed.
+const SLICE: usize = 2048;
+
+/// The least time between two snapshots, so a walk delivering thousands of directories a second
+/// does not make the render thread rebuild its results for each one.
+const INTERVAL: Duration = Duration::from_millis(40);
+
+/// Where the walk that feeds the index stands, for the finder's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Indexing {
+    Walking,
+    Done { truncated: bool },
 }
 
-/// What `FinderJob::poll` found out about the walk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Progress {
-    /// Still walking; more may arrive.
-    Walking,
-    /// The walk is over. `truncated` says a limit stopped it early.
-    Finished { truncated: bool },
+/// What the engine knows at a moment: the best results for the query it was last given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    /// Which query these results are for (see `FinderJob::set_query`).
+    pub generation: u64,
+    /// The best matches, best first, at most `SHOWN`.
+    pub results: Vec<Candidate>,
+    /// How many entries match so far (more than `results` holds when it is a lot).
+    pub matches: usize,
+    /// How many entries have been indexed so far.
+    pub indexed: usize,
+    pub indexing: Indexing,
+    /// Whether every indexed entry has been ranked against the query. False while the engine is
+    /// still catching up, when `results` may yet change.
+    pub settled: bool,
+}
+
+impl Snapshot {
+    /// What the finder shows before the engine has said anything.
+    pub fn empty() -> Self {
+        Self {
+            generation: 0,
+            results: Vec::new(),
+            matches: 0,
+            indexed: 0,
+            indexing: Indexing::Walking,
+            settled: false,
+        }
+    }
+}
+
+enum Command {
+    Batch(Vec<Candidate>),
+    Walked(Walked),
+    Query(u64, Option<Query>),
 }
 
 pub struct FinderJob {
     cancel: Arc<AtomicBool>,
-    rx: UnboundedReceiver<Message>,
-    finished: bool,
+    commands: Sender<Command>,
+    snapshots: Receiver<Snapshot>,
 }
 
 impl FinderJob {
@@ -57,9 +102,11 @@ impl FinderJob {
         root: PathBuf,
         show_hidden: bool,
     ) -> Self {
-        let (tx, rx) = unbounded_channel();
+        let (commands, queue) = channel();
+        let (out, snapshots) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_bg = Arc::clone(&cancel);
+        let walker = commands.clone();
         handle.spawn_blocking(move || {
             let outcome = walk(
                 vfs.as_ref(),
@@ -68,38 +115,30 @@ impl FinderJob {
                 Limits::default(),
                 &cancel_bg,
                 |batch| {
-                    let _ = tx.send(Message::Batch(batch));
+                    let _ = walker.send(Command::Batch(batch));
                 },
             );
-            let _ = tx.send(Message::Finished(outcome));
+            let _ = walker.send(Command::Walked(outcome));
         });
+        handle.spawn_blocking(move || Engine::default().run(&queue, &out));
         Self {
             cancel,
-            rx,
-            finished: false,
+            commands,
+            snapshots,
         }
     }
 
-    /// Moves everything that has arrived into `into` and says where the walk stands. A walk whose
-    /// thread died without finishing reads as finished, so the finder stops claiming to index.
-    pub fn poll(&mut self, into: &mut Vec<Candidate>) -> Progress {
-        if self.finished {
-            return Progress::Finished { truncated: false };
-        }
-        loop {
-            match self.rx.try_recv() {
-                Ok(Message::Batch(batch)) => into.extend(batch),
-                Ok(Message::Finished(Walked::Done { truncated })) => {
-                    self.finished = true;
-                    return Progress::Finished { truncated };
-                }
-                Ok(Message::Finished(Walked::Cancelled)) | Err(TryRecvError::Disconnected) => {
-                    self.finished = true;
-                    return Progress::Finished { truncated: false };
-                }
-                Err(TryRecvError::Empty) => return Progress::Walking,
-            }
-        }
+    /// Ranks against `query` from here on (`None` lists the index as met). `generation` must rise
+    /// with every call; snapshots carry the one they answer, so the caller can tell a late
+    /// snapshot of an old query from a current one.
+    pub fn set_query(&self, generation: u64, query: Option<Query>) {
+        let _ = self.commands.send(Command::Query(generation, query));
+    }
+
+    /// The newest snapshot that has arrived since the last call, if any. Older ones are dropped
+    /// unread: each is a complete picture.
+    pub fn poll(&self) -> Option<Snapshot> {
+        self.snapshots.try_iter().last()
     }
 }
 
@@ -109,54 +148,204 @@ impl Drop for FinderJob {
     }
 }
 
+#[derive(Default)]
+struct Engine {
+    index: Vec<Candidate>,
+    ranking: Ranking,
+    generation: u64,
+    walked: Option<Walked>,
+}
+
+/// Why the engine did not get a command this turn.
+enum Wait {
+    /// Nothing arrived, but the senders are still there.
+    Idle,
+    /// Every sender is gone: the finder was closed.
+    Gone,
+}
+
+impl From<TryRecvError> for Wait {
+    fn from(e: TryRecvError) -> Self {
+        match e {
+            TryRecvError::Empty => Wait::Idle,
+            TryRecvError::Disconnected => Wait::Gone,
+        }
+    }
+}
+
+impl From<RecvTimeoutError> for Wait {
+    fn from(e: RecvTimeoutError) -> Self {
+        match e {
+            RecvTimeoutError::Timeout => Wait::Idle,
+            RecvTimeoutError::Disconnected => Wait::Gone,
+        }
+    }
+}
+
+impl Engine {
+    /// Takes in one command and says whether it changed the query.
+    fn apply(&mut self, command: Command) -> bool {
+        match command {
+            Command::Batch(batch) => self.index.extend(batch),
+            Command::Walked(outcome) => self.walked = Some(outcome),
+            Command::Query(generation, query) => {
+                self.generation = generation;
+                self.ranking.set_query(query);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn snapshot(&self, settled: bool) -> Snapshot {
+        let indexing = match self.walked {
+            None => Indexing::Walking,
+            Some(Walked::Done { truncated }) => Indexing::Done { truncated },
+            Some(Walked::Cancelled) => Indexing::Done { truncated: false },
+        };
+        Snapshot {
+            generation: self.generation,
+            results: self
+                .ranking
+                .top(self.index.len(), SHOWN)
+                .into_iter()
+                .map(|position| self.index[position].clone())
+                .collect(),
+            matches: self.ranking.matches(self.index.len()),
+            indexed: self.index.len(),
+            indexing,
+            settled,
+        }
+    }
+
+    /// Runs until the finder is closed. While there is ranking to do it does one slice at a time
+    /// and only peeks at the queue; with nothing to do it sleeps until a command arrives or a
+    /// snapshot is due.
+    fn run(mut self, queue: &Receiver<Command>, out: &Sender<Snapshot>) {
+        let mut settled = true;
+        // Something changed since the last snapshot, so one is owed.
+        let mut owed = false;
+        let mut next_send = Instant::now();
+        loop {
+            let received = if !settled {
+                queue.try_recv().map_err(Wait::from)
+            } else if owed {
+                queue
+                    .recv_timeout(next_send.saturating_duration_since(Instant::now()))
+                    .map_err(Wait::from)
+            } else {
+                queue.recv().map_err(|_| Wait::Gone)
+            };
+            match received {
+                Ok(command) => {
+                    let mut retyped = self.apply(command);
+                    while let Ok(command) = queue.try_recv() {
+                        retyped |= self.apply(command);
+                    }
+                    settled = false;
+                    owed = true;
+                    if retyped {
+                        next_send = Instant::now();
+                    }
+                }
+                Err(Wait::Idle) => {}
+                Err(Wait::Gone) => return,
+            }
+            if !settled {
+                settled = self.ranking.advance(&self.index, SLICE);
+            }
+            if owed && Instant::now() >= next_send {
+                if out.send(self.snapshot(settled)).is_err() {
+                    return;
+                }
+                next_send = Instant::now() + INTERVAL;
+                owed = !settled;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use shared::MemVfs;
 
     use super::*;
-    use std::time::{Duration, Instant};
 
-    fn drain(job: &mut FinderJob) -> (Vec<Candidate>, Progress) {
+    /// Polls until a snapshot answers `generation`, is settled and the walk is over.
+    fn settled(job: &FinderJob, generation: u64) -> Snapshot {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut all = Vec::new();
         loop {
-            let progress = job.poll(&mut all);
-            if progress != Progress::Walking {
-                return (all, progress);
+            if let Some(snapshot) = job.poll()
+                && snapshot.generation == generation
+                && snapshot.settled
+                && snapshot.indexing != Indexing::Walking
+            {
+                return snapshot;
             }
-            assert!(Instant::now() < deadline, "the walk never finished");
+            assert!(Instant::now() < deadline, "the engine never settled");
             std::thread::sleep(Duration::from_millis(5));
         }
     }
 
-    #[test]
-    fn a_job_delivers_every_entry_and_then_reports_the_end() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+    fn tree() -> MemVfs {
         let vfs = MemVfs::new();
         vfs.add_file("/root/a/b/deep.txt", b"");
         vfs.add_file("/root/top.txt", b"");
-        let mut job = FinderJob::start(runtime.handle(), Arc::new(vfs), "/root".into(), false);
-        let (found, progress) = drain(&mut job);
-        assert_eq!(progress, Progress::Finished { truncated: false });
-        let mut rels: Vec<&str> = found.iter().map(|c| c.rel.as_str()).collect();
-        rels.sort_unstable();
-        assert_eq!(rels, ["a", "a/b", "a/b/deep.txt", "top.txt"]);
-        // A finished job stays finished and delivers nothing more.
-        let mut again = Vec::new();
-        assert_eq!(
-            job.poll(&mut again),
-            Progress::Finished { truncated: false }
-        );
-        assert!(again.is_empty());
+        vfs
     }
 
     #[test]
-    fn dropping_a_job_sets_its_cancel_flag() {
+    fn a_job_lists_every_entry_when_nothing_is_typed() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let job = FinderJob::start(runtime.handle(), Arc::new(MemVfs::new()), "/".into(), false);
+        let job = FinderJob::start(runtime.handle(), Arc::new(tree()), "/root".into(), false);
+        let snapshot = settled(&job, 0);
+        assert_eq!(snapshot.indexing, Indexing::Done { truncated: false });
+        assert_eq!(snapshot.indexed, 4);
+        assert_eq!(snapshot.matches, 4);
+        let mut rels: Vec<&str> = snapshot.results.iter().map(|c| c.rel.as_str()).collect();
+        rels.sort_unstable();
+        assert_eq!(rels, ["a", "a/b", "a/b/deep.txt", "top.txt"]);
+    }
+
+    #[test]
+    fn a_query_is_answered_with_its_own_generation_and_only_its_matches() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let job = FinderJob::start(runtime.handle(), Arc::new(tree()), "/root".into(), false);
+        settled(&job, 0);
+        job.set_query(1, Query::new("deep"));
+        let snapshot = settled(&job, 1);
+        assert_eq!(snapshot.matches, 1);
+        assert_eq!(snapshot.results[0].rel, "a/b/deep.txt");
+        job.set_query(2, Query::new("de"));
+        assert_eq!(settled(&job, 2).results[0].rel, "a/b/deep.txt");
+        job.set_query(3, None);
+        assert_eq!(settled(&job, 3).matches, 4);
+    }
+
+    #[test]
+    fn dropping_a_job_sets_its_cancel_flag_and_ends_the_engine() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let job = FinderJob::start(runtime.handle(), Arc::new(tree()), "/root".into(), false);
         let flag = Arc::clone(&job.cancel);
         assert!(!flag.load(Ordering::Relaxed));
         drop(job);
         assert!(flag.load(Ordering::Relaxed));
+        // The runtime waits for its blocking jobs when dropped, so a stuck engine hangs here.
+        drop(runtime);
+    }
+
+    #[test]
+    fn a_large_index_is_ranked_in_slices_and_a_new_query_takes_over() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let vfs = MemVfs::new();
+        for i in 0..6000 {
+            vfs.add_file(format!("/root/dir{}/file{i}.txt", i % 50), b"");
+        }
+        let job = FinderJob::start(runtime.handle(), Arc::new(vfs), "/root".into(), false);
+        job.set_query(1, Query::new("f"));
+        job.set_query(2, Query::new("file5999"));
+        let snapshot = settled(&job, 2);
+        assert_eq!(snapshot.results[0].rel, "dir49/file5999.txt");
+        assert_eq!(snapshot.matches, 1);
     }
 }

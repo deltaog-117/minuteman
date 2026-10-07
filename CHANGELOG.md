@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `browser`, `tui`: the fuzzy finder (`f`) no longer scores anything on the render thread, so it does
+  not stutter on a large tree. An engine on the blocking pool owns the index and the ranking and
+  sends back the best 200 results; typing sends it a query and the interface carries on, showing
+  the previous results until the new ones arrive (the header says `ranking…` meanwhile). The engine
+  works in slices of about 2 ms and notices a new letter between them. Typing another letter now
+  narrows from the previous letter's matches instead of rescoring everything, and deleting a letter
+  returns to the earlier result at once. A folder's preview is read in the background when it is
+  selected, up to 300 entries, instead of on every frame. The selection stays on its entry when
+  results reorder under it. The results are the same as before: nothing is skipped or approximated.
+  `browser::finder::Ranking` now takes its work in slices (`advance`) and `Query::extends` was added.
 - `theming`: `gradient_borders` in `config.toml` is superseded by `[shape] gradient`; `false` still
   turns the gradient off unless `appearance.toml` or the popup sets `gradient`. The
   `Config::gradient_borders` field is removed; read `config.theme.shape.gradient` instead.

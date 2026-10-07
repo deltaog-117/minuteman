@@ -87,6 +87,14 @@ impl Query {
         Some(Self { typed, lower })
     }
 
+    /// Whether this query is `shorter` with more letters after it (or the same letters), ignoring
+    /// case. Everything that matches this query then also matches `shorter`, because a name that
+    /// holds `abc` in order holds `ab` in order. That lets a ranking narrow as letters are typed
+    /// instead of starting over.
+    pub fn extends(&self, shorter: &Query) -> bool {
+        self.lower.starts_with(&shorter.lower)
+    }
+
     pub fn matches(&self, name: &str) -> bool {
         self.score(name).is_some()
     }

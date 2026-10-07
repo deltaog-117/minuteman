@@ -74,17 +74,32 @@ pub fn score(query: &Query, rel: &str) -> Option<i32> {
     on_name.max(query.score(rel))
 }
 
-/// A running ranking of a growing index against one query. Scoring is incremental: `extend` only
-/// scores what arrived since, and `set_query` starts over, so a walk that is still delivering
-/// directories costs one pass over each entry in total, not one per batch.
+/// What is known about one typed query: every entry of the index below `scanned` that matches it,
+/// scored.
+#[derive(Debug)]
+struct Level {
+    query: Query,
+    /// `(score, position in the index)`, in the order the entries were scored.
+    scored: Vec<(i32, usize)>,
+    /// Entries of the index below this are accounted for, once `from_parent` is `None`.
+    scanned: usize,
+    /// While this level is being narrowed from the one beneath it, how many of that level's
+    /// matches have been looked at; `None` when that is done (or was never needed).
+    from_parent: Option<usize>,
+}
+
+/// A running ranking of a growing index against what is typed, built to be worked on in small
+/// slices. Typing another letter does not start over: everything that matches `abc` also matches
+/// `ab`, so the new query only looks at the previous query's matches, which shrink quickly. Each
+/// typed prefix keeps its own level, so deleting a letter returns to the earlier one for free.
+/// Entries that arrive while the walk is still running are scored once, when `advance` reaches
+/// them. Nothing is skipped or approximated: the answer is the one scoring every entry against
+/// the final query would give.
 #[derive(Debug, Default)]
 pub struct Ranking {
-    query: Option<Query>,
-    /// `(score, position in the index)` of every entry that matched. Unused for an empty query,
-    /// which keeps everything in the order the walk met it.
-    scored: Vec<(i32, usize)>,
-    /// How much of the index has been looked at.
-    scanned: usize,
+    /// One level per prefix of the current query that has been worked on, shortest first. Empty
+    /// for an empty query, which lists the index as the walk met it.
+    levels: Vec<Level>,
 }
 
 impl Ranking {
@@ -92,42 +107,98 @@ impl Ranking {
         Self::default()
     }
 
-    /// Ranks against `query` from here on; `None` (nothing typed) lists the index as met. The
-    /// caller then `extend`s with the whole index again.
+    /// Ranks against `query` from here on; `None` (nothing typed) lists the index as met. Levels
+    /// that are not a prefix of `query` are dropped; the closest one that is, and is finished
+    /// narrowing, is what the new level narrows from.
     pub fn set_query(&mut self, query: Option<Query>) {
-        self.query = query;
-        self.scored.clear();
-        self.scanned = 0;
-    }
-
-    /// Takes in the part of `index` not yet looked at.
-    pub fn extend(&mut self, index: &[Candidate]) {
-        if let Some(query) = &self.query {
-            for (position, candidate) in index.iter().enumerate().skip(self.scanned) {
-                if let Some(s) = score(query, &candidate.rel) {
-                    self.scored.push((s, position));
+        let Some(query) = query else {
+            self.levels.clear();
+            return;
+        };
+        loop {
+            match self.levels.last() {
+                Some(last) if last.query == query => return,
+                Some(last) if last.from_parent.is_none() && query.extends(&last.query) => {
+                    let scanned = last.scanned;
+                    self.levels.push(Level {
+                        query,
+                        scored: Vec::new(),
+                        scanned,
+                        from_parent: Some(0),
+                    });
+                    return;
+                }
+                Some(_) => {
+                    self.levels.pop();
+                }
+                None => {
+                    self.levels.push(Level {
+                        query,
+                        scored: Vec::new(),
+                        scanned: 0,
+                        from_parent: None,
+                    });
+                    return;
                 }
             }
         }
-        self.scanned = index.len();
     }
 
-    /// How many entries match: all of the index for an empty query.
-    pub fn matches(&self) -> usize {
-        match self.query {
-            Some(_) => self.scored.len(),
-            None => self.scanned,
+    /// Scores at most `budget` entries toward the current query, from `index` as it is now, and
+    /// says whether it has caught up with all of it. Call it again with a larger `index` as the
+    /// walk delivers more.
+    pub fn advance(&mut self, index: &[Candidate], budget: usize) -> bool {
+        let Some(at) = self.levels.len().checked_sub(1) else {
+            return true;
+        };
+        let (parents, last) = self.levels.split_at_mut(at);
+        let level = &mut last[0];
+        let mut left = budget;
+        if let Some(cursor) = level.from_parent {
+            match parents.last() {
+                Some(parent) => {
+                    let take = left.min(parent.scored.len() - cursor);
+                    for &(_, position) in &parent.scored[cursor..cursor + take] {
+                        if let Some(s) = score(&level.query, &index[position].rel) {
+                            level.scored.push((s, position));
+                        }
+                    }
+                    left -= take;
+                    let done = cursor + take;
+                    level.from_parent = (done < parent.scored.len()).then_some(done);
+                    if level.from_parent.is_some() {
+                        return false;
+                    }
+                }
+                None => level.from_parent = None,
+            }
+        }
+        let take = left.min(index.len().saturating_sub(level.scanned));
+        for (position, candidate) in index.iter().enumerate().skip(level.scanned).take(take) {
+            if let Some(s) = score(&level.query, &candidate.rel) {
+                level.scored.push((s, position));
+            }
+        }
+        level.scanned += take;
+        level.scanned >= index.len()
+    }
+
+    /// How many entries match so far: all of an index of `index_len` for an empty query.
+    pub fn matches(&self, index_len: usize) -> usize {
+        match self.levels.last() {
+            Some(level) => level.scored.len(),
+            None => index_len,
         }
     }
 
     /// The positions in the index of the best `limit` matches, best first. Equal scores keep the
     /// order the walk met them in, so a nearer entry wins a tie.
-    pub fn top(&self, limit: usize) -> Vec<usize> {
-        if self.query.is_none() {
-            return (0..self.scanned.min(limit)).collect();
-        }
+    pub fn top(&self, index_len: usize, limit: usize) -> Vec<usize> {
+        let Some(level) = self.levels.last() else {
+            return (0..index_len.min(limit)).collect();
+        };
         let by_best = |a: &(i32, usize), b: &(i32, usize)| b.0.cmp(&a.0).then(a.1.cmp(&b.1));
-        let mut kept = self.scored.clone();
+        let mut kept = level.scored.clone();
         if kept.len() > limit {
             kept.select_nth_unstable_by(limit, by_best);
             kept.truncate(limit);
@@ -225,9 +296,9 @@ mod tests {
         let index: Vec<Candidate> = rels.iter().map(|rel| candidate(rel)).collect();
         let mut ranking = Ranking::new();
         ranking.set_query(Query::new(query));
-        ranking.extend(&index);
+        assert!(ranking.advance(&index, usize::MAX));
         ranking
-            .top(SHOWN)
+            .top(index.len(), SHOWN)
             .into_iter()
             .map(|position| index[position].rel.clone())
             .collect()
@@ -282,9 +353,9 @@ mod tests {
         let index = [candidate("b"), candidate("a"), candidate("c")];
         let mut ranking = Ranking::new();
         ranking.set_query(None);
-        ranking.extend(&index);
-        assert_eq!(ranking.top(2), [0, 1]);
-        assert_eq!(ranking.matches(), 3);
+        assert!(ranking.advance(&index, 1), "nothing to rank");
+        assert_eq!(ranking.top(index.len(), 2), [0, 1]);
+        assert_eq!(ranking.matches(index.len()), 3);
     }
 
     #[test]
@@ -293,30 +364,69 @@ mod tests {
     }
 
     #[test]
-    fn extending_scores_only_what_arrived_and_agrees_with_scoring_it_all_at_once() {
+    fn work_is_done_in_slices_and_arrivals_are_scored_when_reached() {
         let rels = ["src/main.rs", "docs/guide.md", "main.c", "src/lib/main.rs"];
         let index: Vec<Candidate> = rels.iter().map(|rel| candidate(rel)).collect();
-        let mut whole = Ranking::new();
-        whole.set_query(Query::new("main"));
-        whole.extend(&index);
         let mut stepped = Ranking::new();
         stepped.set_query(Query::new("main"));
-        stepped.extend(&index[..2]);
-        stepped.extend(&index);
-        assert_eq!(stepped.top(SHOWN), whole.top(SHOWN));
-        assert_eq!(stepped.matches(), whole.matches());
+        assert!(!stepped.advance(&index, 1), "one entry of four is not all");
+        assert!(
+            stepped.advance(&index[..2], 5),
+            "caught up with a shorter index"
+        );
+        assert!(stepped.advance(&index, 5));
+        let mut whole = Ranking::new();
+        whole.set_query(Query::new("main"));
+        whole.advance(&index, usize::MAX);
+        assert_eq!(stepped.top(4, SHOWN), whole.top(4, SHOWN));
+        assert_eq!(stepped.matches(4), 3);
     }
 
     #[test]
-    fn changing_the_query_starts_the_ranking_over() {
+    fn typing_more_narrows_the_matches_and_deleting_returns_to_them() {
+        let index = [
+            candidate("main.rs"),
+            candidate("manual.md"),
+            candidate("mod.rs"),
+        ];
+        let mut ranking = Ranking::new();
+        ranking.set_query(Query::new("m"));
+        ranking.advance(&index, usize::MAX);
+        assert_eq!(ranking.matches(3), 3);
+        ranking.set_query(Query::new("ma"));
+        // Only the three matches of `m` are looked at, not the index.
+        assert!(!ranking.advance(&index, 2));
+        assert!(ranking.advance(&index, 2));
+        assert_eq!(ranking.matches(3), 2);
+        ranking.set_query(Query::new("m"));
+        assert!(
+            ranking.advance(&index, 0),
+            "the earlier level is still complete"
+        );
+        assert_eq!(ranking.matches(3), 3);
+    }
+
+    #[test]
+    fn a_new_query_that_is_not_an_extension_starts_over() {
         let index = [candidate("alpha"), candidate("beta")];
         let mut ranking = Ranking::new();
         ranking.set_query(Query::new("alpha"));
-        ranking.extend(&index);
-        assert_eq!(ranking.top(SHOWN), [0]);
+        ranking.advance(&index, usize::MAX);
+        assert_eq!(ranking.top(2, SHOWN), [0]);
         ranking.set_query(Query::new("beta"));
-        ranking.extend(&index);
-        assert_eq!(ranking.top(SHOWN), [1]);
+        ranking.advance(&index, usize::MAX);
+        assert_eq!(ranking.top(2, SHOWN), [1]);
+    }
+
+    #[test]
+    fn a_query_typed_before_the_last_one_finished_still_ranks_every_entry() {
+        let index: Vec<Candidate> = (0..50).map(|i| candidate(&format!("ab{i}c"))).collect();
+        let mut ranking = Ranking::new();
+        ranking.set_query(Query::new("a"));
+        assert!(!ranking.advance(&index, 10), "`a` is not finished");
+        ranking.set_query(Query::new("ab"));
+        assert!(ranking.advance(&index, usize::MAX));
+        assert_eq!(ranking.matches(50), 50);
     }
 
     #[test]
@@ -404,8 +514,8 @@ mod tests {
             let typed = Query::new(&query).unwrap();
             let mut ranking = Ranking::new();
             ranking.set_query(Some(typed.clone()));
-            ranking.extend(&index);
-            let top = ranking.top(limit);
+            ranking.advance(&index, usize::MAX);
+            let top = ranking.top(index.len(), limit);
             prop_assert!(top.len() <= limit);
             let scores: Vec<i32> = top
                 .iter()
@@ -413,8 +523,40 @@ mod tests {
                 .collect();
             prop_assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]));
             let expected = index.iter().filter(|c| score(&typed, &c.rel).is_some()).count();
-            prop_assert_eq!(ranking.matches(), expected);
+            prop_assert_eq!(ranking.matches(index.len()), expected);
             prop_assert_eq!(top.len(), expected.min(limit));
+        }
+
+        /// Typing and deleting letters in any order, with the index growing and the work cut
+        /// into small slices in between, ends with the ranking scoring every entry against the
+        /// final query would give: narrowing and slicing lose nothing.
+        #[test]
+        fn narrowing_and_slicing_rank_exactly_as_ranking_from_scratch(
+            rels in proptest::collection::vec("[a-c/.]{1,8}", 0..30),
+            steps in proptest::collection::vec((any::<bool>(), 0usize..3, 0usize..6), 1..14),
+        ) {
+            let index: Vec<Candidate> = rels.iter().map(|rel| candidate(rel)).collect();
+            let mut ranking = Ranking::new();
+            let mut text = String::new();
+            for (i, (push, letter, budget)) in steps.iter().enumerate() {
+                if *push {
+                    text.push(['a', 'b', 'c'][*letter]);
+                } else {
+                    text.pop();
+                }
+                ranking.set_query(Query::new(&text));
+                let visible = index.len() * (i + 1) / steps.len();
+                ranking.advance(&index[..visible], *budget);
+            }
+            ranking.advance(&index, usize::MAX);
+            let mut scratch = Ranking::new();
+            scratch.set_query(Query::new(&text));
+            scratch.advance(&index, usize::MAX);
+            prop_assert_eq!(ranking.matches(index.len()), scratch.matches(index.len()));
+            prop_assert_eq!(
+                ranking.top(index.len(), SHOWN),
+                scratch.top(index.len(), SHOWN)
+            );
         }
     }
 }

@@ -6091,6 +6091,61 @@ has not been timed on a large tree.
 
 ---
 
+### Fuzzy Finder Off the Render Thread
+
+**Date:** 2026-10-07 · **Author:** deltaog-117
+
+**Context.** The finder scored every entry on the render thread on each keystroke, and rebuilt its
+best-200 list from a copy of every match each time the walk delivered a directory. On a tree of
+hundreds of thousands of entries, such as `/`, that stutters. The requirement was to stop the
+stutter without listing less: no skipped directories, no lower cap, no partial results kept.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Exact savings and an engine thread: narrow from the previous letter's matches, work in slices on a worker, send snapshots | Chosen |
+| B | Time-slice the scoring on the render thread | Rejected: results are partial for longer, and the thread is still busy |
+| C | Skip `/proc`, `/sys` and ignored folders, or lower the entry cap | Rejected: lists less |
+
+**Decision.** `browser::finder::Ranking` keeps one level per typed prefix. A longer query only looks
+at the previous query's matches (`Query::extends`: whatever holds `abc` in order holds `ab` in
+order), entries that arrive later are scored once when reached, and `advance` takes a budget so the
+work can be cut anywhere. `tui::finder_job` runs two jobs on the blocking pool: the walk, and an
+engine that owns the index and the ranking. The engine scores 2048 entries at a time, looks at its
+queue between slices so a new letter takes over within about 2 ms, and sends a `Snapshot` (the best
+200, the match and indexed counts, whether it has caught up) at most every 40 ms, the first one after
+a query change at once. `FinderPopup` holds the newest snapshot and no index. The folder preview is
+read once per selection on the blocking pool, limited to 300 entries.
+
+**Why this way.** The cost is in scoring, so the saving that changes the result least is not to
+repeat it: typing narrows, deleting returns to a kept level, and a late entry is scored once. What
+cannot be avoided, the first letter over everything, moves off the render thread, where its length
+only delays the answer. Snapshots hold the best 200 only, so the render thread copies 200 entries
+and not a quarter of a million, and a snapshot of an old query is recognised by its generation and
+ignored, with the previous results left on screen so typing never flashes an empty list. The
+selection follows its path across snapshots, so results arriving under the cursor do not move it.
+
+**Results.** On a Ryzen 5 5500U, release build, 200,000 synthetic paths (the ignored test
+`crates/browser/tests/finder_cost.rs`): the first letter costs about 190 ms in total and the longest
+slice is about 2 ms; narrowing to two, three and four letters takes 64, 12 and 3 ms; deleting a
+letter takes about a microsecond; picking the best 200 of 58,000 matches takes 1.5 ms.
+
+**Trade-offs.** The first letter over a very large index still takes the better part of a second
+of work to finish, during which the list shows the previous results and the header says
+`ranking…`; it cannot be shorter without scoring less. Each prefix keeps its matches, up to a few
+megabytes for the first letters of a large index. A query that is not an extension of the last one
+(a letter deleted from the middle) is ranked from scratch. Two threads of the blocking pool are used
+while the finder is open. The walk itself is unchanged and still stops at 200,000 entries. The
+numbers are one machine's, from synthetic paths, and do not include the walk's own disk time.
+
+**Verification.** `scripts/check` passes (1264 tests). New: a property test that types and deletes
+letters in any order, with the index growing and the work cut into slices, and requires the same
+ranking as scoring from scratch; engine tests for generations, a new query taking over a large
+index, and the cancel flag ending the engine; popup tests for results staying until replaced, the
+selection staying on its entry, and a folder's contents arriving in the background. It has not been
+run by hand in a terminal on `/`.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

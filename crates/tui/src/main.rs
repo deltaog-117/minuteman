@@ -3799,17 +3799,14 @@ fn draw(
         finder_view::render(frame, popup, config);
         if let Some(area) = finder_view::layout(frame.area()).preview {
             let subject = popup.preview_subject();
-            // A folder is listed once per frame, as a folder in the browser's preview is.
-            let children: Option<Vec<DirEntryInfo>> = subject
-                .as_ref()
-                .filter(|entry| entry.is_dir)
-                .map(|entry| vfs.list_dir(&entry.path).unwrap_or_default());
+            // A folder's contents were read in the background when it was selected (see
+            // `FinderPopup::children`), so drawing never waits on the disk.
             draw_preview_pane(
                 frame,
                 area,
                 PreviewSubject {
                     is_file: subject.as_ref().is_some_and(|entry| !entry.is_dir),
-                    children: children.as_deref(),
+                    children: popup.children(),
                     label: subject.as_ref().map_or("", |entry| entry.name.as_str()),
                 },
                 previews,

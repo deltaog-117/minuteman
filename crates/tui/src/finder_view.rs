@@ -53,10 +53,11 @@ pub fn layout(screen: Rect) -> Layout {
 /// the walk is still going or was cut short by a limit.
 fn status(popup: &FinderPopup) -> String {
     let counts = format!("{}/{}", popup.matches(), popup.indexed());
-    match popup.indexing() {
-        Indexing::Walking => format!("{counts} indexing…"),
-        Indexing::Done { truncated: true } => format!("{counts} (limit reached)"),
-        Indexing::Done { truncated: false } => counts,
+    match (popup.indexing(), popup.settled()) {
+        (Indexing::Walking, _) => format!("{counts} indexing…"),
+        (Indexing::Done { .. }, false) => format!("{counts} ranking…"),
+        (Indexing::Done { truncated: true }, true) => format!("{counts} (limit reached)"),
+        (Indexing::Done { truncated: false }, true) => counts,
     }
 }
 
@@ -97,9 +98,10 @@ pub fn render(frame: &mut Frame<'_>, popup: &FinderPopup, config: &Config) {
     popup.viewport().set(viewport);
 
     if len == 0 {
-        let note = match popup.indexing() {
-            Indexing::Walking => "indexing…",
-            Indexing::Done { .. } => "no match",
+        let note = match (popup.indexing(), popup.settled()) {
+            (Indexing::Walking, _) => "indexing…",
+            (Indexing::Done { .. }, false) => "ranking…",
+            (Indexing::Done { .. }, true) => "no match",
         };
         frame.render_widget(Paragraph::new(Span::styled(note, dim)), places.rows);
     } else {
@@ -185,13 +187,13 @@ mod tests {
         vfs.add_file("/root/docs/guide.md", b"");
         let mut popup = FinderPopup::open(runtime.handle(), Arc::new(vfs), "/root".into(), false);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while popup.indexing() == Indexing::Walking {
-            popup.poll();
-            assert!(Instant::now() < deadline, "the walk never finished");
-            std::thread::sleep(Duration::from_millis(5));
-        }
         for c in typed.chars() {
             popup.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        while !popup.settled() || popup.indexing() == Indexing::Walking {
+            popup.poll();
+            assert!(Instant::now() < deadline, "the finder never settled");
+            std::thread::sleep(Duration::from_millis(5));
         }
         let config = Config::from_sources(None, None, None);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
