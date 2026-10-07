@@ -202,7 +202,20 @@ mod tests {
         unsafe {
             std::env::set_var("SHELL", &script);
         }
-        let status = spawn_shell(&dir).unwrap();
+        // Running a file just written can fail with "text file busy" if another test thread
+        // forked in the moment the file was open for writing, because the child briefly holds
+        // that handle. The file is complete and the handle is closed in the parent, so trying
+        // again is right; nothing else is retried.
+        let mut tries = 0;
+        let status = loop {
+            match spawn_shell(&dir) {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => break other.unwrap(),
+            }
+        };
         unsafe {
             std::env::remove_var("SHELL");
         }

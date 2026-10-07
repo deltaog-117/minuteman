@@ -1541,6 +1541,32 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   a property test types and deletes letters in any order, with the index growing and the work cut
   into tiny slices, and requires the same results as ranking from scratch.
 
+- ✅ **Devices view: the storage deck (COA B)** – `V` has a fifth view, **deck**: the usual columns
+  under a strip of cards, one per internal disk, USB stick or network share. A card shows the name
+  (label, else mount folder, else kernel name), where it is mounted or that it is not, a gauge of
+  how full it is with the free space (red from 90%), and a sparkline of the last 32 seconds of
+  reads and writes with the current rate. The card holding the folder you are in has the bright
+  frame; a device plugged in slides in over a quarter of a second; one that is plugged in but not
+  mounted shows too, with its size. `Tab` takes the keys to the cards (`←`/`→` or `h`/`l` choose,
+  `Enter` opens one, mounting it first if needed, `m` mounts or unmounts, `e` unmounts and powers
+  the disk off, `Esc` gives the keys back; everything else stays the browser's, so `q` and `j`/`k`
+  work); a click chooses a card, a second click opens it, the wheel moves along them. The data
+  layer is a new crate, `devices`: `mountinfo` (the mounts worth showing, one per device, with
+  boot partitions, snap loop devices and virtual filesystems left out), `udev` (label, filesystem
+  and bus from `/run/udev/data`, which is how an unmounted stick has a name), `probe` (`Sys::scan`
+  over `/proc`, `/sys` and `statvfs`, pointed at a copy of the files in tests), `activity` (rates and
+  history from `/proc/diskstats`) and `udisks` (`udisksctl`, with a 25 s timeout so a password
+  prompt with nobody to answer cannot hang). In `tui`, `deck` is the pure state and `deck_view` the
+  drawing, with one layout function (`cards`) shared by the drawing and the mouse; the strip is cut
+  from the columns by `view_mode::browser_layout`, which gained `BrowserLayout::deck`, and a window
+  under 12 body rows gets no strip. The machine is looked at once a second on the blocking pool,
+  only while the deck view is showing, and a scan still running is not started again, so a hung
+  network mount cannot stall the interface. Found and fixed against this machine's real mounts: a
+  btrfs root reports a made-up device number and showed up a second time as an unmounted device,
+  and the hidden `/boot/efi` showed as unmounted; devices are now matched by the node their mount
+  source links to. Chosen as COA B over a places rail (A) and a zoomable storage atlas (C); both
+  remain below. Linux only. Not run by hand with a real USB stick or `udisksctl` here.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -1692,6 +1718,57 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   sources (directories only, file contents, recent folders, marks, plugin actions); results are
   capped at 200 listed; the index is rebuilt each time the finder opens, with no cache between
   openings; no smart-case or exact-match switch; the `/` search still matches the name only.
+- **Devices view, `V` (B delivered, see the done list; A and C remain)** – a view in the `V` cycle that knows about storage:
+  internal disks, USB sticks and network mounts, with their capacity, state and activity, and
+  mounting, unmounting and ejecting. Nothing in the codebase reads mounts or block devices yet.
+  Shared data layer for all three ideas: `/proc/self/mountinfo` for what is mounted, `statvfs` (via
+  `libc`) for capacity, `/sys/class/block` and the udev database under `/run/udev/data` for label,
+  filesystem and the removable flag (readable without root, and it covers a device that is plugged
+  in but not mounted), `/proc/diskstats` for activity, and `udisksctl` for mount, unmount and
+  power-off (it needs no root; without it the view lists devices and cannot change them). Polled
+  off the render thread, since `statvfs` on a hung network mount can block. Linux only to begin
+  with. Three ideas were weighed, and B was chosen:
+  - **A, places rail** – a left sidebar with Devices, Places (home, the XDG folders, bookmarks,
+    trash) and Remote (ssh hosts), beside the columns or the grid, with one-key jump labels and
+    capacity gauges drawn in cells. The familiar Dolphin/Thunar layout, easiest to learn, least new.
+  - **B, storage deck (chosen)** – a strip of live drive cards across the top and the ordinary file
+    view below. A card shows the name, filesystem, a capacity gauge, free space and a read/write
+    sparkline from `/proc/diskstats`; the card holding the browsed folder is lit as "you are here";
+    a newly plugged device slides in; the cards are the targets for mount, eject and, later,
+    copy-to. Neither Ranger nor the graphical managers show which drive is busy.
+  - **C, atlas** – a zoomable map of all storage: a block per volume sized by capacity and shaded
+    by use, the current location as a pin, selecting a block zooms into its top folders and then
+    the file list, and a corner minimap in the normal views shows where you are. The most original
+    and the most useful for "where did my space go", but it needs a treemap layout and a
+    background size scan below the device level (the disk usage scanner can feed it) with caching.
+    The deck's data layer is the one it would need, so it can follow as another view.
+- **Devices view, follow-ups** – no copy-to-card (drop marked files onto a card, or a key that
+  copies them to the chosen device); network shares can be opened but not mounted or unmounted from
+  the deck (`udisksctl` only handles block devices); no encrypted-container unlock (LUKS shows as
+  not a filesystem and is left out); no temperature or SMART health on a card; no optical drives
+  (`sr*` is skipped); the card colors follow the theme but cannot be set on their own; macOS has no
+  data source; the deck exists only in its own view, not as a strip over the others; the scan
+  repeats every second whether or not anything changed (udev events would make it instant and
+  free); a mount or eject reports in the status line only, with no progress for a slow unmount.
+- **Fuzzy finder, no limit (planned)** – lift the 16-level and 200,000-entry caps without bringing
+  back the stutter. The render thread already never touches the index, so what remains is making a
+  very large one cheap to hold, to build and to rank. In order: (1) walk with `Vfs::scan_dir` (one
+  call per folder, each entry's own metadata, no symlink-following) in place of `list_dir`, and
+  replace the depth cap, which is what stops symlink loops today, with a set of visited
+  `(device, inode)` pairs, so `/proc/self/root` cannot lead back to `/`; (2) store the index as one
+  shared string arena of relative paths with a small `(offset, length, flags)` record per entry,
+  about 70 bytes each against about 150 now, and the path rebuilt from the root when needed; (3) keep
+  a bounded best-200 heap per ranking level and only the matching positions (4 bytes), so a snapshot
+  costs the same at ten million matches as at two hundred; (4) rank on several cores, each slice a
+  range of the index split across `std::thread::scope` workers; (5) show progress (`ranking… 38%`)
+  during a long first pass; (6) walk on several threads sharing one queue of folders, capped at half
+  the cores and at 8, with ties between equal scores broken by depth then path so a run is
+  deterministic. Later: keep the finished index between openings and update it with the live refresh.
+  Estimated against the 200,000-entry benchmark (`crates/browser/tests/finder_cost.rs`): the first
+  letter scales linearly, about 5 s for five million entries on one core and under 1 s on eight, and
+  every later letter narrows from the previous matches. Open questions: whether the SFTP backend
+  lets requests overlap (a parallel walk helps a remote machine only if it does), and a thread count
+  that suits a spinning disk, where more threads can mean more seeking. Measure after each step.
 - **Trash browser, follow-ups** – no sort order other than newest first, no search or filter, no
   preview below 100 columns or on a platform whose trash layout is not the freedesktop one, a
   picture is never scaled up in the pane (as in the browser's own column), no mouse marking (a click selects the row; `v` marks it), restore

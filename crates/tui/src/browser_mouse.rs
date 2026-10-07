@@ -42,6 +42,9 @@ const WHEEL_STEP: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrowserLayout {
     pub header: Rect,
+    /// The strip of device cards above the columns in the deck view; empty in every other view
+    /// and when the window is too short to spare it.
+    pub deck: Rect,
     pub parent: Rect,
     pub current: Rect,
     pub preview: Rect,
@@ -99,6 +102,7 @@ impl BrowserLayout {
         };
         Self {
             header: rows[0],
+            deck: Rect::new(mid.x, mid.y, 0, 0),
             parent,
             current,
             preview,

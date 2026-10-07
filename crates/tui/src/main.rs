@@ -26,6 +26,8 @@ mod cli;
 mod command;
 mod compress_popup;
 mod context_menu;
+mod deck;
+mod deck_view;
 mod desktop_entry;
 mod disk_usage;
 mod disk_usage_view;
@@ -101,6 +103,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     supports_keyboard_enhancement,
 };
+use deck::{DeckState, Event as DeckEvent, Outcome as DeckKey};
 use disk_usage::DiskUsageView;
 use extract_popup::ExtractPopup;
 use file_ops::archive::Format;
@@ -400,6 +403,8 @@ struct Overlay<'a> {
     appearance: Option<&'a AppearancePopup>,
     /// The fuzzy finder, a panel over the browser while open.
     finder: Option<&'a FinderPopup>,
+    /// The strip of device cards, in the deck view.
+    deck: Option<&'a DeckState>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
     /// `effective_panels`/`effective_styles`.
@@ -1318,6 +1323,9 @@ fn run(
     let mut appearance: Option<AppearancePopup> = None;
     // The fuzzy finder (`f`) while one is open; modal too.
     let mut finder: Option<FinderPopup> = None;
+    // The device cards of the deck view; exists only while that view is showing, so the machine
+    // is not looked at for anyone who is not using it.
+    let mut deck: Option<DeckState> = None;
     // `local.toml`'s three tables, seeded from what `Config::load` already parsed from it (so a
     // save this session correctly carries forward whatever an earlier session saved) and mutated
     // live by the two popups; `effective_theme`/`effective_ui`/`effective_panels` layer each onto
@@ -1356,6 +1364,23 @@ fn run(
         }
         if let Some(popup) = finder.as_mut() {
             popup.poll();
+        }
+        // The deck looks at the machine only while its view is showing. Work it finished in the
+        // background (a mount, an eject) arrives here: a message, or a folder to go to.
+        if view_mode == ViewMode::Deck {
+            let cards = deck.get_or_insert_with(|| app.begin_deck());
+            cards.poll(Instant::now());
+            while let Some(event) = cards.take_event() {
+                match event {
+                    DeckEvent::Status(text) => app.status = Some(text),
+                    DeckEvent::Goto(path, text) => {
+                        let plan = browser.plan_goto(&path);
+                        app.begin_move(browser, plan, Some(text), "device");
+                    }
+                }
+            }
+        } else {
+            deck = None;
         }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
         // browser steps aside until it exits. Checked here, once per turn of the loop, because
@@ -1509,6 +1534,7 @@ fn run(
                     extract: extract.as_ref(),
                     appearance: appearance.as_ref(),
                     finder: finder.as_ref(),
+                    deck: deck.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
                     local_panels: &local_panels,
@@ -1529,7 +1555,10 @@ fn run(
             .text
             .reveal_started()
             .is_some_and(|started| started.elapsed() < anim::REVEAL_MAX_WINDOW);
-        let poll_timeout = if shells.is_some() || boot_splash.is_some() || revealing {
+        let sliding = deck
+            .as_ref()
+            .is_some_and(|cards| cards.animating(Instant::now()));
+        let poll_timeout = if shells.is_some() || boot_splash.is_some() || revealing || sliding {
             Duration::from_millis(16)
         } else if drag.active().is_some() {
             EDGE_SCROLL_EVERY
@@ -2005,6 +2034,35 @@ fn run(
                         view_mode,
                         effective_theme(config, &local_theme).shape,
                     );
+                    // A click on a device card chooses it (and opens it if it was chosen already);
+                    // a click anywhere else in the browser gives the keys back to the files.
+                    if let Some(cards) = deck.as_mut() {
+                        let at = Position::new(mouse.column, mouse.row);
+                        if layout.deck.contains(at) {
+                            match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    if let DeckKey::Goto(path) = cards.click(layout.deck, at) {
+                                        let plan = browser.plan_goto(&path);
+                                        app.begin_move(
+                                            browser,
+                                            plan,
+                                            Some("opened device".into()),
+                                            "device",
+                                        );
+                                    }
+                                }
+                                kind => {
+                                    if let Some(wheel) = Wheel::of(kind) {
+                                        cards.scroll(browser_mouse::wheel_rows(wheel));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                            cards.unfocus();
+                        }
+                    }
                     // A click on the header's path jumps to that segment's directory. Only worked
                     // out for the buttons that act on it, since it lays the header out again.
                     let crumb_dir = if panels.show_hud
@@ -2896,6 +2954,26 @@ fn run(
                     continue;
                 }
 
+                // In the deck view `Tab` takes the keys to the cards; with them there, the arrows,
+                // `Enter`, `m`, `e` and `Esc` are theirs. Anything else is the browser's.
+                if let Some(cards) = deck.as_mut() {
+                    let had_keys = cards.focused();
+                    match cards.key(key) {
+                        DeckKey::Pass => {}
+                        DeckKey::Handled => {
+                            if cards.focused() && !had_keys {
+                                app.status = Some(deck::HINT.to_string());
+                            }
+                            continue;
+                        }
+                        DeckKey::Goto(path) => {
+                            let plan = browser.plan_goto(&path);
+                            app.begin_move(browser, plan, Some("opened device".into()), "device");
+                            continue;
+                        }
+                    }
+                }
+
                 // The keys that jump further than a step, the same in every view: a screenful up or
                 // down, or straight to the first or last entry. Fixed rather than bindable, like
                 // the disk usage view's.
@@ -3448,6 +3526,7 @@ fn draw(
         extract,
         appearance,
         finder,
+        deck,
         local_theme,
         local_ui,
         local_panels,
@@ -3520,6 +3599,20 @@ fn draw(
         (_, Some(_)) => [removed; 3],
         _ => [layout.parent, layout.current, layout.preview],
     };
+
+    // The deck's strip of device cards, above the columns.
+    if let Some(cards) = deck
+        && layout.deck.height > 0
+    {
+        deck_view::render(
+            frame,
+            layout.deck,
+            cards,
+            browser.current_dir(),
+            config,
+            Instant::now(),
+        );
+    }
 
     // Read once: the status bar wants the selected directory's item count, and the preview pane
     // wants its listing — one `list_dir`, not two, per frame.

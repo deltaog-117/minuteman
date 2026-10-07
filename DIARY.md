@@ -6146,6 +6146,71 @@ run by hand in a terminal on `/`.
 
 ---
 
+### Devices View: The Storage Deck (COA B)
+
+**Date:** 2026-10-07 · **Author:** deltaog-117
+
+**Context.** `V` switched between four ways of showing a folder, and none of them knew the machine
+had disks. Graphical file managers put the disks, sticks and shares in a sidebar; Ranger has
+nothing. The aim was the same information, in a layout that is neither of those.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A places rail on the left: Devices, Places, Remote | Kept on the roadmap |
+| B | A strip of live cards above the columns: gauge, free space, read/write sparkline, you-are-here frame, slide-in | Chosen |
+| C | An atlas: a zoomable map of all storage with a pin for where you are | Kept on the roadmap |
+
+**Decision.** A new crate, `devices`, holds everything that knows about Linux storage, as parsers
+over text plus one probe that reads the real files. `mountinfo` keeps the mounts worth showing
+(real block devices and network shares, one per device, leaving out `/proc`, `/sys`, `tmpfs`,
+snap loop devices, container layers and `/boot`). `udev` reads `/run/udev/data/b<major>:<minor>`,
+which anyone can read and which covers a stick that is plugged in but not mounted, for its label,
+filesystem and bus. `probe::Sys` joins those with `/sys/class/block` (size, removable, which whole
+disk a partition is on) and `statvfs`; its locations are fields, so the tests point it at a copy
+of the files. `activity` turns `/proc/diskstats` into rates and a 32-sample history. `udisks` runs
+`udisksctl mount`, `unmount` and `power-off` with a timeout. In `tui`, `deck` is the state and
+`deck_view` the drawing; `ViewMode::Deck` follows `Filmstrip` in the cycle, and
+`view_mode::browser_layout` cuts a five-row strip off the top of the columns and returns it as
+`BrowserLayout::deck`, so the drawing and the mouse read the same rectangle.
+
+**Why this way.** Parsing text and keeping the probe's paths as fields means nearly all of it is
+tested without a disk, and the real machine is checked once by hand. The scan runs on the blocking
+pool once a second, and a scan still running is not started again, because `statvfs` on a network
+share that has gone away can block for a long time and must never reach the render thread; the
+deck exists only while its view is showing, so the machine is not polled for anyone who is not
+using it. The keys follow the rest of the interface: the deck takes only `Tab`, the arrows,
+`Enter`, `m`, `e` and `Esc`, and only after `Tab`, so `q`, `j` and `k` are still the browser's.
+Cards are lit as "you are here" by the deepest mount that holds the browsed folder, so a folder
+on a separate `/home` belongs to that card and not to `/`. A device appears by sliding in, not
+by popping up, because a stick being plugged in is the one event on this screen that happens
+without the user doing anything and should be noticed.
+
+**Found against the real machine.** The first scan listed the root filesystem twice. A btrfs
+mount reports a made-up device number, so the root was both a mounted device and, by its real
+node (`dm-1`), a device that looked unmounted; and the hidden `/boot/efi` partition showed up as
+unmounted. Devices are now matched by the node their mount source links to (`/dev/mapper/root`
+is a link to `dm-1`) and every mount's source is counted, listed or not. Both cases are in the
+fixture the tests use.
+
+**Trade-offs.** Linux only, and mounting needs `udisksctl`; without it the cards show and nothing
+can be changed. A network share can be opened but not mounted or unmounted from the deck.
+Encrypted containers are not offered. The scan repeats every second even when nothing changed;
+listening for udev events would be free but is a larger piece of work. The deck lives only in its
+own view, not as a strip over the others. Cards need 16 columns to show their content, so a very
+narrow window shows bare frames, and a window under twelve body rows gets no strip at all.
+
+**Verification.** `scripts/check` passes (1312 tests). New: the parsers on realistic text (escaped
+mount points, a device mounted twice, hidden mounts, a cut escape), the probe over a fixture
+machine with a system disk, a mounted stick, an unmounted stick, a share, a hidden boot partition
+and a mapped device, `statvfs` on the real root, the rates and history, the layout (cards side by
+side, scrolling following the selection, a click landing on the drawn card, the slide-in ramp),
+the drawing at sizes down to nothing, the keys (focus, choosing, what stays the browser's, what
+network shares and fixed disks refuse and say), and the strip cut from the columns. Not done: a
+real stick plugged in, and `udisksctl` actually run; the mount, unmount and eject path is covered
+only up to the command line.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

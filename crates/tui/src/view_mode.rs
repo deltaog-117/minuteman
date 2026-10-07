@@ -41,6 +41,9 @@ pub enum ViewMode {
     Details,
     /// The selected file as large as the window allows, with a strip of its neighbours below.
     Filmstrip,
+    /// The usual columns under a strip of cards, one per disk, stick or share, with how full and
+    /// how busy each is.
+    Deck,
 }
 
 impl ViewMode {
@@ -51,15 +54,22 @@ impl ViewMode {
             Self::List => Self::Grid,
             Self::Grid => Self::Details,
             Self::Details => Self::Filmstrip,
-            Self::Filmstrip => Self::List,
+            Self::Filmstrip => Self::Deck,
+            Self::Deck => Self::List,
         }
     }
 
     /// The view called `name` (as [`label`](Self::label) spells it, in any case), if there is one.
     pub fn named(name: &str) -> Option<Self> {
-        [Self::List, Self::Grid, Self::Details, Self::Filmstrip]
-            .into_iter()
-            .find(|view| view.label().eq_ignore_ascii_case(name.trim()))
+        [
+            Self::List,
+            Self::Grid,
+            Self::Details,
+            Self::Filmstrip,
+            Self::Deck,
+        ]
+        .into_iter()
+        .find(|view| view.label().eq_ignore_ascii_case(name.trim()))
     }
 
     pub fn label(self) -> &'static str {
@@ -68,6 +78,7 @@ impl ViewMode {
             Self::Grid => "grid",
             Self::Details => "details",
             Self::Filmstrip => "filmstrip",
+            Self::Deck => "deck",
         }
     }
 }
@@ -90,6 +101,19 @@ pub fn browser_layout(
         show_hud,
         shape.gaps_in.cells(),
     );
+    if mode == ViewMode::Deck {
+        let body = body_of(&base);
+        let height = deck_height(body.height);
+        let shifted =
+            |pane: Rect| Rect::new(pane.x, pane.y + height, pane.width, pane.height - height);
+        return BrowserLayout {
+            deck: Rect::new(body.x, body.y, body.width, height),
+            parent: shifted(base.parent),
+            current: shifted(base.current),
+            preview: shifted(base.preview),
+            ..base
+        };
+    }
     if mode != ViewMode::Details {
         return base;
     }
@@ -105,6 +129,22 @@ pub fn browser_layout(
         ),
         preview: Rect::new(body.right(), body.y, 0, body.height),
         ..base
+    }
+}
+
+/// The rows the deck's cards take: a frame round three lines.
+pub const DECK_HEIGHT: u16 = 5;
+
+/// The least body height that still leaves the columns room beside a deck.
+const DECK_MIN_BODY: u16 = 12;
+
+/// How tall the deck is in a body `body_height` rows high: none at all when the window is too
+/// short to spare it, since the columns are what the window is for.
+pub fn deck_height(body_height: u16) -> u16 {
+    if body_height >= DECK_MIN_BODY {
+        DECK_HEIGHT
+    } else {
+        0
     }
 }
 
@@ -150,7 +190,9 @@ pub fn jump_target(selected: usize, len: usize, page: usize, jump: Jump) -> usiz
 /// the tiles of the grid, the thumbnails of the strip — and at least one.
 pub fn page_size(view: ViewMode, layout: &BrowserLayout) -> usize {
     let shown = match view {
-        ViewMode::List | ViewMode::Details => usize::from(layout.current.height.saturating_sub(2)),
+        ViewMode::List | ViewMode::Details | ViewMode::Deck => {
+            usize::from(layout.current.height.saturating_sub(2))
+        }
         ViewMode::Grid => GridLayout::split(body_of(layout)).capacity(),
         ViewMode::Filmstrip => FilmstripLayout::split(body_of(layout)).cells.len(),
     };
@@ -483,6 +525,7 @@ mod tests {
             ViewMode::Grid,
             ViewMode::Details,
             ViewMode::Filmstrip,
+            ViewMode::Deck,
         ] {
             assert_eq!(ViewMode::named(view.label()), Some(view));
         }
@@ -505,9 +548,73 @@ mod tests {
                 ViewMode::List,
                 ViewMode::Grid,
                 ViewMode::Details,
-                ViewMode::Filmstrip
+                ViewMode::Filmstrip,
+                ViewMode::Deck
             ]
         );
+    }
+
+    #[test]
+    fn the_deck_takes_a_strip_off_the_top_of_the_columns_and_nothing_else() {
+        let area = Rect::new(0, 0, 120, 40);
+        let list = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::List,
+            Shape::default(),
+        );
+        let deck = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::Deck,
+            Shape::default(),
+        );
+        assert_eq!(
+            deck.deck,
+            Rect::new(
+                list.current.x.min(list.parent.x),
+                list.current.y,
+                120,
+                DECK_HEIGHT
+            )
+        );
+        for (with, without) in [
+            (deck.parent, list.parent),
+            (deck.current, list.current),
+            (deck.preview, list.preview),
+        ] {
+            assert_eq!(with.y, without.y + DECK_HEIGHT);
+            assert_eq!(with.height + DECK_HEIGHT, without.height);
+            assert_eq!((with.x, with.width), (without.x, without.width));
+        }
+        assert_eq!((deck.header, deck.status), (list.header, list.status));
+        assert_eq!(list.deck.height, 0, "no other view has a deck");
+    }
+
+    #[test]
+    fn a_short_window_gets_no_deck_and_keeps_its_columns() {
+        // Less than a dozen rows once the header and status bar are taken off.
+        let area = Rect::new(0, 0, 120, 13);
+        let list = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::List,
+            Shape::default(),
+        );
+        let deck = browser_layout(
+            area,
+            ColumnLayout::ThreePane,
+            true,
+            ViewMode::Deck,
+            Shape::default(),
+        );
+        assert_eq!(deck.deck.height, 0);
+        assert_eq!(deck.current, list.current);
+        assert_eq!(deck_height(DECK_MIN_BODY - 1), 0);
+        assert_eq!(deck_height(DECK_MIN_BODY), DECK_HEIGHT);
     }
 
     #[test]

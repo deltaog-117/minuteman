@@ -38,7 +38,7 @@ git_status = true
 # below flips it while browsing.
 show_hidden = false
 
-# The view Minuteman starts in: "list", "grid", "details" or "filmstrip". Pressing `V` switches it
+# The view Minuteman starts in: "list", "grid", "details", "filmstrip" or "deck". Pressing `V` switches it
 # and remembers the choice for next time (saved in ~/.config/minuteman/local.toml, which wins over
 # this line once you have used `V`). Leave it out to start on the name list.
 # view = "list"
@@ -267,7 +267,15 @@ preview_up = ["K"]
 # Switches the browser's view, round and round: the usual columns, then a grid of thumbnail tiles
 # (like a graphical file manager's icon view), then a flat details table (name, size, exact
 # modified time in your time zone, permissions), then the filmstrip (the selected file as large as the window
-# allows, with a strip of its neighbours underneath). Capital: "V" is Shift+v, distinct from "v"
+# allows, with a strip of its neighbours underneath), then the deck (the usual columns under a strip
+# of cards, one for each disk, USB stick and network share: its name, where it is mounted, a gauge of
+# how full it is, free space, and a sparkline of how busy it is; the card holding the folder you are in
+# has the bright frame, and a stick plugged in slides in). In the deck view Tab takes the keys to the
+# cards: Left/Right (or h/l) choose one, Enter opens it (mounting it first if it is not mounted), `m`
+# mounts or unmounts it, `e` ejects it (unmounts, then powers the disk off, so it is safe to pull
+# out) and Esc or Tab gives the keys back; a click chooses a card, a second click opens it, and the
+# wheel moves along them. Mounting uses `udisksctl`, so without it the cards still show but cannot
+# change anything. Linux only. Capital: "V" is Shift+v, distinct from "v"
 # (marks). In the grid, up/down (and whatever move_down/move_up are bound to) move a whole row, the
 # left/right arrows move one tile, `h`/`l`/enter go up and in, and the wheel scrolls a row; in the
 # filmstrip, move_down/move_up and the up/down arrows move along the strip. Clicking selects in

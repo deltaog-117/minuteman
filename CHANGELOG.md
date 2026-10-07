@@ -77,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clipboard when it still holds the cut that was just pasted.
 
 ### Fixed
+- `shell_overlay`: the test that runs a fake shell from a script it has just written failed about
+  one run in forty with "text file busy", when another test thread forked while the script was open
+  for writing. It now tries again on that error alone; the checks on the directory and the exit
+  code are unchanged.
 - `browser`: going up or into a folder that cannot be listed (a parent with no read permission, or
   the step above a remote machine's root) left the browser pointing at it with the old listing on
   screen. It now stays where it was and reports the error. `:cd` also reports why a path cannot be
@@ -93,6 +97,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `devices`, `tui`: a deck view in the `V` cycle (`view = "deck"` in `config.toml`): the usual
+  columns under a strip of cards, one per disk, USB stick or network share, each with its name,
+  where it is mounted, a gauge of how full it is, the free space and a sparkline of how busy it is.
+  The card holding the folder you are in has the bright frame, and a device plugged in slides in.
+  `Tab` takes the keys to the cards: `Left`/`Right` (or `h`/`l`) choose one, `Enter` opens it
+  (mounting it first if it is not mounted), `m` mounts or unmounts it, `e` ejects it and `Esc`
+  gives the keys back; clicking chooses a card and a second click opens it. Mounting, unmounting
+  and ejecting use `udisksctl`; without it the cards are shown and cannot change anything. A device
+  that is plugged in but not mounted is listed too. Linux only. New crate `devices`, and
+  `BrowserLayout::deck`.
 - `browser`, `theming`, `tui`: a fuzzy finder on `f` (`find` under `[keys]`). A panel opens over
   the browser listing every entry below the current directory, ranked as you type, with a preview
   of the highlighted one beside it on a screen 100 columns or wider. Letters in order match

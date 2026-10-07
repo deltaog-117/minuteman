@@ -9,6 +9,7 @@ members = [
     "crates/preview",
     "crates/shell_overlay",
     "crates/trash",
+    "crates/devices",
     "crates/plugins",
     "crates/theming",
     "crates/tui",

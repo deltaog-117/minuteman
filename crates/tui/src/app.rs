@@ -48,6 +48,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::associations::{self, Associations};
 use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
+use crate::deck::DeckState;
 use crate::disk_usage::DiskUsageView;
 use crate::extract_popup::{self, ExtractPopup};
 use crate::finder_popup::FinderPopup;
@@ -558,6 +559,11 @@ impl App {
 
     pub fn begin_disk_usage(&self, path: PathBuf) -> DiskUsageView {
         DiskUsageView::open(self.handle.clone(), Arc::clone(&self.vfs), path)
+    }
+
+    /// The deck of device cards (`V`, the deck view). It looks at the machine only while it exists.
+    pub fn begin_deck(&self) -> DeckState {
+        DeckState::new(self.handle.clone())
     }
 
     /// The fuzzy finder over everything below the browsed directory, hidden entries only if the
