@@ -288,6 +288,9 @@ pub struct Tally {
     pub bytes: u64,
     /// Folders inside that could not be read.
     pub unreadable: u64,
+    /// The length of the biggest single file, which decides whether the whole will fit on a
+    /// filesystem with a cap on file size.
+    pub largest: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +326,7 @@ pub fn tally_dir(vfs: &dyn Vfs, root: &Path, limit: u64, cancel: &AtomicBool) ->
                 Some(meta) => {
                     tally.files += 1;
                     tally.bytes += meta.len;
+                    tally.largest = tally.largest.max(meta.len);
                 }
                 None => tally.unreadable += 1,
             }
@@ -546,7 +550,8 @@ mod tests {
                 files: 3,
                 dirs: 2,
                 bytes: 35,
-                unreadable: 0
+                unreadable: 0,
+                largest: 20
             }
         );
         std::fs::remove_dir_all(&root).unwrap();

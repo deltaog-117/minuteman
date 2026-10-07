@@ -28,11 +28,12 @@ use std::time::Instant;
 use devices::{Device, Kind};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use theming::Config;
 
+use crate::cargo_fit::{self, Verdict};
 use crate::deck::DeckState;
 use crate::glyphs;
 use crate::hud::{fit_width, format_size, pad_to, text_width};
@@ -210,16 +211,33 @@ pub fn render(
             &format!("{} {}{working}", icon(device.kind, ascii), device.title()),
             usize::from(rect.width.saturating_sub(4)),
         );
+        let verdict = deck.verdict(index);
         let mut block = style::themed_block(config, &title, here == Some(index));
+        let mut base = Style::default();
         if chosen {
-            block = block.style(Style::default().bg(style::color(&theme.selection_bg)));
+            base = base.bg(style::color(&theme.selection_bg));
         }
+        // A card the load cannot go on is dimmed, so what can take it stands out at a glance.
+        if matches!(
+            verdict,
+            Some(Verdict::Short { .. } | Verdict::TooBig { .. })
+        ) {
+            base = base.add_modifier(Modifier::DIM);
+        }
+        block = block.style(base);
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         if rect.width < CONTENT_MIN || inner.height == 0 {
             continue;
         }
-        let lines = card_lines(device, deck, usize::from(inner.width), config, ascii);
+        let lines = card_lines(
+            device,
+            deck,
+            verdict.as_ref(),
+            usize::from(inner.width),
+            config,
+            ascii,
+        );
         frame.render_widget(Paragraph::new(lines), inner);
     }
     // A mark at each edge where cards are hidden beyond it.
@@ -246,6 +264,7 @@ pub fn render(
 fn card_lines(
     device: &Device,
     deck: &DeckState,
+    verdict: Option<&Verdict>,
     width: usize,
     config: &Config,
     ascii: bool,
@@ -285,7 +304,17 @@ fn card_lines(
         _ => Line::from(Span::styled("size unknown", dim)),
     };
 
-    let third = if device.is_mounted() && device.kind != Kind::Network {
+    let third = if let Some(verdict) = verdict {
+        let style = match verdict {
+            Verdict::Fits { .. } | Verdict::SameDisk => accent,
+            Verdict::Short { .. } | Verdict::TooBig { .. } => danger,
+            Verdict::Tight { .. } | Verdict::Unmounted | Verdict::Unsure => dim,
+        };
+        Line::from(Span::styled(
+            fit_width(&cargo_fit::card_text(verdict, ascii), width),
+            style,
+        ))
+    } else if device.is_mounted() && device.kind != Kind::Network {
         let rates = deck.rates(device);
         let text = rate_text(rates.read, rates.written);
         let room = width.saturating_sub(text_width(&text) + 1);
@@ -532,6 +561,50 @@ mod tests {
         assert!(drawn(&deck, "/", 60, 5).contains("looking for devices"));
         deck.set_scanned(true);
         assert!(drawn(&deck, "/", 60, 5).contains("no devices found"));
+    }
+
+    #[test]
+    fn while_files_are_carried_each_card_says_whether_they_fit() {
+        use crate::cargo_fit::{Carry, Load};
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut deck = deck(
+            &runtime,
+            vec![
+                device("sda1", "", Some("/"), Kind::Internal, 900),
+                device(
+                    "sdb1",
+                    "HOLIDAY",
+                    Some("/run/media/me/HOLIDAY"),
+                    Kind::Removable,
+                    10,
+                ),
+                device("sdc1", "BACKUP", None, Kind::Removable, 0),
+            ],
+        );
+        for d in 0..2 {
+            let device = &mut deck.devices_mut()[d];
+            device.total = 1 << 40;
+            device.free = [1u64 << 39, 1 << 20][d];
+        }
+        assert!(
+            !drawn(&deck, "/", 120, 5).contains("fits"),
+            "nothing carried yet"
+        );
+        deck.set_load(Some(Load {
+            bytes: 1 << 30,
+            exact: true,
+            largest: 1 << 20,
+            carry: Carry::Copy,
+            source: "/home/me/photos".into(),
+        }));
+        let shown = drawn(&deck, "/", 120, 5);
+        for text in ["✓ fits", "✗ needs", "mount to check"] {
+            assert!(shown.contains(text), "{text:?} missing:\n{shown}");
+        }
+        assert!(
+            !shown.contains("idle"),
+            "the verdict takes the activity line:\n{shown}"
+        );
     }
 
     #[test]

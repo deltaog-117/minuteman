@@ -1567,6 +1567,28 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   source links to. Chosen as COA B over a places rail (A) and a zoomable storage atlas (C); both
   remain below. Linux only. Not run by hand with a real USB stick or `udisksctl` here.
 
+- ✅ **Cargo-aware deck** – the deck's cards answer "will it fit?" before anything is copied. What is
+  carried is the yanked or cut clipboard, else the marked files (a yank spends the marks, so it is
+  never both); each card then replaces its activity line with a verdict: `✓ fits · 22G left`,
+  `~ tight · 8.0M left`, `✗ needs 4.0G more`, `✗ a file is over 4.0G` (a FAT32 stick cannot hold a
+  file of 4 GiB or more however empty it is), `✓ same disk · instant` (a cut onto the disk the files
+  already sit on takes no room), `mount to check (Enter)` or `? cannot tell`. A card that cannot take
+  the load is dimmed. `p` in the deck sends the load to the chosen device's root through the ordinary
+  paste (progress, cancel, the overwrite prompt), yanking the marks first if they are all there is,
+  and refuses a device that cannot take it with the reason in the status line, which is the point:
+  the failure is met before the copy and not halfway through it. The answer is `cargo_fit::verdict`,
+  pure (sizes and a device in, a verdict out) and tested on the boundaries: the byte that tips a
+  load over, the exact FAT32 limit (allowed) and one byte over (refused), a copy and a move within
+  one disk, an unmounted device, an unknown size, and a load too big to measure fully. Sizing reuses
+  the marks' walk (`marked_size`), now also finding the biggest single file (`measure`, with
+  `total_of` unchanged for the header pill and `Tally::largest` added), and a second walk for the
+  clipboard so the pill is not disturbed. A load that leaves under 16 MiB or 2% of itself is called
+  tight, not fitting, because a filesystem rounds each file up to a whole block and many small
+  files take more than their sizes add up to. Tried in the real app with a yanked file: the card
+  showed `✓ fits · 22G left` and `p` ran the paste (which then failed, as it should, on a root
+  this user cannot write to). The refusing cases (`needs … more`, a file over the FAT32 limit) are
+  covered by tests only, as this machine has no small or FAT32 device to show them on.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -1742,8 +1764,24 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
     and the most useful for "where did my space go", but it needs a treemap layout and a
     background size scan below the device level (the disk usage scanner can feed it) with caching.
     The deck's data layer is the one it would need, so it can follow as another view.
-- **Devices view, follow-ups** – no copy-to-card (drop marked files onto a card, or a key that
-  copies them to the chosen device); network shares can be opened but not mounted or unmounted from
+- **Devices view, next ideas (planned)** – two further ways for storage to react to what the user
+  is doing, each building on the deck and its `devices` crate, in the order they are suggested:
+  - *Runway* – each card shows how long until it fills, from a small history of its usage kept
+    between sessions (`full in ~41 days`), and the folder that grew most this month. Needs a
+    history file and a rule for how much history is enough before it will guess.
+  - *Wiring diagram* – another entry in the `V` cycle that takes the whole body: the machine as it
+    is wired, controller or USB port, whole disk, partitions, encryption or LVM layer, mount, drawn
+    left to right as a layered tree with the same keys as the deck on the chosen node (`Enter`
+    opens, `m` mounts, `e` ejects, and ejecting a partition powers off the disk it shares with its
+    siblings, which the picture makes plain). Activity runs along the links as moving marks, and the
+    node holding the browsed folder is lit. A fixed layered layout, not a force-directed one like
+    Obsidian's graph, which is unreadable at terminal resolution and moves while you read it. New
+    reading code needed on top of `devices`: the USB port from the device's path under
+    `/sys/devices`, layers from `/sys/block/*/slaves`, the controller from the bus. A narrow window
+    falls back to an indented tree, and many devices scroll.
+- **Devices view, follow-ups** – sending goes to the device's root, with no choice of folder (the
+  folder open in the browser, or a favourite, would be the next step), and dropping files on a
+  card with the mouse does not send them; network shares can be opened but not mounted or unmounted from
   the deck (`udisksctl` only handles block devices); no encrypted-container unlock (LUKS shows as
   not a filesystem and is left out); no temperature or SMART health on a card; no optical drives
   (`sr*` is skipped); the card colors follow the theme but cannot be set on their own; macOS has no

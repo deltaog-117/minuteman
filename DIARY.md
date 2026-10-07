@@ -6211,6 +6211,60 @@ only up to the command line.
 
 ---
 
+### Cargo-Aware Deck: Knowing It Fits Before the Copy
+
+**Date:** 2026-10-07 · **Author:** deltaog-117
+
+**Context.** The deck listed devices but did not react to anything the user was doing. The first of
+the three follow-up ideas (cargo-aware deck, runway, wiring diagram) was chosen because it prevents
+a real failure: a copy to a stick that is too small, or to a FAT32 stick with a file over 4 GiB,
+is found out halfway through, leaving half a file behind.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Cards say whether the carried files fit, and `p` sends them there or refuses with the reason | Chosen |
+| B | The same, plus choosing a folder on the device to send to | Left for later |
+| C | A confirmation dialog at paste time that warns when it will not fit | Rejected: it warns after the choice is made, and only for the one device chosen |
+
+**Decision.** `cargo_fit` is pure: a `Load` (bytes, whether the count is exact, the biggest single
+file, copy or move, where it comes from) and a `Device` in, a `Verdict` out. The verdicts are fits,
+tight, short by so much, a file over the filesystem's limit, a move within one disk, not mounted,
+and cannot tell. `App::load` supplies the load: the clipboard if there is one, else the marks
+(a yank spends the marks, so it is never both), sized by `marked_size`. `Tally` gained `largest`, and
+`marked_size::measure` returns bytes, exactness and the biggest file, with `total_of` kept as it was
+for the header pill. The clipboard gets its own `MarkedSize`, so the pill is not disturbed. The
+deck holds the load, gives each card its verdict, and a card shows it in place of the activity
+line, dimmed when the load cannot go there. `p` returns `Outcome::Send(root)` for a device that can
+take it; `main` yanks the marks if the clipboard is empty and calls `begin_paste_into`, so progress,
+cancel and the overwrite prompt are the ones every paste has.
+
+**Why this way.** Judging per device, up front and for every card at once, is the only way to see
+at a glance which device can take the load. The check is a function of numbers, so its edges are
+tested exactly: the byte that tips a load over, the FAT32 limit allowed to the byte and refused one
+byte over, and a move within one disk needing no room at all. The tight band exists because a
+filesystem rounds every file up to a whole block; a load that leaves less than 16 MiB or 2% of
+itself is not called fitting. Refusing in the deck, with the reason, rather than letting the
+paste fail, is the whole point; the paste itself is untouched.
+
+**Trade-offs.** It is a prediction. Another program can fill the disk between the check and the
+copy, and the 2% margin is a guess at block rounding, not a measurement of it. Only the FAT family's
+file size limit is known; other limits (exFAT's forbidden characters, path length) are not checked.
+A load too big to measure fully (the walk stops at its entry limit) is called `cannot tell` unless
+the part measured is already too much. Sending goes to the root of the device, with no choice of
+folder. Because a cut onto another disk is a copy and then a delete, it needs room like a copy.
+
+**Verification.** `scripts/check` passes (1327 tests). New: the verdict at its boundaries (every
+case above), the card lines and refusals including the ASCII glyph set (which a test showed was
+printing a non-ASCII separator, fixed), the biggest file found in marked files and inside marked
+folders, each card getting its own verdict, `p` sending to a device it fits and refusing one it does
+not with the reason, a move within one disk allowed whatever is free, and the drawn cards. In the
+real app, with a temporary home so no configuration was touched: a yanked file made the System card
+read `✓ fits · 22G left`, and `p` on it started the paste, which failed on `/` for lack of
+permission as it should. The refusing cards were not shown in the real app, as this machine has
+no small or FAT32 device; they are tested only.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

@@ -97,6 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`: the deck view (`V`) now says whether what you are carrying will fit. With files yanked or
+  cut (else marked), each card shows `✓ fits · 22G left`, `~ tight`, `✗ needs 4.0G more`,
+  `✗ a file is over 4.0G` (a FAT32 stick, however empty), `✓ same disk · instant` (a cut within one
+  disk) or `mount to check`, and a card that cannot take the files is dimmed. `p` in the deck sends
+  them to the chosen device's root through the ordinary paste, yanking the marks first if need be,
+  and refuses a device they will not fit on with the reason in the status line.
+  `marked_size::measure` also reports the biggest single file.
 - `devices`, `tui`: a deck view in the `V` cycle (`view = "deck"` in `config.toml`): the usual
   columns under a strip of cards, one per disk, USB stick or network share, each with its name,
   where it is mounted, a gauge of how full it is, the free space and a sparkline of how busy it is.

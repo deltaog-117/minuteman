@@ -39,6 +39,7 @@ use devices::udisks::{self, Action};
 use devices::{Device, Kind};
 use ratatui::layout::{Position, Rect};
 
+use crate::cargo_fit::{self, Load, Verdict};
 use crate::deck_view;
 
 /// How often the machine is looked at again.
@@ -48,7 +49,8 @@ const SCAN_EVERY: Duration = Duration::from_secs(1);
 pub const SLIDE_IN: Duration = Duration::from_millis(260);
 
 /// Shown when the keys go to the cards.
-pub const HINT: &str = "deck: ←/→ choose  Enter open  m mount/unmount  e eject  Tab back";
+pub const HINT: &str =
+    "deck: ←/→ choose  Enter open  p send marked  m mount/unmount  e eject  Tab back";
 
 /// What a key or click did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +61,9 @@ pub enum Outcome {
     Handled,
     /// Go to this folder.
     Goto(PathBuf),
+    /// Copy what is being carried into this folder, the root of the chosen device. The caller
+    /// holds the files, so it does the copy; the deck has already checked that it will fit.
+    Send(PathBuf),
 }
 
 /// What the deck asks the caller to show or do, from work that finished in the background.
@@ -107,6 +112,8 @@ pub struct DeckState {
     /// Whether something is being done to a device right now: one thing at a time.
     working: Arc<AtomicBool>,
     pending: VecDeque<Event>,
+    /// What the user is carrying, for the cards to say whether it fits.
+    load: Option<Load>,
 }
 
 impl DeckState {
@@ -131,6 +138,7 @@ impl DeckState {
             event_tx,
             working: Arc::new(AtomicBool::new(false)),
             pending: VecDeque::new(),
+            load: None,
         }
     }
 
@@ -149,6 +157,11 @@ impl DeckState {
     #[cfg(test)]
     pub fn mark_arrived(&mut self, node: &str, at: Instant) {
         self.first_seen.insert(node.to_string(), at);
+    }
+
+    #[cfg(test)]
+    pub fn devices_mut(&mut self) -> &mut Vec<Device> {
+        &mut self.devices
     }
 
     #[cfg(test)]
@@ -216,6 +229,20 @@ impl DeckState {
             .and_then(|node| self.devices.iter().position(|d| d.node == node))
             .unwrap_or_else(|| self.selected().min(self.devices.len().saturating_sub(1)));
         self.selected_node = self.devices.get(at).map(|d| d.node.clone());
+    }
+
+    /// Tells the deck what is being carried (or that nothing is), so each card can say whether it
+    /// fits. Cheap; call it every turn.
+    pub fn set_load(&mut self, load: Option<Load>) {
+        self.load = load;
+    }
+
+    /// Whether the load fits on the device at `index`, or `None` when nothing is carried.
+    pub fn verdict(&self, index: usize) -> Option<Verdict> {
+        let load = self.load.as_ref()?;
+        let device = self.devices.get(index)?;
+        let same_device = self.holding(&load.source) == Some(index);
+        Some(cargo_fit::verdict(device, load, same_device))
     }
 
     pub fn devices(&self) -> &[Device] {
@@ -308,6 +335,7 @@ impl DeckState {
             KeyCode::Left | KeyCode::Char('h') => self.step(-1),
             KeyCode::Right | KeyCode::Char('l') => self.step(1),
             KeyCode::Enter => return self.open_selected(),
+            KeyCode::Char('p') => return self.send_selected(),
             KeyCode::Char('m') => self.toggle_selected(),
             KeyCode::Char('e') => self.eject_selected(),
             _ => return Outcome::Pass,
@@ -359,6 +387,27 @@ impl DeckState {
                 });
                 Outcome::Handled
             }
+        }
+    }
+
+    /// `p`: send what is carried to the chosen device, if it will fit. Refused here, with the
+    /// reason, when it will not, which is the point of asking before the copy starts and not
+    /// halfway through it. With nothing carried the caller says so.
+    fn send_selected(&mut self) -> Outcome {
+        let Some(device) = self.selected_device() else {
+            return Outcome::Handled;
+        };
+        let (title, mount) = (device.title(), device.mount.clone());
+        let Some(mount) = mount else {
+            self.say(cargo_fit::refusal(&Verdict::Unmounted, &title));
+            return Outcome::Handled;
+        };
+        match self.verdict(self.selected()) {
+            Some(verdict) if !verdict.allows() => {
+                self.say(cargo_fit::refusal(&verdict, &title));
+                Outcome::Handled
+            }
+            _ => Outcome::Send(mount),
         }
     }
 
@@ -592,6 +641,90 @@ mod tests {
         assert!(said[0].contains("network share"));
         assert!(said[1].contains("cannot be ejected"));
         assert!(!deck.is_working());
+    }
+
+    fn load(bytes: u64, largest: u64) -> Load {
+        Load {
+            bytes,
+            exact: true,
+            largest,
+            carry: cargo_fit::Carry::Copy,
+            source: "/home/me/photos".into(),
+        }
+    }
+
+    fn with_sizes(mut devices: Vec<Device>, free: &[u64]) -> Vec<Device> {
+        for (device, free) in devices.iter_mut().zip(free) {
+            device.free = *free;
+            device.total = 1 << 40;
+        }
+        devices
+    }
+
+    #[test]
+    fn each_card_gets_its_own_verdict_for_what_is_carried() {
+        let (_rt, mut deck) = deck_with(with_sizes(three(), &[1 << 39, 1 << 20, 0]));
+        assert_eq!(deck.verdict(0), None, "nothing carried, nothing to judge");
+        deck.set_load(Some(load(1 << 30, 1 << 20)));
+        assert!(matches!(deck.verdict(0), Some(Verdict::Fits { .. })));
+        assert!(matches!(deck.verdict(1), Some(Verdict::Short { .. })));
+        assert_eq!(deck.verdict(2), Some(Verdict::Unmounted));
+        assert_eq!(deck.verdict(9), None);
+        deck.set_load(None);
+        assert_eq!(deck.verdict(0), None);
+    }
+
+    #[test]
+    fn p_sends_to_a_device_it_fits_on_and_refuses_one_it_does_not_with_the_reason() {
+        let (_rt, mut deck) = deck_with(with_sizes(three(), &[1 << 39, 1 << 20, 0]));
+        deck.set_load(Some(load(1 << 30, 1 << 20)));
+        deck.key(press(KeyCode::Tab));
+        assert_eq!(
+            deck.key(press(KeyCode::Char('p'))),
+            Outcome::Send(PathBuf::from("/")),
+            "the first card has room"
+        );
+        deck.key(press(KeyCode::Right));
+        assert_eq!(deck.key(press(KeyCode::Char('p'))), Outcome::Handled);
+        deck.key(press(KeyCode::Right));
+        assert_eq!(deck.key(press(KeyCode::Char('p'))), Outcome::Handled);
+        deck.poll(Instant::now());
+        let mut said = Vec::new();
+        while let Some(Event::Status(text)) = deck.take_event() {
+            said.push(text);
+        }
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said[0].contains("needs") && said[0].contains("more room"),
+            "{said:?}"
+        );
+        assert!(said[1].contains("not mounted"), "{said:?}");
+    }
+
+    #[test]
+    fn p_with_nothing_carried_still_goes_to_the_caller_who_says_so() {
+        let (_rt, mut deck) = deck_with(with_sizes(three(), &[1 << 39, 1 << 39, 0]));
+        deck.key(press(KeyCode::Tab));
+        assert_eq!(
+            deck.key(press(KeyCode::Char('p'))),
+            Outcome::Send(PathBuf::from("/"))
+        );
+    }
+
+    #[test]
+    fn a_move_within_the_disk_it_is_on_is_allowed_whatever_is_free() {
+        let mut devices = with_sizes(three(), &[0, 1 << 39, 0]);
+        devices[0].mount = Some("/home".into());
+        let (_rt, mut deck) = deck_with(devices);
+        let mut moving = load(1 << 38, 1 << 20);
+        moving.carry = cargo_fit::Carry::Move;
+        deck.set_load(Some(moving));
+        assert_eq!(deck.verdict(0), Some(Verdict::SameDisk));
+        deck.key(press(KeyCode::Tab));
+        assert!(matches!(
+            deck.key(press(KeyCode::Char('p'))),
+            Outcome::Send(_)
+        ));
     }
 
     #[test]

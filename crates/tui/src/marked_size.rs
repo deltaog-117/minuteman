@@ -56,6 +56,24 @@ impl Total {
     }
 }
 
+/// What a set of paths adds up to, with the biggest single file in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Measured {
+    pub bytes: u64,
+    /// `false` when the walk hit the entry limit, so `bytes` and `largest` are lower bounds.
+    pub exact: bool,
+    pub largest: u64,
+}
+
+impl From<Measured> for Total {
+    fn from(measured: Measured) -> Self {
+        Total {
+            bytes: measured.bytes,
+            exact: measured.exact,
+        }
+    }
+}
+
 /// Adds up what `paths` occupy: a file or link by its own length (a link counts as the link, not
 /// its target), a folder by everything below it. A path that has vanished since it was marked
 /// adds nothing. Returns `None` if `cancel` was set before the sum finished.
@@ -63,21 +81,34 @@ impl Total {
 /// A marked folder already covers whatever is marked inside it, so paths under a marked folder
 /// are skipped rather than counted twice. `limit` bounds how many entries the folder walks visit
 /// in all, so marking `/` cannot keep the blocking pool busy for minutes.
+#[cfg(test)]
 pub fn total_of(
     vfs: &dyn Vfs,
     paths: &[PathBuf],
     limit: u64,
     cancel: &AtomicBool,
 ) -> Option<Total> {
+    measure(vfs, paths, limit, cancel).map(Total::from)
+}
+
+/// Like [`total_of`], and also finds the biggest single file, which a filesystem that caps file
+/// size (FAT32 stops at 4 GiB less one byte) can refuse even when there is room for the total.
+pub fn measure(
+    vfs: &dyn Vfs,
+    paths: &[PathBuf],
+    limit: u64,
+    cancel: &AtomicBool,
+) -> Option<Measured> {
     let mut sorted: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     // Component-wise ordering puts everything below a folder right after it, so remembering the
     // latest folder is enough to recognise every path it covers.
     sorted.sort();
     sorted.dedup();
 
-    let mut total = Total {
+    let mut total = Measured {
         bytes: 0,
         exact: true,
+        largest: 0,
     };
     let mut budget = limit;
     let mut covering: Option<&Path> = None;
@@ -100,9 +131,11 @@ pub fn total_of(
                 Ending::Complete => {}
             }
             total.bytes = total.bytes.saturating_add(tally.bytes);
+            total.largest = total.largest.max(tally.largest);
             budget = budget.saturating_sub(tally.files + tally.dirs);
         } else {
             total.bytes = total.bytes.saturating_add(meta.len);
+            total.largest = total.largest.max(meta.len);
         }
     }
     Some(total)
@@ -110,7 +143,7 @@ pub fn total_of(
 
 struct Job {
     cancel: Arc<AtomicBool>,
-    rx: UnboundedReceiver<Option<Total>>,
+    rx: UnboundedReceiver<Option<Measured>>,
 }
 
 impl Drop for Job {
@@ -125,7 +158,7 @@ pub struct MarkedSize {
     /// The marks the running (or last finished) walk was started for.
     requested: Vec<PathBuf>,
     job: Option<Job>,
-    total: Option<Total>,
+    measured: Option<Measured>,
 }
 
 impl MarkedSize {
@@ -135,7 +168,7 @@ impl MarkedSize {
             vfs,
             requested: Vec::new(),
             job: None,
-            total: None,
+            measured: None,
         }
     }
 
@@ -148,7 +181,7 @@ impl MarkedSize {
             // Dropping the old job cancels it; its answer would be for marks that are gone.
             self.job = None;
             if marks.is_empty() {
-                self.total = None;
+                self.measured = None;
             } else {
                 self.job = Some(self.start(marks.to_vec()));
             }
@@ -158,7 +191,7 @@ impl MarkedSize {
             Ok(answer) => {
                 // A cancelled or lost walk leaves the previous total as it was.
                 if answer.is_some() {
-                    self.total = answer;
+                    self.measured = answer;
                 }
                 self.job = None;
             }
@@ -170,7 +203,12 @@ impl MarkedSize {
     /// The total for the current marks, or the previous one while a new walk is running; `None`
     /// when nothing is marked or no walk has finished yet.
     pub fn total(&self) -> Option<Total> {
-        self.total
+        self.measured.map(Total::from)
+    }
+
+    /// The same, with the biggest single file in the marks.
+    pub fn measured(&self) -> Option<Measured> {
+        self.measured
     }
 
     fn start(&self, marks: Vec<PathBuf>) -> Job {
@@ -179,7 +217,7 @@ impl MarkedSize {
         let cancel_bg = Arc::clone(&cancel);
         let vfs = Arc::clone(&self.vfs);
         self.handle.spawn_blocking(move || {
-            let _ = tx.send(total_of(vfs.as_ref(), &marks, TALLY_LIMIT, &cancel_bg));
+            let _ = tx.send(measure(vfs.as_ref(), &marks, TALLY_LIMIT, &cancel_bg));
         });
         Job { cancel, rx }
     }
@@ -390,6 +428,29 @@ mod tests {
         sizes.poll(&[root.join("a"), root.join("b")]);
         assert!(sizes.total().is_some(), "the pill must not flicker off");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_biggest_single_file_is_found_in_marked_files_and_inside_marked_folders() {
+        let mem = shared::MemVfs::new();
+        mem.add_file("/a/small", vec![0u8; 10]);
+        mem.add_file("/a/deep/big", vec![0u8; 300]);
+        mem.add_file("/solo", vec![0u8; 120]);
+        let none = AtomicBool::new(false);
+        let both: Vec<PathBuf> = ["/a", "/solo"].iter().map(PathBuf::from).collect();
+        let measured = measure(&mem, &both, 100, &none).unwrap();
+        assert_eq!(
+            measured,
+            Measured {
+                bytes: 430,
+                exact: true,
+                largest: 300
+            }
+        );
+        let solo = measure(&mem, &[PathBuf::from("/solo")], 100, &none).unwrap();
+        assert_eq!(solo.largest, 120);
+        assert_eq!(measure(&mem, &[], 100, &none).unwrap().largest, 0);
+        assert_eq!(Total::from(measured).bytes, 430);
     }
 
     #[test]

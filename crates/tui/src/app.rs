@@ -46,6 +46,7 @@ use theming::{OpenRule, OpenWith, PluginSpec};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::associations::{self, Associations};
+use crate::cargo_fit::{Carry, Load};
 use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
@@ -469,6 +470,9 @@ pub struct App {
     live: LiveRefresh,
     /// What the marked entries add up to, for the header pill (see `marked_size`).
     marked_size: MarkedSize,
+    /// What the yanked or cut clipboard adds up to, for the deck's fit check. The marks are spent
+    /// by a yank, so the two are never the load at once, and the marks' own total is reused.
+    clipboard_size: MarkedSize,
     /// The browsed directory's repository, for the status bar (see `git_status`).
     git: GitStatus,
     /// The header's system segment (see `system_hud`), when `[config] system_hud` turns it on.
@@ -522,6 +526,7 @@ impl App {
             untracked: 0,
             live: LiveRefresh::new(handle.clone(), Arc::clone(&vfs)),
             marked_size: MarkedSize::new(handle.clone(), Arc::clone(&vfs)),
+            clipboard_size: MarkedSize::new(handle.clone(), Arc::clone(&vfs)),
             git: GitStatus::new(handle.clone(), true),
             system: None,
             handle,
@@ -583,6 +588,7 @@ impl App {
     pub fn with_vfs(mut self, vfs: Arc<dyn Vfs>) -> Self {
         self.live = LiveRefresh::new(self.handle.clone(), Arc::clone(&vfs));
         self.marked_size = MarkedSize::new(self.handle.clone(), Arc::clone(&vfs));
+        self.clipboard_size = MarkedSize::new(self.handle.clone(), Arc::clone(&vfs));
         self.vfs = vfs;
         self
     }
@@ -812,6 +818,12 @@ impl App {
     /// blocking pool (see `marked_size` and `git_status`); call once per render tick.
     pub fn poll_hud(&mut self, browser: &BrowserState, now: Instant) {
         self.marked_size.poll(&browser.marked_paths());
+        let clipped: Vec<PathBuf> = self
+            .clipboard
+            .as_ref()
+            .map(|clip| clip.paths.clone())
+            .unwrap_or_default();
+        self.clipboard_size.poll(&clipped);
         self.git.poll(browser.current_dir(), now);
         if let Some(system) = self.system.as_mut() {
             system.tick(now);
@@ -869,6 +881,34 @@ impl App {
     /// What the marks add up to, once a walk has finished.
     pub fn marked_total(&self) -> Option<Total> {
         self.marked_size.total()
+    }
+
+    /// What the user is carrying: the yanked or cut files if there are any, else the marked ones,
+    /// sized and ready for the deck to hold up against each device. `None` when nothing is held
+    /// or the sizing walk has not finished.
+    pub fn load(&self, browser: &BrowserState) -> Option<Load> {
+        let (measured, carry, source) = match &self.clipboard {
+            Some(clip) => (
+                self.clipboard_size.measured()?,
+                match clip.mode {
+                    ClipboardMode::Copy => Carry::Copy,
+                    ClipboardMode::Move => Carry::Move,
+                },
+                clip.paths.first()?.clone(),
+            ),
+            None => (
+                self.marked_size.measured()?,
+                Carry::Copy,
+                browser.marked_paths().into_iter().next()?,
+            ),
+        };
+        Some(Load {
+            bytes: measured.bytes,
+            exact: measured.exact,
+            largest: measured.largest,
+            carry,
+            source,
+        })
     }
 
     /// The repository the browsed directory is in, when git answered.

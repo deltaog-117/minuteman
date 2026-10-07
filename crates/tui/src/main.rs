@@ -22,6 +22,7 @@ mod associations;
 mod boot_splash;
 mod browser_drag;
 mod browser_mouse;
+mod cargo_fit;
 mod cli;
 mod command;
 mod compress_popup;
@@ -1370,6 +1371,7 @@ fn run(
         if view_mode == ViewMode::Deck {
             let cards = deck.get_or_insert_with(|| app.begin_deck());
             cards.poll(Instant::now());
+            cards.set_load(app.load(browser));
             while let Some(event) = cards.take_event() {
                 match event {
                     DeckEvent::Status(text) => app.status = Some(text),
@@ -2969,6 +2971,18 @@ fn run(
                         DeckKey::Goto(path) => {
                             let plan = browser.plan_goto(&path);
                             app.begin_move(browser, plan, Some("opened device".into()), "device");
+                            continue;
+                        }
+                        // Copy what is carried to the device. The marks are yanked first if
+                        // they are all there is, the way `y` then `p` would; with neither, the
+                        // yank says nothing is marked.
+                        DeckKey::Send(root) => {
+                            if app.clipboard.is_none() {
+                                app.yank(browser);
+                            }
+                            if app.clipboard.is_some() {
+                                app.begin_paste_into(root);
+                            }
                             continue;
                         }
                     }

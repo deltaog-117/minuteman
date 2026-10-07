@@ -273,7 +273,11 @@ preview_up = ["K"]
 # has the bright frame, and a stick plugged in slides in). In the deck view Tab takes the keys to the
 # cards: Left/Right (or h/l) choose one, Enter opens it (mounting it first if it is not mounted), `m`
 # mounts or unmounts it, `e` ejects it (unmounts, then powers the disk off, so it is safe to pull
-# out) and Esc or Tab gives the keys back; a click chooses a card, a second click opens it, and the
+# out), `p` sends what you are carrying to the chosen device, and Esc or Tab gives the keys back;
+# while you are carrying files (yanked or cut, else marked) every card says whether they fit
+# ("fits, 22G left", "needs 4.0G more", "a file is over 4.0G" for a FAT32 stick, "same disk, instant"
+# for a move within one disk) and a card that cannot take them is dimmed, and `p` refuses it with the
+# reason instead of failing halfway through a copy; a click chooses a card, a second click opens it, and the
 # wheel moves along them. Mounting uses `udisksctl`, so without it the cards still show but cannot
 # change anything. Linux only. Capital: "V" is Shift+v, distinct from "v"
 # (marks). In the grid, up/down (and whatever move_down/move_up are bound to) move a whole row, the
