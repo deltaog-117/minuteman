@@ -30,6 +30,7 @@ mod context_menu;
 mod deck;
 mod deck_view;
 mod desktop_entry;
+mod device_actions;
 mod disk_usage;
 mod disk_usage_view;
 mod extract_popup;
@@ -69,6 +70,10 @@ mod thumbnails;
 mod tile_view;
 mod trash_view;
 mod view_mode;
+mod wiring;
+mod wiring_folders;
+mod wiring_layout;
+mod wiring_view;
 
 use std::collections::BTreeMap;
 use std::io::{self, Stdout};
@@ -135,6 +140,7 @@ use view_mode::{
     FilmstripLayout, GridLayout, Jump, Step, ViewMode, body_of, browser_layout, details_title_row,
     jump_target, page_size,
 };
+use wiring::{Outcome as WiringKey, WiringState};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -406,6 +412,8 @@ struct Overlay<'a> {
     finder: Option<&'a FinderPopup>,
     /// The strip of device cards, in the deck view.
     deck: Option<&'a DeckState>,
+    /// The diagram of how the storage is wired, in the wiring view.
+    wiring: Option<&'a WiringState>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
     /// `effective_panels`/`effective_styles`.
@@ -1327,6 +1335,8 @@ fn run(
     // The device cards of the deck view; exists only while that view is showing, so the machine
     // is not looked at for anyone who is not using it.
     let mut deck: Option<DeckState> = None;
+    // The wiring diagram, likewise only while its view is showing.
+    let mut wiring: Option<WiringState> = None;
     // `local.toml`'s three tables, seeded from what `Config::load` already parsed from it (so a
     // save this session correctly carries forward whatever an earlier session saved) and mutated
     // live by the two popups; `effective_theme`/`effective_ui`/`effective_panels` layer each onto
@@ -1383,6 +1393,22 @@ fn run(
             }
         } else {
             deck = None;
+        }
+        if view_mode == ViewMode::Wiring {
+            let diagram = wiring.get_or_insert_with(|| app.begin_wiring(browser.show_hidden()));
+            diagram.poll(Instant::now(), browser.current_dir());
+            diagram.set_load(app.load(browser));
+            while let Some(event) = diagram.take_event() {
+                match event {
+                    DeckEvent::Status(text) => app.status = Some(text),
+                    DeckEvent::Goto(path, text) => {
+                        let plan = browser.plan_goto(&path);
+                        app.begin_move(browser, plan, Some(text), "device");
+                    }
+                }
+            }
+        } else {
+            wiring = None;
         }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
         // browser steps aside until it exits. Checked here, once per turn of the loop, because
@@ -1537,6 +1563,7 @@ fn run(
                     appearance: appearance.as_ref(),
                     finder: finder.as_ref(),
                     deck: deck.as_ref(),
+                    wiring: wiring.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
                     local_panels: &local_panels,
@@ -2036,6 +2063,40 @@ fn run(
                         view_mode,
                         effective_theme(config, &local_theme).shape,
                     );
+                    // In the wiring view the whole body is the diagram: a click chooses a node (and
+                    // opens it if it was chosen already) and the wheel moves through them.
+                    if let Some(diagram) = wiring.as_mut() {
+                        let at = Position::new(mouse.column, mouse.row);
+                        if layout.current.contains(at) {
+                            match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    match diagram.click(layout.current, at) {
+                                        WiringKey::Goto(path) => {
+                                            let plan = browser.plan_goto(&path);
+                                            app.begin_move(
+                                                browser,
+                                                plan,
+                                                Some("opened".into()),
+                                                "folder",
+                                            );
+                                        }
+                                        WiringKey::Send(_)
+                                        | WiringKey::Pass
+                                        | WiringKey::Handled => {}
+                                    }
+                                }
+                                kind => {
+                                    if let Some(wheel) = Wheel::of(kind) {
+                                        diagram.scroll(
+                                            browser_mouse::wheel_rows(wheel),
+                                            layout.current.width,
+                                        );
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
                     // A click on a device card chooses it (and opens it if it was chosen already);
                     // a click anywhere else in the browser gives the keys back to the files.
                     if let Some(cards) = deck.as_mut() {
@@ -2956,6 +3017,39 @@ fn run(
                     continue;
                 }
 
+                // In the wiring view the arrows move through the diagram and `Enter`, `m`, `e` and
+                // `p` act on the node chosen. Anything else is the browser's.
+                if let Some(diagram) = wiring.as_mut() {
+                    let panels = effective_panels(config, &local_panels);
+                    let width = browser_layout(
+                        terminal.size()?.into(),
+                        panels.columns,
+                        panels.show_hud,
+                        view_mode,
+                        effective_theme(config, &local_theme).shape,
+                    )
+                    .current
+                    .width;
+                    match diagram.key(key, width) {
+                        WiringKey::Pass => {}
+                        WiringKey::Handled => continue,
+                        WiringKey::Goto(path) => {
+                            let plan = browser.plan_goto(&path);
+                            app.begin_move(browser, plan, Some("opened".into()), "folder");
+                            continue;
+                        }
+                        WiringKey::Send(root) => {
+                            if app.clipboard.is_none() {
+                                app.yank(browser);
+                            }
+                            if app.clipboard.is_some() {
+                                app.begin_paste_into(root);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
                 // In the deck view `Tab` takes the keys to the cards; with them there, the arrows,
                 // `Enter`, `m`, `e` and `Esc` are theirs. Anything else is the browser's.
                 if let Some(cards) = deck.as_mut() {
@@ -3159,6 +3253,7 @@ fn run(
                 }
                 grid_top = 0;
                 app.status = Some(match Config::save_view(view_mode.label()) {
+                    Ok(()) if view_mode == ViewMode::Wiring => wiring::HINT.to_string(),
                     Ok(()) => format!("view: {}", view_mode.label()),
                     Err(e) => format!("view: {} (not saved: {e})", view_mode.label()),
                 });
@@ -3541,6 +3636,7 @@ fn draw(
         appearance,
         finder,
         deck,
+        wiring,
         local_theme,
         local_ui,
         local_panels,
@@ -3611,8 +3707,22 @@ fn draw(
     let columns = match (&filmstrip, &grid) {
         (Some(film), _) => [removed, removed, film.big],
         (_, Some(_)) => [removed; 3],
+        // The diagram has the whole body; no column is drawn under it.
+        _ if view_mode == ViewMode::Wiring => [removed; 3],
         _ => [layout.parent, layout.current, layout.preview],
     };
+
+    // The wiring diagram, over the whole body.
+    if let Some(diagram) = wiring {
+        wiring_view::render(
+            frame,
+            layout.current,
+            diagram,
+            browser.current_dir(),
+            config,
+            Instant::now(),
+        );
+    }
 
     // The deck's strip of device cards, above the columns.
     if let Some(cards) = deck

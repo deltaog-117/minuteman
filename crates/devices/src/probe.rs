@@ -195,7 +195,7 @@ impl Sys {
     /// The kernel's name for a mount's source: `/dev/mapper/root` is a link to `dm-1`, and
     /// `/dev/sdb1` is itself. A source that is not under `/dev`, or not there, keeps the last part
     /// of its name.
-    fn node_named(&self, source: &str) -> String {
+    pub(crate) fn node_named(&self, source: &str) -> String {
         source
             .strip_prefix("/dev/")
             .and_then(|rest| std::fs::canonicalize(self.dev_dir.join(rest)).ok())
@@ -215,12 +215,12 @@ impl Sys {
     }
 
     /// The kernel's name for a device number, from the link `/sys/dev/block/<major>:<minor>`.
-    fn node_of(&self, major: u32, minor: u32) -> Option<String> {
+    pub(crate) fn node_of(&self, major: u32, minor: u32) -> Option<String> {
         let link = std::fs::read_link(self.dev_block.join(format!("{major}:{minor}"))).ok()?;
         Some(link.file_name()?.to_string_lossy().into_owned())
     }
 
-    fn udev_of(&self, major: u32, minor: u32) -> udev::Info {
+    pub(crate) fn udev_of(&self, major: u32, minor: u32) -> udev::Info {
         read(&self.udev_data.join(format!("b{major}:{minor}")))
             .map(|text| udev::parse(&text))
             .unwrap_or_default()
@@ -238,21 +238,21 @@ impl Sys {
             .unwrap_or_else(|| node.to_string())
     }
 
-    fn is_removable(&self, disk: &str) -> bool {
+    pub(crate) fn is_removable(&self, disk: &str) -> bool {
         read(&self.class_block.join(disk).join("removable")).is_some_and(|t| t.trim() == "1")
     }
 }
 
-fn read(path: &Path) -> Option<String> {
+pub(crate) fn read(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-fn basename(source: &str) -> String {
+pub(crate) fn basename(source: &str) -> String {
     source.rsplit('/').next().unwrap_or(source).to_string()
 }
 
 /// Devices that are never a place to keep files: RAM disks, loop devices, and the like.
-fn is_virtual(node: &str) -> bool {
+pub(crate) fn is_virtual(node: &str) -> bool {
     ["loop", "ram", "zram", "nbd", "sr", "fd"]
         .iter()
         .any(|prefix| node.starts_with(prefix))

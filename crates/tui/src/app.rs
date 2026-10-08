@@ -62,6 +62,7 @@ use crate::nav_job::{NavJob, NavPoll};
 use crate::open;
 use crate::search_job::{SearchJob, SearchState};
 use crate::system_hud::SystemHud;
+use crate::wiring::WiringState;
 
 /// How many lines of a shell command's output the status line shows before summarizing the rest.
 const STATUS_OUTPUT_LINES: usize = 8;
@@ -569,6 +570,12 @@ impl App {
     /// The deck of device cards (`V`, the deck view). It looks at the machine only while it exists.
     pub fn begin_deck(&self) -> DeckState {
         DeckState::new(self.handle.clone())
+    }
+
+    /// The wiring diagram of the machine's storage (`V`, the wiring view). It looks at the machine
+    /// only while it exists.
+    pub fn begin_wiring(&self, show_hidden: bool) -> WiringState {
+        WiringState::new(self.handle.clone(), Arc::clone(&self.vfs), show_hidden)
     }
 
     /// The fuzzy finder over everything below the browsed directory, hidden entries only if the

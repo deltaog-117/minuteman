@@ -82,14 +82,17 @@ fn unescape(field: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn is_hidden(point: &str) -> bool {
+/// Whether `point` is plumbing. A boot partition is plumbing to the deck, which lists places to
+/// keep files, but part of the machine to the wiring diagram, which draws what is wired.
+fn is_hidden(point: &str, include_boot: bool) -> bool {
     HIDDEN_UNDER
         .iter()
+        .filter(|prefix| !(include_boot && **prefix == "/boot"))
         .any(|prefix| point == *prefix || point.starts_with(&format!("{prefix}/")))
 }
 
-fn kind_of(fs: &str, source: &str, point: &str) -> Option<Kind> {
-    if is_hidden(point) {
+fn kind_of(fs: &str, source: &str, point: &str, include_boot: bool) -> Option<Kind> {
+    if is_hidden(point, include_boot) {
         return None;
     }
     if NETWORK_FS.contains(&fs) {
@@ -106,6 +109,11 @@ fn kind_of(fs: &str, source: &str, point: &str) -> Option<Kind> {
 /// places (a bind mount, a btrfs subvolume) is listed once, at the mount of its whole filesystem
 /// if there is one, else the shortest path.
 pub fn parse(text: &str) -> Vec<Mount> {
+    parse_opts(text, false)
+}
+
+/// Like [`parse`], and with `include_boot` also the boot partition and anything under `/boot`.
+pub fn parse_opts(text: &str, include_boot: bool) -> Vec<Mount> {
     let mut best: HashMap<String, usize> = HashMap::new();
     let mut mounts: Vec<Mount> = Vec::new();
     for line in text.lines() {
@@ -130,7 +138,7 @@ pub fn parse(text: &str) -> Vec<Mount> {
             continue;
         };
         let (point, source) = (unescape(point), unescape(source));
-        let Some(kind) = kind_of(fs, &source, &point) else {
+        let Some(kind) = kind_of(fs, &source, &point, include_boot) else {
             continue;
         };
         let mount = Mount {
@@ -244,6 +252,17 @@ mod tests {
         );
         assert!(sources.contains(&"/dev/loop0".to_string()));
         assert!(!sources.iter().any(|s| s == "proc" || s == "nas:/export"));
+    }
+
+    #[test]
+    fn the_boot_partition_is_listed_only_when_asked_for() {
+        let with: Vec<String> = parse_opts(SAMPLE, true)
+            .iter()
+            .map(|m| m.point.display().to_string())
+            .collect();
+        assert!(with.contains(&"/boot/efi".to_string()), "{with:?}");
+        assert!(!parse(SAMPLE).iter().any(|m| m.point.starts_with("/boot")));
+        assert!(!with.iter().any(|p| p.starts_with("/snap") || p == "/tmp"));
     }
 
     #[test]

@@ -161,7 +161,7 @@ fn gauge(percent: u8, width: usize, on: &str, off: &str) -> (String, String) {
     (on.repeat(filled), off.repeat(width - filled))
 }
 
-fn rate_text(read: u64, written: u64) -> String {
+pub(crate) fn rate_text(read: u64, written: u64) -> String {
     if read == 0 && written == 0 {
         return "idle".to_string();
     }

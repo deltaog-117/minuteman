@@ -25,7 +25,7 @@
 //! there too. What arrives is picked up by `poll` on the loop's next turn.
 
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,14 +33,14 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use devices::Device;
 use devices::activity::{Activity, Counters, Rates};
 use devices::probe::Sys;
-use devices::udisks::{self, Action};
-use devices::{Device, Kind};
 use ratatui::layout::{Position, Rect};
 
 use crate::cargo_fit::{self, Load, Verdict};
 use crate::deck_view;
+use crate::device_actions::Actions;
 
 /// How often the machine is looked at again.
 const SCAN_EVERY: Duration = Duration::from_secs(1);
@@ -66,26 +66,12 @@ pub enum Outcome {
     Send(PathBuf),
 }
 
-/// What the deck asks the caller to show or do, from work that finished in the background.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event {
-    Status(String),
-    /// Go to this folder, saying `String` once there.
-    Goto(PathBuf, String),
-}
+pub use crate::device_actions::Event;
 
 struct Scan {
     at: Instant,
     devices: Vec<Device>,
     counters: HashMap<String, Counters>,
-}
-
-/// What to do to one device, in order.
-struct Plan {
-    title: String,
-    steps: Vec<(Action, String)>,
-    /// Go to where it was mounted, once it is.
-    then_open: bool,
 }
 
 pub struct DeckState {
@@ -107,11 +93,7 @@ pub struct DeckState {
     scan_tx: Sender<Scan>,
     scanning: Arc<AtomicBool>,
     last_scan: Option<Instant>,
-    events: Receiver<Event>,
-    event_tx: Sender<Event>,
-    /// Whether something is being done to a device right now: one thing at a time.
-    working: Arc<AtomicBool>,
-    pending: VecDeque<Event>,
+    actions: Actions,
     /// What the user is carrying, for the cards to say whether it fits.
     load: Option<Load>,
 }
@@ -119,8 +101,8 @@ pub struct DeckState {
 impl DeckState {
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         let (scan_tx, scans) = channel();
-        let (event_tx, events) = channel();
         Self {
+            actions: Actions::new(handle.clone()),
             handle,
             devices: Vec::new(),
             activity: Activity::new(),
@@ -134,10 +116,6 @@ impl DeckState {
             scan_tx,
             scanning: Arc::new(AtomicBool::new(false)),
             last_scan: None,
-            events,
-            event_tx,
-            working: Arc::new(AtomicBool::new(false)),
-            pending: VecDeque::new(),
             load: None,
         }
     }
@@ -175,8 +153,7 @@ impl DeckState {
         while let Ok(scan) = self.scans.try_recv() {
             self.take(scan, now);
         }
-        while let Ok(event) = self.events.try_recv() {
-            self.pending.push_back(event);
+        if self.actions.poll() {
             // Whatever was just done changed what is mounted: look again at once.
             self.last_scan = None;
         }
@@ -295,12 +272,12 @@ impl DeckState {
 
     /// Whether a mount, unmount or eject is in progress.
     pub fn is_working(&self) -> bool {
-        self.working.load(Ordering::Acquire)
+        self.actions.is_working()
     }
 
     /// The next message or folder change from background work, if any.
     pub fn take_event(&mut self) -> Option<Event> {
-        self.pending.pop_front()
+        self.actions.take_event()
     }
 
     /// The device whose mount holds `dir`, if any: the one with the longest mount path that is a
@@ -369,24 +346,13 @@ impl DeckState {
         self.devices.get(self.selected())
     }
 
-    fn say(&self, text: impl Into<String>) {
-        let _ = self.event_tx.send(Event::Status(text.into()));
-    }
-
     fn open_selected(&mut self) -> Outcome {
         let Some(device) = self.selected_device().cloned() else {
             return Outcome::Handled;
         };
-        match &device.mount {
-            Some(mount) => Outcome::Goto(mount.clone()),
-            None => {
-                self.start(Plan {
-                    title: device.title(),
-                    steps: vec![(Action::Mount, device.node.clone())],
-                    then_open: true,
-                });
-                Outcome::Handled
-            }
+        match self.actions.open(&device) {
+            Some(mount) => Outcome::Goto(mount),
+            None => Outcome::Handled,
         }
     }
 
@@ -394,102 +360,25 @@ impl DeckState {
     /// reason, when it will not, which is the point of asking before the copy starts and not
     /// halfway through it. With nothing carried the caller says so.
     fn send_selected(&mut self) -> Outcome {
-        let Some(device) = self.selected_device() else {
+        let Some(device) = self.selected_device().cloned() else {
             return Outcome::Handled;
         };
-        let (title, mount) = (device.title(), device.mount.clone());
-        let Some(mount) = mount else {
-            self.say(cargo_fit::refusal(&Verdict::Unmounted, &title));
-            return Outcome::Handled;
-        };
-        match self.verdict(self.selected()) {
-            Some(verdict) if !verdict.allows() => {
-                self.say(cargo_fit::refusal(&verdict, &title));
-                Outcome::Handled
-            }
-            _ => Outcome::Send(mount),
+        match self.actions.send_to(&device, self.verdict(self.selected())) {
+            Some(mount) => Outcome::Send(mount),
+            None => Outcome::Handled,
         }
     }
 
     fn toggle_selected(&mut self) {
-        let Some(device) = self.selected_device().cloned() else {
-            return;
-        };
-        if device.kind == Kind::Network {
-            self.say("a network share cannot be mounted or unmounted from here");
-            return;
+        if let Some(device) = self.selected_device().cloned() {
+            self.actions.toggle(&device);
         }
-        let action = if device.is_mounted() {
-            Action::Unmount
-        } else {
-            Action::Mount
-        };
-        self.start(Plan {
-            title: device.title(),
-            steps: vec![(action, device.node.clone())],
-            then_open: false,
-        });
     }
 
     fn eject_selected(&mut self) {
-        let Some(device) = self.selected_device().cloned() else {
-            return;
-        };
-        if !device.can_eject() {
-            self.say(format!("{} cannot be ejected", device.title()));
-            return;
+        if let Some(device) = self.selected_device().cloned() {
+            self.actions.eject(&device);
         }
-        let mut steps = Vec::new();
-        if device.is_mounted() {
-            steps.push((Action::Unmount, device.node.clone()));
-        }
-        steps.push((Action::PowerOff, device.disk.clone()));
-        self.start(Plan {
-            title: device.title(),
-            steps,
-            then_open: false,
-        });
-    }
-
-    /// Runs `plan` on the blocking pool, one thing at a time, and reports what came of it.
-    fn start(&mut self, plan: Plan) {
-        if self.working.swap(true, Ordering::AcqRel) {
-            self.say("still working on the last one");
-            return;
-        }
-        self.say(match plan.steps.last() {
-            Some((Action::Mount, _)) => format!("mounting {}…", plan.title),
-            Some((Action::Unmount, _)) => format!("unmounting {}…", plan.title),
-            _ => format!("ejecting {}…", plan.title),
-        });
-        let (tx, working) = (self.event_tx.clone(), Arc::clone(&self.working));
-        self.handle.spawn_blocking(move || {
-            let event = carry_out(&plan);
-            let _ = tx.send(event);
-            working.store(false, Ordering::Release);
-        });
-    }
-}
-
-/// Does each step of `plan` in turn, stopping at the first that fails.
-fn carry_out(plan: &Plan) -> Event {
-    let mut mounted_at = None;
-    for (action, node) in &plan.steps {
-        match udisks::run(*action, node) {
-            Ok(done) => mounted_at = done.mounted_at.or(mounted_at),
-            Err(why) => return Event::Status(format!("{}: {why}", plan.title)),
-        }
-    }
-    match (plan.steps.last(), mounted_at) {
-        (Some((Action::Mount, _)), Some(at)) if plan.then_open => {
-            Event::Goto(at, format!("mounted {}", plan.title))
-        }
-        (Some((Action::Mount, _)), at) => Event::Status(match at {
-            Some(at) => format!("mounted {} at {}", plan.title, at.display()),
-            None => format!("mounted {}", plan.title),
-        }),
-        (Some((Action::Unmount, _)), _) => Event::Status(format!("unmounted {}", plan.title)),
-        _ => Event::Status(format!("{} ejected, safe to remove", plan.title)),
     }
 }
 
@@ -509,6 +398,8 @@ pub fn holding(devices: &[Device], dir: &Path) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use devices::Kind;
+
     use super::*;
 
     fn device(node: &str, mount: Option<&str>, kind: Kind) -> Device {

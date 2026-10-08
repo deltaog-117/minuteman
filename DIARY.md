@@ -6265,6 +6265,140 @@ no small or FAT32 device; they are tested only.
 
 ---
 
+### Wiring Diagram: The Machine as It Is Wired (COA C)
+
+**Date:** 2026-10-07 · **Author:** deltaog-117
+
+**Context.** The deck lists devices, but it shows this machine as a single card, "System", when the
+disk is a stack: an NVMe drive in a PCIe slot, a boot partition, an LVM physical volume, an LVM
+volume, an encrypted container and a btrfs filesystem on top. Nothing in the deck says that
+`nvme0n1p2` is not a place to put files, or what has to be unlocked before `/` exists, or that two
+partitions on a stick are one thing to eject.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A diagram only: layers as columns of boxes joined by lines | Rejected: blank on a small terminal |
+| B | An indented tree only, like `lsblk` | Rejected: reads as a list, not a diagram |
+| C | A when the columns fit, B when they do not, both from one model | Chosen |
+
+**Decision.** `devices::topology` builds a graph, not a tree: a RAID array has several parents.
+Nodes are buses, disks, partitions, stacked devices and shares. They are read from
+`/sys/class/block` (kind, size, the removable flag, the disk a partition is on), the kernel's
+`slaves` links (what a stacked device is made of), device-mapper's own `name` and `uuid` (whose
+prefix says LVM, LUKS or multipath), the udev database (label, filesystem, what it holds) and
+`mountinfo` (where, and how full via `statvfs`). The bus comes from where the disk sits under
+`/sys/devices`, so `PCIe 02:00.0`, `USB 2-3` and `SATA ata1` are read, not guessed. Each node has a
+primary parent, the first, which is where a drawing hangs it; the others are kept. `wiring_layout`
+is pure: columns by longest chain from a root, rows by walking the tree with each parent centred
+on its children, and lines as marks on the four sides of a cell that a lookup turns into a
+box-drawing character, so the junctions come out right wherever lines meet. If the columns do not
+fit the window it lays out an indented tree instead. `wiring` is the state (a scan once a second on
+the blocking pool, selection by node name so it survives a refresh, the keys), `wiring_view` the
+drawing. The mount, unmount, eject and fit-check actions were taken out of the deck into
+`device_actions`, so both views behave the same.
+
+**Why this way.** One model and two renderers means the hard part, reading the machine, is done
+once, and a narrow window costs one small extra renderer instead of a blank screen. The selection
+moves the way the page is laid out: left to what a node is under, right to what is under it, up
+and down in a column. Ejecting a node ejects the disk it is on, unmounting every volume on it first
+and then powering it off, because that is what pulling a stick out means; the diagram makes it
+visible that two partitions hang off one disk. Activity runs along the line into a busy disk as a
+mark, drawn from the same counters the deck's sparkline uses, at a fixed pace so the picture shows
+that data is moving rather than flickering with each sample.
+
+**Found by the tests and the real machine.** A line leaving a box began as a stub (`╶`) and not
+as part of the line, because the first cell had nothing to its left; the cells next to a box now
+reach into it. Dropping an empty card reader left its USB port behind as a box with nothing under
+it; a bus whose disks are all dropped goes too. On the real machine the stack, the sizes, the mount
+and the 95% gauge all came out right, and the `/boot` partition the deck leaves out is shown.
+
+**Trade-offs.** A node with several parents is drawn under the first only; the other parents are
+in the model but not drawn as lines. LVM and LUKS layers can be seen but not opened or closed from
+here, as `udisksctl` does not handle them the same way. There is no SMART data, no bus speed. A
+window too narrow for the columns loses the lines and the marks. The marks move at one pace
+whatever the rate. Btrfs over several devices appears as separate filesystems.
+
+**Verification.** `scripts/check` passes (1377 tests). New: the topology built from a fixture that
+reproduces this machine (bus, disk, two partitions, LVM, LUKS and btrfs, a USB stick, a share, a
+RAID array), the bus rules on the path forms the kernel gives, the layout (columns, centring, no
+overlap, the tree's branches including a trunk that continues past a deeper branch, connectors
+at every junction, a click finding the node), the state's keys in both layouts, what `Enter`, `m`,
+`e` and `p` do and refuse, the drawing at sizes down to nothing, the mark moving along the line and
+not off it, and the fit verdict on both layouts. In the real app on this machine, wide and narrow:
+the stack drawn, the marks moving on the busy disk, `h`/`l` through the stack, `Enter` on a
+non-filesystem refused with a reason, and `Enter` on the root going to `/`. Not tried with a real
+USB stick, RAID or SATA disk: those are fixtures only.
+
+---
+
+### Wiring Diagram: Unfolding the Folders (COA A)
+
+**Date:** 2026-10-08 · **Author:** deltaog-117
+
+**Context.** The wiring diagram ended at the mount point: a box saying `/` and a gauge. The user
+wanted to click the directory and open the rest of the tree, so that the picture which begins at
+the PCIe slot would not stop where the folders begin.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Unfold inline: folders become more boxes to the right, joined by the same lines, read in the background, the path to the current folder unfolded on opening | Chosen |
+| B | A side tray of Miller-style folder columns beside the diagram | Rejected: the diagram and the folders would be two separate things |
+| C | Draw only the path from the device to the current folder, with siblings on demand | Used as the starting state of A, not on its own |
+
+**Decision.** The folders are not hardware, and the hardware is rebuilt from the machine every
+second, so they live apart: `wiring_folders::Folders` holds which folders are open and what was
+read in each, and `compose` returns a copy of the hardware with the open folders added below their
+filesystem. `WiringState` keeps `base` (the last scan) and `composed` (what is drawn and moved
+through), and rebuilds the second whenever either the scan or a folder listing changes. `NodeKind`
+gained `Folder` and `More` (the "+N more", "loading…" and "cannot read" notes), and `Node` a path.
+Reading a folder is `Vfs::list_dir` on the blocking pool, keeping the directories, hiding dotfolders
+unless the browser shows them. The layout gained boxes of different heights, a parent that is
+centred on its children but never above where its family begins, and room enough for a tall box
+over one short child. Opening the view calls `follow`, which unfolds the filesystem and every folder
+down to the folder being browsed and chooses it, once for each folder; a folder with more than
+twelve subfolders always includes the one on the way.
+
+**Why this way.** Because the folders sit in the same graph as the disks, all of what the diagram
+already does applies to them without a second code path: lines, selection, scrolling, the narrow
+tree, the bright "you are here" frame. A copy rebuilt on change is cheap (tens of nodes) and keeps
+every reader of the topology looking at one thing. Reading in the background with a note in the
+meantime means a slow disk or a share never holds up the keys. Closing a folder forgets what was
+read below it, so reopening it shows the disk as it is, with no refresh to build. A click now
+unfolds and `Enter` opens in the browser, because a click that both explored and navigated would
+make exploring impossible without leaving the view; this replaces "a second click opens". `p` on
+a folder sends into it, with the fit check of the filesystem it is on, which closes the gap the
+cargo-aware deck left (it could only send to a device's root).
+
+**Found by the tests and the real machine.** A test that browsed `/nowhere` found that the view
+rightly followed it, since `/` holds every absolute path; tests that want no following use a path
+no mount holds. Another test would have started a real `udisksctl` through `e` on a removable
+disk, so those now use the fixed disk. The view test for a deep folder found a real problem: the
+chosen folder was on screen but the subfolders unfolded to its right were cut off at the window's
+edge. The view now scrolls sideways far enough to show the chosen box and the column beside it.
+In the real app, opened in this repository, the diagram unfolded from `/` down through `home`,
+`Desktop`, `Projects` (15 folders), `Programming` (46) and `minuteman` to `crates` (12), `h` and `l`
+folded and unfolded it, and `Enter` on the first folder moved the browser there.
+
+**Trade-offs.** Only folders, never files. Twelve is a fixed limit, and the "+N more" note opens the
+folder in the browser instead of unfolding in place. Open folders are forgotten when the view is
+left. What was read is not refreshed while a folder stays open. A mount point inside a folder (a
+`/boot` under `/`) is listed as a folder and also drawn as its own filesystem. The folders carry no
+sizes, so the diagram cannot say which is large; the disk usage view is for that. A very deep path
+makes a wide canvas that scrolls sideways.
+
+**Verification.** `scripts/check` passes (1406 tests). New: the folder reader (sorted without regard
+to case, files and hidden folders left out, nested folders under their parent, closing forgetting
+what was read, an unreadable folder saying why, the cap and the way-down rule, an answer for a
+closed folder dropped), the layout (short boxes in the next column, no overlap with a tall box over
+one short one, lines joining boxes at their middles, the tree not taking over when folders run past
+the window), the state (click unfolds and folds, right and left unfold, go and fold, following on
+opening and once for each folder, `Enter` on a folder and on the note, `p` into a folder with and
+without room, the selection surviving a vanished folder, `m` and `e` on a folder), and the drawing
+(signs, counts, the bright frame on the exact folder, sideways scrolling keeping the chosen folder
+on screen, the tree, the note). In the real app as described above.
+
+---
+
 ## 🧠 Usage Guidelines
 
 Write a new entry here before committing to a major design choice (new dependency, new crate

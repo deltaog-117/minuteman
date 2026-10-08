@@ -97,6 +97,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `devices`, `tui`: a wiring diagram in the `V` cycle (`view = "wiring"` in `config.toml`), after the
+  deck. It takes the whole window and shows how the storage is wired: the bus a disk hangs off
+  (`PCIe 02:00.0`, `USB 2-3`, `SATA ata1`), the disk, its partitions, anything stacked on them
+  (LVM, an encrypted container, RAID) and the filesystem with its mount, a gauge of how full it is
+  and, while files are carried, whether they fit. Boxes are drawn in columns joined by lines, with a
+  mark moving along the line into any disk that is busy and the bright frame on the node holding the
+  folder you are in; in a window too narrow for the columns it is an indented tree. The arrows (or
+  `h`/`j`/`k`/`l`) move through it, `Enter` opens a filesystem (mounting it first), `m` mounts or
+  unmounts, `e` ejects the whole removable disk with every volume on it unmounted first, and `p`
+  sends the carried files. The diagram goes on past the mount point: a filesystem, and then any
+  folder, unfolds into its subfolders as more boxes to the right, read in the background (folders
+  only; hidden ones only while the browser shows them; a folder with many shows the first twelve and
+  "+N more", always including the one on the way to where you are). `Right`/`l` unfolds and then
+  goes into the first folder, `Left`/`h` folds and then goes back, a click chooses a node and
+  unfolds or folds it, `Enter` opens a folder in the browser, and `p` on a folder sends the carried
+  files into it if its filesystem has room. Opening the view unfolds the way down to the folder
+  being browsed and chooses it, and the diagram scrolls sideways to keep the chosen box and what is
+  under it on screen. New:
+  `devices::topology` (`Sys::topology`, `Topology`, `bus_of`) and `mountinfo::parse_opts`, which can
+  keep `/boot`.
 - `tui`: the deck view (`V`) now says whether what you are carrying will fit. With files yanked or
   cut (else marked), each card shows `✓ fits · 22G left`, `~ tight`, `✗ needs 4.0G more`,
   `✗ a file is over 4.0G` (a FAT32 stick, however empty), `✓ same disk · instant` (a cut within one

@@ -38,7 +38,7 @@ git_status = true
 # below flips it while browsing.
 show_hidden = false
 
-# The view Minuteman starts in: "list", "grid", "details", "filmstrip" or "deck". Pressing `V` switches it
+# The view Minuteman starts in: "list", "grid", "details", "filmstrip", "deck" or "wiring". Pressing `V` switches it
 # and remembers the choice for next time (saved in ~/.config/minuteman/local.toml, which wins over
 # this line once you have used `V`). Leave it out to start on the name list.
 # view = "list"
@@ -279,7 +279,24 @@ preview_up = ["K"]
 # for a move within one disk) and a card that cannot take them is dimmed, and `p` refuses it with the
 # reason instead of failing halfway through a copy; a click chooses a card, a second click opens it, and the
 # wheel moves along them. Mounting uses `udisksctl`, so without it the cards still show but cannot
-# change anything. Linux only. Capital: "V" is Shift+v, distinct from "v"
+# change anything. Linux only. After the deck comes the wiring diagram, which takes the whole window:
+# how the storage is wired, drawn left to right, one box for each layer (the bus a disk hangs off, the
+# disk, its partitions, whatever is stacked on them such as an LVM volume or an encrypted container,
+# and the filesystem with where it is mounted and how full it is), joined by lines. A mark moves
+# along the line into any disk that is busy, the node holding the folder you are in has the bright
+# frame, and in a window too narrow for the columns the same thing is an indented tree. The arrows
+# (or h/j/k/l) move through it, Enter opens a filesystem (mounting it first if need be), `m`
+# mounts or unmounts it, `e` ejects the whole removable disk the node is on (every volume on it is
+# unmounted first, then it is powered off), and `p` sends what you are carrying, with the same fit
+# check as the deck. The diagram goes on past the mount point: a filesystem, and then any folder, unfolds
+# into its subfolders as more boxes to the right (only folders; the browser is for files; hidden ones
+# only while the browser shows them; a folder with many shows the first twelve and "+N more"). Right
+# (or l) unfolds the node chosen and, once it is open, goes into its first folder; left (or h) folds
+# it, and when it is folded goes back to what it is under; clicking a node chooses it and unfolds or
+# folds it. Enter opens the node in the browser (a folder, or the filesystem), and `p` on a folder
+# sends the carried files into that folder if its filesystem has room. Opening the view unfolds the
+# way down to the folder you are in and chooses it, and the diagram scrolls sideways to keep what you
+# chose and what is under it on screen. Capital: "V" is Shift+v, distinct from "v"
 # (marks). In the grid, up/down (and whatever move_down/move_up are bound to) move a whole row, the
 # left/right arrows move one tile, `h`/`l`/enter go up and in, and the wheel scrolls a row; in the
 # filmstrip, move_down/move_up and the up/down arrows move along the strip. Clicking selects in

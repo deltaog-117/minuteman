@@ -1589,6 +1589,61 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   this user cannot write to). The refusing cases (`needs … more`, a file over the FAT32 limit) are
   covered by tests only, as this machine has no small or FAT32 device to show them on.
 
+- ✅ **Wiring diagram (COA C: wide boxes in columns, a tree when narrow)** – `V` has a sixth view,
+  **wiring**, that takes the whole body and shows how the machine's storage is wired. Read from
+  this machine, the NVMe drive shows as the PCIe slot, the disk (by model), its boot partition, its
+  LVM physical volume, the LVM volume, the encrypted container and the btrfs filesystem on top, with
+  the mount, the gauge and the fit verdict on the nodes that hold a filesystem: the stack the deck
+  could only show as one "System" card. Each layer is a column of framed boxes joined by lines drawn
+  from box-drawing characters (the junction at each cell comes from which of its four sides have a
+  line, so a trunk meeting two children is `┤` and the corners `┌` `└` come out right); a mark
+  (`●`) moves along the line into any node that is busy, at a steady pace measured from a fixed
+  start; the node holding the browsed folder has the bright frame and the chosen node is filled. In
+  a window too narrow for the columns the same model is drawn as an indented tree, one row a node,
+  with `└─`/`├─`/`│` branches. Keys: the arrows or `h`/`j`/`k`/`l` (left to what a node is under,
+  right to what is under it, up and down along the page), `Home`/`End`/`PageUp`/`PageDown`,
+  `Enter` open (mounting first), `m` mount or unmount, `e` eject the whole removable disk with every
+  volume on it unmounted first, `p` send the carried files with the deck's fit check; a click chooses
+  a node (and, since the folder cycle, unfolds it), the wheel moves through them. The data is a new `Topology` in
+  the `devices` crate: buses, disks, partitions, stacked devices (LVM, LUKS, RAID, multipath by
+  device-mapper's own uuid prefix) and shares as nodes that point at each other, built from
+  `/sys/class/block`, the kernel's `slaves` links, the udev database and `mountinfo` (this view
+  keeps `/boot`, which the deck leaves out), with the bus read from where the disk sits under
+  `/sys/devices` (`PCIe 02:00.0`, `USB 2-3`, `SATA ata1`, `MMC mmc0`). A RAID array has several
+  parents, so it is drawn once under the first and the model keeps the others. `device_actions` was
+  taken out of the deck so both views mount, unmount, eject and check a send the same way. Tried in
+  the real app on this machine, wide and narrow. Chosen as COA C over the wide diagram alone (A,
+  blank on a small terminal) and the tree alone (B, reads as a list). Not tried against a real USB
+  stick, a RAID array or a SATA disk: those shapes are covered by fixtures built to match sysfs, and
+  the bus rules by the path forms the kernel gives.
+
+- ✅ **Wiring diagram: unfolding the folders (COA A)** – the diagram no longer stops at the mount
+  point. A filesystem, and then any folder, unfolds into its subfolders as shorter boxes in the
+  next columns to the right, joined to it by the same lines, so one picture runs from the PCIe
+  slot to the folder you are in. `→`/`l` unfolds the node chosen and, once it is open, goes into its
+  first folder; `←`/`h` folds it and, when it is folded, goes back to what it is under; a click
+  chooses a node and unfolds or folds it; `Enter` opens a folder (or the "+N more" note's folder) in
+  the browser, so a click now explores and `Enter` goes there, where a second click used to open;
+  `p` on a folder sends the carried files into that folder, with the fit check of the filesystem it
+  is on (closing the "sending goes to the root" gap). Opening the view unfolds every folder from the
+  filesystem down to the one being browsed and chooses it, once for each folder browsed, so "you are
+  here" is a path with its own bright box. Folders live apart from the hardware (`wiring_folders`):
+  the hardware is rebuilt from the machine every second and the folders outlast it, and a copy of
+  the hardware with the open folders added (`composed`) is what is laid out, drawn and moved
+  through. A folder is read on the blocking pool when it is opened, with a "loading…" note until it
+  arrives and a "cannot read: …" note if it fails; only folders are listed, hidden ones only when
+  the browser shows them, and a folder with more than twelve shows the first twelve and "+N more",
+  except that the one on the way to the folder being browsed is always among them. Closing a folder
+  forgets what was read in it and below it, so opening it again shows the disk as it is then. The
+  layout gained boxes of different heights (a folder is a frame round one line), keeps a tall box
+  from crowding what follows it, and decides between columns and the tree by whether the hardware
+  fits, not the folders, which scroll sideways: the view keeps the chosen box and the column of what
+  is under it on screen. Tried in the real app opened in this repository's folder: it unfolded from
+  `/` through `home`, `Desktop`, `Projects` (15 folders), `Programming` (46 folders), `minuteman`
+  to `crates` (12 folders), `h`/`l` folded and unfolded, and `Enter` on the first folder moved the
+  browser there. Chosen as COA A over a side tray of folder columns (B) and unfolding only the
+  path to the current folder (C), with C's unfolding of the path as the starting state.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -1764,21 +1819,25 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
     and the most useful for "where did my space go", but it needs a treemap layout and a
     background size scan below the device level (the disk usage scanner can feed it) with caching.
     The deck's data layer is the one it would need, so it can follow as another view.
-- **Devices view, next ideas (planned)** – two further ways for storage to react to what the user
-  is doing, each building on the deck and its `devices` crate, in the order they are suggested:
+- **Devices view, next ideas (planned)** – one further way for storage to react to what the user
+  is doing, building on the deck and its `devices` crate:
   - *Runway* – each card shows how long until it fills, from a small history of its usage kept
     between sessions (`full in ~41 days`), and the folder that grew most this month. Needs a
     history file and a rule for how much history is enough before it will guess.
-  - *Wiring diagram* – another entry in the `V` cycle that takes the whole body: the machine as it
-    is wired, controller or USB port, whole disk, partitions, encryption or LVM layer, mount, drawn
-    left to right as a layered tree with the same keys as the deck on the chosen node (`Enter`
-    opens, `m` mounts, `e` ejects, and ejecting a partition powers off the disk it shares with its
-    siblings, which the picture makes plain). Activity runs along the links as moving marks, and the
-    node holding the browsed folder is lit. A fixed layered layout, not a force-directed one like
-    Obsidian's graph, which is unreadable at terminal resolution and moves while you read it. New
-    reading code needed on top of `devices`: the USB port from the device's path under
-    `/sys/devices`, layers from `/sys/block/*/slaves`, the controller from the bus. A narrow window
-    falls back to an indented tree, and many devices scroll.
+- **Wiring diagram, folders, follow-ups** – only folders are shown, never files (the browser is for
+  those); the twelve-folder limit is fixed and the note cannot be unfolded in place (`Enter` opens
+  that folder in the browser); a folder whose name is longer than the box is cut; the open folders
+  are forgotten when the view is left; what was read is not refreshed while a folder stays open,
+  only when it is closed and opened again; a mount point inside a folder (a `/boot` under `/`) is
+  listed as a folder and also drawn as its own filesystem; the folders are not marked or sized, so
+  there is no way to see which one is large (the disk usage view is for that).
+- **Wiring diagram, follow-ups** – a node with several parents shows under the first only (the
+  others are not drawn as lines); the layers LVM and LUKS can be seen but not opened, unlocked or
+  closed from the diagram; no SMART health, model details beyond the name, or speed of the bus;
+  btrfs across several devices is shown as separate filesystems; a window too narrow for the columns
+  loses the lines and the marks (the tree only prints the rates); the diagram has no zoom or pan,
+  only the scroll that follows the chosen node; the marks move at a fixed pace whatever the rate, so
+  they show that data is moving and not how much.
 - **Devices view, follow-ups** – sending goes to the device's root, with no choice of folder (the
   folder open in the browser, or a favourite, would be the next step), and dropping files on a
   card with the mouse does not send them; network shares can be opened but not mounted or unmounted from
