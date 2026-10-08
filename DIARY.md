@@ -6397,6 +6397,24 @@ without room, the selection surviving a vanished folder, `m` and `e` on a folder
 (signs, counts, the bright frame on the exact folder, sideways scrolling keeping the chosen folder
 on screen, the tree, the note). In the real app as described above.
 
+## 2026-10-08 — Wiring diagram: zoom and fit
+
+**Context.** With many folders unfolded the diagram was taller than the window and only scrolled.
+The request was zoom in and out, or a full-size view that adapts to the number of folders.
+
+**Decision.** Both, in one mechanism: the layout takes a `Scale` (four levels, the smallest a
+borderless line a node). The default picks the largest level that fits the window; `+`/`-` set a
+level by hand and `0` returns to fit. The renderer stores the body height in the state so keys and
+clicks lay out exactly as the drawing did.
+
+**Trade-offs.** A terminal cannot scale text, so zoom is a set of discrete box sizes, and the
+smallest shows only names. If nothing fits the height it falls back to the smallest level and
+scrolls. Three drawing tests were pinned to the full level, since they test the full-size and tree
+layouts and a fitted zoom would now shrink them.
+
+**Verification.** `scripts/check` passes. New layout tests: fit shrinks to the height, a level
+chosen by hand is kept, and lines join boxes at every level.
+
 ---
 
 ## 🧠 Usage Guidelines

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`: the wiring diagram now sizes itself to the window. It has four zoom levels, from the full
+  boxes down to one line of text a node, and by default picks the largest at which the whole
+  diagram fits the width and the height, so a filesystem with many unfolded folders no longer runs
+  off the bottom. `+`/`-` step the zoom by hand and `0` goes back to fitting. A narrow window can
+  now keep the columns at a smaller level before it falls back to the tree.
 - `browser`, `tui`: the fuzzy finder (`f`) no longer scores anything on the render thread, so it does
   not stutter on a large tree. An engine on the blocking pool owns the index and the ranking and
   sends back the best 200 results; typing sends it a query and the interface carries on, showing

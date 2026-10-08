@@ -1617,6 +1617,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   stick, a RAID array or a SATA disk: those shapes are covered by fixtures built to match sysfs, and
   the bus rules by the path forms the kernel gives.
 
+- ✅ **Wiring diagram: zoom and fit** – the diagram had one box size, so a filesystem with many
+  unfolded folders ran past the bottom of the window. The layout now takes a scale: four levels
+  (full, compact, small, and one borderless line a node), each with its own box size, gaps and
+  row spacing. The default, fit, picks the largest level whose canvas fits the window's width and
+  height, and falls back to the smallest if none does; `+`/`-` choose a level by hand and `0`
+  returns to fit. The renderer reports the body height to the state so keys and clicks use the
+  same layout as the drawing.
+
 - ✅ **Wiring diagram: unfolding the folders (COA A)** – the diagram no longer stops at the mount
   point. A filesystem, and then any folder, unfolds into its subfolders as shorter boxes in the
   next columns to the right, joined to it by the same lines, so one picture runs from the PCIe

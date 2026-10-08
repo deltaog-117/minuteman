@@ -41,7 +41,7 @@ use crate::hud::{fit_width, format_size, pad_to, text_width};
 use crate::style;
 use crate::trash_view::elide_left;
 use crate::wiring::WiringState;
-use crate::wiring_layout::{self, GAP, Mode, NODE_W};
+use crate::wiring_layout::{self, Mode};
 
 fn icon(node: &Node, ascii: bool) -> &'static str {
     match (node.kind, node.removable, ascii) {
@@ -230,6 +230,7 @@ pub fn render(
         frame.render_widget(Paragraph::new(Span::styled(note, dim)), area);
         return;
     }
+    state.set_height(area.height);
     let layout = state.layout(area.width);
     match layout.mode {
         Mode::Wide => render_wide(frame, area, state, &layout, current_dir, config, now),
@@ -268,7 +269,7 @@ fn render_wide(
         let has_children =
             selected_node.is_some_and(|n| layout.links.iter().any(|&(parent, _)| parent == n));
         let want_right = if has_children {
-            rect.right() + GAP + NODE_W
+            rect.right() + layout.scale.gap + layout.scale.node_w
         } else {
             rect.right()
         };
@@ -342,9 +343,8 @@ fn render_wide(
                 icon(node, ascii),
                 node.title()
             ),
-            usize::from(NODE_W.saturating_sub(4)),
+            usize::from(layout.scale.node_w.saturating_sub(4)),
         );
-        let mut block = style::themed_block(config, &title, here == Some(placed.node));
         let mut base = Style::default();
         if state.index() == Some(placed.node) {
             base = base.bg(style::color(&theme.selection_bg));
@@ -352,7 +352,28 @@ fn render_wide(
         if refused(state, placed.node) {
             base = base.add_modifier(Modifier::DIM);
         }
-        block = block.style(base);
+        if !layout.scale.bordered {
+            // The smallest boxes are one line of text, the frame told by bold type.
+            let plain = fit_width(
+                &format!(
+                    "{}{}{}{working}",
+                    fold_sign(state, placed.node, ascii),
+                    icon(node, ascii),
+                    node.title()
+                ),
+                usize::from(screen.width),
+            );
+            let mut style = base;
+            if here == Some(placed.node) {
+                style = style
+                    .fg(style::color(&theme.accent_fg))
+                    .add_modifier(Modifier::BOLD);
+            }
+            let padded = pad_to(&plain, usize::from(screen.width));
+            frame.render_widget(Paragraph::new(Span::styled(padded, style)), screen);
+            continue;
+        }
+        let block = style::themed_block(config, &title, here == Some(placed.node)).style(base);
         let inner = block.inner(screen);
         frame.render_widget(block, screen);
         if inner.height == 0 || inner.width == 0 {
@@ -610,6 +631,7 @@ mod tests {
     #[test]
     fn a_window_too_narrow_for_the_columns_gets_the_indented_tree() {
         let (_rt, s) = state();
+        s.zoom_for_test(crate::wiring_layout::Zoom::Level(0));
         let shown = drawn(&s, "/", 70, 14, Instant::now());
         assert!(!shown.contains('╭'), "no boxes in the tree:\n{shown}");
         for text in [
@@ -702,6 +724,7 @@ mod tests {
     #[test]
     fn while_files_are_carried_each_filesystem_says_whether_they_fit_and_a_refused_one_is_dimmed() {
         let (_rt, mut s) = state();
+        s.zoom_for_test(crate::wiring_layout::Zoom::Level(0));
         s.set_load(Some(Load {
             bytes: 300 << 30,
             exact: true,
@@ -856,6 +879,7 @@ mod tests {
     #[test]
     fn the_narrow_tree_lists_folders_under_their_filesystem() {
         let (_rt, s) = folders_state("/home/me/projects");
+        s.zoom_for_test(crate::wiring_layout::Zoom::Level(0));
         let shown = drawn(&s, "/home/me/projects", 70, 40, Instant::now());
         for text in ["▾ ◈ root", "▾ home", "▾ projects", "▸ etc", "minuteman"] {
             assert!(shown.contains(text), "{text:?} missing:\n{shown}");

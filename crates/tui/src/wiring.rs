@@ -46,13 +46,13 @@ use shared::Vfs;
 use crate::cargo_fit::{Load, Verdict, verdict};
 use crate::device_actions::Actions;
 use crate::wiring_folders::Folders;
-use crate::wiring_layout::{self, Layout, Mode};
+use crate::wiring_layout::{self, LEVELS, Layout, Mode, Zoom};
 
 /// How often the machine is looked at again.
 const SCAN_EVERY: Duration = Duration::from_secs(1);
 
 /// Shown on entering the view.
-pub const HINT: &str = "wiring: arrows move  →/click unfold folders  Enter open  p send  m mount  e eject  V next view";
+pub const HINT: &str = "wiring: arrows move  →/click unfold folders  Enter open  p send  m mount  e eject  +/- zoom  0 fit  V next view";
 
 /// What a key or click did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +99,10 @@ pub struct WiringState {
     /// The first canvas row and column drawn, kept by the renderer between frames.
     top: Cell<u16>,
     left: Cell<u16>,
+    /// The height of the body, kept by the renderer, so a zoom that fits knows how tall to be.
+    height: Cell<u16>,
+    /// The size of the boxes: fitted to the window, or a level chosen with `+` and `-`.
+    zoom: Cell<Zoom>,
     scans: Receiver<Scan>,
     scan_tx: Sender<Scan>,
     scanning: Arc<AtomicBool>,
@@ -125,6 +129,8 @@ impl WiringState {
             selected: None,
             top: Cell::new(0),
             left: Cell::new(0),
+            height: Cell::new(0),
+            zoom: Cell::new(Zoom::Fit),
             scans,
             scan_tx,
             scanning: Arc::new(AtomicBool::new(false)),
@@ -168,6 +174,11 @@ impl WiringState {
     #[cfg(test)]
     pub fn select_for_test(&mut self, id: &str) {
         self.selected = Some(id.to_string());
+    }
+
+    #[cfg(test)]
+    pub fn zoom_for_test(&self, zoom: Zoom) {
+        self.zoom.set(zoom);
     }
 
     #[cfg(test)]
@@ -357,7 +368,24 @@ impl WiringState {
 
     /// The layout for a body `width` cells wide.
     pub fn layout(&self, width: u16) -> Layout {
-        wiring_layout::layout(&self.composed, width)
+        wiring_layout::zoomed(&self.composed, width, self.height.get(), self.zoom.get())
+    }
+
+    /// Tells the state how tall the body is, for a zoom that fits.
+    pub fn set_height(&self, height: u16) {
+        self.height.set(height);
+    }
+
+    /// Steps the zoom one level in (`by` < 0, bigger boxes) or out, from the level now showing.
+    fn zoom_by(&mut self, by: isize, width: u16) {
+        let now = self.layout(width);
+        let level = now.level.saturating_add_signed(by).min(LEVELS.len() - 1);
+        self.zoom.set(Zoom::Level(level));
+        self.say(format!(
+            "zoom {} of {}  0 fits the window",
+            level + 1,
+            LEVELS.len()
+        ));
     }
 
     /// Where the selection goes for `direction`: up and down along the page, left to what a node
@@ -491,6 +519,12 @@ impl WiringState {
             KeyCode::End => self.scroll(isize::MAX / 2, width),
             KeyCode::PageUp => self.scroll(-8, width),
             KeyCode::PageDown => self.scroll(8, width),
+            KeyCode::Char('+' | '=') => self.zoom_by(-1, width),
+            KeyCode::Char('-' | '_') => self.zoom_by(1, width),
+            KeyCode::Char('0') => {
+                self.zoom.set(Zoom::Fit);
+                self.say("zoom fits the window");
+            }
             KeyCode::Enter => return self.open(),
             KeyCode::Char('m') => self.toggle(),
             KeyCode::Char('e') => self.eject(),

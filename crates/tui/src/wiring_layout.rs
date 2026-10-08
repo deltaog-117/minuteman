@@ -38,6 +38,73 @@ pub const FOLDER_H: u16 = 3;
 /// Blank rows between two boxes in a column.
 const ROW_GAP: u16 = 1;
 
+/// How big the boxes are drawn: one of the zoom levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scale {
+    pub node_w: u16,
+    pub node_h: u16,
+    pub folder_h: u16,
+    pub row_gap: u16,
+    pub gap: u16,
+    /// Whether a box has a frame. Without one a node is a single line of text.
+    pub bordered: bool,
+}
+
+impl Scale {
+    /// How tall a node's box is.
+    pub fn height_of(&self, kind: NodeKind) -> u16 {
+        match kind {
+            NodeKind::Folder | NodeKind::More => self.folder_h,
+            _ => self.node_h,
+        }
+    }
+}
+
+/// The zoom levels, the largest first.
+pub const LEVELS: [Scale; 4] = [
+    Scale {
+        node_w: NODE_W,
+        node_h: NODE_H,
+        folder_h: FOLDER_H,
+        row_gap: ROW_GAP,
+        gap: GAP,
+        bordered: true,
+    },
+    Scale {
+        node_w: 16,
+        node_h: 4,
+        folder_h: 3,
+        row_gap: 0,
+        gap: 3,
+        bordered: true,
+    },
+    Scale {
+        node_w: 12,
+        node_h: 3,
+        folder_h: 3,
+        row_gap: 0,
+        gap: 2,
+        bordered: true,
+    },
+    Scale {
+        node_w: 18,
+        node_h: 1,
+        folder_h: 1,
+        row_gap: 0,
+        gap: 2,
+        bordered: false,
+    },
+];
+
+/// How the diagram is sized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zoom {
+    /// The largest level at which everything fits the window.
+    Fit,
+    /// A level chosen by hand.
+    Level(usize),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Boxes in columns, joined by lines.
@@ -72,6 +139,9 @@ pub struct Layout {
     pub size: (u16, u16),
     /// The lines of the diagram, as (parent, child), for the nodes drawn under a first parent.
     pub links: Vec<(usize, usize)>,
+    /// The zoom level the boxes were laid out at, and which level that is.
+    pub scale: Scale,
+    pub level: usize,
 }
 
 impl Layout {
@@ -98,14 +168,6 @@ impl Layout {
     }
 }
 
-/// How tall a node's box is.
-pub fn height_of(kind: NodeKind) -> u16 {
-    match kind {
-        NodeKind::Folder | NodeKind::More => FOLDER_H,
-        _ => NODE_H,
-    }
-}
-
 /// The row of a box a line joins it at: the middle.
 fn mid(rect: Rect) -> u16 {
     rect.y + rect.height / 2
@@ -127,22 +189,65 @@ fn primary_children(t: &Topology, at: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Lays the topology out for a window `width` cells wide: in columns if they fit, else as a tree.
-pub fn layout(t: &Topology, width: u16) -> Layout {
-    let wide = wide(t);
-    // Folders unfolded to the right may run past the window, which scrolls sideways to follow the
-    // chosen box; it is the hardware that has to fit, or the tree is clearer.
-    let hardware = wide
-        .placed
+/// The right edge of the hardware in a wide layout: what has to fit the window.
+fn hardware_right(t: &Topology, wide: &Layout) -> u16 {
+    wide.placed
         .iter()
         .filter(|p| is_hardware(t.nodes[p.node].kind))
         .map(|p| p.rect.right())
         .max()
-        .unwrap_or(0);
-    if hardware <= width { wide } else { narrow(t) }
+        .unwrap_or(0)
 }
 
+/// Lays the topology out for a window `width` cells wide at the largest size: in columns if they
+/// fit, else as a tree.
+#[cfg(test)]
+pub fn layout(t: &Topology, width: u16) -> Layout {
+    zoomed(t, width, 0, Zoom::Level(0))
+}
+
+/// Lays the topology out for a window `width` by `height` at `zoom`. Folders unfolded to the right
+/// may run past the window, which scrolls sideways to follow the chosen box; it is the hardware
+/// that has to fit, or the tree is clearer. A `height` of 0 is not known, and is not held to.
+pub fn zoomed(t: &Topology, width: u16, height: u16, zoom: Zoom) -> Layout {
+    let at = |level: usize| {
+        let mut l = wide_at(t, LEVELS[level]);
+        l.level = level;
+        l
+    };
+    match zoom {
+        Zoom::Level(level) => {
+            let wide = at(level.min(LEVELS.len() - 1));
+            if hardware_right(t, &wide) <= width {
+                wide
+            } else {
+                narrow(t)
+            }
+        }
+        Zoom::Fit => {
+            let mut smallest = None;
+            for level in 0..LEVELS.len() {
+                let wide = at(level);
+                if hardware_right(t, &wide) > width {
+                    continue;
+                }
+                if height == 0 || wide.size.1 <= height {
+                    return wide;
+                }
+                smallest = Some(wide);
+            }
+            // Nothing fits the height: show as much as the smallest boxes that fit the width can.
+            smallest.unwrap_or_else(|| narrow(t))
+        }
+    }
+}
+
+#[cfg(test)]
 fn wide(t: &Topology) -> Layout {
+    wide_at(t, LEVELS[0])
+}
+
+fn wide_at(t: &Topology, scale: Scale) -> Layout {
     let depths = t.depths();
     let mut placed: Vec<Placed> = Vec::new();
     let mut links = Vec::new();
@@ -150,16 +255,16 @@ fn wide(t: &Topology) -> Layout {
     let mut seen = vec![false; t.nodes.len()];
 
     fn place(
+        (scale, depths): (Scale, &[usize]),
         t: &Topology,
         at: usize,
-        depths: &[usize],
         cursor: &mut u16,
         placed: &mut Vec<Placed>,
         links: &mut Vec<(usize, usize)>,
         seen: &mut [bool],
     ) -> u16 {
         seen[at] = true;
-        let height = height_of(t.nodes[at].kind);
+        let height = scale.height_of(t.nodes[at].kind);
         let start = *cursor;
         let kids: Vec<usize> = primary_children(t, at)
             .into_iter()
@@ -167,30 +272,30 @@ fn wide(t: &Topology) -> Layout {
             .collect();
         let y = if kids.is_empty() {
             let y = *cursor;
-            *cursor += height + ROW_GAP;
+            *cursor += height + scale.row_gap;
             y
         } else {
             let mids: Vec<u16> = kids
                 .iter()
                 .map(|&k| {
                     links.push((at, k));
-                    let kid_height = height_of(t.nodes[k].kind);
-                    place(t, k, depths, cursor, placed, links, seen) + kid_height / 2
+                    let kid_height = scale.height_of(t.nodes[k].kind);
+                    place((scale, depths), t, k, cursor, placed, links, seen) + kid_height / 2
                 })
                 .collect();
             // Centred on its children, but never above where its own family begins.
             let centre = (mids[0] + mids[mids.len() - 1]) / 2;
             let y = centre.saturating_sub(height / 2).max(start);
             // A box taller than what is under it still needs its own room.
-            *cursor = (*cursor).max(y + height + ROW_GAP);
+            *cursor = (*cursor).max(y + height + scale.row_gap);
             y
         };
         let x = u16::try_from(depths[at])
             .unwrap_or(u16::MAX)
-            .saturating_mul(NODE_W + GAP);
+            .saturating_mul(scale.node_w + scale.gap);
         placed.push(Placed {
             node: at,
-            rect: Rect::new(x, y, NODE_W, height),
+            rect: Rect::new(x, y, scale.node_w, height),
         });
         y
     }
@@ -198,9 +303,9 @@ fn wide(t: &Topology) -> Layout {
     for root in t.roots() {
         if !seen[root] {
             place(
+                (scale, &depths),
                 t,
                 root,
-                &depths,
                 &mut cursor,
                 &mut placed,
                 &mut links,
@@ -220,6 +325,8 @@ fn wide(t: &Topology) -> Layout {
         rows: Vec::new(),
         size: (width, height),
         links,
+        scale,
+        level: 0,
     }
 }
 
@@ -282,6 +389,8 @@ fn narrow(t: &Topology) -> Layout {
         rows: tree.rows,
         size: (0, height),
         links: tree.links,
+        scale: LEVELS[0],
+        level: 0,
     }
 }
 
@@ -343,8 +452,8 @@ fn run(cells: &mut HashMap<(u16, u16), u8>, (x0, y0): (u16, u16), (x1, y1): (u16
 }
 
 /// Where a parent's line runs out of its box, down a shared trunk and into each child.
-fn trunk_x(parent: &Placed) -> u16 {
-    parent.rect.right() + GAP / 2 - 1
+fn trunk_x(parent: &Placed, gap: u16) -> u16 {
+    parent.rect.right() + (gap / 2).max(1) - 1
 }
 
 /// The lines between the boxes of a wide layout, a character per canvas cell.
@@ -359,7 +468,7 @@ pub fn connectors(layout: &Layout) -> HashMap<(u16, u16), char> {
             continue;
         };
         let start = (from.rect.right(), mid(from.rect));
-        let trunk = trunk_x(from);
+        let trunk = trunk_x(from, layout.scale.gap);
         run(&mut cells, start, (trunk, start.1));
         // The line starts against the box's side, so it reaches into it.
         *cells.entry(start).or_insert(0) |= W;
@@ -396,7 +505,9 @@ pub fn path_into(layout: &Layout, parent: usize, child: usize) -> Vec<(u16, u16)
         return Vec::new();
     };
     let y = mid(to.rect);
-    (trunk_x(from)..to.rect.x).map(|x| (x, y)).collect()
+    (trunk_x(from, layout.scale.gap)..to.rect.x)
+        .map(|x| (x, y))
+        .collect()
 }
 
 #[cfg(test)]
@@ -694,6 +805,46 @@ mod tests {
             nodes: t.nodes[..2].to_vec(),
         };
         let _ = hardware_only;
+    }
+
+    #[test]
+    fn a_fitted_zoom_shrinks_the_boxes_until_many_folders_fit_the_height() {
+        let (t, ..) = with_folders(30);
+        let width = 200;
+        let big = zoomed(&t, width, 0, Zoom::Fit);
+        assert_eq!(big.level, 0, "no height known: the largest size");
+        let fitted = zoomed(&t, width, 40, Zoom::Fit);
+        assert!(fitted.level > 0);
+        assert!(fitted.size.1 <= 40, "{:?}", fitted.size);
+        for (i, a) in fitted.placed.iter().enumerate() {
+            for b in &fitted.placed[i + 1..] {
+                assert!(!a.rect.intersects(b.rect));
+            }
+        }
+        let by_hand = zoomed(&t, width, 40, Zoom::Level(0));
+        assert_eq!(by_hand.level, 0, "a level chosen by hand is kept");
+        let smallest = zoomed(&t, width, 5, Zoom::Fit);
+        assert_eq!(
+            smallest.level,
+            LEVELS.len() - 1,
+            "when nothing fits, the smallest"
+        );
+    }
+
+    #[test]
+    fn smaller_levels_keep_the_lines_joined_to_the_boxes() {
+        let (t, ..) = laptop();
+        for level in 0..LEVELS.len() {
+            let l = zoomed(&t, 400, 0, Zoom::Level(level));
+            assert_eq!(l.mode, Mode::Wide);
+            let cells = connectors(&l);
+            for &(parent, child) in &l.links {
+                let (a, b) = (l.rect_of(parent).unwrap(), l.rect_of(child).unwrap());
+                let y = mid(b);
+                assert!(cells.contains_key(&(b.x - 1, y)), "level {level}");
+                assert!(cells.contains_key(&(a.right(), mid(a))), "level {level}");
+            }
+        }
     }
 
     #[test]
