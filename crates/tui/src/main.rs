@@ -1404,6 +1404,18 @@ fn run(
         }
         if view_mode == ViewMode::Wiring {
             let diagram = wiring.get_or_insert_with(|| app.begin_wiring(browser.show_hidden()));
+            // The diagram trims and sizes itself to fit the body, so it must know how big it is
+            // before the first frame and after a resize.
+            let panels = effective_panels(config, &local_panels);
+            let body = browser_layout(
+                terminal.size()?.into(),
+                panels.columns,
+                panels.show_hud,
+                view_mode,
+                effective_theme(config, &local_theme).shape,
+            )
+            .current;
+            diagram.set_size(body.width, body.height);
             diagram.poll(Instant::now(), browser.current_dir());
             diagram.set_load(app.load(browser));
             while let Some(event) = diagram.take_event() {

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`: the wiring diagram now fits all of itself in the window, hardware and unfolded folders
+  together, instead of panning across a canvas that a deep path made far bigger than the window.
+  It shows fewer siblings of a crowded folder when the window is short (12, 8, 5, then 3, the rest
+  being the "+N more" note; the folder on the way to the one you are in and the one chosen are
+  always kept, then their nearest siblings, where it used to be the first twelve), squeezes the
+  boxes to as little as 10 cells wide to fit the columns (and widens them up to one and a half
+  times in a wide window), and becomes the indented tree if the columns still cannot fit. The tree's
+  name column now grows to hold the deepest folder name. `+`, `-` and `0` refit as before.
 - `tui`: the wiring diagram now sizes itself to the window. It has four zoom levels, from the full
   boxes down to one line of text a node, and by default picks the largest at which the whole
   diagram fits the width and the height, so a filesystem with many unfolded folders no longer runs
@@ -82,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clipboard when it still holds the cut that was just pasted.
 
 ### Fixed
+- `tui`: in the wiring diagram a box that was only partly inside the window was left out while the
+  lines to it were still drawn, so some boxes showed and others did not. It is now drawn cut off by
+  the window's edge.
 - `shell_overlay`: the test that runs a fake shell from a script it has just written failed about
   one run in forty with "text file busy", when another test thread forked while the script was open
   for writing. It now tries again on that error alone; the checks on the directory and the exit

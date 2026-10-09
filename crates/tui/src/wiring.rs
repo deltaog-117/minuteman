@@ -99,8 +99,13 @@ pub struct WiringState {
     /// The first canvas row and column drawn, kept by the renderer between frames.
     top: Cell<u16>,
     left: Cell<u16>,
-    /// The height of the body, kept by the renderer, so a zoom that fits knows how tall to be.
+    /// The size of the body, from `set_size` (or, for the height, the renderer), so a zoom that
+    /// fits knows how big to be. Zero until known.
+    width: Cell<u16>,
     height: Cell<u16>,
+    /// The layout chosen to fit that size, with `composed` trimmed to match it; `None` until the
+    /// size is known, when the layout is made on demand from everything unfolded.
+    fitted: Option<Layout>,
     /// The size of the boxes: fitted to the window, or a level chosen with `+` and `-`.
     zoom: Cell<Zoom>,
     scans: Receiver<Scan>,
@@ -129,7 +134,9 @@ impl WiringState {
             selected: None,
             top: Cell::new(0),
             left: Cell::new(0),
+            width: Cell::new(0),
             height: Cell::new(0),
+            fitted: None,
             zoom: Cell::new(Zoom::Fit),
             scans,
             scan_tx,
@@ -228,9 +235,42 @@ impl WiringState {
         }
     }
 
-    /// Adds the unfolded folders to the hardware again, after either has changed.
+    /// Adds the unfolded folders to the hardware again, after either has changed, the zoom was
+    /// changed, or the body was resized. Once the size is known the folders are trimmed (fewer
+    /// siblings shown, the rest "+N more") and the boxes sized until the whole diagram fits.
     fn rebuild(&mut self) {
-        self.composed = self.folders.compose(&self.base);
+        let (width, height) = (self.width.get(), self.height.get());
+        if width == 0 || height == 0 {
+            self.composed = self.folders.compose(&self.base);
+            self.fitted = None;
+            return;
+        }
+        // The folder chosen in the diagram is a folder's node id, which is its path; the trimming
+        // never takes it away from under the cursor.
+        let chosen = self
+            .selected
+            .as_deref()
+            .filter(|id| id.starts_with('/'))
+            .map(PathBuf::from);
+        self.folders.set_chosen(chosen);
+        let (composed, layout) = wiring_layout::fit(
+            |cap| self.folders.compose_capped(&self.base, cap),
+            width,
+            height,
+            self.zoom.get(),
+        );
+        self.composed = composed;
+        self.fitted = Some(layout);
+    }
+
+    /// Tells the diagram how big the body it is drawn in is, so it can fit all of itself in. Call
+    /// it every turn; it does work only when the size changed.
+    pub fn set_size(&mut self, width: u16, height: u16) {
+        if (width, height) != (self.width.get(), self.height.get()) {
+            self.width.set(width);
+            self.height.set(height);
+            self.rebuild();
+        }
     }
 
     /// Unfolds the way down to `here`, the folder being browsed, and chooses it, once for each
@@ -366,9 +406,16 @@ impl WiringState {
         u64::try_from(now.saturating_duration_since(self.epoch).as_millis() / 90).unwrap_or(0)
     }
 
-    /// The layout for a body `width` cells wide.
+    /// The layout for a body `width` cells wide. When the size is known (`set_size`) this is the
+    /// layout that was fitted to it and `width` is not consulted; before that, everything
+    /// unfolded is laid out for `width` and the folders may run past the window.
     pub fn layout(&self, width: u16) -> Layout {
-        wiring_layout::zoomed(&self.composed, width, self.height.get(), self.zoom.get())
+        match &self.fitted {
+            Some(layout) => layout.clone(),
+            None => {
+                wiring_layout::zoomed(&self.composed, width, self.height.get(), self.zoom.get())
+            }
+        }
     }
 
     /// Tells the state how tall the body is, for a zoom that fits.
@@ -381,6 +428,7 @@ impl WiringState {
         let now = self.layout(width);
         let level = now.level.saturating_add_signed(by).min(LEVELS.len() - 1);
         self.zoom.set(Zoom::Level(level));
+        self.rebuild();
         self.say(format!(
             "zoom {} of {}  0 fits the window",
             level + 1,
@@ -523,6 +571,7 @@ impl WiringState {
             KeyCode::Char('-' | '_') => self.zoom_by(1, width),
             KeyCode::Char('0') => {
                 self.zoom.set(Zoom::Fit);
+                self.rebuild();
                 self.say("zoom fits the window");
             }
             KeyCode::Enter => return self.open(),
@@ -1286,5 +1335,59 @@ mod tests {
             "a fixed disk, found through its folder: {said:?}"
         );
         assert!(!s.is_working());
+    }
+
+    #[test]
+    fn once_the_size_is_known_the_layout_is_the_one_fitted_to_it_whatever_width_is_asked() {
+        let (_rt, mut s) = folder_state();
+        settle(&mut s, "/home/me/projects/minuteman");
+        s.set_size(160, 40);
+        let layout = s.layout(10);
+        assert_eq!(
+            layout,
+            s.layout(500),
+            "the width asked for is not consulted"
+        );
+        match layout.mode {
+            Mode::Wide => assert!(
+                layout.size.0 <= 160 && layout.size.1 <= 40,
+                "{:?}",
+                layout.size
+            ),
+            Mode::Narrow => assert!(layout.size.1 <= 40),
+        }
+        // Every node of the topology is in the layout: the trimming and the layout agree.
+        let drawn = match layout.mode {
+            Mode::Wide => layout.placed.len(),
+            Mode::Narrow => layout.rows.len(),
+        };
+        assert_eq!(drawn, s.topology().nodes.len());
+    }
+
+    #[test]
+    fn a_size_that_is_zero_is_not_a_size_and_leaves_everything_unfolded() {
+        let (_rt, mut s) = folder_state();
+        settle(&mut s, "/home/me/projects/minuteman");
+        let all = s.topology().nodes.len();
+        s.set_size(0, 0);
+        assert_eq!(s.topology().nodes.len(), all);
+        s.set_size(120, 0);
+        assert_eq!(
+            s.topology().nodes.len(),
+            all,
+            "a height of zero is unknown too"
+        );
+    }
+
+    #[test]
+    fn plus_minus_and_zero_refit_the_diagram_to_the_level_chosen_and_back() {
+        let (_rt, mut s) = folder_state();
+        settle(&mut s, ELSEWHERE);
+        s.set_size(260, 60);
+        let fitted = s.layout(0).level;
+        s.key(press(KeyCode::Char('-')), WIDE);
+        assert_eq!(s.layout(0).level, (fitted + 1).min(LEVELS.len() - 1));
+        s.key(press(KeyCode::Char('0')), WIDE);
+        assert_eq!(s.layout(0).level, fitted, "0 fits the window again");
     }
 }

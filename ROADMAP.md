@@ -1690,6 +1690,39 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   in. Not tried in a real terminal emulator, nor with more than one volume on the real machine (the
   tests cover several).
 
+- ✅ **Wiring diagram fills the window (COA A: fit by budget)** – with a deep path (nine folders
+  down, as in this repository) the diagram was far bigger than the window: one column for every
+  level, and every unfolded sibling stacked down the page. Only the hardware was held to the
+  window, so the view panned to the chosen box and the hardware scrolled off the left; and any box
+  not wholly inside the window was left out while its lines were still drawn, so some things
+  showed and others did not. Now, once the body's size is known (`WiringState::set_size`, called
+  every turn by `main` before `poll`), `wiring_layout::fit` chooses what is drawn so that all of it
+  fits both ways. It tries a cap on the subfolders each folder shows (12, 8, 5, then 3; the rest
+  are the existing "+N more" note) and, for each, the four zoom levels largest first, squeezing the
+  boxes' width to the columns in the window (never below 10 cells, never past one and a half times
+  what the level draws them at, so a wide window is used too) and falling back to the indented tree
+  if the columns cannot fit; the first combination whose whole canvas fits the width and height
+  wins. Which siblings survive a cut is decided by distance: the folder on the way to the browsed
+  folder and the folder chosen in the diagram are always kept (so a cursor is never trimmed from
+  under you after a resize), then their nearest siblings, so a folder with 46 subfolders shows the
+  twelve around the one you are in and not the first twelve. `+`/`-` still pick a level by hand
+  and `0` returns to fit; both refit. If nothing fits even at the smallest cap and level (a very
+  short window), the smallest boxes that fit the width are used and the view scrolls, as before.
+  Two further fixes in the drawing: a box cut by the window's edge is now drawn cut (it is painted
+  into an off-screen buffer and the visible part copied over) instead of being left out, and the
+  tree's name column is sized to its longest row, up to three fifths of the width, where a fixed
+  40 cells cut the deepest folders to `…`. Chosen as COA A over a layout that depends on the
+  selection (B) and only drawing clipped boxes with the hardware pinned (C). Property-tested: for
+  any window, depth, number of siblings and zoom the fitted layout holds the whole diagram inside
+  the window whenever any cap and level could, and otherwise uses the fewest folders and the
+  smallest boxes; boxes never overlap; every node of the trimmed topology is laid out; a squeezed
+  scale always holds its columns inside the width. Verified against the real binary in a PTY read
+  through `pyte`, browsing `crates/tui` of this repository: at 150×40 the whole path, hardware
+  included, is on screen as the tree with every name whole; at 230×50 and 190×45 it is on screen as
+  boxes joined by lines with the hardware on the left and `tui` on the right, nothing scrolled; at
+  120×24 it does not fit and scrolls to the chosen folder, as it always did; arrows, `+` and `0`
+  kept it fitting. Not tried through a live resize of a real terminal (the tests resize the state).
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -1884,8 +1917,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
     between sessions (`full in ~41 days`), and the folder that grew most this month. Needs a
     history file and a rule for how much history is enough before it will guess.
 - **Wiring diagram, folders, follow-ups** – only folders are shown, never files (the browser is for
-  those); the twelve-folder limit is fixed and the note cannot be unfolded in place (`Enter` opens
-  that folder in the browser); a folder whose name is longer than the box is cut; the open folders
+  those); twelve is the most a folder shows (a small window shows 8, 5 or 3) and the note cannot be
+  unfolded in place (`Enter` opens that folder in the browser); a folder whose name is longer than the box is cut, and the boxes are squeezed to as little as 10
+  cells in a crowded window, where the tree is the alternative; the fit prefers smaller boxes with
+  every sibling up to the cap over larger boxes with fewer, so a deep path in a short window is drawn
+  as one line a box; the open folders
   are forgotten when the view is left; what was read is not refreshed while a folder stays open,
   only when it is closed and opened again; a mount point inside a folder (a `/boot` under `/`) is
   listed as a folder and also drawn as its own filesystem; the folders are not marked or sized, so

@@ -284,7 +284,9 @@ preview_up = ["K"]
 # disk, its partitions, whatever is stacked on them such as an LVM volume or an encrypted container,
 # and the filesystem with where it is mounted and how full it is), joined by lines. A mark moves
 # along the line into any disk that is busy, the node holding the folder you are in has the bright
-# frame, and in a window too narrow for the columns the same thing is an indented tree. The arrows
+# frame. The whole diagram always fits the window: a crowded folder shows fewer siblings in a short
+# window (the rest are a "+N more" box), boxes are squeezed or stretched to the width, and when the
+# columns cannot fit at all it is the same thing as an indented tree. The arrows
 # (or h/j/k/l) move through it, Enter opens a filesystem (mounting it first if need be), `m`
 # mounts or unmounts it, `e` ejects the whole removable disk the node is on (every volume on it is
 # unmounted first, then it is powered off), and `p` sends what you are carrying, with the same fit

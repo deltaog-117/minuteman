@@ -28,10 +28,11 @@ use std::time::Instant;
 
 use devices::topology::{Layer, Node, NodeKind};
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Widget};
 use theming::Config;
 
 use crate::cargo_fit::{self, Verdict};
@@ -314,74 +315,113 @@ fn render_wide(
     }
 
     let here = state.here(current_dir);
+    let window = Rect::new(left, top, area.width, area.height);
     for placed in &layout.placed {
         let rect = placed.rect;
-        if rect.y < top
-            || rect.bottom() > top + area.height
-            || rect.x < left
-            || rect.right() > left + area.width
-        {
+        let visible = rect.intersection(window);
+        if visible.is_empty() {
             continue;
         }
-        let screen = Rect::new(
-            area.x + (rect.x - left),
-            area.y + (rect.y - top),
-            rect.width,
-            rect.height,
-        );
-        let node = &state.topology().nodes[placed.node];
-        // A mount or an eject started from the chosen node is still running.
-        let working = if state.index() == Some(placed.node) && state.is_working() {
-            " …"
-        } else {
-            ""
+        let look = BoxLook {
+            state,
+            node: placed.node,
+            here,
+            config,
+            scale: layout.scale,
+            ascii,
         };
-        let title = fit_width(
-            &format!(
-                "{}{}{}{working}",
-                fold_sign(state, placed.node, ascii),
-                icon(node, ascii),
-                node.title()
-            ),
-            usize::from(layout.scale.node_w.saturating_sub(4)),
-        );
-        let mut base = Style::default();
-        if state.index() == Some(placed.node) {
-            base = base.bg(style::color(&theme.selection_bg));
-        }
-        if refused(state, placed.node) {
-            base = base.add_modifier(Modifier::DIM);
-        }
-        if !layout.scale.bordered {
-            // The smallest boxes are one line of text, the frame told by bold type.
-            let plain = fit_width(
-                &format!(
-                    "{}{}{}{working}",
-                    fold_sign(state, placed.node, ascii),
-                    icon(node, ascii),
-                    node.title()
-                ),
-                usize::from(screen.width),
+        if visible == rect {
+            let screen = Rect::new(
+                area.x + (rect.x - left),
+                area.y + (rect.y - top),
+                rect.width,
+                rect.height,
             );
-            let mut style = base;
-            if here == Some(placed.node) {
-                style = style
-                    .fg(style::color(&theme.accent_fg))
-                    .add_modifier(Modifier::BOLD);
+            paint_box(frame.buffer_mut(), screen, &look);
+            continue;
+        }
+        // Only part of the box is on screen. Draw all of it somewhere off screen and copy over the
+        // part that is, so it is cut off by the window's edge like a picture, not left out.
+        let mut scratch = Buffer::empty(Rect::new(0, 0, rect.width, rect.height));
+        paint_box(
+            &mut scratch,
+            Rect::new(0, 0, rect.width, rect.height),
+            &look,
+        );
+        let buf = frame.buffer_mut();
+        for y in visible.y..visible.bottom() {
+            for x in visible.x..visible.right() {
+                buf[(area.x + (x - left), area.y + (y - top))] =
+                    scratch[(x - rect.x, y - rect.y)].clone();
             }
-            let padded = pad_to(&plain, usize::from(screen.width));
-            frame.render_widget(Paragraph::new(Span::styled(padded, style)), screen);
-            continue;
         }
-        let block = style::themed_block(config, &title, here == Some(placed.node)).style(base);
-        let inner = block.inner(screen);
-        frame.render_widget(block, screen);
-        if inner.height == 0 || inner.width == 0 {
-            continue;
-        }
-        let lines = box_lines(state, placed.node, usize::from(inner.width), config, ascii);
-        frame.render_widget(Paragraph::new(lines), inner);
     }
+}
+
+/// What `paint_box` needs to draw one node's box.
+struct BoxLook<'a> {
+    state: &'a WiringState,
+    node: usize,
+    here: Option<usize>,
+    config: &'a Config,
+    scale: wiring_layout::Scale,
+    ascii: bool,
+}
+
+/// Draws the box of one node into `buf` at `screen`: a frame round its lines, or just its name
+/// when the boxes are too small for frames.
+fn paint_box(buf: &mut Buffer, screen: Rect, look: &BoxLook<'_>) {
+    let BoxLook {
+        state,
+        node: index,
+        here,
+        config,
+        scale,
+        ascii,
+    } = *look;
+    let theme = &config.theme;
+    let node = &state.topology().nodes[index];
+    // A mount or an eject started from the chosen node is still running.
+    let working = if state.index() == Some(index) && state.is_working() {
+        " …"
+    } else {
+        ""
+    };
+    let name = format!(
+        "{}{}{}{working}",
+        fold_sign(state, index, ascii),
+        icon(node, ascii),
+        node.title()
+    );
+    let mut base = Style::default();
+    if state.index() == Some(index) {
+        base = base.bg(style::color(&theme.selection_bg));
+    }
+    if refused(state, index) {
+        base = base.add_modifier(Modifier::DIM);
+    }
+    if !scale.bordered {
+        // The smallest boxes are one line of text, the frame told by bold type.
+        let plain = fit_width(&name, usize::from(screen.width));
+        let mut style = base;
+        if here == Some(index) {
+            style = style
+                .fg(style::color(&theme.accent_fg))
+                .add_modifier(Modifier::BOLD);
+        }
+        let padded = pad_to(&plain, usize::from(screen.width));
+        Paragraph::new(Span::styled(padded, style)).render(screen, buf);
+        return;
+    }
+    let title = fit_width(&name, usize::from(scale.node_w.saturating_sub(4)));
+    let block = style::themed_block(config, &title, here == Some(index)).style(base);
+    let inner = block.inner(screen);
+    block.render(screen, buf);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+    let lines = box_lines(state, index, usize::from(inner.width), config, ascii);
+    Paragraph::new(lines).render(inner, buf);
 }
 
 fn render_narrow(
@@ -412,6 +452,27 @@ fn render_narrow(
 
     let here = state.here(current_dir);
     let width = usize::from(area.width);
+    // Deep folders are indented a step for every level, so the name column grows to hold the
+    // longest row (up to three fifths of the width) instead of cutting the deepest names short.
+    let name_of = |row: &wiring_layout::Row| {
+        let node = &state.topology().nodes[row.node];
+        format!(
+            "{}{}{}{}",
+            row.prefix,
+            fold_sign(state, row.node, ascii),
+            icon(node, ascii),
+            node.title()
+        )
+    };
+    let longest = layout
+        .rows
+        .iter()
+        .map(|row| text_width(&name_of(row)))
+        .max()
+        .unwrap_or(0);
+    let name_width = longest
+        .clamp(18, (width * 3 / 5).max(40))
+        .min(width.saturating_sub(2));
     let lines: Vec<Line<'static>> = layout
         .rows
         .iter()
@@ -426,14 +487,7 @@ fn render_narrow(
             } else {
                 "  ".to_string()
             };
-            let name = format!(
-                "{}{}{}{}",
-                row.prefix,
-                fold_sign(state, row.node, ascii),
-                icon(node, ascii),
-                node.title()
-            );
-            let name_width = (width / 2).clamp(18, 40).min(width.saturating_sub(2));
+            let name = name_of(row);
             let rates = state.rates(row.node);
             let busy = rates.read > 0 || rates.written > 0;
             let mut detail = vec![match node.kind {
@@ -933,6 +987,136 @@ mod tests {
         assert!(drawn(&s, "/", 60, 8, Instant::now()).contains("looking at how"));
         s.mark_scanned_for_test();
         assert!(drawn(&s, "/", 60, 8, Instant::now()).contains("no storage found"));
+    }
+
+    /// The machine with forty sibling folders under `/home/me`, browsed at one of them.
+    fn crowded_state(here: &str) -> (tokio::runtime::Runtime, WiringState) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let vfs = shared::MemVfs::new();
+        for i in 0..40 {
+            vfs.add_dir(format!("/home/me/d{i:02}/inner"));
+        }
+        let mut s = WiringState::with_vfs(runtime.handle().clone(), machine(), Arc::new(vfs));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            s.poll(Instant::now(), Path::new(here));
+            if s.topology().nodes.iter().all(|n| n.title() != "loading…") {
+                return (runtime, s);
+            }
+            assert!(Instant::now() < deadline, "folders were never read");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn once_the_size_is_known_the_hardware_and_the_deep_folder_are_on_screen_together() {
+        let here = "/home/me/projects/minuteman";
+        let (_rt, mut s) = folders_state(here);
+        let before = drawn(&s, here, 130, 40, Instant::now());
+        assert!(
+            !before.contains("PCIe 02:00.0"),
+            "unsized, the far left scrolls away:\n{before}"
+        );
+        s.set_size(130, 40);
+        let shown = drawn(&s, here, 130, 40, Instant::now());
+        // The boxes are squeezed to fit, so long names are cut short with an ellipsis.
+        for text in ["PCIe", "▣ nvm", "▾ ◈ r", "▾ pro", "▾ min"] {
+            assert!(shown.contains(text), "{text:?} missing:\n{shown}");
+        }
+        assert_eq!((s.left().get(), s.top().get()), (0, 0), "nothing scrolled");
+    }
+
+    #[test]
+    fn a_shorter_window_shows_fewer_siblings_and_still_the_one_being_browsed() {
+        let here = "/home/me/d27";
+        let (_rt, mut s) = crowded_state(here);
+        let siblings = |s: &WiringState, height: u16| {
+            let shown = drawn(s, here, 200, height, Instant::now());
+            (
+                shown.matches("▸ d").count() + shown.matches("▾ d").count(),
+                shown,
+            )
+        };
+        s.set_size(200, 80);
+        let (tall, shown) = siblings(&s, 80);
+        assert!(shown.contains("d27"), "{shown}");
+        s.set_size(200, 14);
+        let (short, shown) = siblings(&s, 14);
+        assert!(short < tall, "{short} < {tall}:\n{shown}");
+        assert!(shown.contains("d27"), "the way down is kept:\n{shown}");
+        assert!(shown.contains("more"), "and the cut says so:\n{shown}");
+        s.set_size(200, 80);
+        assert_eq!(
+            siblings(&s, 80).0,
+            tall,
+            "growing the window brings them back"
+        );
+    }
+
+    #[test]
+    fn a_folder_chosen_in_the_diagram_survives_the_window_shrinking() {
+        let here = "/home/me/d02";
+        let (_rt, mut s) = crowded_state(here);
+        s.set_size(200, 80);
+        s.select_for_test("/home/me/d30");
+        s.set_size(200, 12);
+        assert!(
+            s.index().is_some(),
+            "d30 is far from the browsed folder, but it is the chosen one"
+        );
+    }
+
+    #[test]
+    fn a_box_cut_by_the_window_edge_is_drawn_cut_not_left_out() {
+        let here = "/home/me/projects/minuteman";
+        let (_rt, s) = folders_state(here);
+        let mut straddlers = 0;
+        for width in 100..=140u16 {
+            let shown = drawn(&s, here, width, 40, Instant::now());
+            let lines: Vec<&str> = shown.lines().collect();
+            let layout = s.layout(width);
+            let (left, top) = (s.left().get(), s.top().get());
+            for placed in &layout.placed {
+                let r = placed.rect;
+                if r.x < left && r.right() > left && r.y >= top && r.bottom() <= top + 40 {
+                    straddlers += 1;
+                    // The slice of the box that is on screen, from column 0 to its right edge, is
+                    // drawn: its frame is there.
+                    let visible = usize::from(r.right() - left);
+                    let drawn_cells = (r.y - top..r.bottom() - top)
+                        .flat_map(|y| lines[usize::from(y)].chars().take(visible))
+                        .filter(|c| *c != ' ')
+                        .count();
+                    assert!(
+                        drawn_cells > 0,
+                        "width {width}: the box at x={} is cut by the window's left edge but \
+                         nothing of it is drawn:\n{shown}",
+                        r.x
+                    );
+                }
+            }
+        }
+        assert!(straddlers > 0, "no width made a box straddle the edge");
+    }
+
+    #[test]
+    fn a_sized_diagram_draws_at_any_size_without_panicking() {
+        let here = "/home/me/projects/minuteman";
+        let (_rt, mut s) = folders_state(here);
+        for (w, h) in [
+            (0, 0),
+            (1, 1),
+            (9, 3),
+            (30, 6),
+            (60, 10),
+            (99, 20),
+            (130, 40),
+            (200, 25),
+            (300, 80),
+        ] {
+            s.set_size(w, h);
+            drawn(&s, here, w, h, Instant::now());
+        }
     }
 
     #[test]

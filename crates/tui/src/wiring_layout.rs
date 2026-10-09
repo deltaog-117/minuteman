@@ -29,6 +29,8 @@ use std::collections::HashMap;
 use devices::topology::{NodeKind, Topology};
 use ratatui::layout::Rect;
 
+use crate::wiring_folders::MAX_SHOWN;
+
 /// The width of a node's box, and the room for lines between two columns.
 pub const NODE_W: u16 = 20;
 pub const GAP: u16 = 4;
@@ -95,6 +97,31 @@ pub const LEVELS: [Scale; 4] = [
         bordered: false,
     },
 ];
+
+/// How many subfolders a folder may show, most first. `fit` takes the first that lets the whole
+/// diagram fit the window, so a crowded window shows fewer siblings (the rest are "+N more")
+/// rather than running off the edge.
+pub const CAPS: [usize; 4] = [MAX_SHOWN, 8, 5, 3];
+
+/// The narrowest a box is squeezed to before the diagram gives up on columns and becomes a tree:
+/// room for a short name and a sign in a bordered box.
+pub const MIN_NODE_W: u16 = 10;
+
+impl Scale {
+    /// This size with its boxes made as wide as `columns` columns in `width` cells allow: no wider
+    /// than one and a half times what the level draws them at, and `None` if that would be
+    /// narrower than `MIN_NODE_W`.
+    pub fn fitted_to(&self, columns: usize, width: u16) -> Option<Scale> {
+        let columns = u32::try_from(columns.max(1)).unwrap_or(u32::MAX);
+        let gap = u32::from(self.gap);
+        // Each column takes a box and a gap, and the last has no gap after it.
+        let pitch = (u32::from(width) + gap) / columns;
+        let room = pitch.checked_sub(gap)?;
+        let widest = u32::from(self.node_w) * 3 / 2;
+        let node_w = u16::try_from(room.min(widest)).ok()?;
+        (node_w >= MIN_NODE_W).then_some(Scale { node_w, ..*self })
+    }
+}
 
 /// How the diagram is sized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +267,76 @@ pub fn zoomed(t: &Topology, width: u16, height: u16, zoom: Zoom) -> Layout {
             smallest.unwrap_or_else(|| narrow(t))
         }
     }
+}
+
+/// How many columns the topology spans.
+fn columns(t: &Topology) -> usize {
+    t.depths()
+        .into_iter()
+        .max()
+        .map_or(0, |deepest| deepest + 1)
+}
+
+/// The layout at `zoom` that holds the whole of `t` inside `width` by `height`, if there is one:
+/// boxes in columns at the largest level whose squeezed boxes fit both ways, else the tree if its
+/// rows fit the height. A level chosen by hand is the only one tried.
+fn fitting(t: &Topology, width: u16, height: u16, zoom: Zoom) -> Option<Layout> {
+    let levels = match zoom {
+        Zoom::Fit => 0..LEVELS.len(),
+        Zoom::Level(level) => {
+            let level = level.min(LEVELS.len() - 1);
+            level..level + 1
+        }
+    };
+    let columns = columns(t);
+    for level in levels {
+        let Some(scale) = LEVELS[level].fitted_to(columns, width) else {
+            continue;
+        };
+        let mut wide = wide_at(t, scale);
+        wide.level = level;
+        if wide.size.0 <= width && wide.size.1 <= height {
+            return Some(wide);
+        }
+    }
+    let tree = narrow(t);
+    (tree.size.1 <= height).then_some(tree)
+}
+
+/// Lays the diagram out so that all of it is on screen. `compose(cap)` gives the topology with
+/// each folder showing at most `cap` subfolders; the first cap in `CAPS` for which the whole
+/// topology fits `width` by `height` wins, at the largest level that fits. If none does, even with
+/// the fewest folders, the smallest boxes that fit the width are used and the view scrolls, as it
+/// always did. The topology is returned with the layout, since which folders it holds depends on
+/// the cap.
+pub fn fit(
+    compose: impl Fn(usize) -> Topology,
+    width: u16,
+    height: u16,
+    zoom: Zoom,
+) -> (Topology, Layout) {
+    let mut crowded = None;
+    for cap in CAPS {
+        let t = compose(cap);
+        if let Some(layout) = fitting(&t, width, height, zoom) {
+            return (t, layout);
+        }
+        crowded = Some(t);
+    }
+    let t = crowded.unwrap_or_else(|| compose(MAX_SHOWN));
+    let columns = columns(&t);
+    let wide_at_level = |level: usize| {
+        let scale = LEVELS[level].fitted_to(columns, width)?;
+        let mut wide = wide_at(&t, scale);
+        wide.level = level;
+        Some(wide)
+    };
+    let layout = match zoom {
+        Zoom::Level(level) => wide_at_level(level.min(LEVELS.len() - 1)),
+        Zoom::Fit => (0..LEVELS.len()).rev().find_map(wide_at_level),
+    }
+    .unwrap_or_else(|| narrow(&t));
+    (t, layout)
 }
 
 #[cfg(test)]
@@ -855,6 +952,174 @@ mod tests {
         assert!(l.placed.is_empty() && l.rows.is_empty() && l.links.is_empty());
         assert!(connectors(&l).is_empty());
         assert_eq!(narrow(&t).rows.len(), 0);
+    }
+
+    /// A chain of `depth` unfolded folders under one filesystem, each showing at most `cap` of its
+    /// `siblings` subfolders and the next folder hanging from the first: the shape a deep path
+    /// makes.
+    fn chain(depth: usize, siblings: usize, cap: usize) -> Topology {
+        let mut t = Topology::default();
+        let mut fs = Node::new("sda1", NodeKind::Partition);
+        fs.mount = Some("/".into());
+        let mut parent = t.add(fs);
+        for level in 0..depth {
+            let shown = siblings.min(cap);
+            let mut first = None;
+            for i in 0..shown {
+                let child = t.add(Node::new(&format!("/d{level}/{i}"), NodeKind::Folder));
+                t.link(parent, child);
+                first = first.or(Some(child));
+            }
+            if siblings > shown {
+                let more = t.add(Node::new(&format!("/d{level}/more"), NodeKind::More));
+                t.link(parent, more);
+            }
+            match first {
+                Some(next) => parent = next,
+                None => break,
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn boxes_are_squeezed_to_fit_the_columns_but_never_below_the_minimum_or_past_one_and_a_half() {
+        let level = LEVELS[0];
+        let roomy = level.fitted_to(5, 1000).unwrap();
+        assert_eq!(
+            roomy.node_w,
+            level.node_w * 3 / 2,
+            "room to spare: stretched, up to a limit"
+        );
+        let tight = level.fitted_to(5, 100).unwrap();
+        // Five columns share 100 cells and the last has no gap after it: (100 + 4) / 5 = 20 a column.
+        assert_eq!(tight.node_w, 20 - level.gap, "{tight:?}");
+        assert!(
+            level
+                .fitted_to(5, 5 * (MIN_NODE_W + level.gap) - level.gap)
+                .is_some()
+        );
+        assert!(
+            level
+                .fitted_to(5, 5 * (MIN_NODE_W + level.gap) - level.gap - 1)
+                .is_none()
+        );
+        assert!(level.fitted_to(5, 0).is_none());
+        assert_eq!(
+            level.fitted_to(0, 100),
+            level.fitted_to(1, 100),
+            "no columns count as one"
+        );
+    }
+
+    #[test]
+    fn a_deep_chain_gets_boxes_when_the_window_is_wide_enough_and_the_tree_when_it_is_not() {
+        let compose = |cap| chain(9, 20, cap);
+        let (_, wide) = fit(compose, 330, 120, Zoom::Fit);
+        assert_eq!(wide.mode, Mode::Wide);
+        assert!(wide.size.0 <= 330 && wide.size.1 <= 120, "{:?}", wide.size);
+        assert!(wide.scale.node_w >= MIN_NODE_W);
+        let (_, tree) = fit(compose, 100, 120, Zoom::Fit);
+        assert_eq!(tree.mode, Mode::Narrow, "ten columns do not fit 100 cells");
+    }
+
+    #[test]
+    fn a_short_window_shows_fewer_siblings_and_says_how_many_more() {
+        let compose = |cap| chain(3, 30, cap);
+        let (tall, _) = fit(compose, 300, 200, Zoom::Fit);
+        let (short, layout) = fit(compose, 300, 14, Zoom::Fit);
+        let folders = |t: &Topology| {
+            t.nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Folder)
+                .count()
+        };
+        assert_eq!(folders(&tall), 3 * MAX_SHOWN, "room: the most siblings");
+        assert!(folders(&short) < folders(&tall));
+        assert!(
+            short.nodes.iter().any(|n| n.kind == NodeKind::More),
+            "the cut is a visible note"
+        );
+        let rows = match layout.mode {
+            Mode::Wide => layout.size.1,
+            Mode::Narrow => layout.size.1,
+        };
+        assert!(rows <= 14, "{rows}");
+    }
+
+    #[test]
+    fn when_nothing_fits_the_smallest_boxes_that_fit_the_width_are_used_with_the_fewest_folders() {
+        let compose = |cap| chain(9, 30, cap);
+        let (t, layout) = fit(compose, 400, 3, Zoom::Fit);
+        assert_eq!(layout.level, LEVELS.len() - 1);
+        assert_eq!(layout.mode, Mode::Wide);
+        assert!(layout.size.1 > 3, "it scrolls");
+        let shown = t
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Folder)
+            .count();
+        assert_eq!(shown, 9 * CAPS[CAPS.len() - 1]);
+        // A level chosen by hand is kept even then.
+        let (_, by_hand) = fit(compose, 400, 3, Zoom::Level(1));
+        assert_eq!(by_hand.level, 1);
+    }
+
+    proptest::proptest! {
+        /// However the window and the folders fall, the fitted layout either holds the whole
+        /// diagram inside the window, or no cap and no level could, in which case the folders
+        /// are the fewest and the boxes the smallest. Boxes never overlap, and the layout holds
+        /// every node of the topology it comes with.
+        #[test]
+        fn the_fitted_diagram_fits_whenever_anything_does(
+            width in 0u16..320,
+            height in 0u16..90,
+            depth in 0usize..12,
+            siblings in 0usize..40,
+            level in proptest::option::of(0usize..4),
+        ) {
+            let zoom = level.map_or(Zoom::Fit, Zoom::Level);
+            let compose = |cap| chain(depth, siblings, cap);
+            let (t, layout) = fit(compose, width, height, zoom);
+            let possible = CAPS.iter().find(|&&cap| fitting(&chain(depth, siblings, cap), width, height, zoom).is_some());
+            match possible {
+                Some(&cap) => {
+                    // The first cap that can fit wins, and the result really fits.
+                    proptest::prop_assert_eq!(t.nodes.len(), chain(depth, siblings, cap).nodes.len());
+                    match layout.mode {
+                        Mode::Wide => proptest::prop_assert!(layout.size.0 <= width && layout.size.1 <= height),
+                        Mode::Narrow => proptest::prop_assert!(layout.size.1 <= height),
+                    }
+                }
+                None => {
+                    let fewest = CAPS[CAPS.len() - 1];
+                    proptest::prop_assert_eq!(t.nodes.len(), chain(depth, siblings, fewest).nodes.len());
+                }
+            }
+            match layout.mode {
+                Mode::Wide => {
+                    proptest::prop_assert_eq!(layout.placed.len(), t.nodes.len());
+                    for (i, a) in layout.placed.iter().enumerate() {
+                        proptest::prop_assert!(a.rect.right() <= layout.size.0 && a.rect.bottom() <= layout.size.1);
+                        for b in &layout.placed[i + 1..] {
+                            proptest::prop_assert!(!a.rect.intersects(b.rect));
+                        }
+                    }
+                }
+                Mode::Narrow => proptest::prop_assert_eq!(layout.rows.len(), t.nodes.len()),
+            }
+        }
+
+        /// A squeezed scale always fits the columns it was squeezed for, and is within bounds.
+        #[test]
+        fn a_fitted_scale_holds_its_columns_inside_the_width(columns in 1usize..30, width in 0u16..500, level in 0usize..4) {
+            if let Some(scale) = LEVELS[level].fitted_to(columns, width) {
+                proptest::prop_assert!(scale.node_w >= MIN_NODE_W);
+                proptest::prop_assert!(scale.node_w <= LEVELS[level].node_w * 3 / 2);
+                let canvas = columns * usize::from(scale.node_w + scale.gap) - usize::from(scale.gap);
+                proptest::prop_assert!(canvas <= usize::from(width), "{canvas} > {width}");
+            }
+        }
     }
 
     #[test]

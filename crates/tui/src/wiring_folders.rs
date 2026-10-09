@@ -22,9 +22,11 @@
 //! Opening a folder reads its subfolders on the blocking pool, so a slow disk or a share never
 //! holds up the interface: until the answer arrives the folder shows a "loading…" note in place of
 //! its children. Only folders are shown (files are what the browser is for), hidden ones only if
-//! the browser is showing them, and a folder with many subfolders shows the first few and a note
-//! saying how many more there are, always including the one on the way to the folder being
-//! browsed, so the path down to where you are is never cut.
+//! the browser is showing them, and a folder with many subfolders shows some of them and a note
+//! saying how many more there are. Which ones: always the one on the way to the folder being
+//! browsed and the one chosen, so the path down to where you are is never cut, and then the
+//! siblings nearest to those, so the cut falls on what is furthest from where you are looking.
+//! How many is a cap the layout chooses to make the whole diagram fit the window.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -34,7 +36,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use devices::topology::{Node, NodeKind, Topology};
 use shared::Vfs;
 
-/// How many subfolders a folder shows before the rest are folded into "+N more".
+/// The most subfolders a folder shows before the rest are folded into "+N more"; the layout
+/// asks for fewer when the window is too small for that many.
 pub const MAX_SHOWN: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +60,8 @@ pub struct Folders {
     rx: Receiver<Answer>,
     /// The folder being browsed, whose way down is always shown.
     toward: Option<PathBuf>,
+    /// The folder chosen in the diagram, whose way down is always shown too.
+    chosen: Option<PathBuf>,
 }
 
 impl Folders {
@@ -71,12 +76,19 @@ impl Folders {
             tx,
             rx,
             toward: None,
+            chosen: None,
         }
     }
 
     /// Says which folder is being browsed, so the way down to it is never folded away.
     pub fn set_toward(&mut self, here: Option<PathBuf>) {
         self.toward = here;
+    }
+
+    /// Says which folder is chosen in the diagram, so choosing a folder and then making the
+    /// window smaller does not trim the folder away from under the cursor.
+    pub fn set_chosen(&mut self, chosen: Option<PathBuf>) {
+        self.chosen = chosen;
     }
 
     pub fn is_expanded(&self, path: &Path) -> bool {
@@ -153,20 +165,37 @@ impl Folders {
         self.listings.values().any(|l| *l == Listing::Loading)
     }
 
-    /// The name of the child of `path` on the way to the folder being browsed.
-    fn on_the_way(&self, path: &Path) -> Option<String> {
-        let rest = self.toward.as_deref()?.strip_prefix(path).ok()?;
-        Some(
-            rest.components()
-                .next()?
-                .as_os_str()
-                .to_string_lossy()
-                .into_owned(),
-        )
+    /// The names of the children of `path` on the way to the folder being browsed and to the one
+    /// chosen (one name if they go the same way, none if neither goes through `path`).
+    fn on_the_way(&self, path: &Path) -> Vec<String> {
+        let child = |target: &Option<PathBuf>| {
+            let rest = target.as_deref()?.strip_prefix(path).ok()?;
+            Some(
+                rest.components()
+                    .next()?
+                    .as_os_str()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        let mut names: Vec<String> = [&self.toward, &self.chosen]
+            .into_iter()
+            .filter_map(child)
+            .collect();
+        names.dedup();
+        names
     }
 
-    /// `base` with every opened folder added below the filesystem it is on.
+    /// `base` with every opened folder added below the filesystem it is on, each showing at most
+    /// `MAX_SHOWN` subfolders.
     pub fn compose(&self, base: &Topology) -> Topology {
+        self.compose_capped(base, MAX_SHOWN)
+    }
+
+    /// Like [`compose`](Self::compose), with each folder showing at most `cap` subfolders (the
+    /// way down to the browsed and the chosen folder excepted, so a very small cap can still
+    /// show two).
+    pub fn compose_capped(&self, base: &Topology, cap: usize) -> Topology {
         let mut topology = base.clone();
         let roots: Vec<(usize, PathBuf)> = base
             .nodes
@@ -180,7 +209,7 @@ impl Folders {
             })
             .collect();
         for (at, path) in roots {
-            self.attach(&mut topology, at, &path);
+            self.attach(&mut topology, at, &path, cap);
         }
         topology
     }
@@ -193,14 +222,16 @@ impl Folders {
         topology.link(parent, at);
     }
 
-    fn attach(&self, topology: &mut Topology, parent: usize, path: &Path) {
+    fn attach(&self, topology: &mut Topology, parent: usize, path: &Path, cap: usize) {
         match self.listings.get(path) {
             None | Some(Listing::Loading) => Self::note(topology, parent, path, "loading…"),
             Some(Listing::Failed(why)) => {
                 Self::note(topology, parent, path, &format!("cannot read: {why}"));
             }
             Some(Listing::Loaded(names)) => {
-                let shown = pick(names, MAX_SHOWN, self.on_the_way(path).as_deref());
+                let musts = self.on_the_way(path);
+                let musts: Vec<&str> = musts.iter().map(String::as_str).collect();
+                let shown = pick(names, cap, &musts);
                 for name in &shown {
                     let child_path = path.join(name);
                     let mut folder = Node::new(&child_path.display().to_string(), NodeKind::Folder);
@@ -209,7 +240,7 @@ impl Folders {
                     let child = topology.add(folder);
                     topology.link(parent, child);
                     if self.expanded.contains(&child_path) {
-                        self.attach(topology, child, &child_path);
+                        self.attach(topology, child, &child_path, cap);
                     }
                 }
                 if names.len() > shown.len() {
@@ -221,17 +252,35 @@ impl Folders {
     }
 }
 
-/// The names to show: the first `cap`, except that `must`, if it is one of `names`, is always
-/// there, in place of the last of them when it would have been cut.
-fn pick<'a>(names: &'a [String], cap: usize, must: Option<&str>) -> Vec<&'a String> {
-    let mut indices: Vec<usize> = (0..names.len().min(cap)).collect();
-    if let Some(at) = must.and_then(|m| names.iter().position(|n| n == m))
-        && at >= cap
-        && let Some(last) = indices.last_mut()
-    {
-        *last = at;
+/// The names to show, at most `cap` of them, in their order: every one of `musts` that is among
+/// `names` (up to `cap`), then the names nearest to those, earlier ones first on a tie. With no
+/// `musts` among the names, the first `cap`.
+fn pick<'a>(names: &'a [String], cap: usize, musts: &[&str]) -> Vec<&'a String> {
+    if names.len() <= cap {
+        return names.iter().collect();
     }
-    indices.into_iter().map(|i| &names[i]).collect()
+    let mut anchors: Vec<usize> = musts
+        .iter()
+        .filter_map(|m| names.iter().position(|n| n == m))
+        .collect();
+    anchors.sort_unstable();
+    anchors.dedup();
+    anchors.truncate(cap);
+    let mut keep = vec![false; names.len()];
+    for &a in &anchors {
+        keep[a] = true;
+    }
+    let mut rest: Vec<usize> = (0..names.len()).filter(|&i| !keep[i]).collect();
+    // With no anchors every name is 0 away from nothing, so the order is simply the first ones.
+    rest.sort_by_key(|&i| (anchors.iter().map(|&a| a.abs_diff(i)).min().unwrap_or(0), i));
+    for &i in rest.iter().take(cap - anchors.len()) {
+        keep[i] = true;
+    }
+    names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| keep[i].then_some(n))
+        .collect()
 }
 
 #[cfg(test)]
@@ -430,33 +479,92 @@ mod tests {
             .map(Node::title)
             .collect();
         assert_eq!(shown.len(), MAX_SHOWN);
+        assert!(shown.contains(&"d27".to_string()), "{shown:?}");
         assert_eq!(
-            shown.last().map(String::as_str),
-            Some("d27"),
-            "in place of the last: {shown:?}"
+            (shown[0].as_str(), shown[MAX_SHOWN - 1].as_str()),
+            ("d18", "d29"),
+            "the siblings nearest the way down, not the first twelve: {shown:?}"
         );
-        assert_eq!(shown[0], "d00");
     }
 
     #[test]
-    fn picking_never_exceeds_the_cap_and_keeps_the_required_name_in_order() {
+    fn a_smaller_cap_shows_fewer_folders_and_the_note_counts_the_rest() {
+        let rt = runtime();
+        let vfs = MemVfs::new();
+        for i in 0..30 {
+            vfs.add_dir(format!("/data/d{i:02}"));
+        }
+        let mut folders = Folders::new(rt.handle().clone(), Arc::new(vfs), false);
+        folders.expand(Path::new("/data"));
+        settle(&mut folders);
+        for cap in [12, 8, 5, 3] {
+            let t = folders.compose_capped(&base(), cap);
+            let shown = t
+                .nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Folder)
+                .count();
+            assert_eq!(shown, cap);
+            let note = t.nodes.iter().find(|n| n.kind == NodeKind::More).unwrap();
+            assert_eq!(note.title(), format!("+{} more", 30 - cap));
+        }
+    }
+
+    #[test]
+    fn the_chosen_folder_is_kept_as_well_as_the_way_to_the_browsed_one() {
+        let rt = runtime();
+        let vfs = MemVfs::new();
+        for i in 0..30 {
+            vfs.add_dir(format!("/data/d{i:02}"));
+        }
+        let mut folders = Folders::new(rt.handle().clone(), Arc::new(vfs), false);
+        folders.set_toward(Some("/data/d02".into()));
+        folders.set_chosen(Some("/data/d25".into()));
+        folders.expand(Path::new("/data"));
+        settle(&mut folders);
+        let shown: Vec<String> = folders
+            .compose_capped(&base(), 3)
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Folder)
+            .map(Node::title)
+            .collect();
+        assert_eq!(shown, ["d01", "d02", "d25"], "{shown:?}");
+    }
+
+    #[test]
+    fn picking_never_exceeds_the_cap_and_keeps_the_required_names_in_order() {
         let names: Vec<String> = (0..20).map(|i| format!("n{i:02}")).collect();
-        assert_eq!(pick(&names, 5, None).len(), 5);
-        assert_eq!(pick(&names, 5, Some("n02")).len(), 5);
+        let texts = |picked: Vec<&String>| -> Vec<String> { picked.into_iter().cloned().collect() };
+        assert_eq!(pick(&names, 5, &[]).len(), 5);
         assert_eq!(
-            pick(&names, 5, Some("n02"))[2],
-            "n02",
-            "already shown: nothing changes"
+            texts(pick(&names, 5, &[]))[4],
+            "n04",
+            "no anchor: the first ones"
         );
-        let with = pick(&names, 5, Some("n17"));
         assert_eq!(
-            (with.len(), with[4].as_str(), with[0].as_str()),
-            (5, "n17", "n00")
+            texts(pick(&names, 5, &["n02"])),
+            ["n00", "n01", "n02", "n03", "n04"]
         );
-        assert_eq!(pick(&names, 5, Some("missing")).len(), 5);
-        assert_eq!(pick(&names[..3], 5, Some("n02")).len(), 3);
-        assert!(pick(&[], 5, Some("x")).is_empty());
-        assert!(pick(&names, 0, Some("n17")).is_empty());
+        // Far down: a window ending at the end of the list, nearest first.
+        assert_eq!(
+            texts(pick(&names, 5, &["n17"])),
+            ["n15", "n16", "n17", "n18", "n19"]
+        );
+        assert_eq!(
+            texts(pick(&names, 4, &["n03", "n15"])),
+            ["n02", "n03", "n04", "n15"],
+            "two anchors share the room; on a tie the earlier name goes first"
+        );
+        assert_eq!(pick(&names, 5, &["missing"]).len(), 5);
+        assert_eq!(pick(&names[..3], 5, &["n02"]).len(), 3);
+        assert!(pick(&[], 5, &["x"]).is_empty());
+        assert!(pick(&names, 0, &["n17"]).is_empty());
+        assert_eq!(
+            pick(&names, 1, &["n03", "n15"]).len(),
+            1,
+            "more anchors than room"
+        );
     }
 
     #[test]

@@ -85,6 +85,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-06 | Plugin `run_action` | One more turn of the render loop that enters the browser's own key handling as a `Browse` step, not a second dispatcher for plugins | ✅ Confirmed |
 | 2026-10-06 | Plugin Cost Benchmarks | Ignored benchmark tests beside the integration tests, run by hand with `--release`, no stored baseline (COA A); a criterion bench (B) and a docs-only close-out (C) rejected | ✅ Confirmed |
 | 2026-10-09 | Atlas Storage Map | Lazy zoom on the disk usage scanner with a pure whole-cell treemap (COA A); a cached whole-volume tree with a minimap (B) and a volumes-only map (C) not taken | ✅ Confirmed |
+| 2026-10-09 | Wiring Diagram Fit | Fit by budget: a cap on siblings and a squeeze on box width chosen so the whole diagram fits (COA A); a selection-dependent focus layout (B) and clipped panning (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -6493,6 +6494,77 @@ shares, the frame on the chosen block, the empty states, and no panic for any wi
 volumes). Against the real binary through a PTY read with `pyte` and `HOME` pointed at a scratch
 folder: the volume map, `Enter` into `/` with rows arriving, `Enter` into `/var`, `Backspace` twice,
 `o` moving the browser to `/var` with the pin following, and a real SGR mouse click zooming in.
+
+### Wiring Diagram: Fitting the Whole Diagram in the Window (COA A)
+
+**Date:** 2026-10-09 · **Author:** deltaog-117
+
+**Context.** After the folders could be unfolded, a deep path made the diagram much larger than
+the window: a column for every level and every unfolded sibling stacked down the page. The fit only
+required the *hardware* to fit the width, so the view panned to the chosen box, the hardware went
+off the left edge, and boxes not wholly inside the window were skipped while their lines were still
+drawn: "some things appearing and others not". Reproduced in the real binary with this repository's
+own path (`crates/tui`) at 150×40: a slice from the middle of the canvas, `Vida` at the left edge,
+dangling lines, the hardware gone.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Fit by budget: a cap on the siblings each folder shows and a squeeze on the box width, chosen so the whole diagram fits both ways | Chosen |
+| B | Focus and context: columns and siblings far from the chosen node collapse | Rejected: the layout would move with the cursor, so the picture would jump as you navigate |
+| C | Keep panning, but draw clipped boxes and pin the hardware | Its one real fix (clipped boxes) is in A; as a whole it still does not fill the screen |
+
+**Decision.** `wiring_layout::fit(compose, width, height, zoom)` tries a cap on siblings (12, 8, 5, 3)
+and, within each, the zoom levels from largest to smallest, and returns the first topology and
+layout whose whole canvas fits. The cap changes which nodes exist, so `Folders::compose_capped(base,
+cap)` builds the topology for a cap and the fit returns the topology with the layout; `WiringState`
+keeps the pair (`composed`, `fitted`) and rebuilds it whenever the folders, the hardware, the zoom or
+the body size change. The size comes from `set_size`, which `main` calls every turn before `poll` so
+the first frame is already fitted; before a size is known (and in the many older tests) the state
+behaves exactly as before, which is why `layout(width)` keeps its signature and ignores `width` once
+fitted. A level's box width is squeezed to the columns (`Scale::fitted_to`): the window's width
+shared out over the columns, never below 10 cells and never past one and a half times what the level
+draws, and if even 10 does not fit the columns the diagram becomes the tree.
+
+**Which siblings are cut.** Siblings further from where you are go first. `pick` keeps every name
+on the way to the browsed folder and to the chosen one, then fills the rest of the cap with the
+names nearest to those (earlier on a tie). It used to take the first twelve and swap the last for the
+one on the way, which for a folder of 46 showed `1ytunes … copycat111 … minuteman`. The chosen
+folder is taken from the selection's node id (a folder's id is its path), so choosing a far sibling
+and then shrinking the window does not trim the cursor away.
+
+**Why this way.** The result is deterministic given the size, which keeps the picture steady while
+moving through it and makes "fits" a property a test can state for any window: the property test
+asserts that the fitted layout holds the whole diagram whenever any cap and level could, and
+otherwise uses the fewest folders and smallest boxes. Every cut is visible as the existing "+N more"
+note, so nothing is dropped silently. Smaller boxes are preferred over fewer siblings (the loop is
+over caps, then levels), so a deep path in a short window comes out as one-line boxes with every
+sibling up to the cap rather than big boxes with three siblings each; that was a choice, and the
+other order is a small change in `fit`.
+
+**Found by the real binary.** The first fitted run drew the tree at 150 columns (fourteen columns do
+not fit at ten cells each) but its deepest names were cut to `…`: the tree's name column was a fixed
+40 cells and the indentation of nine levels took most of it. It now grows to the longest row, up to
+three fifths of the width. A test for clipped boxes written from the first idea (look for a frame
+character in column 0) failed on a correct drawing, because a clipped title row can legitimately be
+blank there; it now looks for any drawn cell in the visible slice. Another test expected the full
+text `PCIe 02:00.0`, which a squeezed box rightly cuts to `PCIe …`.
+
+**Trade-offs.** At the narrowest, names are cut to a few letters, and the tree is the alternative
+when the columns need more than the window has. A window too short for even the smallest cap and
+level still scrolls, as before. Each refit composes the topology up to four times; it runs on a
+change of size, zoom, folders or hardware, not per frame, and the topologies are tens to hundreds of
+nodes. Open folders are never closed to make room, only trimmed.
+
+**Verification.** `scripts/check` passes (1466 tests). New: the cap on `compose` and the choice of
+which names survive (counts, the note's number, the chosen folder kept, nearest siblings first, more
+anchors than room), `fitted_to` (stretch limit, minimum, exact boundary, and a property that the
+columns fit the width), `fit` (boxes when the window is wide enough and the tree when it is not, fewer
+siblings and a visible note in a short window, the fallback when nothing fits, a level chosen by
+hand kept, and a property over any window, depth, siblings and zoom), the state (the fitted layout
+whatever width is asked, a zero size leaving everything unfolded, `-` and `0` refitting) and the
+drawing (the hardware and the deep folder on screen together, fewer siblings in a shorter window and
+the browsed one kept, growing back, a chosen folder surviving a shrink, cut boxes drawn, any size
+without a panic). In the real binary as described above.
 
 ---
 
