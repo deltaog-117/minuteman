@@ -38,7 +38,7 @@ git_status = true
 # below flips it while browsing.
 show_hidden = false
 
-# The view Minuteman starts in: "list", "grid", "details", "filmstrip", "deck" or "wiring". Pressing `V` switches it
+# The view Minuteman starts in: "list", "grid", "details", "filmstrip", "deck", "wiring" or "atlas". Pressing `V` switches it
 # and remembers the choice for next time (saved in ~/.config/minuteman/local.toml, which wins over
 # this line once you have used `V`). Leave it out to start on the name list.
 # view = "list"
@@ -296,7 +296,16 @@ preview_up = ["K"]
 # folds it. Enter opens the node in the browser (a folder, or the filesystem), and `p` on a folder
 # sends the carried files into that folder if its filesystem has room. Opening the view unfolds the
 # way down to the folder you are in and chooses it, and the diagram scrolls sideways to keep what you
-# chose and what is under it on screen. Capital: "V" is Shift+v, distinct from "v"
+# chose and what is under it on screen.
+# After the wiring diagram comes the atlas, also over the whole window: a map of your storage as
+# blocks whose areas follow sizes. It starts with one block per volume (sized by capacity, filled
+# from the bottom by how full it is, with a diamond on the one holding your folder); Enter or a
+# second click zooms into the chosen block, first to the volume's biggest folders and then into a
+# folder; Backspace or Esc zooms out; the arrows (or h/j/k/l) move to the nearest block and Tab walks
+# through them biggest first; `o` opens the chosen block's folder in the browser, `a` switches
+# between size on disk and apparent size, and `r` looks again. Entries too small for a block of
+# their own are folded into one "+N smaller" block.
+# Capital: "V" is Shift+v, distinct from "v"
 # (marks). In the grid, up/down (and whatever move_down/move_up are bound to) move a whole row, the
 # left/right arrows move one tile, `h`/`l`/enter go up and in, and the wheel scrolls a row; in the
 # filmstrip, move_down/move_up and the up/down arrows move along the strip. Clicking selects in
@@ -353,6 +362,7 @@ bookmark_set = ["B"]
 # enter changes the row under it, and Esc or q closes it. While typing in a shell, every key —
 # this one included — goes to the shell.
 leader = ["space"]
+
 
 # Colors, text styles (bold, italic, ...), glyphs and fonts live in their own file,
 # ~/.config/minuteman/appearance.toml — run `minuteman init-appearance` to print a fully

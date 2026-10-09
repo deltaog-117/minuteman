@@ -46,6 +46,7 @@ use theming::{OpenRule, OpenWith, PluginSpec};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::associations::{self, Associations};
+use crate::atlas::AtlasState;
 use crate::cargo_fit::{Carry, Load};
 use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
@@ -576,6 +577,12 @@ impl App {
     /// only while it exists.
     pub fn begin_wiring(&self, show_hidden: bool) -> WiringState {
         WiringState::new(self.handle.clone(), Arc::clone(&self.vfs), show_hidden)
+    }
+
+    /// The map of the machine's storage (`V`, the atlas view). It looks at the machine only while
+    /// it exists.
+    pub fn begin_atlas(&self) -> AtlasState {
+        AtlasState::new(self.handle.clone(), Arc::clone(&self.vfs))
     }
 
     /// The fuzzy finder over everything below the browsed directory, hidden entries only if the

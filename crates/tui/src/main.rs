@@ -19,6 +19,9 @@ mod anim;
 mod app;
 mod appearance_popup;
 mod associations;
+mod atlas;
+mod atlas_layout;
+mod atlas_view;
 mod boot_splash;
 mod browser_drag;
 mod browser_mouse;
@@ -89,6 +92,7 @@ use appearance_popup::{
     AppearancePopup, AppearanceView, Hit as AppearanceHit, Outcome as AppearanceOutcome,
     Row as AppearanceRow, RowKind as AppearanceRowKind, SaveChoice, SaveTarget,
 };
+use atlas::{AtlasState, Outcome as AtlasKey};
 use boot_splash::BootSplash;
 use browser::BrowserState;
 use browser::sort::Sort;
@@ -414,6 +418,8 @@ struct Overlay<'a> {
     deck: Option<&'a DeckState>,
     /// The diagram of how the storage is wired, in the wiring view.
     wiring: Option<&'a WiringState>,
+    /// The zoomable map of the storage, in the atlas view.
+    atlas: Option<&'a AtlasState>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
     /// `effective_panels`/`effective_styles`.
@@ -1337,6 +1343,8 @@ fn run(
     let mut deck: Option<DeckState> = None;
     // The wiring diagram, likewise only while its view is showing.
     let mut wiring: Option<WiringState> = None;
+    // The atlas, likewise only while its view is showing.
+    let mut atlas: Option<AtlasState> = None;
     // `local.toml`'s three tables, seeded from what `Config::load` already parsed from it (so a
     // save this session correctly carries forward whatever an earlier session saved) and mutated
     // live by the two popups; `effective_theme`/`effective_ui`/`effective_panels` layer each onto
@@ -1409,6 +1417,12 @@ fn run(
             }
         } else {
             wiring = None;
+        }
+        if view_mode == ViewMode::Atlas {
+            let map = atlas.get_or_insert_with(|| app.begin_atlas());
+            map.poll(Instant::now(), browser.current_dir());
+        } else {
+            atlas = None;
         }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
         // browser steps aside until it exits. Checked here, once per turn of the loop, because
@@ -1564,6 +1578,7 @@ fn run(
                     finder: finder.as_ref(),
                     deck: deck.as_ref(),
                     wiring: wiring.as_ref(),
+                    atlas: atlas.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
                     local_panels: &local_panels,
@@ -2093,6 +2108,19 @@ fn run(
                                         );
                                     }
                                 }
+                            }
+                            continue;
+                        }
+                    }
+                    // In the atlas view the whole body is the map: a click chooses a block (and
+                    // zooms into it if it was chosen already). The wheel does nothing there, and
+                    // does not scroll the list that is not showing.
+                    if let Some(map) = atlas.as_mut() {
+                        let at = Position::new(mouse.column, mouse.row);
+                        if layout.current.contains(at) {
+                            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                                let outcome = map.click(atlas_view::layout(layout.current).map, at);
+                                apply_atlas(outcome, app, browser);
                             }
                             continue;
                         }
@@ -3050,6 +3078,25 @@ fn run(
                     }
                 }
 
+                // In the atlas view the arrows move between blocks, `Enter` zooms in, `Backspace`
+                // out and `o` opens in the browser. Anything else is the browser's.
+                if let Some(map) = atlas.as_mut() {
+                    let panels = effective_panels(config, &local_panels);
+                    let body = browser_layout(
+                        terminal.size()?.into(),
+                        panels.columns,
+                        panels.show_hud,
+                        view_mode,
+                        effective_theme(config, &local_theme).shape,
+                    )
+                    .current;
+                    let outcome = map.key(key, atlas_view::layout(body).map);
+                    if outcome != AtlasKey::Pass {
+                        apply_atlas(outcome, app, browser);
+                        continue;
+                    }
+                }
+
                 // In the deck view `Tab` takes the keys to the cards; with them there, the arrows,
                 // `Enter`, `m`, `e` and `Esc` are theirs. Anything else is the browser's.
                 if let Some(cards) = deck.as_mut() {
@@ -3254,6 +3301,7 @@ fn run(
                 grid_top = 0;
                 app.status = Some(match Config::save_view(view_mode.label()) {
                     Ok(()) if view_mode == ViewMode::Wiring => wiring::HINT.to_string(),
+                    Ok(()) if view_mode == ViewMode::Atlas => atlas::HINT.to_string(),
                     Ok(()) => format!("view: {}", view_mode.label()),
                     Err(e) => format!("view: {} (not saved: {e})", view_mode.label()),
                 });
@@ -3545,6 +3593,19 @@ struct PreviewSubject<'a> {
     label: &'a str,
 }
 
+/// Does what the atlas asked for: go to a folder, or say something. `Pass` and `Handled` ask for
+/// nothing.
+fn apply_atlas(outcome: AtlasKey, app: &mut App, browser: &mut BrowserState) {
+    match outcome {
+        AtlasKey::Goto(path) => {
+            let plan = browser.plan_goto(&path);
+            app.begin_move(browser, plan, Some("opened".into()), "folder");
+        }
+        AtlasKey::Status(text) => app.status = Some(text),
+        AtlasKey::Pass | AtlasKey::Handled => {}
+    }
+}
+
 /// Draws a preview pane into `area` — an inline image for image files (or ones an `Image`-kind
 /// preview hook thumbnailed), rendered text for code and text files (or ones a `Text`-kind hook
 /// extracted, an archive's listing, a hex dump), the children of a folder, or the file's name as a
@@ -3637,6 +3698,7 @@ fn draw(
         finder,
         deck,
         wiring,
+        atlas,
         local_theme,
         local_ui,
         local_panels,
@@ -3708,7 +3770,7 @@ fn draw(
         (Some(film), _) => [removed, removed, film.big],
         (_, Some(_)) => [removed; 3],
         // The diagram has the whole body; no column is drawn under it.
-        _ if view_mode == ViewMode::Wiring => [removed; 3],
+        _ if matches!(view_mode, ViewMode::Wiring | ViewMode::Atlas) => [removed; 3],
         _ => [layout.parent, layout.current, layout.preview],
     };
 
@@ -3722,6 +3784,11 @@ fn draw(
             config,
             Instant::now(),
         );
+    }
+
+    // The atlas, over the whole body.
+    if let Some(map) = atlas {
+        atlas_view::render(frame, layout.current, map, browser.current_dir(), config);
     }
 
     // The deck's strip of device cards, above the columns.

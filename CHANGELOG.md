@@ -102,6 +102,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `tui`: an atlas in the `V` cycle (`view = "atlas"` in `config.toml`), after the wiring diagram: a
+  zoomable map of the machine's storage that takes the whole window. It starts as one block per
+  volume, sized by capacity and filled from the bottom by how full the volume is (red at 90% and
+  over, dim when it is not mounted), with a `◆` on the volume holding the folder you are in. `Enter`
+  (or a second click) zooms into the chosen block: a volume shows its biggest folders as blocks
+  sized by what is inside them, a folder shows its contents, and a file's block opens its folder in
+  the browser. `Backspace` or `Esc` zooms back out one level. The arrows (or `h`/`j`/`k`/`l`) move
+  to the nearest block that way, `Tab` and `Shift+Tab` walk through them biggest first, `o` opens
+  the chosen block's folder in the browser, `a` switches between size on disk and apparent size, and
+  `r` looks again. Entries too small to deserve a block of their own are folded into one `+N
+  smaller` block. Linux only, like the deck. New `atlas_layout` (a pure treemap on whole terminal
+  cells), `atlas` (state and keys) and `atlas_view` (drawing) modules; the folder levels reuse the
+  disk usage view's scanner, so a scan runs on the blocking pool and is cancelled when you zoom
+  away.
 - `devices`, `tui`: a wiring diagram in the `V` cycle (`view = "wiring"` in `config.toml`), after the
   deck. It takes the whole window and shows how the storage is wired: the bus a disk hangs off
   (`PCIe 02:00.0`, `USB 2-3`, `SATA ata1`), the disk, its partitions, anything stacked on them

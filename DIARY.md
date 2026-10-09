@@ -84,6 +84,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-05 | Configurable Border Gradient | Colors with `accent`/`focused` keywords in `[theme]`, scope and direction in `[shape]`, the old switch kept beneath (COA B); a moved switch alone (A) rejected, an animated gradient (C) deferred to the roadmap | ✅ Confirmed |
 | 2026-10-06 | Plugin `run_action` | One more turn of the render loop that enters the browser's own key handling as a `Browse` step, not a second dispatcher for plugins | ✅ Confirmed |
 | 2026-10-06 | Plugin Cost Benchmarks | Ignored benchmark tests beside the integration tests, run by hand with `--release`, no stored baseline (COA A); a criterion bench (B) and a docs-only close-out (C) rejected | ✅ Confirmed |
+| 2026-10-09 | Atlas Storage Map | Lazy zoom on the disk usage scanner with a pure whole-cell treemap (COA A); a cached whole-volume tree with a minimap (B) and a volumes-only map (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -6414,6 +6415,84 @@ layouts and a fitted zoom would now shrink them.
 
 **Verification.** `scripts/check` passes. New layout tests: fit shrinks to the height, a level
 chosen by hand is kept, and lines join boxes at every level.
+
+### Atlas: a Zoomable Map of Storage (COA A)
+
+**Date:** 2026-10-09 · **Author:** deltaog-117
+
+**Context.** The roadmap held three ideas for a storage view; the deck (B) and the wiring diagram came
+first. The third, the atlas, was to answer "where did my space go" as a picture: a block per volume
+sized by capacity, zoom into a volume for its biggest folders, then into a folder for its files.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A new `V` view; volumes from `devices`, every level below scanned on demand by the disk usage scanner, a stack of levels so zooming out is instant | Chosen |
+| B | A: plus a cached whole-volume tree per device and a corner minimap in the other views | Rejected for this cycle: cache invalidation, a size budget and a change to every view in one go |
+| C | Volumes only; `Enter` opens the disk usage view | Not taken on its own: it is level one of A |
+
+**Decision.** Three modules. `atlas_layout` is pure: `treemap(weights, area)` turns sizes into
+rectangles of whole cells, and `neighbor`, `cycle` and `tile_at` move between and find them.
+`atlas` is the state: the volumes (sorted biggest first, polled every two seconds on the blocking
+pool), the chosen one by kernel name so it survives a rescan, and, once zoomed in, a `DiskUsageView`
+plus a depth counter. `atlas_view` is the drawing. Nothing new scans the disk: the view that already
+scans one folder at a time on the blocking pool, cancels on drop and keeps a stack of levels is the
+engine for every level below the volumes, and the atlas only maps its rows to tiles. The depth
+counter is there because the view's own `leave` climbs to the parent of the mount point once its
+stack is empty, which on the map would walk out of the volume.
+
+**The layout, and why not squarified.** The first plan, and what the COA table said, was a
+squarified treemap. A squarified layout picks rows by real-valued aspect ratios, and turning that
+into whole cells means rounding each row's thickness and each tile's length, which can leave a tile
+with no cells, so "the tiles cover the map exactly" holds only when the rounding happens to agree.
+A balanced binary split does not have the problem: the entries (largest first) are cut into two
+groups of about equal weight, the map is cut across its longer side (a cell counted as twice as tall
+as wide) at the matching integer position, clamped to leave a cell on each side, and each half is
+laid out the same way. Every tile is at least one cell and the tiles partition the map by
+construction. The price is blocks that are somewhat more elongated than a squarified layout gives.
+A group worth fewer than six cells of the map is folded into one `+N smaller` block (also when the
+map is too small to cut), which keeps a thousand specks from becoming a thousand one-cell tiles.
+
+**Why this way.** The folded block is drawn but never chosen, so reachability needs its own
+guarantee: arrows go to the nearest centre in that direction, which can leave a block out of reach
+of the four directions in an odd layout, so `Tab` and `Shift+Tab` cycle through every block with a
+tile in order, and a property test checks that cycling forward visits all of them. Colours are the
+theme's own (`accent`, `danger`, `dir`, `file`, `status`), used as backgrounds, with the text
+colour chosen by the brightness of what it sits on and a darker shade made by blending to black
+where the colour is RGB (and dark gray where it is not). The chosen block gets a thick frame inside
+its own edge rather than a different fill, because a volume's fill already encodes how full it is.
+A block leaves its right column and bottom row bare when it is big enough, so two neighbours of one
+colour stay apart.
+
+**Found by the real binary.** A scan shows only what has finished: for the first seconds on the root
+volume the map held the four links in `/`, and then `var/` at 99% once it finished, with `usr/`
+arriving much later and changing every share. That is the scanner doing what it was built to do, and
+the header says `scanning`, but it does make the early picture misleading, and it is listed as a
+follow-up. The same run showed the project's known PTY quirk, a keystroke swallowed right after
+startup by the graphics probe's reader, which a harmless `Esc` first works round. A test written
+before the run expected `90%` for a volume with 800 of 900 bytes used, which is 88%: the test, not
+the code, was wrong. The header said `1 volumes`, now `1 volume`.
+
+**Trade-offs.** No cache and no minimap, so zooming into a big volume rescans it every time (the
+root volume here took minutes to finish) and leaving it throws the scan away. Blocks under six
+cells of the map are only a `+N smaller` block, and files in it are reached through the browser or
+the disk usage view. Opening a file's block goes to its folder without the cursor on the file.
+Unmounted volumes cannot be mounted from the atlas. Linux only.
+
+**Verification.** `scripts/check` passes (1450 tests). New: the treemap (the tiles partition any map
+for any sizes, every sized entry is accounted for exactly once, a block of its own deserves its
+cells, a lone entry fills even a one-cell map, areas follow the sizes, a tall map is cut across its
+height, moves land strictly in the direction pressed and cycling reaches every block), the state
+(volumes biggest first with ties by name, the choice starting on the volume holding the browsed
+folder and surviving a rescan, an unmounted volume saying why, zoom from volume to folder to file
+and back out one level at a time, going out never climbing past the mount point, `o` on volumes,
+folders and files, the pin following the browsed folder down into the rows, `a` and `r` belonging
+to the atlas only once zoomed in, arrows and `Tab`, a click choosing and a second click zooming,
+other keys passing through) and the drawing (the regions never overlap or leave the window, the
+free part of a volume shrinking as it fills, text colours on light and dark backgrounds, labels and
+shares, the frame on the chosen block, the empty states, and no panic for any window or number of
+volumes). Against the real binary through a PTY read with `pyte` and `HOME` pointed at a scratch
+folder: the volume map, `Enter` into `/` with rows arriving, `Enter` into `/var`, `Backspace` twice,
+`o` moving the browser to `/var` with the pin following, and a real SGR mouse click zooming in.
 
 ---
 

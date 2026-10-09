@@ -47,6 +47,9 @@ pub enum ViewMode {
     /// How the storage is wired, drawn over the whole body in place of the columns: the bus, the
     /// disk, its partitions and whatever is stacked on them, down to what is mounted.
     Wiring,
+    /// A zoomable map of the storage drawn over the whole body: a block per volume sized by
+    /// capacity, then the biggest folders of one, then the files in a folder.
+    Atlas,
 }
 
 impl ViewMode {
@@ -59,7 +62,8 @@ impl ViewMode {
             Self::Details => Self::Filmstrip,
             Self::Filmstrip => Self::Deck,
             Self::Deck => Self::Wiring,
-            Self::Wiring => Self::List,
+            Self::Wiring => Self::Atlas,
+            Self::Atlas => Self::List,
         }
     }
 
@@ -72,6 +76,7 @@ impl ViewMode {
             Self::Filmstrip,
             Self::Deck,
             Self::Wiring,
+            Self::Atlas,
         ]
         .into_iter()
         .find(|view| view.label().eq_ignore_ascii_case(name.trim()))
@@ -85,6 +90,7 @@ impl ViewMode {
             Self::Filmstrip => "filmstrip",
             Self::Deck => "deck",
             Self::Wiring => "wiring",
+            Self::Atlas => "atlas",
         }
     }
 }
@@ -120,7 +126,7 @@ pub fn browser_layout(
             ..base
         };
     }
-    if mode == ViewMode::Wiring {
+    if matches!(mode, ViewMode::Wiring | ViewMode::Atlas) {
         let body = body_of(&base);
         return BrowserLayout {
             parent: Rect::new(body.x, body.y, 0, body.height),
@@ -205,9 +211,11 @@ pub fn jump_target(selected: usize, len: usize, page: usize, jump: Jump) -> usiz
 /// the tiles of the grid, the thumbnails of the strip — and at least one.
 pub fn page_size(view: ViewMode, layout: &BrowserLayout) -> usize {
     let shown = match view {
-        ViewMode::List | ViewMode::Details | ViewMode::Deck | ViewMode::Wiring => {
-            usize::from(layout.current.height.saturating_sub(2))
-        }
+        ViewMode::List
+        | ViewMode::Details
+        | ViewMode::Deck
+        | ViewMode::Wiring
+        | ViewMode::Atlas => usize::from(layout.current.height.saturating_sub(2)),
         ViewMode::Grid => GridLayout::split(body_of(layout)).capacity(),
         ViewMode::Filmstrip => FilmstripLayout::split(body_of(layout)).cells.len(),
     };
@@ -542,6 +550,7 @@ mod tests {
             ViewMode::Filmstrip,
             ViewMode::Deck,
             ViewMode::Wiring,
+            ViewMode::Atlas,
         ] {
             assert_eq!(ViewMode::named(view.label()), Some(view));
         }
@@ -566,13 +575,14 @@ mod tests {
                 ViewMode::Details,
                 ViewMode::Filmstrip,
                 ViewMode::Deck,
-                ViewMode::Wiring
+                ViewMode::Wiring,
+                ViewMode::Atlas
             ]
         );
     }
 
     #[test]
-    fn the_wiring_view_gives_its_whole_body_to_one_pane_and_hides_the_columns() {
+    fn the_wiring_and_atlas_views_give_their_whole_body_to_one_pane_and_hide_the_columns() {
         let area = Rect::new(0, 0, 120, 40);
         let list = browser_layout(
             area,
@@ -581,17 +591,13 @@ mod tests {
             ViewMode::List,
             Shape::default(),
         );
-        let wiring = browser_layout(
-            area,
-            ColumnLayout::ThreePane,
-            true,
-            ViewMode::Wiring,
-            Shape::default(),
-        );
-        assert_eq!(wiring.current, body_of(&list));
-        assert_eq!((wiring.parent.width, wiring.preview.width), (0, 0));
-        assert_eq!((wiring.header, wiring.status), (list.header, list.status));
-        assert_eq!(wiring.deck.height, 0);
+        for mode in [ViewMode::Wiring, ViewMode::Atlas] {
+            let whole = browser_layout(area, ColumnLayout::ThreePane, true, mode, Shape::default());
+            assert_eq!(whole.current, body_of(&list), "{mode:?}");
+            assert_eq!((whole.parent.width, whole.preview.width), (0, 0));
+            assert_eq!((whole.header, whole.status), (list.header, list.status));
+            assert_eq!(whole.deck.height, 0);
+        }
     }
 
     #[test]

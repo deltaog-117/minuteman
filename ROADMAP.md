@@ -1652,6 +1652,44 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   browser there. Chosen as COA A over a side tray of folder columns (B) and unfolding only the
   path to the current folder (C), with C's unfolding of the path as the starting state.
 
+- ✅ **Atlas — a zoomable map of storage (`V`, COA A)** – the third idea from the *Devices view*
+  note, after the deck (B) and the wiring diagram. A new last view in the `V` cycle (`view =
+  "atlas"`) that takes the whole body: one block per volume, its area following capacity and its
+  fill, from the bottom, following how full it is (danger colour from 90%, dim when not mounted),
+  with a `◆` on the volume holding the browsed folder. `Enter` or a second click zooms into the
+  chosen block; a volume then shows its biggest folders as blocks sized by what is inside them, a
+  folder shows its contents, and a file's block opens its folder in the browser; `Backspace`/`Esc`
+  zooms out a level, arrows (and `hjkl`) move to the nearest block, `Tab`/`Shift+Tab` walk through
+  them biggest first, `o` opens the chosen block's folder in the browser, `a` switches between size
+  on disk and apparent size, `r` looks again. Three new modules in `tui`: `atlas_layout` (a pure
+  treemap on whole terminal cells, plus the moves between tiles), `atlas` (state, keys, clicks) and
+  `atlas_view` (layout of the regions, colours, labels, drawing). The folder levels do not scan
+  anything new: the atlas holds a `DiskUsageView` for the volume zoomed into, which already scans
+  one folder at a time on the blocking pool, cancels when dropped, sorts biggest first and keeps a
+  stack of levels, so zooming out is instant and nothing holds a whole tree. The volumes come from
+  the `devices` crate, looked at every two seconds on the blocking pool only while the view shows.
+  Chosen as COA A (lazy zoom on the existing scanner) over a cached whole-volume tree with a corner
+  minimap (B, too big for one cycle) and a volumes-only map (C, which is level one of A). The
+  layout is a balanced binary split (the entries, largest first, are cut into two groups of about
+  equal weight and the map across its longer side, with a cell counted as twice as tall as wide),
+  not a squarified one: cutting whole cells at integer positions is what makes "every tile is at
+  least one cell, none overlap and together they cover the map" true by construction, which the
+  property tests check for any sizes and any window, rather than true unless rounding disagrees. A
+  group worth fewer than 6 cells of the map is folded into one `+N smaller` block that is drawn but
+  never chosen, so `Tab` (which visits every block with a tile, tested) is the guarantee that
+  nothing else is out of reach. Property-tested: tiles partition the map exactly, every sized
+  entry is on it exactly once, a block of its own deserves its cells, every move lands on a
+  different block strictly in the direction pressed, cycling reaches them all, the regions of the
+  view never overlap or leave the window, a volume's free part shrinks as it fills, and drawing
+  never panics for any window size or number of volumes. Verified against the real binary in a PTY
+  read through `pyte`, with `HOME` pointed at a scratch folder: the map showed this machine's
+  volume (`System`, btrfs, 74% of 382G) with the frame and the pin; `Enter` zoomed into `/` with
+  the rows arriving while the header said `scanning`; `Enter` again went into `/var` (`lib/` 82%,
+  `cache/` 17%); `Backspace` came back out to `/` and a second one to the map; `o` on `var/` moved
+  the browser to `/var` and the `◆` onto `var/`; a real SGR mouse click on the chosen volume zoomed
+  in. Not tried in a real terminal emulator, nor with more than one volume on the real machine (the
+  tests cover several).
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -1803,7 +1841,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   sources (directories only, file contents, recent folders, marks, plugin actions); results are
   capped at 200 listed; the index is rebuilt each time the finder opens, with no cache between
   openings; no smart-case or exact-match switch; the `/` search still matches the name only.
-- **Devices view, `V` (B delivered, see the done list; A and C remain)** – a view in the `V` cycle that knows about storage:
+- **Devices view, `V` (B and C delivered, see the done list; A remains)** – a view in the `V` cycle that knows about storage:
   internal disks, USB sticks and network mounts, with their capacity, state and activity, and
   mounting, unmounting and ejecting. Nothing in the codebase reads mounts or block devices yet.
   Shared data layer for all three ideas: `/proc/self/mountinfo` for what is mounted, `statvfs` (via
@@ -1821,12 +1859,25 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
     sparkline from `/proc/diskstats`; the card holding the browsed folder is lit as "you are here";
     a newly plugged device slides in; the cards are the targets for mount, eject and, later,
     copy-to. Neither Ranger nor the graphical managers show which drive is busy.
-  - **C, atlas** – a zoomable map of all storage: a block per volume sized by capacity and shaded
+  - **C, atlas (delivered, see the done list)** – a zoomable map of all storage: a block per volume sized by capacity and shaded
     by use, the current location as a pin, selecting a block zooms into its top folders and then
     the file list, and a corner minimap in the normal views shows where you are. The most original
     and the most useful for "where did my space go", but it needs a treemap layout and a
     background size scan below the device level (the disk usage scanner can feed it) with caching.
     The deck's data layer is the one it would need, so it can follow as another view.
+- **Atlas, follow-ups** – the corner minimap in the other views, the cache of a whole volume's tree
+  and a persistent size history are not built (zooming into a big volume rescans it each time, and
+  leaving drops the scan; on this machine the root volume took minutes to finish, during which the
+  first folder to finish fills the whole map); the layout is a balanced split, not a squarified
+  one, so some blocks are long and thin; a `+N smaller` block cannot be chosen or opened, so the
+  smallest entries are reached only through the browser or the disk usage view; a file's block
+  opens its folder with the cursor at the top and does not reveal the file; an unmounted volume says
+  to mount it from the deck and cannot be mounted from the atlas; there is no right-click menu,
+  marking, deleting or sending from the atlas, and the wheel does nothing; labels need a block at
+  least three cells wide and three tall, and a smaller one is just colour; colours are the theme's
+  foreground colours used as backgrounds, with a dark gray fallback for named-colour themes where
+  no darker shade exists; the volumes are scanned separately from the deck's (a second `statvfs` a
+  second apart while both are alive, which they never are); no macOS data source.
 - **Devices view, next ideas (planned)** – one further way for storage to react to what the user
   is doing, building on the deck and its `devices` crate:
   - *Runway* – each card shows how long until it fills, from a small history of its usage kept
@@ -1931,7 +1982,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the newest: press `V` in a folder of images and keep pressing it: first a
+1. `cargo run -p tui` — the newest: keep pressing `V` until the title says `atlas` (it is the last
+   view before the list): a block per volume, the one holding your folder marked `◆`; `Enter` zooms
+   into it (watch the folders arrive, biggest first), arrows or `Tab` move between blocks, `Enter`
+   again goes deeper, `Backspace` comes out, `o` opens a block's folder in the browser, `a` swaps
+   size on disk for apparent size. Before that: press `V` in a folder of images and keep pressing it: first a
    grid of tiles (arrows, `j`/`k` to move, a click to select, a double-click to open, the wheel to
    scroll), then a flat details table (name, size, modified time, permissions), then the filmstrip,
    then back to the columns. Before that, the filmstrip on its own: the selected
