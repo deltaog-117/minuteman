@@ -50,7 +50,7 @@ pub const SLIDE_IN: Duration = Duration::from_millis(260);
 
 /// Shown when the keys go to the cards.
 pub const HINT: &str =
-    "devices: j/k choose  Enter open  p send marked  m mount/unmount  e eject  l/Esc back";
+    "devices: ↑/↓ choose  Enter open  p send marked  m mount/unmount  e eject  Tab/Esc back";
 
 /// What a key or click did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,12 +296,11 @@ impl DeckState {
     }
 
     /// Where the keys go in a deck whose rail is at the left of the files (`visible`; with no
-    /// room for the rail they are all the browser's). With the keys on the files, `Tab` or `h`
-    /// takes them to the rail, and `l` is nothing, since going into a file or folder is `Enter`'s
-    /// alone here. With them on the rail, `j`/`k` (and the up and down arrows) choose a card,
-    /// `Enter` opens it (mounting it first if it is not mounted), `m` mounts or unmounts it, `e`
-    /// ejects it, `p` sends what is carried, and `l`, `Tab` or `Esc` give the keys back. Every
-    /// other key is the browser's, so `q` still quits.
+    /// room for the rail they are all the browser's). `Tab` takes them to the rail and gives them
+    /// back. With them there, the up and down arrows choose a card, `Enter` opens it (mounting it
+    /// first if it is not mounted), `m` mounts or unmounts it, `e` ejects it, `p` sends what is
+    /// carried and `Esc` gives the keys back. Every other key is the browser's, `h`, `j`, `k` and
+    /// `l` included, so the files are browsed the same way in every view and `q` still quits.
     pub fn key(&mut self, key: KeyEvent, visible: bool) -> Outcome {
         if !visible {
             self.focused = false;
@@ -311,26 +310,13 @@ impl DeckState {
             self.focused = !self.focused;
             return Outcome::Handled;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if !self.focused || key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Pass;
         }
-        let plain = key.modifiers == KeyModifiers::NONE;
-        if !self.focused {
-            return match key.code {
-                KeyCode::Char('h') if plain => {
-                    self.focused = true;
-                    Outcome::Handled
-                }
-                KeyCode::Char('l') if plain => Outcome::Handled,
-                _ => Outcome::Pass,
-            };
-        }
         match key.code {
-            KeyCode::Esc | KeyCode::Right | KeyCode::Char('l') => self.focused = false,
-            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.step(1),
-            // The rail is the leftmost thing there is: nowhere further to go.
-            KeyCode::Left | KeyCode::Char('h') => {}
+            KeyCode::Esc => self.focused = false,
+            KeyCode::Up => self.step(-1),
+            KeyCode::Down => self.step(1),
             KeyCode::Enter => return self.open_selected(),
             KeyCode::Char('p') => return self.send_selected(),
             KeyCode::Char('m') => self.toggle_selected(),
@@ -490,46 +476,41 @@ mod tests {
     }
 
     #[test]
-    fn h_goes_left_to_the_rail_and_l_comes_back_to_the_files() {
+    fn hjkl_are_the_browsers_whether_or_not_the_rail_has_the_keys() {
         let (_rt, mut deck) = deck_with(three());
-        assert_eq!(deck.key(press(KeyCode::Char('h')), true), Outcome::Handled);
-        assert!(deck.focused());
-        assert_eq!(deck.key(press(KeyCode::Char('h')), true), Outcome::Handled);
-        assert!(deck.focused(), "nowhere further left");
-        assert_eq!(deck.key(press(KeyCode::Char('l')), true), Outcome::Handled);
-        assert!(!deck.focused());
-        deck.key(press(KeyCode::Tab), true);
-        deck.key(press(KeyCode::Right), true);
-        assert!(!deck.focused());
+        for focused in [false, true] {
+            if focused {
+                deck.key(press(KeyCode::Tab), true);
+            }
+            for code in ['h', 'j', 'k', 'l'] {
+                assert_eq!(
+                    deck.key(press(KeyCode::Char(code)), true),
+                    Outcome::Pass,
+                    "{code} with the rail focused: {focused}"
+                );
+            }
+            for code in [KeyCode::Left, KeyCode::Right] {
+                assert_eq!(deck.key(press(code), true), Outcome::Pass, "{code:?}");
+            }
+        }
+        assert_eq!(deck.selected(), 0, "none of them moved the rail");
     }
 
     #[test]
-    fn l_alone_no_longer_goes_into_the_file_under_the_cursor() {
+    fn the_up_and_down_arrows_choose_cards_and_stop_at_the_ends() {
         let (_rt, mut deck) = deck_with(three());
         assert_eq!(
-            deck.key(press(KeyCode::Char('l')), true),
-            Outcome::Handled,
-            "swallowed, so it never reaches the browser's Enter"
-        );
-        assert_eq!(deck.key(press(KeyCode::Enter), true), Outcome::Pass);
-        let alt = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT);
-        assert_eq!(
-            deck.key(alt, true),
+            deck.key(press(KeyCode::Down), true),
             Outcome::Pass,
-            "the Alt layer is not ours"
+            "the browser's until Tab"
         );
-    }
-
-    #[test]
-    fn j_and_k_choose_cards_and_stop_at_the_ends() {
-        let (_rt, mut deck) = deck_with(three());
         deck.key(press(KeyCode::Tab), true);
         assert_eq!(deck.selected(), 0);
-        deck.key(press(KeyCode::Char('k')), true);
+        deck.key(press(KeyCode::Up), true);
         assert_eq!(deck.selected(), 0);
-        deck.key(press(KeyCode::Char('j')), true);
         deck.key(press(KeyCode::Down), true);
-        deck.key(press(KeyCode::Char('j')), true);
+        deck.key(press(KeyCode::Down), true);
+        deck.key(press(KeyCode::Down), true);
         assert_eq!(deck.selected(), 2);
         deck.key(press(KeyCode::Up), true);
         assert_eq!(deck.selected(), 1);
@@ -555,7 +536,7 @@ mod tests {
     fn with_no_room_for_the_rail_every_key_is_the_browsers() {
         let (_rt, mut deck) = deck_with(three());
         deck.key(press(KeyCode::Tab), true);
-        for code in [KeyCode::Tab, KeyCode::Char('h'), KeyCode::Char('l')] {
+        for code in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {
             assert_eq!(deck.key(press(code), false), Outcome::Pass, "{code:?}");
         }
         assert!(

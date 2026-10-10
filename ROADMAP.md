@@ -1746,10 +1746,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   and `▴`/`▾` on the frame say more is scrolled out (a group's heading stays with its first device
   when scrolled to). The rail is dropped when the body is under 70 cells wide or 6 rows high. The
   layout puts the columns in what is left, a pane gap from the rail (`BrowserLayout::split_columns`
-  is the old column split, taken out so both can use it). Keys: `h` or `Tab` goes to the rail,
-  `j`/`k` or the up and down arrows choose, `Enter`, `m`, `e` and `p` as before, `l`, `Tab` or
-  `Esc` come back; with the keys on the files `l` does nothing in this view and `Enter` opens the
-  file or folder. The sparkline and the mount path are no longer on the device's row (the path is
+  is the old column split, taken out so both can use it). Keys: `Tab` takes the keys to the rail and gives them back; there the up and down arrows choose,
+  `Enter`, `m`, `e` and `p` as before and `Esc` leaves; `h`, `j`, `k` and `l` are the file browser's
+  whether or not the rail has the keys. (First cut had `h`/`l` move between rail and files and
+  `l` do nothing on files; reverted the next cycle as it broke the muscle memory of every other view.) The sparkline and the mount path are no longer on the device's row (the path is
   in the header once you are in it). Chosen as COA A over the old cards stacked in a column (B)
   and a rail that folds to icons and unfolds on focus (C). Tests: the layout (rail beside the
   columns, gaps, narrow and short windows), the rows (grouping, heights, scrolling, a click on

@@ -87,7 +87,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-09 | Atlas Storage Map | Lazy zoom on the disk usage scanner with a pure whole-cell treemap (COA A); a cached whole-volume tree with a minimap (B) and a volumes-only map (C) not taken | ✅ Confirmed |
 | 2026-10-09 | Wiring Diagram Fit | Fit by budget: a cap on siblings and a squeeze on box width chosen so the whole diagram fits (COA A); a selection-dependent focus layout (B) and clipped panning (C) not taken | ✅ Confirmed |
 | 2026-10-10 | Operation Keys on Marks and Cursor | Marks act where you stand, the cursor row is the fallback, `space x` for the trash (COA A); a cursor fallback alone (B) and a same-folder guard (C) not taken | ✅ Confirmed |
-| 2026-10-10 | Deck Rail | A grouped places-style rail at the left with `h`/`l` moving between rail and files (COA A); stacked cards (B) and a rail that folds to icons (C) not taken | ✅ Confirmed |
+| 2026-10-10 | Deck Rail | A grouped places-style rail at the left, entered with `Tab` and `↑`/`↓`, `hjkl` left to the files (COA A); stacked cards (B) and a rail that folds to icons (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -6627,14 +6627,13 @@ the one function that drawing and clicks both ask: it flattens the devices (alre
 by the scan) into headings and devices with their heights, picks the first line to show with a
 pure `follow`, and stores it in the `Cell` the cards already used. A rail under 70 cells of body
 width or 6 rows is dropped, so the keys must know whether it is there: `DeckState::key` now takes
-`visible` and passes everything, unfocusing, when it is not. Keys: the user said `hjkl` browse and
-`Enter` open instead of `l`. I read that as the rail being a pane to the left: `h` goes to it, `j`
-and `k` choose in it, `l` comes back, and with the keys on the files `l` is swallowed so it never
-reaches the browser's enter-folder, leaving `Enter` and `→`. That is an interpretation, easy to
-change in one `match`.
+`visible` and passes everything, unfocusing, when it is not. Keys: the first cut had `h` go left to the rail and `l` come back, with `l` doing nothing on the
+files so `Enter` opened. That broke the habit every other view relies on, and the user asked for
+`hjkl` back as they were. The rail now takes only `Tab` (toggle), the up and down arrows, `Enter`,
+`m`, `e`, `p` and `Esc`; every other key, `hjkl` and the left and right arrows included, is the
+browser's whether or not the rail has the keys, as the old deck did for `j`/`k`.
 
-**Trade-offs.** `h` no longer goes up a folder in this view (`←` and `Backspace` do), and `l`
-does nothing on the files. A device's row is two lines, so the sparkline shrank to a three-bar
+**Trade-offs.** A device's row is two lines, so the sparkline shrank to a three-bar
 pulse shown only while the disk is busy and the mount path left the row. The rail takes 26 cells
 from the columns.
 

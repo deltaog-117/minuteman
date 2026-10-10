@@ -17,11 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is 26 cells wide and is left out, giving the columns the whole window, when the body is under 70
   cells wide or 6 rows high. The columns, and the gaps between panes, are laid out in what the rail
   leaves.
-- `tui`: keys in the deck view follow the new layout. `h` (or `Tab`) goes left to the rail, where
-  `j`/`k` or the up and down arrows choose a device and `Enter`, `m`, `e` and `p` act as before;
-  `l`, `Tab` or `Esc` hand the keys back to the files. With the keys on the files `l` no longer
-  goes into the folder or file under the cursor in this view: `Enter` (or `→`) does, and `h` goes
-  to the rail, so `←` or `Backspace` go up a folder there.
+- `tui`: in the deck view `Tab` takes the keys to the rail of devices and gives them back. With
+  them there, the up and down arrows choose a device and `Enter`, `m`, `e` and `p` act as before;
+  `Esc` hands the keys back. `h`, `j`, `k` and `l` stay the file browser's in every view, rail
+  focused or not, so `l` still enters a folder and `h` still goes up.
 - `tui`, `theming`: `y` (yank), `d` (cut), `x` (trash) and `X` (delete for good) now work on the
   entry under the cursor when nothing is marked, and on the marks when there are any. With marks,
   `y` and `d` act at once: mark, go to the folder the files should end up in, press the key, and
