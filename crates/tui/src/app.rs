@@ -133,6 +133,16 @@ pub enum Prompt {
     CreateInput {
         buffer: LineEdit,
     },
+    /// The name to save under in `dir`, while another program has asked for a save path (see
+    /// `chooser`).
+    SaveName {
+        dir: PathBuf,
+        buffer: LineEdit,
+    },
+    /// Asks before the file a save would name is replaced.
+    ConfirmReplace {
+        target: PathBuf,
+    },
     /// Confirms a permanent delete of one or more targets — either the single cursor entry, or
     /// every currently marked path if any are marked (Ranger-style: marks win over the cursor).
     ConfirmDelete {
@@ -183,6 +193,8 @@ impl Prompt {
         match self {
             Prompt::RenameInput { .. } => "RENAME",
             Prompt::CreateInput { .. } => "CREATE",
+            Prompt::SaveName { .. } => "SAVE AS",
+            Prompt::ConfirmReplace { .. } => "REPLACE",
             Prompt::ConfirmDelete { .. } => "DELETE",
             Prompt::ConfirmTrash { .. } => "TRASH",
             Prompt::Conflict(_) => "CONFLICT",
@@ -200,6 +212,7 @@ impl Prompt {
             self,
             Prompt::RenameInput { .. }
                 | Prompt::CreateInput { .. }
+                | Prompt::SaveName { .. }
                 | Prompt::SearchInput { .. }
                 | Prompt::CommandInput { .. }
                 | Prompt::OpenOther { .. }
@@ -210,7 +223,10 @@ impl Prompt {
 
     /// Whether confirming this prompt is destructive (permanent delete, overwrite).
     pub fn is_destructive(&self) -> bool {
-        matches!(self, Prompt::ConfirmDelete { .. } | Prompt::Conflict(_))
+        matches!(
+            self,
+            Prompt::ConfirmDelete { .. } | Prompt::ConfirmReplace { .. } | Prompt::Conflict(_)
+        )
     }
 
     /// [`display`](Self::display) with `glyph` drawn where typing will land: inside the text for a
@@ -223,6 +239,9 @@ impl Prompt {
                     "create (end with / for a directory): {}",
                     buffer.render(glyph)
                 )
+            }
+            Prompt::SaveName { dir, buffer } => {
+                format!("save in {} as: {}", display_name(dir), buffer.render(glyph))
             }
             Prompt::SearchInput { buffer, .. } => format!("/{}", buffer.render(glyph)),
             Prompt::CommandInput { buffer } => format!(":{}", buffer.render(glyph)),
@@ -238,6 +257,12 @@ impl Prompt {
             Prompt::RenameInput { buffer, .. } => format!("rename: {buffer}"),
             Prompt::CreateInput { buffer } => {
                 format!("create (end with / for a directory): {buffer}")
+            }
+            Prompt::SaveName { dir, buffer } => {
+                format!("save in {} as: {buffer}", display_name(dir))
+            }
+            Prompt::ConfirmReplace { target } => {
+                format!("replace '{}'? (y/N)", display_name(target))
             }
             Prompt::ConfirmDelete { targets } if targets.len() == 1 => {
                 format!("delete '{}' permanently? (y/N)", display_name(&targets[0]))
@@ -464,6 +489,10 @@ pub struct App {
     pub clipboard: Option<Clipboard>,
     pub prompt: Option<Prompt>,
     pub status: Option<String>,
+    /// Set when another program asked for a pick (`--chooser-file`); see `chooser`.
+    pub(crate) chooser: Option<crate::chooser::Chooser>,
+    /// The answer to that pick, once the user has given it. The event loop ends on seeing it.
+    pub(crate) picked: Option<shared::chooser::Selection>,
     bulk: Option<BulkOp>,
     /// What can be taken back with `Undo` and done again with `Redo` (see `file_ops::history`).
     history: History,
@@ -523,6 +552,8 @@ impl App {
             clipboard: None,
             prompt: None,
             status: None,
+            chooser: None,
+            picked: None,
             bulk: None,
             history: History::default(),
             untracked: 0,
@@ -1587,6 +1618,18 @@ impl App {
                     buffer.edit(key);
                     self.prompt = Some(Prompt::CreateInput { buffer });
                 }
+            },
+            Prompt::SaveName { dir, mut buffer } => match code {
+                KeyCode::Esc => self.status = Some("save cancelled".into()),
+                KeyCode::Enter => self.finish_save_name(vfs, dir, buffer),
+                _ => {
+                    buffer.edit(key);
+                    self.prompt = Some(Prompt::SaveName { dir, buffer });
+                }
+            },
+            Prompt::ConfirmReplace { target } => match code {
+                KeyCode::Char('y' | 'Y') => self.accept_save(target),
+                _ => self.status = Some("not replaced".into()),
             },
             Prompt::ConfirmDelete { targets } => match code {
                 KeyCode::Char('y' | 'Y') => {

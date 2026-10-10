@@ -14,7 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Command-line parsing: `minuteman [--cwd-file <path>] [start_dir]`, `minuteman init
+//! Command-line parsing: `minuteman [--cwd-file <path>] [--chooser-file <path> [--pick <kind>]
+//! [--pick-name <name>]] [start_dir]`, `minuteman init
 //! <bash|zsh|fish>`, `minuteman init-terminal <kitty|alacritty|wezterm>`, `minuteman init-appearance`, and
 //! `minuteman glyphs`.
 
@@ -22,6 +23,8 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
+
+use shared::chooser::PickKind;
 
 use crate::shell_init::Shell;
 use crate::terminal_init::Terminal;
@@ -45,6 +48,17 @@ pub struct RunArgs {
     pub start_dir: Option<PathBuf>,
     /// Where `Q` records the directory being browsed. `None` makes `Q` behave like `q`.
     pub cwd_file: Option<PathBuf>,
+    /// Set when another program asked for a pick (see [`ChooserArgs`]).
+    pub chooser: Option<ChooserArgs>,
+}
+
+/// A request to pick something and write the answer to `file` (see `shared::chooser`).
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChooserArgs {
+    pub file: PathBuf,
+    pub kind: PickKind,
+    /// The file name to offer when saving.
+    pub suggested_name: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -56,6 +70,9 @@ pub enum CliError {
     UnknownTerminal(String),
     MissingTerminal,
     ExtraArgument(PathBuf),
+    UnknownPick(String),
+    /// `--pick` or `--pick-name` given without anywhere to write the answer.
+    PickWithoutChooserFile(&'static str),
 }
 
 impl fmt::Display for CliError {
@@ -83,6 +100,11 @@ impl fmt::Display for CliError {
             Self::ExtraArgument(path) => {
                 write!(f, "unexpected extra argument: {}", path.display())
             }
+            Self::UnknownPick(name) => write!(
+                f,
+                "unsupported pick '{name}' (expected file, files, directory, or save)"
+            ),
+            Self::PickWithoutChooserFile(flag) => write!(f, "{flag} needs --chooser-file"),
         }
     }
 }
@@ -96,6 +118,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliErr
     let mut args = args.into_iter();
     let mut run = RunArgs::default();
     let mut first = true;
+    let mut chooser_file: Option<PathBuf> = None;
+    let mut pick: Option<PickKind> = None;
+    let mut pick_name: Option<String> = None;
 
     while let Some(arg) = args.next() {
         let is_first = std::mem::take(&mut first);
@@ -131,6 +156,23 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliErr
             run.cwd_file = Some(PathBuf::from(value));
         } else if let Some(value) = arg.to_str().and_then(|a| a.strip_prefix("--cwd-file=")) {
             run.cwd_file = Some(PathBuf::from(value));
+        } else if arg == "--chooser-file" {
+            let value = args
+                .next()
+                .ok_or(CliError::MissingValue("--chooser-file"))?;
+            chooser_file = Some(PathBuf::from(value));
+        } else if let Some(value) = arg.to_str().and_then(|a| a.strip_prefix("--chooser-file=")) {
+            chooser_file = Some(PathBuf::from(value));
+        } else if arg == "--pick" {
+            let value = args.next().ok_or(CliError::MissingValue("--pick"))?;
+            pick = Some(parse_pick(&value.to_string_lossy())?);
+        } else if let Some(value) = arg.to_str().and_then(|a| a.strip_prefix("--pick=")) {
+            pick = Some(parse_pick(value)?);
+        } else if arg == "--pick-name" {
+            let value = args.next().ok_or(CliError::MissingValue("--pick-name"))?;
+            pick_name = Some(value.to_string_lossy().into_owned());
+        } else if let Some(value) = arg.to_str().and_then(|a| a.strip_prefix("--pick-name=")) {
+            pick_name = Some(value.to_owned());
         } else if arg
             .to_str()
             .is_some_and(|a| a.starts_with('-') && a.len() > 1)
@@ -143,13 +185,33 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliErr
         }
     }
 
+    run.chooser = match chooser_file {
+        Some(file) => Some(ChooserArgs {
+            file,
+            kind: pick.unwrap_or_default(),
+            suggested_name: pick_name,
+        }),
+        None if pick.is_some() => return Err(CliError::PickWithoutChooserFile("--pick")),
+        None if pick_name.is_some() => return Err(CliError::PickWithoutChooserFile("--pick-name")),
+        None => None,
+    };
+
     Ok(Command::Run(run))
+}
+
+fn parse_pick(name: &str) -> Result<PickKind, CliError> {
+    PickKind::parse(name).ok_or_else(|| CliError::UnknownPick(name.to_owned()))
 }
 
 /// Records `dir` as raw bytes with no trailing newline, so the wrapper reads back exactly the
 /// path — including one that isn't valid UTF-8.
 pub fn write_cwd_file(file: &Path, dir: &Path) -> io::Result<()> {
     fs::write(file, dir.as_os_str().as_encoded_bytes())
+}
+
+/// Writes what `--chooser-file` was asked to hold: the picked paths, or nothing for a cancel.
+pub fn write_chooser_file(file: &Path, answer: &[u8]) -> io::Result<()> {
+    fs::write(file, answer)
 }
 
 #[cfg(test)]
@@ -172,6 +234,7 @@ mod tests {
             Ok(Command::Run(RunArgs {
                 start_dir: Some("/tmp".into()),
                 cwd_file: None,
+                chooser: None,
             }))
         );
     }
@@ -181,6 +244,7 @@ mod tests {
         let expected = Ok(Command::Run(RunArgs {
             start_dir: Some("/tmp".into()),
             cwd_file: Some("/x/out".into()),
+            chooser: None,
         }));
         assert_eq!(parse_strs(&["--cwd-file", "/x/out", "/tmp"]), expected);
         assert_eq!(parse_strs(&["/tmp", "--cwd-file=/x/out"]), expected);
@@ -203,6 +267,83 @@ mod tests {
         assert_eq!(
             parse_strs(&["/a", "/b"]),
             Err(CliError::ExtraArgument("/b".into()))
+        );
+    }
+
+    #[test]
+    fn chooser_file_defaults_to_picking_one_file() {
+        assert_eq!(
+            parse_strs(&["--chooser-file", "/x/out"]),
+            Ok(Command::Run(RunArgs {
+                chooser: Some(ChooserArgs {
+                    file: "/x/out".into(),
+                    kind: PickKind::File,
+                    suggested_name: None,
+                }),
+                ..RunArgs::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn pick_and_pick_name_accept_both_spellings() {
+        let expected = Ok(Command::Run(RunArgs {
+            start_dir: Some("/tmp".into()),
+            chooser: Some(ChooserArgs {
+                file: "/x/out".into(),
+                kind: PickKind::Save,
+                suggested_name: Some("a b.pdf".into()),
+            }),
+            ..RunArgs::default()
+        }));
+        assert_eq!(
+            parse_strs(&[
+                "--chooser-file=/x/out",
+                "--pick",
+                "save",
+                "--pick-name",
+                "a b.pdf",
+                "/tmp",
+            ]),
+            expected
+        );
+        assert_eq!(
+            parse_strs(&[
+                "/tmp",
+                "--chooser-file",
+                "/x/out",
+                "--pick=save",
+                "--pick-name=a b.pdf",
+            ]),
+            expected
+        );
+    }
+
+    #[test]
+    fn pick_needs_somewhere_to_write_the_answer() {
+        assert_eq!(
+            parse_strs(&["--pick", "files"]),
+            Err(CliError::PickWithoutChooserFile("--pick"))
+        );
+        assert_eq!(
+            parse_strs(&["--pick-name", "x"]),
+            Err(CliError::PickWithoutChooserFile("--pick-name"))
+        );
+    }
+
+    #[test]
+    fn an_unknown_pick_and_missing_values_are_errors() {
+        assert_eq!(
+            parse_strs(&["--chooser-file", "/x", "--pick", "folder"]),
+            Err(CliError::UnknownPick("folder".into()))
+        );
+        assert_eq!(
+            parse_strs(&["--chooser-file"]),
+            Err(CliError::MissingValue("--chooser-file"))
+        );
+        assert_eq!(
+            parse_strs(&["--chooser-file", "/x", "--pick"]),
+            Err(CliError::MissingValue("--pick"))
         );
     }
 

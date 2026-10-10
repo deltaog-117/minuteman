@@ -1,0 +1,7 @@
+# ~/.config/xdg-desktop-portal/portals.conf
+#
+# Keeps every other portal as it is and routes only the file chooser to mman. The name on the
+# right is the file name of minuteman.portal without its extension.
+[preferred]
+default=gtk
+org.freedesktop.impl.portal.FileChooser=minuteman

@@ -118,6 +118,42 @@ usual and `Q` quits and leaves your shell in the directory you were browsing, wh
 `command mman` is also how to run the bare binary, without `cd`-on-quit. A directory literally
 named `init` must be passed as `./init`.
 
+### File chooser for browsers
+
+`mman` can answer a browser's "Save as" and "Upload" dialogs, through the XDG desktop portal. The
+crate `portal_backend` builds `mman-portal`, a small background service the portal hands those
+dialogs to; it opens `mman` in a terminal window, waits for you to pick, and gives the answer back.
+
+```bash
+cargo install --path crates/portal_backend      # installs mman-portal next to mman
+data=crates/portal_backend/data
+sudo install -Dm644 $data/minuteman.portal /usr/local/share/xdg-desktop-portal/portals/minuteman.portal
+sed "s#/usr/bin#$HOME/.cargo/bin#" $data/org.freedesktop.impl.portal.desktop.minuteman.service \
+  | install -Dm644 /dev/stdin ~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.minuteman.service
+sed "s#/usr/bin#$HOME/.cargo/bin#" $data/mman-portal.service \
+  | install -Dm644 /dev/stdin ~/.config/systemd/user/mman-portal.service
+```
+
+Then route only the file chooser to it in `~/.config/xdg-desktop-portal/portals.conf` (the example
+in `crates/portal_backend/data/portals.conf.example` has the line:
+`org.freedesktop.impl.portal.FileChooser=minuteman`) and restart the portal
+(`systemctl --user restart xdg-desktop-portal`). Firefox also needs
+`widget.use-xdg-desktop-portal.file-picker` set to `1` in `about:config`; a program that uses GTK's
+file dialog goes through the portal when started with `GTK_USE_PORTAL=1`.
+
+In the picker, `Enter` on a file picks it; `Q` confirms where the cursor is: the folder under it
+(or the one you are in) when a folder is wanted, the marked files (`v`) when several are, and a
+name prompt when saving, where `Enter` on an existing file offers its name and replacing a file
+asks first. `q` cancels. A path on another machine or inside an archive is refused. The browser's
+file-type filters are not applied yet.
+
+The window is a terminal of class `mman-chooser`; add a window-manager rule to float and center
+that class. The terminal is the first of foot, alacritty, kitty, wezterm and xterm found. Set
+`MINUTEMAN_PORTAL_TERMINAL=kitty` (or another of those) to choose, or
+`MINUTEMAN_PORTAL_TERMINAL_CMD="mycterm -e"` for any other that stays in the foreground until its
+command ends. `MINUTEMAN_PORTAL_MMAN` names the `mman` to run when it is not on the service's
+`PATH` (`systemctl --user edit mman-portal` to set these).
+
 ### Default keybindings
 
 | Key         | Action                                       |
@@ -453,7 +489,8 @@ crates/
 ├── preview/            # detects + decodes image files (terminal-agnostic; text preview: WIP)
 ├── trash/              # (stub, WIP) trash + undo history
 ├── plugins/            # out-of-process, any-language plugin host (JSON-RPC over stdio); WASM tier: WIP
-└── vfs_ssh/            # native SSH/SFTP remote browsing, through the system `ssh`
+├── vfs_ssh/            # native SSH/SFTP remote browsing, through the system `ssh`
+└── portal_backend/     # `mman-portal`: the desktop portal's file chooser, answered by `mman`
 ```
 
 ---

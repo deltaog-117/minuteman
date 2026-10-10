@@ -12,6 +12,7 @@ members = [
     "crates/devices",
     "crates/plugins",
     "crates/theming",
+    "crates/portal_backend",
     "crates/tui",
 ]
 

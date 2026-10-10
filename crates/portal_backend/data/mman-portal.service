@@ -1,0 +1,12 @@
+[Unit]
+Description=Portal file chooser backed by mman
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=|WAYLAND_DISPLAY
+ConditionEnvironment=|DISPLAY
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.minuteman
+ExecStart=/usr/bin/mman-portal
+Restart=on-failure

@@ -26,6 +26,7 @@ mod boot_splash;
 mod browser_drag;
 mod browser_mouse;
 mod cargo_fit;
+mod chooser;
 mod cli;
 mod command;
 mod compress_popup;
@@ -557,6 +558,10 @@ const REMOTE_SHELL: &str =
 /// Opens a file: an archive is entered as a folder, unless an `[[open_rule]]` claims it, and
 /// anything else goes to its program.
 fn open_file(app: &mut App, browser: &mut BrowserState, vfs: &dyn Vfs, path: &Path) {
+    // While another program waits for a pick, a file is chosen, not launched — an archive too.
+    if app.choose_file(browser, vfs, path) {
+        return;
+    }
     if vfs_archive::is_archive(path) && !vfs_archive::is_inside(path) && !app.open_rule_covers(path)
     {
         if let Err(error) = browser.goto(vfs, &shared::mount_root(path)) {
@@ -782,6 +787,9 @@ fn main() -> Result<()> {
         .with_interactive_commands(config.interactive_commands.clone())
         .with_open_config(config.open_rules.clone(), config.open_with.clone())
         .with_plugins(config.plugins.clone(), browser.current_dir());
+    if let Some(chooser) = args.chooser {
+        app.begin_choosing(chooser);
+    }
 
     let mut guard = TerminalGuard::new()?;
     // Both probes must run after entering the alternate screen but before the event loop reads
@@ -822,6 +830,12 @@ fn main() -> Result<()> {
     );
 
     drop(guard);
+    // Written after the terminal is restored, and even when the loop failed: whoever is waiting
+    // on the file reads an empty one as "backed out" rather than hanging on a missing answer.
+    let (chooser, picked) = app.take_chooser();
+    if let Some(chooser) = chooser {
+        chooser.write_answer(picked.as_ref())?;
+    }
     result
 }
 
@@ -1368,6 +1382,9 @@ fn run(
             .is_some_and(|splash| splash.done(Instant::now()))
         {
             boot_splash = None;
+        }
+        if app.is_answered() {
+            return Ok(());
         }
         app.poll_bulk(browser, vfs)?;
         app.poll_search(browser, vfs);
@@ -3240,6 +3257,7 @@ fn run(
             Some(Action::Quit) => return Ok(()),
             // Without `--cwd-file` (a bare `minuteman` run) there's nobody to hand the
             // directory to, so this degrades to a plain quit rather than doing nothing.
+            Some(Action::QuitToCwd) if app.choose_here(browser, vfs) => {}
             Some(Action::QuitToCwd) => {
                 // A folder on another machine is not one the shell can `cd` into.
                 if let Some(file) = cwd_file

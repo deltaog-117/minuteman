@@ -1,0 +1,21 @@
+[package]
+name = "portal_backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mman-portal"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+thiserror = "2.0.20"
+# `tokio` rather than the default async-io executor: the daemon waits on a child process, and the
+# rest of the workspace already runs on tokio.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "io-util"] }
+
+[dev-dependencies]
+proptest = "1.11"

@@ -1756,6 +1756,20 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   each line), the keys (`h`/`l`/`Tab`, `j`/`k`, `l` swallowed, no room for the rail), and drawing
   at any size. Looked at through the test backend; not driven in the real binary this cycle.
 
+- ✅ **File chooser for browsers** – `mman` can answer a browser's open and save dialogs through
+  the XDG desktop portal. New crate `portal_backend` (binary `mman-portal`) is a backend for
+  `org.freedesktop.impl.portal.FileChooser` (`OpenFile`, `SaveFile`, `SaveFiles`): per dialog it
+  opens `mman --chooser-file` in a terminal window (class `mman-chooser`, first of foot, alacritty,
+  kitty, wezterm, xterm, or `MINUTEMAN_PORTAL_TERMINAL[_CMD]`), waits, and replies with `file://`
+  URIs; the portal's `Close` kills the window. `mman` gained `--chooser-file`, `--pick
+  <file|files|directory|save>` and `--pick-name`: `Enter` on a file picks it, `Q` confirms where the
+  cursor is, a save asks for the name and before replacing a file; paths on another machine or in
+  an archive are refused. `shared::chooser` holds the contract (`PickKind`, and `Selection`, whose
+  NUL-separated file format keeps any file name intact). Verified with property tests, an
+  end-to-end test over a private D-Bus session (real daemon, stand-in `mman`), and the real `mman`
+  driven through a PTY in every pick mode. Not yet tried against a real browser and the real
+  `xdg-desktop-portal`; the dialog's file-type filters and extra choices are ignored.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -2051,7 +2065,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the newest: mark two files with `v`, go into another folder and press `d`
+1. `cargo run -p tui` — the newest: `mman --chooser-file /tmp/pick --pick save --pick-name x.txt`, press `Q`, `Enter`,
+   and `cat /tmp/pick` (the saved path; `--pick files` with `v` marks and `Q` picks several; `q` leaves it empty).
+   To try it from a browser, see "File chooser for browsers" in the README. Before that: mark two files with `v`, go into another folder and press `d`
    (they move there; `y` copies), then press `x` or `X` with nothing marked to delete the row under
    the cursor (`y` or `Y` confirms), `c` to cancel, and `space` then `x` for the trash. Before that: keep pressing `V` until the title says `atlas` (it is the last
    view before the list): a block per volume, the one holding your folder marked `◆`; `Enter` zooms

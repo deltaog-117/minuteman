@@ -139,6 +139,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- `portal_backend` (new crate, binary `mman-portal`), `tui`, `shared`: `mman` can be the file
+  chooser of a browser's open and save dialogs. `mman-portal` is a backend for the XDG desktop
+  portal's `FileChooser` (`OpenFile`, `SaveFile`, `SaveFiles`): when the portal forwards a dialog
+  to it, it opens `mman` in a terminal window of class `mman-chooser`, waits for the pick, and
+  replies with the chosen `file://` URIs; closing the window or `q` is a cancel, and the portal
+  withdrawing the call closes the window. `mman` itself gained `--chooser-file <path>` with
+  `--pick <file|files|directory|save>` and `--pick-name <name>`: `Enter` or a double-click on a
+  file picks it (with marks, the marks, when picking several), `Q` confirms where the cursor is
+  (the folder under it or the one you are in for a folder pick, the marked files for several, a
+  name prompt for a save), and `Enter` on a file while saving offers its name. A save asks before
+  replacing a file that is there, and refuses a name with a slash. A path on another machine or
+  inside an archive is refused, since the program waiting could not open it. The answer file holds
+  the paths each ended by a NUL byte (an empty file means no pick), described in
+  `shared::chooser`. The terminal is the first of foot, alacritty, kitty, wezterm and xterm found,
+  or `MINUTEMAN_PORTAL_TERMINAL` (one of those) or `MINUTEMAN_PORTAL_TERMINAL_CMD` (any command
+  that runs its arguments). `crates/portal_backend/data/` holds the `.portal` file, the D-Bus
+  service file, a systemd user unit and an example `portals.conf`. The dialog's file-type filters
+  and extra choices are not used yet.
 - `tui`: an atlas in the `V` cycle (`view = "atlas"` in `config.toml`), after the wiring diagram: a
   zoomable map of the machine's storage that takes the whole window. It starts as one block per
   volume, sized by capacity and filled from the bottom by how full the volume is (red at 90% and

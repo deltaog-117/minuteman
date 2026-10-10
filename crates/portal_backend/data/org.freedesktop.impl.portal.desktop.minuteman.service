@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.minuteman
+Exec=/usr/bin/mman-portal
+SystemdService=mman-portal.service

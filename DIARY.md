@@ -88,6 +88,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-09 | Wiring Diagram Fit | Fit by budget: a cap on siblings and a squeeze on box width chosen so the whole diagram fits (COA A); a selection-dependent focus layout (B) and clipped panning (C) not taken | ✅ Confirmed |
 | 2026-10-10 | Operation Keys on Marks and Cursor | Marks act where you stand, the cursor row is the fallback, `space x` for the trash (COA A); a cursor fallback alone (B) and a same-folder guard (C) not taken | ✅ Confirmed |
 | 2026-10-10 | Deck Rail | A grouped places-style rail at the left, entered with `Tab` and `↑`/`↓`, `hjkl` left to the files (COA A); stacked cards (B) and a rail that folds to icons (C) not taken | ✅ Confirmed |
+| 2026-10-10 | Browser File Chooser | A native portal backend, `mman-portal`, opening `mman --chooser-file` in a terminal (COA B); `xdg-desktop-portal-termfilechooser` with a wrapper script (A) and only a default folder handler (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -6640,6 +6641,59 @@ from the columns.
 **Verification.** `scripts/check` passes. Tests for the layout, rows, scrolling, clicks, keys and
 drawing at any size; the rail was also drawn through the test backend and read. Not run in the real
 binary: no terminal emulator was at hand to read a PTY.
+
+---
+
+## 2026-10-10 — Browser file chooser: `mman` behind the desktop portal
+
+**Context.** A browser's "Save as" and upload dialogs come from the XDG desktop portal, not from the
+file manager set as the default for folders. To have `mman` answer them, something has to speak the
+portal's backend interface.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | `xdg-desktop-portal-termfilechooser` plus a wrapper script that opens `mman` in a terminal | Not taken: works at once, but leans on a third-party daemon and a shell script, and passes few of the portal's options through |
+| B | Our own backend, `mman-portal`, a small D-Bus service that opens `mman` in a terminal | Chosen |
+| C | `xdg-mime default … inode/directory` | Not taken: it only decides what "show in folder" opens; save dialogs never ask it |
+
+**Decision.** Three parts. `shared::chooser` holds the contract both sides use: `PickKind`
+(file, files, directory, save) and `Selection`, a non-empty list of absolute paths that can only be
+built by `try_new` or `decode`, written as paths each ended by a NUL (the one byte a path cannot
+hold, so a newline or invalid UTF-8 in a name survives) with an empty file meaning "backed out".
+In `mman`, `--chooser-file` turns on a pick mode (`tui::chooser`) that changes only what two keys
+mean: opening a file picks it (the single `open_file` function every Enter, double-click and
+menu Open goes through, so none of them can launch the file by accident), and `Q`, which already
+meant "finish here", confirms where the cursor is. A save is a `Prompt::SaveName` followed, if the
+file exists, by `Prompt::ConfirmReplace`; the name is checked by `save_target`, which cannot leave
+the folder on screen. `Q` was reused instead of a new `Action` so the key map, the config and the
+HUD stay as they are. The new crate `portal_backend` exports
+`org.freedesktop.impl.portal.FileChooser` and, per call, a `Request` object whose `Close` kills the
+window. One call makes a private `0700` directory, starts `<terminal> … mman --chooser-file
+<dir>/answer …`, waits, and reads the file: no file (window closed) is a cancel, an empty file is a
+cancel, a file that is not an answer is a failure (response 2), never mistaken for a cancel.
+`SaveFiles` picks a folder and names each file inside it, dropping any name that is not one plain
+component.
+
+**Trade-offs.** `mman` is a terminal program, so the backend still needs a terminal emulator; B
+saves the wrapper script and gains the window class, title, cancel on `Close` and a typed reply,
+not the terminal. The terminal has to stay in the foreground until the command ends, so ones that
+hand the window to a server process and exit (a `gnome-terminal`, a ghostty with a running
+instance) are left out; `MINUTEMAN_PORTAL_TERMINAL_CMD` takes any command that does wait. The
+dialog's filters, extra choices and parent window are ignored. `scripts/vfs-gate` gained two
+entries (`portal_backend/src/session.rs` and `terminal.rs`), because the daemon and `mman` talk
+through a scratch file on this machine and the daemon looks for a program on this machine's
+`PATH`; the chooser's write went into `cli.rs`, next to the `--cwd-file` one, with no entry of its
+own.
+
+**Verification.** `scripts/check` passes. Property tests: a `Selection` round-trips any bytes a
+name can hold and decoding never yields a relative or empty pick; a file URI reads back as the same
+bytes; a save target and a `SaveFiles` name never leave their folder. An end-to-end test starts a
+private `dbus-daemon`, the real `mman-portal` and a stand-in `mman` script and calls
+`OpenFile`, `SaveFile` and `SaveFiles` and `Close` over the bus (pick, cancel, window closed,
+garbage answer, withdrawn request). The real `mman` binary was driven through a scripted PTY in
+all four modes (a file, two marked files, a folder, a save with a suggested name, a save over an
+existing file with `y`, and `q`) and the answer files read back byte for byte. Not run: a real
+browser, the real `xdg-desktop-portal`, or a real terminal window; those are the next thing to try.
 
 ---
 
