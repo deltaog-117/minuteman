@@ -747,6 +747,11 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
             bound(Action::QuitToCwd, "quit+cd"),
             bound(Action::Cancel, "cancel"),
         ],
+        Mode::Leader if !view.shell_open => vec![
+            fixed("x", "trash"),
+            fixed("t", "settings"),
+            bound(Action::Leader, "cancel"),
+        ],
         Mode::Leader => vec![
             fixed("hjkl", "focus"),
             fixed("|", "split"),
@@ -1540,14 +1545,26 @@ mod tests {
     #[test]
     fn the_leader_mode_lists_the_pane_commands() {
         let config = test_config();
-        let text = render_to_text(120, |f, a| {
-            render_status_bar(f, a, &view(Mode::Leader, None, ""), &config)
-        });
+        let mut status = view(Mode::Leader, None, "");
+        status.shell_open = true;
+        let text = render_to_text(120, |f, a| render_status_bar(f, a, &status, &config));
         for expected in [
             "LEADER", "focus", "split", "close", "resize", "flip", "space",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text:?}");
         }
+    }
+
+    #[test]
+    fn the_leader_mode_without_a_shell_lists_the_browser_commands() {
+        let config = test_config();
+        let text = render_to_text(120, |f, a| {
+            render_status_bar(f, a, &view(Mode::Leader, None, ""), &config)
+        });
+        for expected in ["LEADER", "trash", "settings"] {
+            assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+        }
+        assert!(!text.contains("split"), "{text:?}");
     }
 
     #[test]

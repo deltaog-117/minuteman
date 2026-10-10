@@ -57,8 +57,9 @@ trash, and a stable multi-language sandboxed plugin system). Native SSH/SFTP bro
   Sixel) or Unicode halfblocks as a universal fallback. Decoding and rendering never block the UI.
 - 🔹 **Config-driven keybindings** – read from `~/.config/minuteman/config.toml`, with per-field
   fallback to built-in defaults if the file is missing, partial, or fails to parse.
-- 🔹 **Ranger-style marks** – `v` toggles a mark on the current entry; `d` (delete) acts on every
-  marked entry when any are marked, falling back to the single selection otherwise.
+- 🔹 **Ranger-style marks** – `v` toggles a mark on the current entry; `y`, `d`, `x` and `X` act on
+  every marked entry when any are marked, and on the entry under the cursor otherwise. With marks,
+  `y` and `d` copy or move them into the folder you are in at once: mark, go there, press the key.
 - 🔹 **Tiling mini-shells with a single leader key** – `Alt+n` opens a real `$SHELL` in a movable,
   resizable box; `space` is the one leader for everything else (see below). While you type, every
   key goes to the shell — `Tab` completion and `Esc` included.
@@ -129,13 +130,13 @@ named `init` must be passed as `./init`.
 | `Q`         | quit and `cd` your shell to the directory you were in (needs the `mman` wrapper above) |
 | `v`         | mark the entry under the cursor — the only way to choose entries. `y`, `d`, `x`, `X`, `C`, `E`, their right-click entries and the `:` commands act on the marked entries and nothing else, and spend the marks when they take them |
 | `T`         | open the trash browser: what is in the desktop trash, newest first, with a preview of the selected item beside the list on a wide terminal (text, images, archive listings, a hex dump, a folder's contents; `J`/`K` scroll it). `v` marks, `r` puts the marked back, `x` deletes them for good, `E` empties the trash (both ask first), `q` closes |
-| `y`         | yank (copy) the marked entries                |
-| `d`         | cut (move) the marked entries                 |
+| `y`         | yank (copy): with entries marked, copies them into this folder at once; with none, takes the entry under the cursor onto the clipboard for `p` |
+| `d`         | cut (move): same as `y`, but moves; marks already in this folder are left alone |
 | `C` / `E`   | compress / extract the marked entries (opens the form) |
 | `z` / `Z`   | undo / redo the last create, rename, move, copy or trash (a whole batch is one step) |
 | `p`         | paste                                         |
-| `x`         | delete the marked entries to the trash (confirm `y`/N) |
-| `X`         | delete the marked entries permanently (confirm `y`) |
+| `x`         | delete the marked entries (or the one under the cursor) to the trash (confirm `y` or `Y`, or `enter`) |
+| `X`         | delete the marked entries (or the one under the cursor) permanently (confirm `y` or `Y`) |
 | `r`         | rename selection                              |
 | `n`         | create — trailing `/` makes a directory       |
 | `/`         | search — fuzzy search — jump to the best entry whose name holds the letters you type in order (`aernd` finds `aerend`), in this directory or the nearest folder below it that has one; `↓`/`Ctrl-N` and `↑`/`Ctrl-P` step through the best matches while it is open (`Enter` stays, `Esc` goes back) |
@@ -147,7 +148,7 @@ named `init` must be passed as `./init`.
 | `PageUp` / `PageDown` / `Home` / `End` | jump a screenful up or down, or to the first or last entry (in any view) |
 | `.`         | show or hide dot-files (hidden by default; `show_hidden = true` in `config.toml` starts them shown) |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
-| `space`     | leader — commands for the mini-shell panes (below); inert with no shell open |
+| `space`     | leader — commands for the mini-shell panes (below); with no shell open, `space x` opens the trash browser and `space t` the settings popup |
 
 ### Mouse
 
@@ -214,6 +215,8 @@ terminals honour, including over `ssh` and inside `tmux`.
 | `r` / `m`     | resize / move mode (`hjkl` to nudge, `Esc` to leave) |
 | `t`           | flip the focused split between side by side and stacked |
 
+With no shell open, `space` offers only `x` (the trash browser) and `t` (the settings popup).
+
 Pressing `space` lists these in the status bar. Clicking a pane focuses it and starts typing;
 dragging a divider, the box's title bar, or its right border resizes and moves things.
 
@@ -256,7 +259,7 @@ and `Esc` cancels; the keybindings above are not resolved until the prompt close
 searching also returns you to the directory and row you started from. While a paste or delete
 is running in the background, every key except `Esc` and `c` (cancel — copy/move only; delete
 can't be cancelled mid-flight) is ignored until it finishes, including `q`. Marks persist as you navigate
-directories until toggled off or consumed by a delete, and a marked entry is shown with a `*`
+directories until toggled off or spent by a yank, cut or delete, and a marked entry is shown with a `*`
 prefix in the current pane.
 
 ---

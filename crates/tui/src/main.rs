@@ -1481,7 +1481,8 @@ fn run(
         if shells.is_none() {
             // A pane can exit on its own (e.g. `exit` typed into it) between keystrokes, which
             // would otherwise leave a resize/move chord dangling with nothing left to act on.
-            pending_leader = false;
+            // The leader itself is not cleared: with no pane open it is a prefix for the
+            // browser's own commands, and its next key is still on its way.
             shell_chord = None;
         }
 
@@ -1515,7 +1516,7 @@ fn run(
 
         // Mirrors the order the key handling below checks these in, so the pill always names
         // what the next keystroke will actually do.
-        let mode = if shells.is_some() && pending_leader {
+        let mode = if pending_leader {
             hud::Mode::Leader
         } else if let (Some(chord), true) = (shell_chord, shells.is_some()) {
             match chord {
@@ -2912,6 +2913,9 @@ fn run(
                         // nothing (there is no orientation to flip) — free for the settings
                         // popup instead.
                         settings = Some(SettingsPopup::new());
+                    } else if key.code == KeyCode::Char('x') {
+                        // Likewise `x` has no pane to close, so it opens the trash instead.
+                        trash_view = Some(app.begin_trash_view());
                     }
                     continue;
                 }
@@ -3250,8 +3254,8 @@ fn run(
                     app.begin_move(browser, plan, None, "cannot open");
                 }
             }
-            Some(Action::Yank) if app.require_marks(browser) => app.yank(browser),
-            Some(Action::Cut) if app.require_marks(browser) => app.cut(browser),
+            Some(Action::Yank) => app.yank_key(browser),
+            Some(Action::Cut) => app.cut_key(browser),
             Some(Action::Paste) => app.begin_paste(browser),
             Some(Action::Compress) if app.require_marks(browser) => {
                 compress = app.begin_compress_form(browser);
@@ -3261,10 +3265,8 @@ fn run(
             }
             Some(Action::Undo) => app.undo(browser, vfs)?,
             Some(Action::Redo) => app.redo(browser, vfs)?,
-            Some(Action::Delete) if app.require_marks(browser) => app.begin_trash(browser),
-            Some(Action::DeletePermanently) if app.require_marks(browser) => {
-                app.begin_delete_permanently(browser)
-            }
+            Some(Action::Delete) => app.begin_trash(browser),
+            Some(Action::DeletePermanently) => app.begin_delete_permanently(browser),
             Some(Action::Rename) => app.begin_rename(browser),
             Some(Action::Create) => app.begin_create(),
             Some(Action::Search) => app.begin_search(browser),
@@ -3329,15 +3331,10 @@ fn run(
                     .into(),
                 );
             }
-            // Starts the resize/move chord for shell panes (see `pending_leader` and
-            // `ShellChordMode`). Stays inert — same as before panes existed to chord
-            // against — whenever no shell is open.
-            Some(Action::Leader) => {
-                if shells.is_some() {
-                    // The status bar lists what can follow (see `hud::hints`).
-                    pending_leader = true;
-                }
-            }
+            // Starts a leader chord: the pane commands when a shell is open, otherwise the
+            // browser's own (`t` settings, `x` trash). The status bar lists what can follow
+            // (see `hud::hints`).
+            Some(Action::Leader) => pending_leader = true,
             // Guarded explicitly rather than relying on it being unreachable while panes
             // are already open (the branch above handles that case) — opening a second
             // tree here would silently drop the running one without closing it. Use a
@@ -3356,14 +3353,7 @@ fn run(
                     Err(e) => app.status = Some(format!("failed to start shell: {e}")),
                 }
             }
-            Some(
-                Action::Yank
-                | Action::Cut
-                | Action::Delete
-                | Action::DeletePermanently
-                | Action::Compress
-                | Action::Extract,
-            ) => {}
+            Some(Action::Compress | Action::Extract) => {}
             Some(Action::Shell) => {}
             None => {
                 if let Some(code) = key_code {

@@ -1723,6 +1723,19 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   120×24 it does not fit and scrolls to the chosen folder, as it always did; arrows, `+` and `0`
   kept it fitting. Not tried through a live resize of a real terminal (the tests resize the state).
 
+- ✅ **Operation keys work on the cursor row, and marks act where you stand** – `y`, `d`, `x` and `X`
+  act on the marks when there are any and on the entry under the cursor when there are none (the
+  earlier marks-only rule is gone for these four; compress and extract keep it). With marks, `y`
+  and `d` copy or move them into the browsed folder at once instead of filling the clipboard for a
+  `p`, so the flow is mark, go to the destination, press the key; marks already in that folder are
+  skipped for a cut with "already in this folder". The batch goes through the same background paste
+  as a drag and drop, so progress, cancel, the conflict prompt and undo are unchanged. The trash and delete confirmations accept `Y` as well
+  as `y`. `space` is a leader with no shell pane open as well: `space x` opens the trash browser and
+  `space t` the settings popup, whose branch existed but could never be reached because the pending
+  leader was cleared every tick when no pane was open. The mini-shell panes are untouched. Verified
+  against the real binary in a tmux session: cut two marked files into another folder with `d`, `X`
+  then `Y` on the entry under the cursor, `c` clearing a mark, and `space x` opening the trash.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -2018,7 +2031,9 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the newest: keep pressing `V` until the title says `atlas` (it is the last
+1. `cargo run -p tui` — the newest: mark two files with `v`, go into another folder and press `d`
+   (they move there; `y` copies), then press `x` or `X` with nothing marked to delete the row under
+   the cursor (`y` or `Y` confirms), `c` to cancel, and `space` then `x` for the trash. Before that: keep pressing `V` until the title says `atlas` (it is the last
    view before the list): a block per volume, the one holding your folder marked `◆`; `Enter` zooms
    into it (watch the folders arrive, biggest first), arrows or `Tab` move between blocks, `Enter`
    again goes deeper, `Backspace` comes out, `o` opens a block's folder in the browser, `a` swaps

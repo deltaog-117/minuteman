@@ -30,9 +30,10 @@ pub enum Action {
     /// `--cwd-file`, so the `minuteman init` shell wrapper can `cd` the parent shell there. Behaves
     /// exactly like `Quit` when no `--cwd-file` was given.
     QuitToCwd,
-    /// Mark the selection to be duplicated on the next `Paste`.
+    /// Copies the marked entries into the browsed folder at once; with none marked, puts the entry
+    /// under the cursor on the clipboard to be duplicated on the next `Paste`.
     Yank,
-    /// Mark the selection to be relocated on the next `Paste`.
+    /// Like `Yank`, but moves the entries instead of copying them.
     Cut,
     Paste,
     /// Opens the compress form for the marked entries.
@@ -43,12 +44,12 @@ pub enum Action {
     Undo,
     /// Does again what `Undo` took back.
     Redo,
-    /// Sends the selection to the desktop trash (asks for confirmation first, but `Enter` accepts
-    /// it as well as `y` since this is reversible — see `DeletePermanently` for the destructive
-    /// version).
+    /// Sends the marked entries, or the one under the cursor, to the desktop trash (asks for
+    /// confirmation first, but `Enter` accepts it as well as `y` since this is reversible — see
+    /// `DeletePermanently` for the destructive version).
     Delete,
-    /// Permanently deletes the selection, bypassing the trash — asks for confirmation first
-    /// (`y` only, unlike `Delete`).
+    /// Permanently deletes the marked entries, or the one under the cursor, bypassing the trash —
+    /// asks for confirmation first (`y` or `Y` only, unlike `Delete`).
     DeletePermanently,
     Rename,
     /// Prompts for a name; a trailing `/` creates a directory, otherwise a file.
@@ -99,8 +100,9 @@ pub enum Action {
     /// Waits for one more key naming a register, then saves the browsed directory under it,
     /// overwriting whatever that register held before.
     BookmarkSet,
-    /// The single leader key for every shell-pane command. Inert with no shell pane open; while
-    /// one is, and keystrokes aren't going to the shell (`Esc` leaves that typing mode), the next
+    /// The single leader key for every shell-pane command. With no shell pane open, the next key
+    /// is `x` for the trash browser or `t` for the settings popup; while one is open,
+    /// and keystrokes aren't going to the shell (`Esc` leaves that typing mode), the next
     /// key is the command: `Space` again to go back to typing in the focused pane, `hjkl`/arrows
     /// to move focus to the neighbouring pane, `|` / `-` to split side by side / stacked, `x` to
     /// close the focused pane, `r` (enters a resize mode where `hjkl`/arrows repeatedly nudge the

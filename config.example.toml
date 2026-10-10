@@ -193,13 +193,12 @@ quit = ["q"]
 # case-sensitive: "Q" is Shift+q, distinct from "q". Without `--cwd-file` (the bare binary run
 # as `command mman`, not through the wrapper) it just quits.
 quit_to_cwd = ["Q"]
-# Marking with `select` (v) is the only way to choose entries. Every operation — yank, cut, both
-# deletes, compress and extract, the right-click menu's entries for them and the `:` commands —
-# acts on the marks and on nothing else, never on the row under the cursor; with nothing marked
-# they just say so. And each one spends the marks it took: after `y` or `d` the entries are on the
-# clipboard and nothing is marked any more, and the same goes for a confirmed trash or delete and
-# for a compress or extract that starts (declining a question keeps the marks). Choosing and acting
-# are two steps: `v` to choose, then the key for what to do.
+# `y` (yank), `d` (cut), `x` (trash) and `X` (delete for good) act on what you marked with `select`
+# (v), or on the entry under the cursor when nothing is marked. With marks, yank and cut work at
+# once: mark, go to the folder the files should end up in, and press the key; they are copied or
+# moved there, and the marks are spent. Without marks, yank and cut put the entry under the cursor
+# on the clipboard, for `paste` to drop wherever you go next. A confirmed trash or delete spends the
+# marks too, and so does a compress or extract that starts (those two still act on marks only).
 yank = ["y"]
 cut = ["d"]
 paste = ["p"]
@@ -214,14 +213,15 @@ compress = ["C"]
 extract = ["E"]
 undo = ["z"]
 redo = ["Z"]
-# Sends every marked entry (see `select` below) to the desktop trash — the same trash
-# Nautilus/Dolphin/Explorer/Finder use. Confirms with "y" or enter, since this is reversible.
+# Sends every marked entry (see `select` below), or the entry under the cursor when none is marked,
+# to the desktop trash — the same trash Nautilus/Dolphin/Explorer/Finder use. Confirms with "y"
+# or enter, since this is reversible.
 # ":trash" does the same thing from the `:` prompt, and the trash browser (`trash_view`) shows
 # what is in it and puts things back.
 delete = ["x"]
 # Same batching as `delete`, but permanent: bypasses the trash entirely. Single-character keys are
 # case-sensitive (see `quit_to_cwd` above), so "X" is Shift+x, distinct from "x". Confirms with "y"
-# only.
+# or "Y" only.
 delete_permanently = ["X"]
 rename = ["r"]
 # A trailing "/" on the typed name creates a directory instead of a file.
@@ -337,7 +337,7 @@ sort_reverse = ["<"]
 # once, other filesystems and symlinks are not entered. Also in the right-click menu.
 disk_usage = ["u"]
 # Toggles a mark on the current entry — press once per file to choose it for the next operation.
-# This is the only way to choose entries; see `yank` above.
+# Marks stay while you move between folders; see `yank` above.
 select = ["v"]
 # Opens the appearance popup: Theme picks the base palette (default, neon, classic, dracula,
 # catppuccin, nord or terminal); Accent, Focused border, Selection, Directory, Status bar and Danger are edited as free
@@ -362,7 +362,7 @@ bookmark_set = ["B"]
 # mode (hjkl to nudge, esc to leave); t = flip the split's orientation. With no shell open, leader
 # then t instead opens the settings popup (see [panels] above) — j/k moves its cursor, h/l or
 # enter changes the row under it, and Esc or q closes it. While typing in a shell, every key —
-# this one included — goes to the shell.
+# this one included — goes to the shell. With no shell open, leader then x opens the trash browser.
 leader = ["space"]
 
 

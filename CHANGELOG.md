@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `tui`, `theming`: `y` (yank), `d` (cut), `x` (trash) and `X` (delete for good) now work on the
+  entry under the cursor when nothing is marked, and on the marks when there are any. With marks,
+  `y` and `d` act at once: mark, go to the folder the files should end up in, press the key, and
+  they are copied or moved there with no `p` in between (marks spent, undo still takes the batch
+  back). A cut whose marks are all in the folder already says so and keeps them. Without marks,
+  `y` and `d` put the cursor entry on the clipboard for `p`. Compress and extract still need marks.
+  The right-click menu, the deck's and the wiring diagram's `p` and the `:` commands keep the
+  clipboard route, and `:trash` follows the same marks-else-cursor rule.
+- `tui`: `space` is a leader with no shell pane open too: `space x` opens the trash browser and
+  `space t` the settings popup (which the code had but never reached). With a pane open `space x`
+  still closes it.
+
 - `tui`: the wiring diagram now fits all of itself in the window, hardware and unfolded folders
   together, instead of panning across a canvas that a deep path made far bigger than the window.
   It shows fewer siblings of a crowded folder when the window is short (12, 8, 5, then 3, the rest
@@ -90,6 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clipboard when it still holds the cut that was just pasted.
 
 ### Fixed
+- `tui`: the permanent-delete and trash confirmations now take a capital `Y` as well as `y`.
 - `tui`: in the wiring diagram a box that was only partly inside the window was left out while the
   lines to it were still drawn, so some boxes showed and others did not. It is now drawn cut off by
   the window's edge.

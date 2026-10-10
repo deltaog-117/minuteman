@@ -1211,7 +1211,7 @@ impl App {
 
     /// Snapshots the current batch: every marked path if any are marked, otherwise just the
     /// entry under the cursor. Ranger-style "act on marks if any, else the current file"
-    /// convention, shared by yank/cut/delete so all three batch the same way.
+    /// convention, shared by the trash and delete keys and by the cursor fallback of yank and cut.
     fn marked_or_selected(browser: &BrowserState) -> Vec<PathBuf> {
         match browser.marked_paths() {
             marked if !marked.is_empty() => marked,
@@ -1222,14 +1222,13 @@ impl App {
         }
     }
 
-    /// What every operation acts on: the entries marked with `Select` (`v`), and nothing else.
-    /// Marking is the one way to choose entries; the cursor row is never used as a stand-in, so
-    /// `y`, `d`, `x`, `C`, `E`, their menu entries and the `:` commands all mean the same thing.
+    /// What compress and extract act on: the entries marked with `Select` (`v`), and nothing
+    /// else. The cursor row is not a stand-in for them, unlike for `y`, `c`, `x` and `X`.
     fn marked_only(browser: &BrowserState) -> Vec<PathBuf> {
         browser.marked_paths()
     }
 
-    /// Whether anything is marked with `Select`. The yank, cut and delete keys act on marks only,
+    /// Whether anything is marked with `Select`. The compress and extract keys act on marks only,
     /// so with none this reports it on the status line and returns `false`.
     pub fn require_marks(&mut self, browser: &BrowserState) -> bool {
         let any = !browser.marked_paths().is_empty();
@@ -1242,40 +1241,83 @@ impl App {
     /// Copies the marked entries to the clipboard. The marks are spent: `y` takes what `v` chose,
     /// leaving nothing selected, so selecting stays a separate step from acting.
     pub fn yank(&mut self, browser: &mut BrowserState) {
-        let paths = Self::marked_only(browser);
-        if paths.is_empty() {
-            self.status = Some(NOTHING_MARKED.into());
-            return;
-        }
-        browser.clear_marks();
-        self.status = Some(format!("yanked {}", batch_label(&paths)));
-        self.clipboard = Some(Clipboard {
-            paths,
-            mode: ClipboardMode::Copy,
-        });
+        self.carry(browser, ClipboardMode::Copy);
     }
 
     /// Like [`yank`](Self::yank), but the entries are moved when pasted.
     pub fn cut(&mut self, browser: &mut BrowserState) {
+        self.carry(browser, ClipboardMode::Move);
+    }
+
+    fn carry(&mut self, browser: &mut BrowserState, mode: ClipboardMode) {
         let paths = Self::marked_only(browser);
         if paths.is_empty() {
             self.status = Some(NOTHING_MARKED.into());
             return;
         }
         browser.clear_marks();
-        self.status = Some(format!("cut {} to move", batch_label(&paths)));
-        self.clipboard = Some(Clipboard {
-            paths,
-            mode: ClipboardMode::Move,
-        });
+        self.stage(paths, mode);
     }
 
-    /// Asks to send the marked entries to the desktop trash. Nothing marked means nothing to do:
-    /// the entry under the cursor is never used in its place.
+    fn stage(&mut self, paths: Vec<PathBuf>, mode: ClipboardMode) {
+        self.status = Some(match mode {
+            ClipboardMode::Copy => format!("yanked {}", batch_label(&paths)),
+            ClipboardMode::Move => format!("cut {} to move", batch_label(&paths)),
+        });
+        self.clipboard = Some(Clipboard { paths, mode });
+    }
+
+    /// The `y` key. With entries marked it copies them into the browsed folder at once, so the
+    /// order is: mark, go where they should end up, press the key. With none marked it takes the
+    /// entry under the cursor onto the clipboard, for `p` to drop where wanted.
+    pub fn yank_key(&mut self, browser: &mut BrowserState) {
+        self.carry_key(browser, ClipboardMode::Copy);
+    }
+
+    /// The `c` key: [`yank_key`](Self::yank_key), but the entries are moved rather than copied.
+    pub fn cut_key(&mut self, browser: &mut BrowserState) {
+        self.carry_key(browser, ClipboardMode::Move);
+    }
+
+    fn carry_key(&mut self, browser: &mut BrowserState, mode: ClipboardMode) {
+        let marked = Self::marked_only(browser);
+        if marked.is_empty() {
+            match browser.selected_entry() {
+                Some(entry) => {
+                    let paths = vec![entry.path.clone()];
+                    self.stage(paths, mode);
+                }
+                None => self.status = Some(NOTHING_HERE.into()),
+            }
+            return;
+        }
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return;
+        }
+        let dst = browser.current_dir().to_path_buf();
+        // Moving a file to the folder it is already in would only raise a conflict with itself.
+        let paths: Vec<PathBuf> = match mode {
+            ClipboardMode::Move => marked
+                .into_iter()
+                .filter(|path| path.parent() != Some(dst.as_path()))
+                .collect(),
+            ClipboardMode::Copy => marked,
+        };
+        if paths.is_empty() {
+            self.status = Some("already in this folder".into());
+            return;
+        }
+        browser.clear_marks();
+        self.begin_drop(paths, mode, dst);
+    }
+
+    /// Asks to send the marked entries to the desktop trash, or the entry under the cursor when
+    /// none is marked.
     pub fn begin_trash(&mut self, browser: &BrowserState) {
-        let targets = Self::marked_only(browser);
+        let targets = Self::marked_or_selected(browser);
         if targets.is_empty() {
-            self.status = Some(NOTHING_MARKED.into());
+            self.status = Some(NOTHING_HERE.into());
             return;
         }
         self.prompt = Some(Prompt::ConfirmTrash { targets });
@@ -1283,9 +1325,9 @@ impl App {
 
     /// Same batching as `begin_trash`, but for a permanent, trash-bypassing delete.
     pub fn begin_delete_permanently(&mut self, browser: &BrowserState) {
-        let targets = Self::marked_only(browser);
+        let targets = Self::marked_or_selected(browser);
         if targets.is_empty() {
-            self.status = Some(NOTHING_MARKED.into());
+            self.status = Some(NOTHING_HERE.into());
             return;
         }
         self.prompt = Some(Prompt::ConfirmDelete { targets });
@@ -1547,14 +1589,14 @@ impl App {
                 }
             },
             Prompt::ConfirmDelete { targets } => match code {
-                KeyCode::Char('y') => {
+                KeyCode::Char('y' | 'Y') => {
                     browser.clear_marks();
                     self.spawn_delete(targets);
                 }
                 _ => self.status = Some("delete cancelled".into()),
             },
             Prompt::ConfirmTrash { targets } => match code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     browser.clear_marks();
                     self.spawn_trash(targets);
                 }
@@ -3023,6 +3065,9 @@ fn handover_status(line: &str, result: &std::io::Result<ExitStatus>) -> String {
 /// What an operation says when nothing is marked.
 const NOTHING_MARKED: &str = "nothing marked — mark with v first";
 
+/// What an operation says when nothing is marked and no entry is under the cursor either.
+const NOTHING_HERE: &str = "nothing here to act on";
+
 fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -4015,35 +4060,14 @@ mod tests {
         f
     }
 
-    const NOTHING_MARKED_STATUS: &str = "nothing marked — mark with v first";
-
     #[test]
-    fn with_nothing_marked_no_operation_falls_back_to_the_cursor_row() {
+    fn with_nothing_marked_the_archive_operations_still_need_marks() {
         let mut f = three_files("marks-only");
         f.browser.select_index(1);
 
-        f.app.yank(&mut f.browser);
-        assert!(f.app.clipboard.is_none());
-        assert_eq!(f.app.status.as_deref(), Some(NOTHING_MARKED_STATUS));
-
-        f.app.status = None;
-        f.app.cut(&mut f.browser);
-        assert!(f.app.clipboard.is_none());
-        assert_eq!(f.app.status.as_deref(), Some(NOTHING_MARKED_STATUS));
-
-        f.app.status = None;
-        f.app.begin_trash(&f.browser);
-        assert!(f.app.prompt.is_none());
-        assert_eq!(f.app.status.as_deref(), Some(NOTHING_MARKED_STATUS));
-
-        f.app.status = None;
-        f.app.begin_delete_permanently(&f.browser);
-        assert!(f.app.prompt.is_none());
-        assert_eq!(f.app.status.as_deref(), Some(NOTHING_MARKED_STATUS));
-
         assert!(f.app.begin_compress_form(&f.browser).is_none());
         assert!(f.app.begin_extract_form(&f.browser).is_none());
-        for line in ["compress out.zip", "extract", "trash"] {
+        for line in ["compress out.zip", "extract"] {
             f.app.status = None;
             f.run(line);
             assert!(f.app.prompt.is_none(), "{line}");
@@ -4053,6 +4077,138 @@ mod tests {
         }
         assert!(f.root.join("b.txt").exists(), "nothing was touched");
         assert!(!f.root.join("out.zip").exists());
+    }
+
+    #[test]
+    fn with_nothing_marked_the_keys_act_on_the_cursor_row() {
+        let mut f = three_files("cursor-row");
+        f.browser.select_index(1);
+
+        f.app.yank_key(&mut f.browser);
+        let held = f.app.clipboard.as_ref().expect("yanked");
+        assert_eq!(held.paths, [f.root.join("b.txt")]);
+        assert_eq!(held.mode, ClipboardMode::Copy);
+
+        f.app.cut_key(&mut f.browser);
+        let held = f.app.clipboard.as_ref().expect("cut");
+        assert_eq!(held.paths, [f.root.join("b.txt")]);
+        assert_eq!(held.mode, ClipboardMode::Move);
+
+        f.app.begin_trash(&f.browser);
+        assert!(matches!(
+            &f.app.prompt,
+            Some(Prompt::ConfirmTrash { targets }) if *targets == [f.root.join("b.txt")]
+        ));
+        f.press(KeyCode::Char('n'));
+
+        f.app.begin_delete_permanently(&f.browser);
+        assert!(matches!(
+            &f.app.prompt,
+            Some(Prompt::ConfirmDelete { targets }) if *targets == [f.root.join("b.txt")]
+        ));
+    }
+
+    #[test]
+    fn marks_win_over_the_cursor_row_for_a_delete() {
+        let mut f = three_files("marks-win");
+        select_named(&mut f, "a.txt");
+        f.browser.select_index(2);
+
+        f.app.begin_delete_permanently(&f.browser);
+
+        assert!(matches!(
+            &f.app.prompt,
+            Some(Prompt::ConfirmDelete { targets }) if *targets == [f.root.join("a.txt")]
+        ));
+    }
+
+    /// A fixture whose root holds `dest/` besides the three files, with `a.txt` and `c.txt`
+    /// marked and the browser then moved into `dest/`, where the keys are pressed.
+    fn marked_then_moved_to_dest(label: &str) -> Fixture {
+        let mut f = three_files(label);
+        std::fs::create_dir(f.root.join("dest")).unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "a.txt");
+        select_named(&mut f, "c.txt");
+        f.run("cd dest");
+        f.wait_for_idle();
+        assert_eq!(f.browser.current_dir(), f.root.join("dest"));
+        f
+    }
+
+    #[test]
+    fn the_yank_key_copies_the_marks_into_the_browsed_folder_at_once() {
+        let mut f = marked_then_moved_to_dest("yank-here");
+
+        f.app.yank_key(&mut f.browser);
+        f.wait_for_idle();
+
+        assert!(f.root.join("dest/a.txt").exists());
+        assert!(f.root.join("dest/c.txt").exists());
+        assert!(f.root.join("a.txt").exists(), "a copy leaves the original");
+        assert!(f.browser.marked_paths().is_empty(), "the marks are spent");
+        assert!(f.app.clipboard.is_none(), "no paste is needed");
+    }
+
+    #[test]
+    fn the_cut_key_moves_the_marks_into_the_browsed_folder_at_once() {
+        let mut f = marked_then_moved_to_dest("cut-here");
+
+        f.app.cut_key(&mut f.browser);
+        f.wait_for_idle();
+
+        assert!(f.root.join("dest/a.txt").exists());
+        assert!(f.root.join("dest/c.txt").exists());
+        assert!(!f.root.join("a.txt").exists());
+        assert!(!f.root.join("c.txt").exists());
+        assert!(f.root.join("b.txt").exists(), "unmarked entries stay");
+        assert!(f.browser.marked_paths().is_empty());
+        assert!(f.app.clipboard.is_none());
+    }
+
+    #[test]
+    fn cutting_marks_that_are_already_in_the_folder_says_so_and_keeps_them() {
+        let mut f = three_files("cut-in-place");
+        select_named(&mut f, "b.txt");
+
+        f.app.cut_key(&mut f.browser);
+
+        assert_eq!(f.app.status.as_deref(), Some("already in this folder"));
+        assert!(!f.app.is_busy());
+        assert_eq!(f.browser.marked_paths().len(), 1);
+        assert!(f.root.join("b.txt").exists());
+    }
+
+    #[test]
+    fn yanking_marks_that_are_already_in_the_folder_never_damages_them() {
+        let mut f = three_files("yank-in-place");
+        select_named(&mut f, "b.txt");
+
+        f.app.yank_key(&mut f.browser);
+        f.wait_for_idle();
+
+        assert!(f.root.join("b.txt").exists());
+        assert_eq!(std::fs::read(f.root.join("b.txt")).unwrap(), b"x");
+        assert!(f.app.prompt.is_none(), "no overwrite is offered on itself");
+    }
+
+    #[test]
+    fn a_capital_y_confirms_a_delete_and_a_trash_like_a_lowercase_one() {
+        let mut f = three_files("capital-y");
+        select_named(&mut f, "b.txt");
+        f.app.begin_delete_permanently(&f.browser);
+        f.press(KeyCode::Char('Y'));
+        f.wait_for_idle();
+        assert!(!f.root.join("b.txt").exists());
+
+        // A name that does not exist, so a confirmed trash cannot reach the user's real trash.
+        f.app.prompt = Some(Prompt::ConfirmTrash {
+            targets: vec![f.root.join("ghost.txt")],
+        });
+        f.press(KeyCode::Char('Y'));
+        assert!(f.app.prompt.is_none());
+        assert_ne!(f.app.status.as_deref(), Some("trash cancelled"));
+        f.wait_for_idle();
     }
 
     #[test]
@@ -4071,9 +4227,12 @@ mod tests {
             f.browser.marked_paths().is_empty(),
             "y spends the selection"
         );
-        // So a following operation has nothing to act on until something is marked again.
+        // So a following operation falls back to the cursor row, not to the spent marks.
         f.app.begin_trash(&f.browser);
-        assert!(f.app.prompt.is_none());
+        assert!(matches!(
+            &f.app.prompt,
+            Some(Prompt::ConfirmTrash { targets }) if *targets == [f.root.join("b.txt")]
+        ));
     }
 
     #[test]

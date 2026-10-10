@@ -86,6 +86,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-06 | Plugin Cost Benchmarks | Ignored benchmark tests beside the integration tests, run by hand with `--release`, no stored baseline (COA A); a criterion bench (B) and a docs-only close-out (C) rejected | ✅ Confirmed |
 | 2026-10-09 | Atlas Storage Map | Lazy zoom on the disk usage scanner with a pure whole-cell treemap (COA A); a cached whole-volume tree with a minimap (B) and a volumes-only map (C) not taken | ✅ Confirmed |
 | 2026-10-09 | Wiring Diagram Fit | Fit by budget: a cap on siblings and a squeeze on box width chosen so the whole diagram fits (COA A); a selection-dependent focus layout (B) and clipped panning (C) not taken | ✅ Confirmed |
+| 2026-10-10 | Operation Keys on Marks and Cursor | Marks act where you stand, the cursor row is the fallback, `space x` for the trash (COA A); a cursor fallback alone (B) and a same-folder guard (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -6565,6 +6566,46 @@ whatever width is asked, a zero size leaving everything unfolded, `-` and `0` re
 drawing (the hardware and the deep folder on screen together, fewer siblings in a shorter window and
 the browsed one kept, growing back, a chosen folder surviving a shrink, cut boxes drawn, any size
 without a panic). In the real binary as described above.
+
+### Operation Keys: Marks Act Where You Stand (COA A)
+
+**Date:** 2026-10-10 · **Author:** deltaog-117
+
+**Context.** Every operation used to need `v` marks and ignored the cursor row, and `y`/`d` only
+filled a clipboard that `p` then had to drop. That made a single file cost three keys and a batch
+cost mark, act, move, paste. The request: a bare `y`, `d`, `x` or `X` should act on the row under the
+cursor, and with marks the key should itself do the work where you are standing.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Marks present: yank/cut copy or move them into the browsed folder at once. None: the cursor row goes to the clipboard (yank, cut) or to the confirmation (trash, delete) | Chosen |
+| B | Only add the cursor fallback; marks still go through the clipboard | Not taken: keeps the extra step that was the complaint |
+| C | A, but marks already in this folder fall back to the clipboard | Not taken: the behaviour is explicit in A, and a same-folder cut is told "already in this folder" |
+
+**Decision.** `App::yank_key` and `App::cut_key` are new and used by the keys only; `yank` and `cut`
+stay clipboard-only because the right-click menu (which marks the clicked row first, so a menu "Cut"
+would otherwise move it onto itself) and the deck and wiring `p` rely on them. The immediate path
+reuses `begin_drop`, the background paste a drag and drop already uses, so progress, cancel, the
+overwrite/skip/abort prompt and undo came free, and the clipboard is left alone. `begin_trash` and
+`begin_delete_permanently` switched from marks-only to marks-else-cursor, which also changes `:trash`.
+Compress and extract were left marks-only. The keys keep their places: `d` cuts and `c` cancels.
+Confirmations take `y` and `Y`. `space` with no pane open
+is now a pending leader whose `x` opens the trash and `t` the settings popup: that `t` branch was
+dead code, because the pending leader was reset on every tick when no pane was open, so the reset
+no longer clears it. The mini-shell panes were weighed for removal as immature and kept as they are, at the
+author's choice; the leader gaining a use outside them is what the change did for them.
+
+**Trade-offs.** A `y` with marks in the same folder is a copy onto itself, which `file_ops`
+rejects as the same path, so nothing is duplicated or overwritten (a test pins that); the old
+`v`, `y`, `p` there behaved the same. One key has two behaviours depending on whether anything is marked, which is the cost of
+dropping the clipboard step.
+
+**Verification.** `scripts/check` passes. New tests: the cursor row for `y`, `d`, `x`, `X`; marks
+winning over the cursor; `y` and `d` into another folder, for a copy and a move, leaving no
+clipboard and no marks; a same-folder cut keeping its marks; a capital `Y` for both confirmations;
+the leader's hints with and without a shell. In the real binary under tmux:
+two marked files cut into another folder, `X` then `Y` on the cursor row, `c` clearing a mark,
+`space` then `x` opening the trash.
 
 ---
 
