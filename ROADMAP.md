@@ -1736,6 +1736,26 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   against the real binary in a tmux session: cut two marked files into another folder with `d`, `X`
   then `Y` on the entry under the cursor, `c` clearing a mark, and `space x` opening the trash.
 
+- ✅ **Deck view: the disk tray moves to the left, like a file manager's places panel (COA A)** –
+  the strip of framed cards above the columns is now a 26-cell rail beside them: a frame titled
+  "devices" holding the devices grouped under Internal, Removable and Network headings, two lines
+  each (name; gauge and free space, or "not mounted" and the size, or the "fits"/"needs" verdict
+  while files are carried, which dims a device that cannot take them). A `▌` at the row's edge
+  marks the folder you are in, the chosen row is filled while the keys are on the rail, a busy
+  disk shows a three-bar sparkline beside its name, a plugged-in device grows in a line at a time,
+  and `▴`/`▾` on the frame say more is scrolled out (a group's heading stays with its first device
+  when scrolled to). The rail is dropped when the body is under 70 cells wide or 6 rows high. The
+  layout puts the columns in what is left, a pane gap from the rail (`BrowserLayout::split_columns`
+  is the old column split, taken out so both can use it). Keys: `h` or `Tab` goes to the rail,
+  `j`/`k` or the up and down arrows choose, `Enter`, `m`, `e` and `p` as before, `l`, `Tab` or
+  `Esc` come back; with the keys on the files `l` does nothing in this view and `Enter` opens the
+  file or folder. The sparkline and the mount path are no longer on the device's row (the path is
+  in the header once you are in it). Chosen as COA A over the old cards stacked in a column (B)
+  and a rail that folds to icons and unfolds on focus (C). Tests: the layout (rail beside the
+  columns, gaps, narrow and short windows), the rows (grouping, heights, scrolling, a click on
+  each line), the keys (`h`/`l`/`Tab`, `j`/`k`, `l` swallowed, no room for the rail), and drawing
+  at any size. Looked at through the test backend; not driven in the real binary this cycle.
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`

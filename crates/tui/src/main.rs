@@ -414,7 +414,7 @@ struct Overlay<'a> {
     appearance: Option<&'a AppearancePopup>,
     /// The fuzzy finder, a panel over the browser while open.
     finder: Option<&'a FinderPopup>,
-    /// The strip of device cards, in the deck view.
+    /// The rail of devices, in the deck view.
     deck: Option<&'a DeckState>,
     /// The diagram of how the storage is wired, in the wiring view.
     wiring: Option<&'a WiringState>,
@@ -3113,15 +3113,30 @@ fn run(
                     }
                 }
 
-                // In the deck view `Tab` takes the keys to the cards; with them there, the arrows,
-                // `Enter`, `m`, `e` and `Esc` are theirs. Anything else is the browser's.
+                // In the deck view `Tab` or `h` takes the keys to the rail of devices at the left;
+                // with them there, `j`, `k`, `Enter`, `m`, `e` and `Esc` are theirs, and `l` gives
+                // them back. Anything else is the browser's.
                 if let Some(cards) = deck.as_mut() {
                     let had_keys = cards.focused();
-                    match cards.key(key) {
+                    let panels = effective_panels(config, &local_panels);
+                    let rail = browser_layout(
+                        terminal.size()?.into(),
+                        panels.columns,
+                        panels.show_hud,
+                        view_mode,
+                        effective_theme(config, &local_theme).shape,
+                    )
+                    .deck;
+                    match cards.key(key, rail.width > 0) {
                         DeckKey::Pass => {}
                         DeckKey::Handled => {
                             if cards.focused() && !had_keys {
                                 app.status = Some(deck::HINT.to_string());
+                            } else if !cards.focused()
+                                && had_keys
+                                && app.status.as_deref() == Some(deck::HINT)
+                            {
+                                app.status = None;
                             }
                             continue;
                         }
@@ -3793,9 +3808,9 @@ fn draw(
         atlas_view::render(frame, layout.current, map, browser.current_dir(), config);
     }
 
-    // The deck's strip of device cards, above the columns.
+    // The deck's rail of devices, at the left of the columns.
     if let Some(cards) = deck
-        && layout.deck.height > 0
+        && layout.deck.width > 0
     {
         deck_view::render(
             frame,

@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! The deck's state (`V`, the deck view): the devices found, how busy each is, which card is
-//! selected and whether the keys are going to the cards, and what is being done to a device. Like
+//! selected and whether the keys are going to the rail, and what is being done to a device. Like
 //! `settings_popup` it is pure: no `Frame`, no terminal; `deck_view` draws it and `main` applies
 //! the few things it asks for, which are to go to a folder and to show a message.
 //!
@@ -50,7 +50,7 @@ pub const SLIDE_IN: Duration = Duration::from_millis(260);
 
 /// Shown when the keys go to the cards.
 pub const HINT: &str =
-    "deck: ←/→ choose  Enter open  p send marked  m mount/unmount  e eject  Tab back";
+    "devices: j/k choose  Enter open  p send marked  m mount/unmount  e eject  l/Esc back";
 
 /// What a key or click did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +87,7 @@ pub struct DeckState {
     /// The node of the selected card, so the selection stays on its device as the list changes.
     selected_node: Option<String>,
     focused: bool,
-    /// The first card drawn, kept by the renderer between frames.
+    /// The first line item (a heading or a card) drawn, kept by the renderer between frames.
     first_card: Cell<usize>,
     scans: Receiver<Scan>,
     scan_tx: Sender<Scan>,
@@ -295,22 +295,42 @@ impl DeckState {
         self.selected_node = Some(self.devices[at].node.clone());
     }
 
-    /// `Tab` takes the keys to the cards and gives them back; with them, `Left`/`Right` (and
-    /// `h`/`l`) choose a card, `Enter` opens it (mounting it first if it is not mounted), `m`
-    /// mounts or unmounts it, `e` ejects it and `Esc` gives the keys back. Every other key is the
-    /// browser's, so `q` still quits and `j`/`k` still move through the files.
-    pub fn key(&mut self, key: KeyEvent) -> Outcome {
+    /// Where the keys go in a deck whose rail is at the left of the files (`visible`; with no
+    /// room for the rail they are all the browser's). With the keys on the files, `Tab` or `h`
+    /// takes them to the rail, and `l` is nothing, since going into a file or folder is `Enter`'s
+    /// alone here. With them on the rail, `j`/`k` (and the up and down arrows) choose a card,
+    /// `Enter` opens it (mounting it first if it is not mounted), `m` mounts or unmounts it, `e`
+    /// ejects it, `p` sends what is carried, and `l`, `Tab` or `Esc` give the keys back. Every
+    /// other key is the browser's, so `q` still quits.
+    pub fn key(&mut self, key: KeyEvent, visible: bool) -> Outcome {
+        if !visible {
+            self.focused = false;
+            return Outcome::Pass;
+        }
         if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
             self.focused = !self.focused;
             return Outcome::Handled;
         }
-        if !self.focused || key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
             return Outcome::Pass;
         }
+        let plain = key.modifiers == KeyModifiers::NONE;
+        if !self.focused {
+            return match key.code {
+                KeyCode::Char('h') if plain => {
+                    self.focused = true;
+                    Outcome::Handled
+                }
+                KeyCode::Char('l') if plain => Outcome::Handled,
+                _ => Outcome::Pass,
+            };
+        }
         match key.code {
-            KeyCode::Esc => self.focused = false,
-            KeyCode::Left | KeyCode::Char('h') => self.step(-1),
-            KeyCode::Right | KeyCode::Char('l') => self.step(1),
+            KeyCode::Esc | KeyCode::Right | KeyCode::Char('l') => self.focused = false,
+            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.step(1),
+            // The rail is the leftmost thing there is: nowhere further to go.
+            KeyCode::Left | KeyCode::Char('h') => {}
             KeyCode::Enter => return self.open_selected(),
             KeyCode::Char('p') => return self.send_selected(),
             KeyCode::Char('m') => self.toggle_selected(),
@@ -452,63 +472,105 @@ mod tests {
     }
 
     #[test]
-    fn tab_takes_the_keys_to_the_cards_and_gives_them_back() {
+    fn tab_takes_the_keys_to_the_rail_and_gives_them_back() {
         let (_rt, mut deck) = deck_with(three());
         assert!(!deck.focused());
         assert_eq!(
-            deck.key(press(KeyCode::Right)),
+            deck.key(press(KeyCode::Down), true),
             Outcome::Pass,
             "the browser's until Tab"
         );
-        assert_eq!(deck.key(press(KeyCode::Tab)), Outcome::Handled);
+        assert_eq!(deck.key(press(KeyCode::Tab), true), Outcome::Handled);
         assert!(deck.focused());
-        assert_eq!(deck.key(press(KeyCode::Esc)), Outcome::Handled);
+        assert_eq!(deck.key(press(KeyCode::Esc), true), Outcome::Handled);
         assert!(!deck.focused());
-        deck.key(press(KeyCode::Tab));
-        deck.key(press(KeyCode::Tab));
+        deck.key(press(KeyCode::Tab), true);
+        deck.key(press(KeyCode::Tab), true);
         assert!(!deck.focused());
     }
 
     #[test]
-    fn the_arrows_choose_cards_and_stop_at_the_ends() {
+    fn h_goes_left_to_the_rail_and_l_comes_back_to_the_files() {
         let (_rt, mut deck) = deck_with(three());
-        deck.key(press(KeyCode::Tab));
+        assert_eq!(deck.key(press(KeyCode::Char('h')), true), Outcome::Handled);
+        assert!(deck.focused());
+        assert_eq!(deck.key(press(KeyCode::Char('h')), true), Outcome::Handled);
+        assert!(deck.focused(), "nowhere further left");
+        assert_eq!(deck.key(press(KeyCode::Char('l')), true), Outcome::Handled);
+        assert!(!deck.focused());
+        deck.key(press(KeyCode::Tab), true);
+        deck.key(press(KeyCode::Right), true);
+        assert!(!deck.focused());
+    }
+
+    #[test]
+    fn l_alone_no_longer_goes_into_the_file_under_the_cursor() {
+        let (_rt, mut deck) = deck_with(three());
+        assert_eq!(
+            deck.key(press(KeyCode::Char('l')), true),
+            Outcome::Handled,
+            "swallowed, so it never reaches the browser's Enter"
+        );
+        assert_eq!(deck.key(press(KeyCode::Enter), true), Outcome::Pass);
+        let alt = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT);
+        assert_eq!(
+            deck.key(alt, true),
+            Outcome::Pass,
+            "the Alt layer is not ours"
+        );
+    }
+
+    #[test]
+    fn j_and_k_choose_cards_and_stop_at_the_ends() {
+        let (_rt, mut deck) = deck_with(three());
+        deck.key(press(KeyCode::Tab), true);
         assert_eq!(deck.selected(), 0);
-        deck.key(press(KeyCode::Left));
+        deck.key(press(KeyCode::Char('k')), true);
         assert_eq!(deck.selected(), 0);
-        deck.key(press(KeyCode::Right));
-        deck.key(press(KeyCode::Char('l')));
-        deck.key(press(KeyCode::Right));
+        deck.key(press(KeyCode::Char('j')), true);
+        deck.key(press(KeyCode::Down), true);
+        deck.key(press(KeyCode::Char('j')), true);
         assert_eq!(deck.selected(), 2);
-        deck.key(press(KeyCode::Char('h')));
+        deck.key(press(KeyCode::Up), true);
         assert_eq!(deck.selected(), 1);
     }
 
     #[test]
     fn keys_the_deck_does_not_use_stay_the_browsers_even_with_it_focused() {
         let (_rt, mut deck) = deck_with(three());
-        deck.key(press(KeyCode::Tab));
-        for code in [
-            KeyCode::Char('q'),
-            KeyCode::Char('j'),
-            KeyCode::Down,
-            KeyCode::Char('x'),
-        ] {
-            assert_eq!(deck.key(press(code)), Outcome::Pass, "{code:?}");
+        deck.key(press(KeyCode::Tab), true);
+        for code in [KeyCode::Char('q'), KeyCode::Char('x'), KeyCode::Backspace] {
+            assert_eq!(deck.key(press(code), true), Outcome::Pass, "{code:?}");
         }
         assert_eq!(
-            deck.key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL)),
+            deck.key(
+                KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+                true
+            ),
             Outcome::Pass
+        );
+    }
+
+    #[test]
+    fn with_no_room_for_the_rail_every_key_is_the_browsers() {
+        let (_rt, mut deck) = deck_with(three());
+        deck.key(press(KeyCode::Tab), true);
+        for code in [KeyCode::Tab, KeyCode::Char('h'), KeyCode::Char('l')] {
+            assert_eq!(deck.key(press(code), false), Outcome::Pass, "{code:?}");
+        }
+        assert!(
+            !deck.focused(),
+            "the keys cannot stay on a rail that is not there"
         );
     }
 
     #[test]
     fn enter_on_a_mounted_card_goes_to_its_folder() {
         let (_rt, mut deck) = deck_with(three());
-        deck.key(press(KeyCode::Tab));
-        deck.key(press(KeyCode::Right));
+        deck.key(press(KeyCode::Tab), true);
+        deck.key(press(KeyCode::Down), true);
         assert_eq!(
-            deck.key(press(KeyCode::Enter)),
+            deck.key(press(KeyCode::Enter), true),
             Outcome::Goto(PathBuf::from("/run/media/me/STICK"))
         );
     }
@@ -519,10 +581,10 @@ mod tests {
             device("nas:/export", Some("/mnt/nas"), Kind::Network),
             device("sda1", Some("/"), Kind::Internal),
         ]);
-        deck.key(press(KeyCode::Tab));
-        deck.key(press(KeyCode::Char('m')));
-        deck.key(press(KeyCode::Right));
-        deck.key(press(KeyCode::Char('e')));
+        deck.key(press(KeyCode::Tab), true);
+        deck.key(press(KeyCode::Char('m')), true);
+        deck.key(press(KeyCode::Down), true);
+        deck.key(press(KeyCode::Char('e')), true);
         deck.poll(Instant::now());
         let mut said = Vec::new();
         while let Some(Event::Status(text)) = deck.take_event() {
@@ -569,16 +631,16 @@ mod tests {
     fn p_sends_to_a_device_it_fits_on_and_refuses_one_it_does_not_with_the_reason() {
         let (_rt, mut deck) = deck_with(with_sizes(three(), &[1 << 39, 1 << 20, 0]));
         deck.set_load(Some(load(1 << 30, 1 << 20)));
-        deck.key(press(KeyCode::Tab));
+        deck.key(press(KeyCode::Tab), true);
         assert_eq!(
-            deck.key(press(KeyCode::Char('p'))),
+            deck.key(press(KeyCode::Char('p')), true),
             Outcome::Send(PathBuf::from("/")),
             "the first card has room"
         );
-        deck.key(press(KeyCode::Right));
-        assert_eq!(deck.key(press(KeyCode::Char('p'))), Outcome::Handled);
-        deck.key(press(KeyCode::Right));
-        assert_eq!(deck.key(press(KeyCode::Char('p'))), Outcome::Handled);
+        deck.key(press(KeyCode::Down), true);
+        assert_eq!(deck.key(press(KeyCode::Char('p')), true), Outcome::Handled);
+        deck.key(press(KeyCode::Down), true);
+        assert_eq!(deck.key(press(KeyCode::Char('p')), true), Outcome::Handled);
         deck.poll(Instant::now());
         let mut said = Vec::new();
         while let Some(Event::Status(text)) = deck.take_event() {
@@ -595,9 +657,9 @@ mod tests {
     #[test]
     fn p_with_nothing_carried_still_goes_to_the_caller_who_says_so() {
         let (_rt, mut deck) = deck_with(with_sizes(three(), &[1 << 39, 1 << 39, 0]));
-        deck.key(press(KeyCode::Tab));
+        deck.key(press(KeyCode::Tab), true);
         assert_eq!(
-            deck.key(press(KeyCode::Char('p'))),
+            deck.key(press(KeyCode::Char('p')), true),
             Outcome::Send(PathBuf::from("/"))
         );
     }
@@ -611,9 +673,9 @@ mod tests {
         moving.carry = cargo_fit::Carry::Move;
         deck.set_load(Some(moving));
         assert_eq!(deck.verdict(0), Some(Verdict::SameDisk));
-        deck.key(press(KeyCode::Tab));
+        deck.key(press(KeyCode::Tab), true);
         assert!(matches!(
-            deck.key(press(KeyCode::Char('p'))),
+            deck.key(press(KeyCode::Char('p')), true),
             Outcome::Send(_)
         ));
     }
@@ -621,8 +683,8 @@ mod tests {
     #[test]
     fn the_selection_follows_its_device_when_the_list_changes() {
         let (_rt, mut deck) = deck_with(three());
-        deck.key(press(KeyCode::Tab));
-        deck.key(press(KeyCode::Right));
+        deck.key(press(KeyCode::Tab), true);
+        deck.key(press(KeyCode::Down), true);
         assert_eq!(deck.devices()[deck.selected()].node, "sdb1");
         let mut shifted = three();
         shifted.insert(0, device("nvme0n1p1", Some("/data"), Kind::Internal));

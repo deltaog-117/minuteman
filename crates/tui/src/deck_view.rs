@@ -14,20 +14,23 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Draws the deck: a strip of cards above the columns, one per device, each with its name, where
-//! it is mounted, a gauge of how full it is and a sparkline of how busy it has been. The card
-//! holding the folder being browsed has the bright frame ("you are here"); with the keys on the
-//! deck, the chosen card is filled. A card that has just appeared grows in from nothing.
+//! Draws the deck: a rail of devices at the left of the columns, the way a file manager's places
+//! panel is. The devices are grouped under a heading each (internal, removable, network); a device
+//! is two lines, its name over a gauge of how full it is (or, while files are carried, whether
+//! they fit). A bar at the left edge of the row holding the folder being browsed says "you are
+//! here"; with the keys on the rail, the chosen row is filled. A disk that is reading or writing
+//! shows a small live sparkline beside its name. A device that has just appeared grows in from
+//! nothing.
 //!
-//! The layout (`cards`) is one function that both the drawing and the mouse ask, so a click lands
-//! on the card that was drawn there.
+//! The layout (`rows`) is one function that both the drawing and the mouse ask, so a click lands
+//! on the row that was drawn there.
 
 use std::path::Path;
 use std::time::Instant;
 
 use devices::{Device, Kind};
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -38,82 +41,126 @@ use crate::deck::DeckState;
 use crate::glyphs;
 use crate::hud::{fit_width, format_size, pad_to, text_width};
 use crate::style;
-use crate::trash_view::elide_left;
 
-/// The width of a full card.
-pub const CARD_WIDTH: u16 = 28;
+/// The lines a device takes: its name, then how full it is.
+const ROW_HEIGHT: u16 = 2;
 
-/// Blank columns between two cards.
-const GAP: u16 = 1;
+/// The least width at which a row has room for what is in it.
+const CONTENT_MIN: u16 = 14;
 
-/// The least width worth drawing a card at while it grows in.
-const MIN_CARD: u16 = 4;
-
-/// The least width at which a card has room for what is in it.
-const CONTENT_MIN: u16 = 16;
+/// The width of the sparkline beside the name of a busy disk.
+const PULSE_WIDTH: usize = 3;
 
 /// A sparkline never scales its tallest bar below this many bytes a second, so a trickle of
 /// background writes does not look like a flood.
 const SPARK_FLOOR: u64 = 256 * 1024;
 
-/// How many cards fit across `width`.
-fn capacity(width: u16) -> usize {
-    usize::from(((width + GAP) / (CARD_WIDTH + GAP)).max(1))
+/// What a line of the rail is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// The title over a group of devices.
+    Heading(Kind),
+    /// A device, by index into the deck's devices.
+    Device(usize),
 }
 
-/// The first card to draw so the selected one is on screen with as little scrolling as possible.
-fn follow(selected: usize, first: usize, count: usize, capacity: usize) -> usize {
-    let mut first = first.min(count.saturating_sub(capacity));
-    if selected < first {
-        first = selected;
-    } else if selected >= first + capacity {
-        first = selected + 1 - capacity;
+/// What is drawn in the rail's frame, top to bottom, and whether more is hidden past either end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rows {
+    pub placed: Vec<(Slot, Rect)>,
+    pub more_above: bool,
+    pub more_below: bool,
+}
+
+/// Where the rail's lines go: inside its one-cell frame.
+fn inner(area: Rect) -> Rect {
+    area.inner(Margin::new(1, 1))
+}
+
+/// The lines of a device that has grown `grown` (0 to 1) of the way in: never none, so a new
+/// device is seen the moment it appears.
+fn grown_height(grown: f64) -> u16 {
+    // `grown` is between 0 and 1 and the height is at most `ROW_HEIGHT`, so this is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let lines = (f64::from(ROW_HEIGHT) * grown).ceil() as u16;
+    lines.clamp(1, ROW_HEIGHT)
+}
+
+/// The first item to draw so the items `top` to `bottom` are on screen in `room` lines with as
+/// little scrolling as possible, and no blank space left at the end when the list could fill it.
+fn follow(heights: &[u16], top: usize, bottom: usize, first: usize, room: u16) -> usize {
+    if heights.is_empty() {
+        return 0;
+    }
+    let bottom = bottom.min(heights.len() - 1);
+    let top = top.min(bottom);
+    let span =
+        |from: usize, to: usize| -> u32 { heights[from..=to].iter().map(|&h| u32::from(h)).sum() };
+    let room = u32::from(room);
+    let mut first = first.min(top);
+    while first < top && span(first, bottom) > room {
+        first += 1;
+    }
+    while first > 0 && span(first - 1, heights.len() - 1) <= room {
+        first -= 1;
     }
     first
 }
 
-/// Where each visible card is and which device it is, left to right from `area`'s edge. A card
-/// that is still sliding in is only as wide as it has grown; the one at the edge is cut to what
-/// room is left, or left out if that is too little to read.
-pub fn cards(area: Rect, deck: &DeckState, now: Instant) -> Vec<(usize, Rect)> {
-    let devices = deck.devices();
-    let first = follow(
-        deck.selected(),
-        deck.first_card().get(),
-        devices.len(),
-        capacity(area.width),
-    );
-    deck.first_card().set(first);
-    let mut placed = Vec::new();
-    let mut x = area.x;
-    for (index, device) in devices.iter().enumerate().skip(first) {
-        let left = area.right().saturating_sub(x);
-        if left < MIN_CARD {
-            break;
+/// What is on each line of the rail in `area`, from the top. A device that is still sliding in is
+/// only as tall as it has grown; the one at the bottom is cut to what room is left.
+pub fn rows(area: Rect, deck: &DeckState, now: Instant) -> Rows {
+    let body = inner(area);
+    let mut items: Vec<(Slot, u16)> = Vec::new();
+    let mut group = None;
+    for (index, device) in deck.devices().iter().enumerate() {
+        if group != Some(device.kind) {
+            group = Some(device.kind);
+            items.push((Slot::Heading(device.kind), 1));
         }
-        let grown = deck.slide(device, now);
-        // `grown` is between 0 and 1 and the width is at most `CARD_WIDTH`, so this is exact.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let wanted = (f64::from(CARD_WIDTH) * grown).round() as u16;
-        let width = wanted.max(MIN_CARD);
-        // A card that does not fit is cut to the room left only if that is enough to read it;
-        // a stub with nothing in it is left out, and the mark at the edge says there are more.
-        if width > left && left < CONTENT_MIN {
-            break;
-        }
-        let width = width.min(left);
-        placed.push((index, Rect::new(x, area.y, width, area.height)));
-        x += width + GAP;
+        items.push((Slot::Device(index), grown_height(deck.slide(device, now))));
     }
-    placed
+    let chosen = items
+        .iter()
+        .position(|&(slot, _)| slot == Slot::Device(deck.selected()))
+        .unwrap_or(0);
+    // The heading over the first device of a group stays with it when it is scrolled to.
+    let top = match chosen.checked_sub(1).map(|above| items[above].0) {
+        Some(Slot::Heading(_)) => chosen - 1,
+        _ => chosen,
+    };
+    let heights: Vec<u16> = items.iter().map(|&(_, height)| height).collect();
+    let first = follow(&heights, top, chosen, deck.first_card().get(), body.height);
+    deck.first_card().set(first);
+
+    let mut placed = Vec::new();
+    let mut y = body.y;
+    for &(slot, height) in items.iter().skip(first) {
+        let left = body.bottom().saturating_sub(y);
+        if left == 0 {
+            break;
+        }
+        let height = height.min(left);
+        placed.push((slot, Rect::new(body.x, y, body.width, height)));
+        y += height;
+    }
+    let shown = placed.len();
+    Rows {
+        placed,
+        more_above: first > 0,
+        more_below: first + shown < items.len(),
+    }
 }
 
-/// The device whose card is under `pointer`, as drawn in `area`.
+/// The device whose row is under `pointer`, as drawn in `area`.
 pub fn card_at(area: Rect, deck: &DeckState, pointer: Position) -> Option<usize> {
-    cards(area, deck, Instant::now())
+    rows(area, deck, Instant::now())
+        .placed
         .into_iter()
-        .find(|(_, rect)| rect.contains(pointer))
-        .map(|(index, _)| index)
+        .find_map(|(slot, rect)| match slot {
+            Slot::Device(index) if rect.contains(pointer) => Some(index),
+            _ => None,
+        })
 }
 
 fn icon(kind: Kind, ascii: bool) -> &'static str {
@@ -124,6 +171,14 @@ fn icon(kind: Kind, ascii: bool) -> &'static str {
         (Kind::Internal, true) => "[]",
         (Kind::Removable, true) => "^",
         (Kind::Network, true) => "<>",
+    }
+}
+
+fn group_title(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Internal => "Internal",
+        Kind::Removable => "Removable",
+        Kind::Network => "Network",
     }
 }
 
@@ -181,90 +236,90 @@ pub fn render(
     }
     let theme = &config.theme;
     let dim = Style::default().fg(style::color(&theme.status_fg));
+    let block = style::themed_block(config, "devices", deck.focused());
     if deck.devices().is_empty() {
         let note = if deck.has_scanned() {
             "no devices found"
         } else {
             "looking for devices…"
         };
-        frame.render_widget(
-            Paragraph::new(Span::styled(note, dim))
-                .block(style::themed_block(config, "devices", false)),
-            area,
-        );
+        frame.render_widget(Paragraph::new(Span::styled(note, dim)).block(block), area);
         return;
     }
+    frame.render_widget(block, area);
     let g = glyphs::of(config);
     let ascii = g.gauge_on.is_ascii();
     let here = deck.holding(current_dir);
-    let placed = cards(area, deck, now);
-    for &(index, rect) in &placed {
-        let device = &deck.devices()[index];
-        let chosen = deck.focused() && index == deck.selected();
-        // A mount or an eject started from the chosen card is still running.
-        let working = if index == deck.selected() && deck.is_working() {
-            " …"
-        } else {
-            ""
-        };
-        let title = fit_width(
-            &format!("{} {}{working}", icon(device.kind, ascii), device.title()),
-            usize::from(rect.width.saturating_sub(4)),
-        );
-        let verdict = deck.verdict(index);
-        let mut block = style::themed_block(config, &title, here == Some(index));
-        let mut base = Style::default();
-        if chosen {
-            base = base.bg(style::color(&theme.selection_bg));
-        }
-        // A card the load cannot go on is dimmed, so what can take it stands out at a glance.
-        if matches!(
-            verdict,
-            Some(Verdict::Short { .. } | Verdict::TooBig { .. })
-        ) {
-            base = base.add_modifier(Modifier::DIM);
-        }
-        block = block.style(base);
-        let inner = block.inner(rect);
-        frame.render_widget(block, rect);
-        if rect.width < CONTENT_MIN || inner.height == 0 {
+    let layout = rows(area, deck, now);
+    for &(slot, rect) in &layout.placed {
+        if rect.width < CONTENT_MIN {
             continue;
         }
-        let lines = card_lines(
-            device,
-            deck,
-            verdict.as_ref(),
-            usize::from(inner.width),
-            config,
-            ascii,
-        );
-        frame.render_widget(Paragraph::new(lines), inner);
+        match slot {
+            Slot::Heading(kind) => {
+                let rule = if ascii { "-" } else { "─" };
+                let title = format!(" {} ", group_title(kind));
+                let fill = usize::from(rect.width).saturating_sub(text_width(&title));
+                let line = Line::from(vec![
+                    Span::styled(title, dim.add_modifier(Modifier::BOLD)),
+                    Span::styled(rule.repeat(fill), dim),
+                ]);
+                frame.render_widget(Paragraph::new(line), rect);
+            }
+            Slot::Device(index) => {
+                let verdict = deck.verdict(index);
+                let mut base = Style::default();
+                if deck.focused() && index == deck.selected() {
+                    base = base.bg(style::color(&theme.selection_bg));
+                }
+                // A device the load cannot go on is dimmed, so what can take it stands out at a
+                // glance.
+                if matches!(
+                    verdict,
+                    Some(Verdict::Short { .. } | Verdict::TooBig { .. })
+                ) {
+                    base = base.add_modifier(Modifier::DIM);
+                }
+                let lines = row_lines(
+                    &deck.devices()[index],
+                    deck,
+                    index,
+                    verdict.as_ref(),
+                    here == Some(index),
+                    usize::from(rect.width),
+                    config,
+                    ascii,
+                );
+                frame.render_widget(Paragraph::new(lines).style(base), rect);
+            }
+        }
     }
-    // A mark at each edge where cards are hidden beyond it.
+    // A mark on the frame where devices are hidden beyond it.
     let accent = Style::default().fg(style::color(&theme.accent_fg));
-    let middle = area.y + area.height / 2;
-    if deck.first_card().get() > 0 {
+    let body = inner(area);
+    let edge = area.right().saturating_sub(1);
+    if layout.more_above {
         frame.render_widget(
-            Paragraph::new(Span::styled("‹", accent)),
-            Rect::new(area.x, middle, 1, 1),
+            Paragraph::new(Span::styled("▴", accent)),
+            Rect::new(edge, body.y, 1, 1),
         );
     }
-    if placed
-        .last()
-        .is_some_and(|(i, _)| i + 1 < deck.devices().len())
-    {
+    if layout.more_below {
         frame.render_widget(
-            Paragraph::new(Span::styled("›", accent)),
-            Rect::new(area.right().saturating_sub(1), middle, 1, 1),
+            Paragraph::new(Span::styled("▾", accent)),
+            Rect::new(edge, body.bottom().saturating_sub(1), 1, 1),
         );
     }
 }
 
-/// The three lines inside a card: where it is, how full it is, how busy it is.
-fn card_lines(
+/// The two lines of a device: its name, then how full it is.
+#[allow(clippy::too_many_arguments)]
+fn row_lines(
     device: &Device,
     deck: &DeckState,
+    index: usize,
     verdict: Option<&Verdict>,
+    here: bool,
     width: usize,
     config: &Config,
     ascii: bool,
@@ -275,75 +330,95 @@ fn card_lines(
     let accent = Style::default().fg(style::color(&theme.accent_fg));
     let danger = Style::default().fg(style::color(&theme.danger_fg));
 
-    let place = match (&device.mount, device.kind) {
-        (Some(mount), _) => elide_left(&mount.display().to_string(), width),
-        (None, _) => format!("not mounted · {}", device.fs.as_deref().unwrap_or("?")),
+    let mark = if here {
+        Span::styled(if ascii { "|" } else { "▌" }, accent)
+    } else {
+        Span::raw(" ")
     };
-    let first = Line::from(Span::styled(pad_to(&fit_width(&place, width), width), dim));
-
-    let second = match (device.used_percent(), device.is_mounted()) {
-        (Some(percent), true) => {
-            let free = format!(" {percent:>3}% {} free", format_size(device.free));
-            let bar = width.saturating_sub(text_width(&free));
-            if bar >= 4 {
-                let (on, off) = gauge(percent, bar, g.gauge_on, g.gauge_off);
-                let fill = if percent >= 90 { danger } else { accent };
-                Line::from(vec![
-                    Span::styled(on, fill),
-                    Span::styled(off, dim),
-                    Span::raw(free),
-                ])
-            } else {
-                Line::from(Span::raw(fit_width(free.trim_start(), width)))
-            }
-        }
-        (Some(_) | None, false) if device.total > 0 => Line::from(Span::styled(
-            fit_width(&format!("{} to mount", format_size(device.total)), width),
-            dim,
-        )),
-        _ => Line::from(Span::styled("size unknown", dim)),
+    let symbol = icon(device.kind, ascii);
+    let indent = 1 + text_width(symbol) + 1;
+    // A mount or an eject started from the chosen device is still running.
+    let working = if index == deck.selected() && deck.is_working() {
+        " …"
+    } else {
+        ""
     };
 
-    let third = if let Some(verdict) = verdict {
+    // A disk that is reading or writing right now pulses beside its name.
+    let rates = deck.rates(device);
+    let busy = device.is_mounted() && (rates.read > 0 || rates.written > 0);
+    let pulse = (busy && width >= indent + 8).then(|| {
+        sparkline(
+            &deck.history(device),
+            PULSE_WIDTH.min(devices::activity::HISTORY),
+            ascii,
+        )
+    });
+    let name_width = width - indent - pulse.as_ref().map_or(0, |p| text_width(p) + 1);
+    let name = pad_to(
+        &fit_width(&format!("{}{working}", device.title()), name_width),
+        name_width,
+    );
+    let mut first = vec![
+        mark,
+        Span::styled(symbol, if device.is_mounted() { accent } else { dim }),
+        Span::raw(" "),
+        Span::raw(name),
+    ];
+    if let Some(pulse) = pulse {
+        first.push(Span::raw(" "));
+        first.push(Span::styled(pulse, accent));
+    }
+
+    let room = width - indent;
+    let detail = if let Some(verdict) = verdict {
         let style = match verdict {
             Verdict::Fits { .. } | Verdict::SameDisk => accent,
             Verdict::Short { .. } | Verdict::TooBig { .. } => danger,
             Verdict::Tight { .. } | Verdict::Unmounted | Verdict::Unsure => dim,
         };
-        Line::from(Span::styled(
-            fit_width(&cargo_fit::card_text(verdict, ascii), width),
+        vec![Span::styled(
+            fit_width(&cargo_fit::card_text(verdict, ascii), room),
             style,
-        ))
-    } else if device.is_mounted() && device.kind != Kind::Network {
-        let rates = deck.rates(device);
-        let text = rate_text(rates.read, rates.written);
-        let room = width.saturating_sub(text_width(&text) + 1);
-        let history = deck.history(device);
-        if room >= 3 {
-            let busy = rates.read > 0 || rates.written > 0;
-            Line::from(vec![
-                Span::styled(
-                    sparkline(&history, room.min(devices::activity::HISTORY), ascii),
-                    if busy { accent } else { dim },
-                ),
-                Span::raw(" "),
-                Span::styled(text, if busy { accent } else { dim }),
-            ])
-        } else {
-            Line::from(Span::styled(fit_width(&text, width), dim))
-        }
-    } else if device.kind == Kind::Network {
-        Line::from(Span::styled(fit_width(&device.node, width), dim))
+        )]
     } else {
-        Line::from(Span::styled("Enter to mount", dim))
+        match (device.used_percent(), device.is_mounted()) {
+            (Some(percent), true) => {
+                let free = format!(" {percent:>3}% {} free", format_size(device.free));
+                let bar = room.saturating_sub(text_width(&free));
+                if bar >= 4 {
+                    let (on, off) = gauge(percent, bar, g.gauge_on, g.gauge_off);
+                    let fill = if percent >= 90 { danger } else { accent };
+                    vec![
+                        Span::styled(on, fill),
+                        Span::styled(off, dim),
+                        Span::raw(free),
+                    ]
+                } else {
+                    vec![Span::raw(fit_width(free.trim_start(), room))]
+                }
+            }
+            (_, false) if device.total > 0 => vec![Span::styled(
+                fit_width(
+                    &format!("not mounted · {}", format_size(device.total)),
+                    room,
+                ),
+                dim,
+            )],
+            _ => vec![Span::styled("size unknown", dim)],
+        }
     };
-    vec![first, second, third]
+    let mut second = vec![Span::raw(" ".repeat(indent))];
+    second.extend(detail);
+    vec![Line::from(first), Line::from(second)]
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -361,6 +436,10 @@ mod tests {
             free,
             kind,
         }
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     fn deck(runtime: &tokio::runtime::Runtime, devices: Vec<Device>) -> DeckState {
@@ -408,65 +487,117 @@ mod tests {
     }
 
     #[test]
-    fn cards_sit_side_by_side_with_a_gap_and_as_many_as_fit() {
+    fn the_rail_groups_devices_under_headings_and_stacks_two_lines_each() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = deck(&runtime, many(5));
-        let area = Rect::new(2, 3, 100, 5);
-        let placed = cards(area, &deck, Instant::now());
+        let deck = deck(
+            &runtime,
+            vec![
+                device("sda1", "", Some("/"), Kind::Internal, 250),
+                device("sdb1", "STICK", Some("/m/STICK"), Kind::Removable, 900),
+            ],
+        );
+        let area = Rect::new(2, 3, 26, 12);
+        let placed = rows(area, &deck, Instant::now()).placed;
+        let slots: Vec<Slot> = placed.iter().map(|&(slot, _)| slot).collect();
         assert_eq!(
-            placed.len(),
-            3,
-            "100 columns hold three cards of 28 and gaps"
+            slots,
+            [
+                Slot::Heading(Kind::Internal),
+                Slot::Device(0),
+                Slot::Heading(Kind::Removable),
+                Slot::Device(1)
+            ]
         );
-        assert_eq!(placed[0].1, Rect::new(2, 3, CARD_WIDTH, 5));
-        assert_eq!(placed[1].1.x, 2 + CARD_WIDTH + GAP);
-        assert!(
-            placed
-                .iter()
-                .all(|(_, r)| area.contains(Position::new(r.x, r.y)))
+        let ys: Vec<u16> = placed.iter().map(|(_, r)| r.y).collect();
+        assert_eq!(
+            ys,
+            [4, 5, 7, 8],
+            "inside the frame, a heading is one line and a device two"
         );
+        assert!(placed.iter().all(|(_, r)| r.x == 3 && r.width == 24));
     }
 
     #[test]
-    fn scrolling_follows_the_selected_card_and_stays_put_otherwise() {
-        assert_eq!(follow(0, 0, 10, 3), 0);
-        assert_eq!(follow(2, 0, 10, 3), 0, "still on screen");
-        assert_eq!(follow(3, 0, 10, 3), 1, "one past the edge scrolls one");
-        assert_eq!(follow(9, 0, 10, 3), 7);
-        assert_eq!(follow(1, 7, 10, 3), 1, "back to the left");
-        assert_eq!(follow(5, 99, 10, 3), 5, "a stale position is pulled in");
-        assert_eq!(follow(0, 0, 0, 3), 0);
+    fn scrolling_follows_the_selected_item_and_stays_put_otherwise() {
+        let heights = [1, 2, 2, 2, 2];
+        assert_eq!(follow(&heights, 0, 0, 0, 5), 0);
+        assert_eq!(follow(&heights, 2, 2, 0, 5), 0, "still on screen");
+        assert_eq!(
+            follow(&heights, 3, 3, 0, 5),
+            2,
+            "one past the edge scrolls to fit it"
+        );
+        assert_eq!(follow(&heights, 1, 1, 3, 5), 1, "back up");
+        assert_eq!(
+            follow(&heights, 2, 2, 99, 5),
+            2,
+            "a stale position is pulled in"
+        );
+        assert_eq!(follow(&heights, 0, 4, 0, 99), 0, "all of it fits");
+        assert_eq!(follow(&[], 0, 0, 0, 5), 0);
     }
 
     #[test]
-    fn a_click_finds_the_card_that_was_drawn_there() {
+    fn a_heading_is_kept_with_the_first_device_scrolled_to() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut devices = many(4);
+        devices.push(device(
+            "sdz1",
+            "STICK",
+            Some("/m/STICK"),
+            Kind::Removable,
+            900,
+        ));
+        let mut deck = deck(&runtime, devices);
+        deck.key(press(KeyCode::Tab), true);
+        for _ in 0..4 {
+            deck.key(press(KeyCode::Down), true);
+        }
+        let layout = rows(Rect::new(0, 0, 26, 8), &deck, Instant::now());
+        let slots: Vec<Slot> = layout.placed.iter().map(|&(slot, _)| slot).collect();
+        let heading = slots
+            .iter()
+            .position(|&s| s == Slot::Heading(Kind::Removable));
+        assert_eq!(
+            heading.map(|at| slots[at + 1]),
+            Some(Slot::Device(4)),
+            "{slots:?}"
+        );
+        assert!(layout.more_above);
+        assert!(!layout.more_below);
+    }
+
+    #[test]
+    fn a_click_finds_the_device_that_was_drawn_there() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let deck = deck(&runtime, many(3));
-        let area = Rect::new(0, 0, 100, 5);
+        let area = Rect::new(0, 0, 26, 20);
+        assert_eq!(card_at(area, &deck, Position::new(3, 0)), None, "the frame");
+        assert_eq!(
+            card_at(area, &deck, Position::new(3, 1)),
+            None,
+            "the heading"
+        );
         assert_eq!(card_at(area, &deck, Position::new(3, 2)), Some(0));
         assert_eq!(
-            card_at(area, &deck, Position::new(CARD_WIDTH + GAP + 1, 2)),
-            Some(1)
+            card_at(area, &deck, Position::new(3, 3)),
+            Some(0),
+            "its second line"
         );
-        assert_eq!(
-            card_at(area, &deck, Position::new(CARD_WIDTH, 2)),
-            None,
-            "the gap"
-        );
-        assert_eq!(card_at(area, &deck, Position::new(3, 9)), None);
+        assert_eq!(card_at(area, &deck, Position::new(3, 4)), Some(1));
+        assert_eq!(card_at(area, &deck, Position::new(3, 19)), None);
     }
 
     #[test]
-    fn a_card_sliding_in_is_narrow_and_grows_to_full_width() {
+    fn a_device_sliding_in_is_short_and_grows_to_its_full_height() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut deck = deck(&runtime, many(1));
         let now = Instant::now();
         deck.mark_arrived("sd01", now);
-        let area = Rect::new(0, 0, 100, 5);
-        let at = |t: Duration| cards(area, &deck, now + t)[0].1.width;
-        assert_eq!(at(Duration::ZERO), MIN_CARD);
-        assert!(at(crate::deck::SLIDE_IN / 2) > MIN_CARD);
-        assert_eq!(at(crate::deck::SLIDE_IN), CARD_WIDTH);
+        let area = Rect::new(0, 0, 26, 12);
+        let at = |t: Duration| rows(area, &deck, now + t).placed[1].1.height;
+        assert_eq!(at(Duration::ZERO), 1);
+        assert_eq!(at(crate::deck::SLIDE_IN), ROW_HEIGHT);
     }
 
     #[test]
@@ -497,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn each_card_shows_its_name_where_it_is_how_full_and_how_busy() {
+    fn each_device_shows_its_name_how_full_and_which_group_it_is_in() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let deck = deck(
             &runtime,
@@ -513,44 +644,32 @@ mod tests {
                 device("sdc1", "BACKUP", None, Kind::Removable, 0),
             ],
         );
-        let shown = drawn(&deck, "/run/media/me/HOLIDAY/photos", 120, 5);
+        let shown = drawn(&deck, "/run/media/me/HOLIDAY/photos", 26, 14);
         for text in [
+            "devices",
+            "Internal",
+            "Removable",
             "System",
             "HOLIDAY",
             "BACKUP",
             "75%",
             "10%",
             "not mounted",
-            "to mount",
-            "idle",
         ] {
             assert!(shown.contains(text), "{text:?} missing:\n{shown}");
         }
+        assert!(!shown.contains("Network"), "no empty group:\n{shown}");
     }
 
     #[test]
-    fn the_card_holding_the_browsed_folder_is_the_one_with_the_bright_frame() {
+    fn the_device_holding_the_browsed_folder_has_the_bar_at_its_edge() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let deck = deck(&runtime, many(2));
-        let config = Config::from_sources(None, None, None);
-        let here_color = style::color(&config.theme.border_focused_fg);
-        let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
-        terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    frame.area(),
-                    &deck,
-                    Path::new("/mnt/1/deep"),
-                    &config,
-                    Instant::now(),
-                );
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let corner = |x: u16| buffer[Position::new(x, 0)].fg;
-        assert_ne!(corner(0), here_color, "the first card is not where we are");
-        assert_eq!(corner(CARD_WIDTH + GAP), here_color, "the second is");
+        let shown = drawn(&deck, "/mnt/1/deep", 26, 10);
+        let lines: Vec<&str> = shown.lines().collect();
+        // Row 0 is the frame, row 1 the heading, rows 2-3 the first device, 4-5 the second.
+        assert!(lines[4].chars().nth(1) == Some('▌'), "{shown}");
+        assert!(!lines[2].contains('▌'), "{shown}");
     }
 
     #[test]
@@ -558,13 +677,13 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut deck = deck(&runtime, Vec::new());
         deck.set_scanned(false);
-        assert!(drawn(&deck, "/", 60, 5).contains("looking for devices"));
+        assert!(drawn(&deck, "/", 26, 10).contains("looking for devices"));
         deck.set_scanned(true);
-        assert!(drawn(&deck, "/", 60, 5).contains("no devices found"));
+        assert!(drawn(&deck, "/", 26, 10).contains("no devices found"));
     }
 
     #[test]
-    fn while_files_are_carried_each_card_says_whether_they_fit() {
+    fn while_files_are_carried_each_device_says_whether_they_fit() {
         use crate::cargo_fit::{Carry, Load};
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut deck = deck(
@@ -587,7 +706,7 @@ mod tests {
             device.free = [1u64 << 39, 1 << 20][d];
         }
         assert!(
-            !drawn(&deck, "/", 120, 5).contains("fits"),
+            !drawn(&deck, "/", 26, 14).contains("fits"),
             "nothing carried yet"
         );
         deck.set_load(Some(Load {
@@ -597,14 +716,22 @@ mod tests {
             carry: Carry::Copy,
             source: "/home/me/photos".into(),
         }));
-        let shown = drawn(&deck, "/", 120, 5);
+        let shown = drawn(&deck, "/", 26, 14);
         for text in ["✓ fits", "✗ needs", "mount to check"] {
             assert!(shown.contains(text), "{text:?} missing:\n{shown}");
         }
         assert!(
-            !shown.contains("idle"),
-            "the verdict takes the activity line:\n{shown}"
+            !shown.contains("free"),
+            "the verdict takes the gauge's line:\n{shown}"
         );
+    }
+
+    #[test]
+    fn an_idle_disk_shows_no_pulse() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let deck = deck(&runtime, many(1));
+        let shown = drawn(&deck, "/mnt/0", 26, 8);
+        assert!(!shown.contains('█'), "idle:\n{shown}");
     }
 
     #[test]
@@ -616,20 +743,21 @@ mod tests {
             (1, 1),
             (3, 5),
             (10, 2),
-            (27, 5),
-            (28, 5),
-            (60, 3),
-            (300, 5),
+            (13, 6),
+            (14, 6),
+            (26, 3),
+            (26, 40),
+            (80, 6),
         ] {
             drawn(&deck, "/mnt/2", w, h);
         }
     }
 
     #[test]
-    fn hidden_cards_are_marked_at_the_edges() {
+    fn hidden_devices_are_marked_at_the_edges() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let deck = deck(&runtime, many(6));
-        let shown = drawn(&deck, "/mnt/0", 100, 5);
-        assert!(shown.contains('›') && !shown.contains('‹'), "{shown}");
+        let shown = drawn(&deck, "/mnt/0", 26, 8);
+        assert!(shown.contains('▾') && !shown.contains('▴'), "{shown}");
     }
 }

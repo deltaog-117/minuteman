@@ -41,8 +41,8 @@ pub enum ViewMode {
     Details,
     /// The selected file as large as the window allows, with a strip of its neighbours below.
     Filmstrip,
-    /// The usual columns under a strip of cards, one per disk, stick or share, with how full and
-    /// how busy each is.
+    /// The usual columns beside a rail of devices, one per disk, stick or share, grouped as a
+    /// file manager's places panel is, with how full each is.
     Deck,
     /// How the storage is wired, drawn over the whole body in place of the columns: the bus, the
     /// disk, its partitions and whatever is stacked on them, down to what is mounted.
@@ -115,14 +115,25 @@ pub fn browser_layout(
     );
     if mode == ViewMode::Deck {
         let body = body_of(&base);
-        let height = deck_height(body.height);
-        let shifted =
-            |pane: Rect| Rect::new(pane.x, pane.y + height, pane.width, pane.height - height);
+        let width = rail_width(body.width, body.height);
+        if width == 0 {
+            return base;
+        }
+        let gap = shape.gaps_in.cells();
+        let rail = Rect::new(body.x, body.y, width, body.height);
+        let rest_x = rail.right() + gap;
+        let rest = Rect::new(
+            rest_x,
+            body.y,
+            body.right().saturating_sub(rest_x),
+            body.height,
+        );
+        let (parent, current, preview) = BrowserLayout::split_columns(rest, columns, gap);
         return BrowserLayout {
-            deck: Rect::new(body.x, body.y, body.width, height),
-            parent: shifted(base.parent),
-            current: shifted(base.current),
-            preview: shifted(base.preview),
+            deck: rail,
+            parent,
+            current,
+            preview,
             ..base
         };
     }
@@ -153,17 +164,20 @@ pub fn browser_layout(
     }
 }
 
-/// The rows the deck's cards take: a frame round three lines.
-pub const DECK_HEIGHT: u16 = 5;
+/// The columns the device rail takes at the left of the body.
+pub const RAIL_WIDTH: u16 = 26;
 
-/// The least body height that still leaves the columns room beside a deck.
-const DECK_MIN_BODY: u16 = 12;
+/// The narrowest body that still leaves the columns room beside the rail.
+const RAIL_MIN_BODY_WIDTH: u16 = 70;
 
-/// How tall the deck is in a body `body_height` rows high: none at all when the window is too
-/// short to spare it, since the columns are what the window is for.
-pub fn deck_height(body_height: u16) -> u16 {
-    if body_height >= DECK_MIN_BODY {
-        DECK_HEIGHT
+/// The shortest body worth a rail: its frame, a heading and one device.
+const RAIL_MIN_BODY_HEIGHT: u16 = 6;
+
+/// How wide the rail is in a body `body_width` by `body_height`: none at all when the window is
+/// too small to spare it, since the columns are what the window is for.
+pub fn rail_width(body_width: u16, body_height: u16) -> u16 {
+    if body_width >= RAIL_MIN_BODY_WIDTH && body_height >= RAIL_MIN_BODY_HEIGHT {
+        RAIL_WIDTH
     } else {
         0
     }
@@ -601,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn the_deck_takes_a_strip_off_the_top_of_the_columns_and_nothing_else() {
+    fn the_deck_takes_a_rail_off_the_left_of_the_columns_and_nothing_else() {
         let area = Rect::new(0, 0, 120, 40);
         let list = browser_layout(
             area,
@@ -617,50 +631,59 @@ mod tests {
             ViewMode::Deck,
             Shape::default(),
         );
+        let body = body_of(&list);
         assert_eq!(
             deck.deck,
-            Rect::new(
-                list.current.x.min(list.parent.x),
-                list.current.y,
-                120,
-                DECK_HEIGHT
-            )
+            Rect::new(body.x, body.y, RAIL_WIDTH, body.height)
         );
-        for (with, without) in [
-            (deck.parent, list.parent),
-            (deck.current, list.current),
-            (deck.preview, list.preview),
-        ] {
-            assert_eq!(with.y, without.y + DECK_HEIGHT);
-            assert_eq!(with.height + DECK_HEIGHT, without.height);
-            assert_eq!((with.x, with.width), (without.x, without.width));
-        }
+        let columns = body_of(&deck);
+        assert_eq!(columns.x, deck.deck.right());
+        assert_eq!(columns.right(), body.right());
+        assert_eq!((columns.y, columns.height), (body.y, body.height));
+        assert!(deck.parent.right() <= deck.current.x && deck.current.right() <= deck.preview.x);
         assert_eq!((deck.header, deck.status), (list.header, list.status));
-        assert_eq!(list.deck.height, 0, "no other view has a deck");
+        assert_eq!(list.deck.width, 0, "no other view has a rail");
     }
 
     #[test]
-    fn a_short_window_gets_no_deck_and_keeps_its_columns() {
-        // Less than a dozen rows once the header and status bar are taken off.
-        let area = Rect::new(0, 0, 120, 13);
-        let list = browser_layout(
-            area,
-            ColumnLayout::ThreePane,
-            true,
-            ViewMode::List,
-            Shape::default(),
-        );
+    fn the_rail_and_the_columns_are_a_gap_apart_when_there_are_gaps() {
+        let shape = Shape {
+            gaps_in: theming::Gap::clamped(2),
+            ..Shape::default()
+        };
         let deck = browser_layout(
-            area,
+            Rect::new(0, 0, 120, 40),
             ColumnLayout::ThreePane,
             true,
             ViewMode::Deck,
-            Shape::default(),
+            shape,
         );
-        assert_eq!(deck.deck.height, 0);
-        assert_eq!(deck.current, list.current);
-        assert_eq!(deck_height(DECK_MIN_BODY - 1), 0);
-        assert_eq!(deck_height(DECK_MIN_BODY), DECK_HEIGHT);
+        assert_eq!(deck.parent.x, deck.deck.right() + 2);
+    }
+
+    #[test]
+    fn a_narrow_or_short_window_gets_no_rail_and_keeps_its_columns() {
+        for area in [Rect::new(0, 0, 60, 40), Rect::new(0, 0, 120, 7)] {
+            let list = browser_layout(
+                area,
+                ColumnLayout::ThreePane,
+                true,
+                ViewMode::List,
+                Shape::default(),
+            );
+            let deck = browser_layout(
+                area,
+                ColumnLayout::ThreePane,
+                true,
+                ViewMode::Deck,
+                Shape::default(),
+            );
+            assert_eq!(deck.deck.width, 0, "{area:?}");
+            assert_eq!(deck.current, list.current);
+        }
+        assert_eq!(rail_width(RAIL_MIN_BODY_WIDTH - 1, 40), 0);
+        assert_eq!(rail_width(RAIL_MIN_BODY_WIDTH, 40), RAIL_WIDTH);
+        assert_eq!(rail_width(120, RAIL_MIN_BODY_HEIGHT - 1), 0);
     }
 
     #[test]

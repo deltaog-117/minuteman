@@ -42,8 +42,8 @@ const WHEEL_STEP: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrowserLayout {
     pub header: Rect,
-    /// The strip of device cards above the columns in the deck view; empty in every other view
-    /// and when the window is too short to spare it.
+    /// The rail of devices left of the columns in the deck view; empty in every other view and
+    /// when the window is too small to spare it.
     pub deck: Rect,
     pub parent: Rect,
     pub current: Rect,
@@ -75,7 +75,21 @@ impl BrowserLayout {
             ])
             .split(area);
         let mid = rows[1];
-        let (parent, current, preview) = match columns {
+        let (parent, current, preview) = Self::split_columns(mid, columns, gap);
+        Self {
+            header: rows[0],
+            deck: Rect::new(mid.x, mid.y, 0, 0),
+            parent,
+            current,
+            preview,
+            status: rows[2],
+        }
+    }
+
+    /// Splits `mid` (the area between the header and the status bar, or what a side panel leaves
+    /// of it) into the parent, current and preview columns, `gap` blank cells apart.
+    pub fn split_columns(mid: Rect, columns: ColumnLayout, gap: u16) -> (Rect, Rect, Rect) {
+        match columns {
             ColumnLayout::ThreePane => {
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
@@ -99,14 +113,6 @@ impl BrowserLayout {
                 let removed = Rect::new(cols[0].x, cols[0].y, 0, cols[0].height);
                 (removed, cols[0], cols[1])
             }
-        };
-        Self {
-            header: rows[0],
-            deck: Rect::new(mid.x, mid.y, 0, 0),
-            parent,
-            current,
-            preview,
-            status: rows[2],
         }
     }
 }

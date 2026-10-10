@@ -87,6 +87,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-09 | Atlas Storage Map | Lazy zoom on the disk usage scanner with a pure whole-cell treemap (COA A); a cached whole-volume tree with a minimap (B) and a volumes-only map (C) not taken | ✅ Confirmed |
 | 2026-10-09 | Wiring Diagram Fit | Fit by budget: a cap on siblings and a squeeze on box width chosen so the whole diagram fits (COA A); a selection-dependent focus layout (B) and clipped panning (C) not taken | ✅ Confirmed |
 | 2026-10-10 | Operation Keys on Marks and Cursor | Marks act where you stand, the cursor row is the fallback, `space x` for the trash (COA A); a cursor fallback alone (B) and a same-folder guard (C) not taken | ✅ Confirmed |
+| 2026-10-10 | Deck Rail | A grouped places-style rail at the left with `h`/`l` moving between rail and files (COA A); stacked cards (B) and a rail that folds to icons (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -6606,6 +6607,42 @@ clipboard and no marks; a same-folder cut keeping its marks; a capital `Y` for b
 the leader's hints with and without a shell. In the real binary under tmux:
 two marked files cut into another folder, `X` then `Y` on the cursor row, `c` clearing a mark,
 `space` then `x` opening the trash.
+
+## 2026-10-10 — Deck view: the disk tray moves to the left
+
+**Context.** The deck view put its devices in a strip of framed cards above the columns. The
+request was a tray like Dolphin's or Thunar's, at the left, with a look of its own, and in this
+view `hjkl` to browse and `Enter` (not `l`) to open a file or enter a folder.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A places-style rail: one frame, devices under group headings, two lines each | Chosen |
+| B | The existing three-line cards stacked in a column | Not taken: a pile of boxes, five rows a device |
+| C | An icon rail that unfolds when it has the keys | Not taken: hover and fold state for little gain |
+
+**Decision.** `browser_layout` gives the deck a rail of `RAIL_WIDTH` cells and lays the columns out
+in the rest, using `BrowserLayout::split_columns`, which is the old column split lifted out of
+`split_spaced`. `BrowserLayout::deck` keeps its name and now means the rail. `deck_view::rows` is
+the one function that drawing and clicks both ask: it flattens the devices (already sorted by kind
+by the scan) into headings and devices with their heights, picks the first line to show with a
+pure `follow`, and stores it in the `Cell` the cards already used. A rail under 70 cells of body
+width or 6 rows is dropped, so the keys must know whether it is there: `DeckState::key` now takes
+`visible` and passes everything, unfocusing, when it is not. Keys: the user said `hjkl` browse and
+`Enter` open instead of `l`. I read that as the rail being a pane to the left: `h` goes to it, `j`
+and `k` choose in it, `l` comes back, and with the keys on the files `l` is swallowed so it never
+reaches the browser's enter-folder, leaving `Enter` and `→`. That is an interpretation, easy to
+change in one `match`.
+
+**Trade-offs.** `h` no longer goes up a folder in this view (`←` and `Backspace` do), and `l`
+does nothing on the files. A device's row is two lines, so the sparkline shrank to a three-bar
+pulse shown only while the disk is busy and the mount path left the row. The rail takes 26 cells
+from the columns.
+
+**Verification.** `scripts/check` passes. Tests for the layout, rows, scrolling, clicks, keys and
+drawing at any size; the rail was also drawn through the test backend and read. Not run in the real
+binary: no terminal emulator was at hand to read a PTY.
+
+---
 
 ---
 
