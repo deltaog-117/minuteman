@@ -1770,6 +1770,64 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   driven through a PTY in every pick mode. Not yet tried against a real browser and the real
   `xdg-desktop-portal`; the dialog's file-type filters and extra choices are ignored.
 
+## 🔴 High Priority: a small core and bundled plugins
+
+The goal: the core is only the file operations (create, delete, move, copy, rename, touch, and the
+trash they go to) and the terminal interface, and everything else can be replaced by a plugin.
+Features move out one at a time and none of them is a rewrite; each move must leave behavior
+unchanged. The features that ship by default are plugins installed with the program and enabled
+on a fresh install, in the manner of the system add-ons bundled with a browser: a user plugin of
+the same name, or one that claims the same action, takes their place, and the config can switch any
+of them off.
+
+**Stays in the core:** the `Vfs` trait and local disk, `file_ops`, `trash`, the directory model
+(`browser`: listing, navigation, sort, cursor, marks, live refresh), the interface shell (event
+loop, panes, popups, mouse, line editing, status bar, `:` command line), the mini-shell panes and
+the shell popup, the keymap and config, the plugin host and action registry, minimal theme
+tokens, the plain open (`$EDITOR` or `xdg-open`), and the small terminal plumbing (cd-on-exit,
+OSC 52). The portal backend stays its own program on top of the core.
+
+**Layout:** `crates/` holds the core only; `plugins/` holds one crate per bundled plugin;
+`crates/plugin_host` is the host (renamed from `crates/plugins` so the two names stop colliding)
+and `crates/plugin_api` holds the wire types and a client helper that the host and every plugin
+share. Nothing in `crates/` may depend on anything in `plugins/`; a test over `cargo metadata`
+enforces it. Installed, bundled plugins live in `<prefix>/share/minuteman/plugins/<name>/` and user
+plugins in `~/.config/minuteman/plugins/<name>/`.
+
+**Rules for every move:** `scripts/vfs-gate` keeps its allow-list entry with the file and scans
+`plugins/*/src`; a build with no plugins installed still browses and runs the file operations (the
+test that the core stands alone); the plugin draws nothing itself, it describes and the interface
+draws.
+
+- [x] **M1 – scaffold, no behavior change.** `crates/plugins` is now `crates/plugin_host`;
+  `crates/plugin_api` holds the plain wire data (event names, `EventKind`, `JobOutcome`, `Change`,
+  `Job`, `StateSnapshot`, `LogLevel`, `WireEntry`), re-exported from the host under their old paths;
+  the root `plugins/` folder exists (the first plugin crate adds itself to the workspace `members`
+  in M2, since Cargo refuses a `plugins/*` glob that matches nothing); the `dependency_direction`
+  test fails if a core crate names a plugin, if `plugin_api` grows a dependency other than
+  `shared`, or if a bundled plugin uses anything but `plugin_api` and `shared`; `scripts/vfs-gate`
+  now scans `plugins/` too. The client helper and the line-reading half of `protocol.rs` (which
+  needs `file_ops` and `crossterm`) stay in the host until M2 gives a plugin something to use them
+  for.
+- [ ] **M2 – picker slot and the fuzzy finder.** A plugin can claim an action name and a key
+  (`Provide`, `BindKey`) and open a host-drawn picker (`ShowPicker`, with the query, items and
+  chosen cycle, streamed and cancellable); the finder moves out of `tui` and `browser` into
+  `plugins/finder`. Measure it against `finder_cost` before and after.
+- [ ] **M3 – recursive search** on the same picker slot.
+- [ ] **M4 – pane and decoration slots (`SetPane`):** preview (text, hex, images, thumbnails),
+  git status, the system HUD, marked size, inspect.
+- [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave
+  `file_ops`; trash management (the trash view, restore, empty) becomes a plugin while moving a
+  file to the trash stays in the core.
+- [ ] **M6 – devices, the places rail, disk usage.** First check how far the deck is tied to the
+  browser keys.
+- [ ] **M7 – decide, then do:** Vfs schemes served by a plugin (ssh, browsing inside an archive),
+  which put a process boundary under a synchronous call, and the alternate views (grid, tiles,
+  filmstrip, atlas, wiring), which need `SetPane` to describe more than text spans. If either
+  proves too costly, it stays in the core behind a cargo feature.
+
+---
+
 ## 🟡 Medium Priority (Important)
 
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -2050,13 +2108,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   like S3 or rclone-backed remotes.
 - **Community plugin ecosystem** – a registry/index of Extism-based plugins across languages,
   sandboxed by default.
-- **Considered and not planned: "everything is a plugin"** – turning the built-ins (trash view,
-  disk usage, archives, appearance, the browser itself) into plugins so any of them can be
-  replaced wholesale. It would rewrite about 100k lines for no visible gain, force an API big
-  enough to express the whole app (and then a promise to keep it stable), put serialization on
-  the hot paths and make a core plugin's failure a core failure. Replacing or disabling a
-  built-in stays a user decision made in config. Revisit only with a large community asking for
-  it, and then by moving selected features out one at a time, never as one rewrite.
+- **Still not planned: "everything is a plugin" as one rewrite** – the browser, the file
+  operations, the trash and the interface shell stay in the core. The earlier objection (a plugin
+  API big enough to express the whole app, serialization on the hot paths, a core plugin's failure
+  becoming a core failure) is why selected features move out one at a time under "A small core and
+  bundled plugins", each measured, and why the core is not one of them.
 
 ---
 

@@ -21,7 +21,7 @@
 //! user's own state always wins, and the plugin is told what stood in the way.
 
 use crossterm::event::KeyCode;
-use plugins::ActionRequest;
+use plugin_host::ActionRequest;
 use theming::Action;
 
 use crate::hud::Mode;

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `plugins` crate renamed `plugin_host`, and its plain wire data (the event names, `EventKind`,
+  `JobOutcome`, `Change`, `Job`, `StateSnapshot`, `LogLevel`, `WireEntry`) moved into a new
+  `plugin_api` crate that depends only on `shared`. The host re-exports them under the paths they
+  had, so plugins and the protocol are unchanged. The moved types now derive both `Serialize` and
+  `Deserialize`.
+- `scripts/vfs-gate` also scans the new `plugins/` folder.
 - `tui`: the deck view's disk tray is now a rail at the left of the columns, the way a file
   manager's places panel is, instead of a strip of framed cards above them. Devices are grouped
   under Internal, Removable and Network headings; each is two lines, its name over a gauge of how
@@ -139,6 +145,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- A `plugins/` folder for the plugins bundled with Minuteman, and a `dependency_direction` test
+  that fails if a crate under `crates/` depends on one of them, if `plugin_api` depends on
+  anything but `shared`, or if a bundled plugin depends on anything but `plugin_api` and `shared`.
 - `portal_backend` (new crate, binary `mman-portal`), `tui`, `shared`: `mman` can be the file
   chooser of a browser's open and save dialogs. `mman-portal` is a backend for the XDG desktop
   portal's `FileChooser` (`OpenFile`, `SaveFile`, `SaveFiles`): when the portal forwards a dialog

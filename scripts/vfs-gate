@@ -62,6 +62,6 @@ while IFS= read -r file; do
     echo "$hits"
     status=1
   fi
-done < <(find crates -path '*/src/*' -name '*.rs' | sort)
+done < <(find crates plugins -path '*/src/*' -name '*.rs' | sort)
 
 exit "$status"

@@ -42,80 +42,12 @@ use crossterm::event::KeyCode;
 use file_ops::ConflictPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shared::DirEntryInfo;
 
-/// Bumped only for a breaking change to the shapes below; sent with every event so a plugin can
-/// check it against what it was built for and refuse to run rather than misbehave silently.
-pub const API_VERSION: u32 = 1;
-
-/// The event name a plugin gets exactly once, right after its process starts.
-pub const EVENT_INIT: &str = "init";
-/// The event name a plugin gets when one of its configured keys is pressed.
-pub const EVENT_KEY: &str = "key";
-/// The event name a plugin gets when a `:` command it declared, or `:plugin <its name>`, is run.
-pub const EVENT_COMMAND: &str = "command";
-
-/// The event name a subscribed plugin gets when the browsed directory changes.
-pub const EVENT_DIR_CHANGED: &str = "dir_changed";
-/// The event name a subscribed plugin gets when the cursor entry or the marks change.
-pub const EVENT_SELECTION_CHANGED: &str = "selection_changed";
-/// The event name a subscribed plugin gets when a copy, move, delete or similar job ends.
-pub const EVENT_JOB_FINISHED: &str = "job_finished";
-
-/// The events a plugin must ask for (`events = [...]` in its `[[plugin]]` table) because, unlike
-/// `init`, `key` and `command`, they fire without the user addressing the plugin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventKind {
-    DirChanged,
-    SelectionChanged,
-    JobFinished,
-}
-
-impl EventKind {
-    /// The event as the wire and the config spell it.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::DirChanged => EVENT_DIR_CHANGED,
-            Self::SelectionChanged => EVENT_SELECTION_CHANGED,
-            Self::JobFinished => EVENT_JOB_FINISHED,
-        }
-    }
-
-    /// The event called `name`, or `None` for a word that names no event.
-    pub fn parse(name: &str) -> Option<Self> {
-        [Self::DirChanged, Self::SelectionChanged, Self::JobFinished]
-            .into_iter()
-            .find(|kind| kind.name() == name)
-    }
-}
-
-/// How a background job ended, as a `job_finished` event reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JobOutcome {
-    Completed,
-    /// Every item was skipped because its destination already existed.
-    Skipped,
-    Cancelled,
-    Failed,
-}
-
-/// What moved, on a `dir_changed` or `selection_changed` event. `from` and `to` are the old and
-/// new directory, or the old and new cursor entry (`null` for an empty directory). A burst of
-/// changes reaches a plugin as one event from where it began to where it ended.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Change {
-    pub from: Option<PathBuf>,
-    pub to: Option<PathBuf>,
-}
-
-/// What ended, on a `job_finished` event: `kind` is the verb (`copy`, `move`, `delete`, `trash`,
-/// `extract`, `compress` or `command`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Job {
-    pub kind: String,
-    pub outcome: JobOutcome,
-}
+pub use plugin_api::{
+    API_VERSION, Change, EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT, EVENT_JOB_FINISHED,
+    EVENT_KEY, EVENT_SELECTION_CHANGED, EventKind, Job, JobOutcome, LogLevel, StateSnapshot,
+    WireEntry,
+};
 
 /// A host -> plugin line: always a notification, never expects a reply.
 #[derive(Debug, Clone, Serialize)]
@@ -211,27 +143,6 @@ impl HostEvent {
     pub fn to_line(&self) -> String {
         line(self)
     }
-}
-
-/// What a `get_state` reply carries: the browser as the user sees it, as of the last render tick.
-/// Published by the host on a `watch` channel each tick (see `PluginManager::publish_state`), so
-/// answering a request never touches the render thread, and a plugin that asks twice in one tick
-/// gets the same answer twice.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct StateSnapshot {
-    /// The directory being browsed.
-    pub cwd: PathBuf,
-    /// The entry under the cursor, or `null` for an empty directory.
-    pub cursor: Option<PathBuf>,
-    /// Every `v` mark, sorted. Marks are the only selection, so this is what a built-in bulk
-    /// action would act on.
-    pub marks: Vec<PathBuf>,
-    pub show_hidden: bool,
-    /// The sort key's name (`"name"`, `"size"`, `"modified"` or `"mode"`).
-    pub sort: String,
-    pub sort_reversed: bool,
-    /// The view's name (`"list"`, `"grid"`, `"details"` or `"filmstrip"`).
-    pub view: String,
 }
 
 /// What to do when a `copy`/`mv`/`rename` request's destination already exists — the wire form of
@@ -413,16 +324,6 @@ impl PluginRequest {
     }
 }
 
-/// How urgent a plugin's `log` line is — purely advisory, the host shows every level the same way
-/// (the status bar has one line, not a severity-colored log view).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogLevel {
-    Info,
-    Warn,
-    Error,
-}
-
 #[derive(Debug, Deserialize)]
 struct LogParams {
     #[serde(default)]
@@ -539,40 +440,11 @@ fn line(value: &impl Serialize) -> String {
     text
 }
 
-/// A directory listing entry, in the plain JSON shape a `read_dir` reply carries — `shared`'s own
-/// `DirEntryInfo` isn't `Serialize` (its `modified: Option<SystemTime>` isn't JSON-shaped), so
-/// this converts it rather than adding a wire concern to shared infrastructure.
-#[derive(Debug, Clone, Serialize)]
-pub struct WireEntry {
-    pub name: String,
-    pub path: PathBuf,
-    pub is_dir: bool,
-    pub size: u64,
-    /// Whole seconds since the Unix epoch, or `null` when the entry's metadata couldn't be read.
-    pub modified: Option<u64>,
-    pub mode: Option<u32>,
-}
-
-impl From<&DirEntryInfo> for WireEntry {
-    fn from(entry: &DirEntryInfo) -> Self {
-        Self {
-            name: entry.name.clone(),
-            path: entry.path.clone(),
-            is_dir: entry.is_dir,
-            size: entry.size,
-            modified: entry
-                .modified
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs()),
-            mode: entry.mode,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use shared::DirEntryInfo;
 
     fn event_json(event: &HostEvent) -> Value {
         serde_json::from_str(event.to_line().trim()).unwrap()

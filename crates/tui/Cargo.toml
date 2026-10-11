@@ -16,7 +16,7 @@ file_ops = { path = "../file_ops" }
 shell_overlay = { path = "../shell_overlay" }
 preview = { path = "../preview" }
 theming = { path = "../theming" }
-plugins = { path = "../plugins" }
+plugin_host = { path = "../plugin_host" }
 vfs_ssh = { path = "../vfs_ssh" }
 vfs_archive = { path = "../vfs_archive" }
 trash = { path = "../trash" }

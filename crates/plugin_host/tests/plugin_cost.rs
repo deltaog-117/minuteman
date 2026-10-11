@@ -17,7 +17,7 @@
 //! What a plugin costs, measured against the real fixture and a real `python3`. These are
 //! benchmarks, not tests of behaviour, so they are `#[ignore]`d and run by hand:
 //!
-//! `cargo test --release -p plugins --test plugin_cost -- --ignored --nocapture --test-threads=1`
+//! `cargo test --release -p plugin_host --test plugin_cost -- --ignored --nocapture --test-threads=1`
 //!
 //! There is no stored baseline: a run prints its numbers, and the ones worth keeping are written
 //! into `DIARY.md`. Numbers from a debug build mean little, so run it with `--release`.
@@ -25,7 +25,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use plugins::{PluginManager, Triggers};
+use plugin_host::{PluginManager, Triggers};
 
 const FIXTURE: &str = env!("CARGO_BIN_EXE_test-fixture-plugin");
 const PYTHON_EXAMPLE: &str = concat!(

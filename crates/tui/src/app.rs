@@ -37,7 +37,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
-use plugins::{
+use plugin_host::{
     ActionRequest, EventKind, JobOutcome, PluginManager, Restart, StateSnapshot, Triggers,
 };
 use shared::{LocalVfs, Vfs, VfsError};

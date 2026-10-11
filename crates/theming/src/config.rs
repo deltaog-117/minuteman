@@ -353,7 +353,7 @@ pub struct Config {
     /// The `[[preview_hook]]` tables — external commands that thumbnail or extract text for a
     /// file extension the built-in previews can't otherwise show. See `tui::preview_hook`.
     pub preview_hooks: Vec<PreviewHook>,
-    /// The `[[plugin]]` tables, in the order they were spawned — see `plugins::PluginManager`.
+    /// The `[[plugin]]` tables, in the order they were spawned — see `plugin_host::PluginManager`.
     pub plugins: Vec<PluginSpec>,
     pub keys: KeyMap,
     pub theme: Theme,

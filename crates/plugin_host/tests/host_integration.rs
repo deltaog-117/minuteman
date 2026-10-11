@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
-use plugins::{
+use plugin_host::{
     EventKind, JobOutcome, PluginManager, PluginState, Restart, StateSnapshot, Triggers,
 };
 
@@ -1054,7 +1054,7 @@ fn a_python_plugin_registers_its_own_command_with_no_config() {
 
 /// Waits for the plugin's next `run_action` to reach the render thread's side.
 #[track_caller]
-fn wait_for_action(manager: &mut PluginManager) -> plugins::ActionRequest {
+fn wait_for_action(manager: &mut PluginManager) -> plugin_host::ActionRequest {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if let Some(request) = manager.take_action() {

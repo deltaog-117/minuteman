@@ -89,6 +89,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-10 | Operation Keys on Marks and Cursor | Marks act where you stand, the cursor row is the fallback, `space x` for the trash (COA A); a cursor fallback alone (B) and a same-folder guard (C) not taken | ✅ Confirmed |
 | 2026-10-10 | Deck Rail | A grouped places-style rail at the left, entered with `Tab` and `↑`/`↓`, `hjkl` left to the files (COA A); stacked cards (B) and a rail that folds to icons (C) not taken | ✅ Confirmed |
 | 2026-10-10 | Browser File Chooser | A native portal backend, `mman-portal`, opening `mman --chooser-file` in a terminal (COA B); `xdg-desktop-portal-termfilechooser` with a wrapper script (A) and only a default folder handler (C) not taken | ✅ Confirmed |
+| 2026-10-11 | Core and Bundled Plugins | Move features out one at a time into bundled plugins, starting with a scaffold that changes no behavior (COA C: in-process traits and the plugin protocol); in-process traits alone (A) and everything over the protocol (B) not taken | ✅ Confirmed |
 
 ---
 
@@ -6694,6 +6695,50 @@ garbage answer, withdrawn request). The real `mman` binary was driven through a 
 all four modes (a file, two marked files, a folder, a save with a suggested name, a save over an
 existing file with `y`, and `q`) and the answer files read back byte for byte. Not run: a real
 browser, the real `xdg-desktop-portal`, or a real terminal window; those are the next thing to try.
+
+---
+
+## 2026-10-11 — A small core and bundled plugins: the scaffold (M1)
+
+**Context.** The aim is for the file operations (with the trash they go to) and the terminal
+interface to be the only essential parts, and for the finder, search, preview, archives, devices
+and the rest to be replaceable by a plugin, and shipped by default the way a browser ships its
+system add-ons. The plugin protocol already let a plugin run the file operations and the
+interface's actions, but not show anything, claim a key or take a built-in's place. The roadmap had
+listed "everything is a plugin" as not planned, on the grounds of a 100k-line rewrite, an API as
+big as the app, and serialization on hot paths.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | In-process traits and a cargo feature per feature crate | Not taken alone: fast and typed, but replacing a feature needs a rebuild |
+| B | Every feature, defaults included, over the plugin protocol | Not taken as a rewrite: fully replaceable, but a pipe on every hot path and one very large API |
+| C | In-process traits for what is hot, and the same slots exposed over the protocol so a plugin can take a name | Chosen, and moved one feature at a time |
+
+**Decision.** The core is `shared`, `file_ops`, `trash`, `browser` (the directory model), `tui`
+(including the mini-shell panes and the shell popup, which are kept), the plugin host, the config,
+and a plain open. Everything else becomes a bundled plugin in M2 to M7 (the finder first, because it
+forces the picker and key-claiming design the others reuse), each move measured against what it
+replaces and leaving behavior unchanged. The earlier objection stays honoured by never doing it as
+one rewrite and by keeping the browser, the operations, the trash and the shell out of it. M1 is
+the scaffold only: `crates/plugins` became `crates/plugin_host` so it no longer shares a name with
+the root `plugins/` folder for the bundled plugins; `crates/plugin_api` was cut out of
+`protocol.rs` with the plain wire data, which the host re-exports under the old paths so no
+caller changed except `tui`'s `use plugins::` lines; and the dependency-direction rule became a
+test over `cargo metadata`.
+
+**Trade-offs.** `plugin_api` depends on `shared` because `WireEntry` converts from `shared`'s
+`DirEntryInfo`, and Rust's orphan rule puts that conversion in one of the two crates. The line
+parser (`PluginRequest`, `parse_line`) and the event builder stay in the host because they use
+`file_ops::ConflictPolicy` and `crossterm::KeyCode`, which a plugin must not need; splitting them
+is M2's work, when a plugin first needs a client. The workspace does not list `plugins/*` yet,
+since Cargo rejects a glob that matches nothing, so each plugin crate adds itself. The moved types
+now derive both `Serialize` and `Deserialize`, so a Rust plugin can read what the host writes.
+
+**Verification.** `scripts/check` passes (format, `vfs-gate` now scanning `plugins/` as well,
+clippy with warnings denied, the whole workspace's tests). New tests pin the JSON spelling of every
+moved type and round-trip a `StateSnapshot` as a property; `dependency_direction` runs the rules on
+the real workspace and on made-up workspaces that break each one, so a rule that stopped firing
+would fail. No behavior changed, and no interface was run by hand for this reason.
 
 ---
 
