@@ -37,6 +37,13 @@
 //! Because it takes the next line on stdin as a request's reply, a test must wait for these logs
 //! before sending it anything else.
 //!
+//! An `action` event is logged as `action: NAME hidden=BOOL`; with `--picker-on-action` the plugin
+//! then asks for a picker (`picker: ok` or the host's refusal), sends one `picker_items` notification
+//! and asks for a walk of the directory it was told (`walk: ok` or the refusal). It logs each
+//! `picker_query` as `picker_query: PICKER GENERATION TEXT`, each `walk_batch` as `walk_batch: WALK
+//! COUNT`, each `walk_done` as `walk_done: WALK OUTCOME truncated=BOOL`, and on `picker_closed`
+//! logs `picker_closed: PICKER` and cancels its walk.
+//!
 //! Three flags make it end on purpose, so the tests can play a one-shot plugin and a plugin in a
 //! crash loop: `--exit-on-init=N`, `--exit-after-key=N` and `--exit-after-event=N` exit with
 //! status N right at `init`, after finishing a `key`, or after logging a change or job event.
@@ -223,6 +230,101 @@ fn main() {
                     std::process::exit(code);
                 }
             }
+            "action" => {
+                let params = &event["params"];
+                let hidden = params["show_hidden"].as_bool().unwrap_or(false);
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!(
+                        "action: {} hidden={hidden}",
+                        params["action"].as_str().unwrap_or("?")
+                    ),
+                );
+                if std::env::args().any(|arg| arg == "--picker-on-action") {
+                    let shown = send_request(
+                        &mut stdout,
+                        &mut lines,
+                        &mut next_id,
+                        "show_picker",
+                        serde_json::json!({ "picker": 1, "title": "fixture", "preview": false }),
+                    );
+                    let outcome = shown.map_or_else(|e| e, |_| "ok".to_string());
+                    send_log(&mut stdout, "info", &format!("picker: {outcome}"));
+                    send_notification(
+                        &mut stdout,
+                        "picker_items",
+                        serde_json::json!({
+                            "picker": 1,
+                            "generation": 0,
+                            "items": [{ "path": "/r/a.txt", "rel": "a.txt", "is_dir": false }],
+                            "matches": 1,
+                            "indexed": 1,
+                            "indexing": "walking",
+                            "settled": true,
+                        }),
+                    );
+                    let walked = send_request(
+                        &mut stdout,
+                        &mut lines,
+                        &mut next_id,
+                        "walk",
+                        serde_json::json!({
+                            "walk": 7,
+                            "root": params["cwd"],
+                            "show_hidden": hidden,
+                        }),
+                    );
+                    let outcome = walked.map_or_else(|e| e, |_| "ok".to_string());
+                    send_log(&mut stdout, "info", &format!("walk: {outcome}"));
+                }
+            }
+            "picker_query" => {
+                let picker = &event["params"]["picker"];
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!(
+                        "picker_query: {} {} {}",
+                        picker["picker"],
+                        picker["generation"],
+                        picker["text"].as_str().unwrap_or("")
+                    ),
+                );
+            }
+            "picker_closed" => {
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!("picker_closed: {}", event["params"]["picker"]["picker"]),
+                );
+                send_notification(&mut stdout, "walk_cancel", serde_json::json!({ "walk": 7 }));
+            }
+            "walk_batch" => {
+                let walk = &event["params"]["walk"];
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!(
+                        "walk_batch: {} {}",
+                        walk["walk"],
+                        walk["entries"].as_array().map_or(0, Vec::len)
+                    ),
+                );
+            }
+            "walk_done" => {
+                let walk = &event["params"]["walk"];
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!(
+                        "walk_done: {} {} truncated={}",
+                        walk["walk"],
+                        walk["end"]["outcome"].as_str().unwrap_or("?"),
+                        walk["end"]["truncated"]
+                    ),
+                );
+            }
             _ => {}
         }
     }
@@ -291,6 +393,12 @@ fn handle_key(
     send_log(stdout, "info", &format!("cursor: {cursor}"));
 
     send_log(stdout, "info", "done");
+}
+
+fn send_notification(stdout: &mut io::Stdout, method: &str, params: serde_json::Value) {
+    let line = serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": params });
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
 }
 
 fn send_log(stdout: &mut io::Stdout, level: &str, message: &str) {

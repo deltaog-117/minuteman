@@ -20,18 +20,23 @@
 //! plugin fires on its configured keys and `:` commands (or `:plugin <name>`) and can call back into `read_dir`/`copy`/`mv`/`delete`/
 //! `create_dir`/`create_file`/`touch`/`rename` — the same `file_ops` orchestration the built-in
 //! keys use, so a plugin reaches real core operations, not a bolted-on extras API — and run the
-//! interface's own actions by name with `run_action`.
+//! interface's own actions by name with `run_action`. A plugin can also provide one of those
+//! actions itself (the fuzzy finder is such a plugin), opening a list the interface draws and
+//! filling it, with the tree below a folder walked for it (see `picker` and `walk`).
 
 mod actions;
 pub mod error;
 pub mod host;
 mod life;
 mod mailbox;
+mod picker;
 pub mod protocol;
 mod registry;
+mod walk;
 
 pub use actions::ActionRequest;
 pub use error::PluginError;
-pub use host::{LogMessage, PluginManager, Restart, Triggers};
+pub use host::{ActionDispatch, LogMessage, PluginManager, Restart, Triggers};
 pub use life::{PluginInfo, PluginState};
+pub use picker::{PickerRequest, UiRequest};
 pub use protocol::{API_VERSION, EventKind, JobOutcome, LogLevel, StateSnapshot};

@@ -44,10 +44,13 @@ use crate::actions::{ActionLink, ActionRequest};
 use crate::error::PluginError;
 use crate::life::{self, Exit, Life, PluginInfo, PluginState, Verdict};
 use crate::mailbox::{Mailbox, Queued};
+use crate::picker::{UiLink, UiRequest};
 use crate::protocol::{
-    self, EventKind, Incoming, JobOutcome, LogLevel, PluginRequest, StateSnapshot, WireEntry,
+    self, EventKind, HostEventKey, Incoming, JobOutcome, LogLevel, PluginRequest, StateSnapshot,
+    WireEntry,
 };
 use crate::registry::SharedRegistry;
+use crate::walk::Walks;
 
 /// One line to show the user, from a plugin's own `log` notification or the host's diagnostics
 /// about it (a malformed line, an abnormal exit).
@@ -72,8 +75,12 @@ struct RunningPlugin {
     handle: Handle,
     on_keys: Vec<KeyCode>,
     events: Vec<EventKind>,
+    /// The interface's actions this plugin answers (`provides` in its config).
+    provides: Vec<String>,
     registry: SharedRegistry,
     actions: ActionLink,
+    vfs: Arc<dyn Vfs>,
+    ui: UiLink,
     process: Process,
     /// Crashes in a row, each soon after starting (see `life::after_crash`).
     crashes: u32,
@@ -154,6 +161,8 @@ impl RunningPlugin {
                 state_rx: state_tx.subscribe(),
                 registry: self.registry.clone(),
                 actions: self.actions.clone(),
+                vfs: Arc::clone(&self.vfs),
+                ui: self.ui.clone(),
             },
         )?;
         self.restarts += 1;
@@ -222,6 +231,9 @@ struct Wiring {
     state_rx: watch::Receiver<StateSnapshot>,
     registry: SharedRegistry,
     actions: ActionLink,
+    /// What a `walk` request reads through: the same paths the browser shows.
+    vfs: Arc<dyn Vfs>,
+    ui: UiLink,
 }
 
 /// How `PluginManager::restart` went.
@@ -233,14 +245,29 @@ pub enum Restart {
     Failed(String),
 }
 
+/// What came of `PluginManager::dispatch_action`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionDispatch {
+    /// No plugin provides that action, so the interface handles it itself.
+    NoProvider,
+    /// A plugin provides it but cannot be started; the reason was logged (see `poll`).
+    Unavailable,
+    /// The plugin has the action.
+    Sent,
+}
+
 /// What a plugin is configured to answer: the keys that fire it, the `:` command words it
-/// declared and the events it asked to hear about. All may be empty, for a plugin only ever
+/// declared, the events it asked to hear about and the actions it provides. All may be empty, for a plugin only ever
 /// started by `:plugin <name>`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Triggers {
     pub keys: Vec<KeyCode>,
     pub commands: Vec<String>,
     pub events: Vec<EventKind>,
+    /// The names of the interface's actions this plugin answers instead of the interface: when
+    /// the user triggers one, the plugin gets an `action` event and nothing else happens. The
+    /// first plugin configured with a name gets it.
+    pub actions: Vec<String>,
 }
 
 /// Owns every configured plugin process for the running session: spawns them, fires key and
@@ -263,6 +290,11 @@ pub struct PluginManager {
     /// Where every plugin's reader sends `run_action`, and the names `list_actions` answers.
     actions: ActionLink,
     actions_rx: UnboundedReceiver<ActionRequest>,
+    /// Where every plugin's reader sends what concerns its picker, for the render thread.
+    ui: UiLink,
+    ui_rx: UnboundedReceiver<UiRequest>,
+    /// What a plugin's `walk` reads through. The local disk until the interface says otherwise.
+    vfs: Arc<dyn Vfs>,
     /// Whether the interface has published at least once; the first publish is the browser
     /// arriving, not a change, so it fires no event.
     published: AtomicBool,
@@ -272,6 +304,7 @@ impl Default for PluginManager {
     fn default() -> Self {
         let (logs_tx, logs_rx) = unbounded_channel();
         let (actions_tx, actions_rx) = unbounded_channel();
+        let (ui_tx, ui_rx) = unbounded_channel();
         Self {
             plugins: Vec::new(),
             logs_tx,
@@ -280,6 +313,9 @@ impl Default for PluginManager {
             registry: SharedRegistry::default(),
             actions: ActionLink::new(actions_tx),
             actions_rx,
+            ui: UiLink::new(ui_tx),
+            ui_rx,
+            vfs: Arc::new(LocalVfs),
             published: AtomicBool::new(false),
         }
     }
@@ -334,6 +370,8 @@ impl PluginManager {
                 state_rx: self.state_tx.subscribe(),
                 registry: self.registry.clone(),
                 actions: self.actions.clone(),
+                vfs: Arc::clone(&self.vfs),
+                ui: self.ui.clone(),
             },
         )?;
         self.plugins.push(RunningPlugin {
@@ -343,8 +381,11 @@ impl PluginManager {
             handle: handle.clone(),
             on_keys: triggers.keys,
             events: triggers.events,
+            provides: triggers.actions,
             registry: self.registry.clone(),
             actions: self.actions.clone(),
+            vfs: Arc::clone(&self.vfs),
+            ui: self.ui.clone(),
             process,
             crashes: 0,
             restarts: 0,
@@ -432,6 +473,81 @@ impl PluginManager {
             plugin.send_command("plugin", args, cwd, selection);
         }
         true
+    }
+
+    /// Points the plugins started from now on at `vfs`, which their `walk` requests read through
+    /// (the local disk until this is called). Call before spawning, like `declare_actions`.
+    pub fn set_vfs(&mut self, vfs: Arc<dyn Vfs>) {
+        self.vfs = vfs;
+    }
+
+    /// Hands the action `name` to the plugin that provides it (the first configured with that
+    /// name), with the browsed directory, the selection and whether dot-files are shown. A plugin
+    /// whose process has ended is started again first (see `life`), and one the host has given up
+    /// on says so through `poll`.
+    pub fn dispatch_action(
+        &mut self,
+        name: &str,
+        cwd: &Path,
+        selection: &[PathBuf],
+    ) -> ActionDispatch {
+        let show_hidden = self.state_tx.borrow().show_hidden;
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins
+            .iter_mut()
+            .find(|p| p.provides.iter().any(|provided| provided == name))
+        else {
+            return ActionDispatch::NoProvider;
+        };
+        if !plugin.ensure_alive(logs_tx, state_tx, true) {
+            return ActionDispatch::Unavailable;
+        }
+        let event =
+            protocol::HostEvent::action(name, cwd.to_path_buf(), selection.to_vec(), show_hidden);
+        let _ = plugin.process.stdin_tx.send(event.to_line());
+        ActionDispatch::Sent
+    }
+
+    /// Tells `plugin` that what is typed into its picker is now `text`. `generation` rises with
+    /// every change, and the plugin's `picker_items` carry the one they answer. Nothing is sent to
+    /// a plugin whose process has ended; the interface notices that through `is_running`.
+    pub fn send_picker_query(&self, plugin: &str, picker: u64, generation: u64, text: &str) {
+        self.write_to(
+            plugin,
+            protocol::HostEvent::picker_query(picker, generation, text),
+        );
+    }
+
+    /// Tells `plugin` its picker was closed, by the user or because a result was chosen.
+    pub fn send_picker_closed(&self, plugin: &str, picker: u64) {
+        self.write_to(plugin, protocol::HostEvent::picker_closed(picker));
+    }
+
+    fn write_to(&self, plugin: &str, event: protocol::HostEvent) {
+        if let Some(plugin) = self.plugins.iter().find(|p| p.name == plugin)
+            && plugin.process.life.exit() == Exit::Running
+        {
+            let _ = plugin.process.stdin_tx.send(event.to_line());
+        }
+    }
+
+    /// Whether `plugin` has a live process right now.
+    pub fn is_running(&self, plugin: &str) -> bool {
+        self.plugins
+            .iter()
+            .any(|p| p.name == plugin && p.process.life.exit() == Exit::Running)
+    }
+
+    /// The oldest thing a plugin asked of the interface's picker that is waiting for the render
+    /// thread, if any. Call until it returns `None` once per render tick; answer a `ShowPicker`
+    /// with `opened` or `refuse`.
+    pub fn take_ui(&mut self) -> Option<UiRequest> {
+        self.ui_rx.try_recv().ok()
     }
 
     /// Every plugin's state, in the order they were configured, for `:plugins`.
@@ -622,7 +738,9 @@ async fn write_loop(
 /// Reads the plugin's stdout one line at a time: a `log` notification is forwarded to
 /// `logs_tx`, a `get_state` request is answered at once from `state_rx`, a `register_command` or
 /// `unregister_command` at once from `registry`, a `run_action` once the render thread has run it
-/// (`list_actions` at once from `actions`), any other request is
+/// (`list_actions` at once from `actions`), a `show_picker` once the render thread has answered it
+/// (the picker's `picker_items` and `picker_close` go to the render thread without a reply), a
+/// `walk` at once with the walk running on the blocking pool, any other request is
 /// executed on the blocking pool and replied to over `stdin_tx`, and a malformed line is reported the same way `log` is (with a reply if it carried an `id`).
 async fn read_loop(
     plugin: String,
@@ -636,7 +754,10 @@ async fn read_loop(
         state_rx,
         registry,
         actions,
+        vfs,
+        ui,
     } = wiring;
+    let walks = Arc::new(Walks::default());
     let mut lines = BufReader::new(stdout).lines();
     loop {
         let next = match lines.next_line().await {
@@ -663,6 +784,9 @@ async fn read_loop(
                     message,
                 });
             }
+            Ok(Incoming::PickerItems(update)) => ui.items(&plugin, update),
+            Ok(Incoming::PickerClose(close)) => ui.close(&plugin, close.picker),
+            Ok(Incoming::WalkCancel(cancel)) => walks.cancel(cancel.walk),
             Ok(Incoming::UnknownNotification) => {}
             Ok(Incoming::Request { id, request }) => {
                 let reply = match request {
@@ -679,6 +803,13 @@ async fn read_loop(
                         .map_err(|e| format!("cannot unregister '{name}': {e}")),
                     PluginRequest::RunAction { name } => actions.run(&plugin, name).await,
                     PluginRequest::ListActions => Ok(actions.list()),
+                    PluginRequest::ShowPicker(spec) => ui.show_picker(&plugin, spec).await,
+                    PluginRequest::Walk(request) => {
+                        let number = request.walk;
+                        walks
+                            .start(&handle, Arc::clone(&vfs), request, stdin_tx.clone())
+                            .map(|()| json!({ "walk": number }))
+                    }
                     request => match handle.spawn_blocking(move || execute(request)).await {
                         Ok(result) => result,
                         Err(e) => Err(format!("request task panicked: {e}")),
@@ -702,6 +833,8 @@ async fn read_loop(
             }
         }
     }
+    // The process is gone (or its output is): nobody is left to read what its walks find.
+    walks.cancel_all();
 }
 
 /// Waits out the process so `kill_on_drop` has something alive to act on for its whole lifetime,
@@ -808,7 +941,9 @@ fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
         | PluginRequest::RegisterCommand { .. }
         | PluginRequest::UnregisterCommand { .. }
         | PluginRequest::RunAction { .. }
-        | PluginRequest::ListActions => Err("answered by the host's reader, not here".to_string()),
+        | PluginRequest::ListActions
+        | PluginRequest::ShowPicker(_)
+        | PluginRequest::Walk(_) => Err("answered by the host's reader, not here".to_string()),
         PluginRequest::ReadDir { path } => vfs
             .list_dir(&path)
             .map(|entries| json!(entries.iter().map(WireEntry::from).collect::<Vec<_>>()))

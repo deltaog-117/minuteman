@@ -7,6 +7,7 @@ authors.workspace = true
 
 [dependencies]
 shared = { path = "../shared" }
+browser = { path = "../browser" }
 plugin_api = { path = "../plugin_api" }
 file_ops = { path = "../file_ops" }
 crossterm = "0.29.0"

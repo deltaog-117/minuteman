@@ -15,6 +15,7 @@ members = [
     "crates/theming",
     "crates/portal_backend",
     "crates/tui",
+    "plugins/finder",
 ]
 
 [workspace.package]

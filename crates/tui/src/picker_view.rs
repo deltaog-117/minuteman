@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Draws the fuzzy finder: a panel floating over the browser with the query on top, the ranked
+//! Draws a plugin's picker (the fuzzy finder's): a panel floating over the browser with the query on top, the ranked
 //! results below it, and, on a screen wide enough, the selected result's preview beside them. The
 //! preview itself is drawn by `main` (it owns the preview pipelines); this module only says where
 //! it goes. The panel is laid out by `trash_view::layout`, which already splits a rect into a
@@ -27,9 +27,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use theming::Config;
 
-use crate::finder_popup::{FinderPopup, Indexing};
+use plugin_host::protocol::PickerIndexing;
+
 use crate::glyphs;
 use crate::hud::{self, fit_width, pad_to, text_width};
+use crate::picker_popup::PickerPopup;
 use crate::style;
 use crate::trash_view::{self, Layout, elide_left, scroll_top};
 
@@ -45,24 +47,26 @@ pub fn area(screen: Rect) -> Rect {
     }
 }
 
-pub fn layout(screen: Rect) -> Layout {
-    trash_view::layout(area(screen))
+/// Where the parts of the panel go; with `preview` false the whole panel is the list, however
+/// wide the screen.
+pub fn layout(screen: Rect, preview: bool) -> Layout {
+    trash_view::layout_with(area(screen), preview)
 }
 
 /// The header's right-hand note: how many entries match out of how many are indexed, and whether
 /// the walk is still going or was cut short by a limit.
-fn status(popup: &FinderPopup) -> String {
+fn status(popup: &PickerPopup) -> String {
     let counts = format!("{}/{}", popup.matches(), popup.indexed());
     match (popup.indexing(), popup.settled()) {
-        (Indexing::Walking, _) => format!("{counts} indexing…"),
-        (Indexing::Done { .. }, false) => format!("{counts} ranking…"),
-        (Indexing::Done { truncated: true }, true) => format!("{counts} (limit reached)"),
-        (Indexing::Done { truncated: false }, true) => counts,
+        (PickerIndexing::Walking, _) => format!("{counts} indexing…"),
+        (PickerIndexing::Done | PickerIndexing::Truncated, false) => format!("{counts} ranking…"),
+        (PickerIndexing::Truncated, true) => format!("{counts} (limit reached)"),
+        (PickerIndexing::Done, true) => counts,
     }
 }
 
-pub fn render(frame: &mut Frame<'_>, popup: &FinderPopup, config: &Config) {
-    let places = layout(frame.area());
+pub fn render(frame: &mut Frame<'_>, popup: &PickerPopup, config: &Config) {
+    let places = layout(frame.area(), popup.wants_preview());
     let theme = &config.theme;
     let g = glyphs::of(config);
     style::cast_shadow(frame.buffer_mut(), places.frame, config);
@@ -70,7 +74,10 @@ pub fn render(frame: &mut Frame<'_>, popup: &FinderPopup, config: &Config) {
     if let Some(preview) = places.preview {
         frame.render_widget(Clear, preview);
     }
-    frame.render_widget(style::themed_block(config, "find", true), places.frame);
+    frame.render_widget(
+        style::themed_block(config, popup.title(), true),
+        places.frame,
+    );
 
     let dim = Style::default().fg(style::color(&theme.status_fg));
     let accent = Style::default().fg(style::color(&theme.accent_fg));
@@ -99,9 +106,9 @@ pub fn render(frame: &mut Frame<'_>, popup: &FinderPopup, config: &Config) {
 
     if len == 0 {
         let note = match (popup.indexing(), popup.settled()) {
-            (Indexing::Walking, _) => "indexing…",
-            (Indexing::Done { .. }, false) => "ranking…",
-            (Indexing::Done { .. }, true) => "no match",
+            (PickerIndexing::Walking, _) => "indexing…",
+            (PickerIndexing::Done | PickerIndexing::Truncated, false) => "ranking…",
+            (PickerIndexing::Done | PickerIndexing::Truncated, true) => "no match",
         };
         frame.render_widget(Paragraph::new(Span::styled(note, dim)), places.rows);
     } else {
@@ -168,9 +175,10 @@ pub fn render(frame: &mut Frame<'_>, popup: &FinderPopup, config: &Config) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
+    use plugin_host::protocol::{PickerSpec, PickerUpdate, TreeEntry};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
@@ -179,22 +187,43 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    /// A finder over a small tree whose walk has finished, drawn on a `width` x `height` screen.
+    fn entry(rel: &str) -> TreeEntry {
+        TreeEntry {
+            path: PathBuf::from("/root").join(rel),
+            rel: rel.to_string(),
+            is_dir: false,
+        }
+    }
+
+    /// A picker holding what a finder over a small tree would have sent for `typed`, drawn on a
+    /// `width` x `height` screen.
     fn drawn(typed: &str, width: u16, height: u16) -> String {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let vfs = MemVfs::new();
-        vfs.add_file("/root/src/main.rs", b"");
-        vfs.add_file("/root/docs/guide.md", b"");
-        let mut popup = FinderPopup::open(runtime.handle(), Arc::new(vfs), "/root".into(), false);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let spec = PickerSpec {
+            picker: 1,
+            title: "find".to_string(),
+            preview: true,
+        };
+        let mut popup =
+            PickerPopup::open(runtime.handle(), Arc::new(MemVfs::new()), "finder", &spec);
         for c in typed.chars() {
             popup.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
-        while !popup.settled() || popup.indexing() == Indexing::Walking {
-            popup.poll();
-            assert!(Instant::now() < deadline, "the finder never settled");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let all = [entry("src/main.rs"), entry("docs/guide.md")];
+        let items: Vec<TreeEntry> = all
+            .iter()
+            .filter(|e| e.rel.contains(typed))
+            .cloned()
+            .collect();
+        popup.apply(PickerUpdate {
+            picker: 1,
+            generation: u64::try_from(typed.chars().count()).unwrap(),
+            matches: items.len(),
+            indexed: 4,
+            items,
+            indexing: PickerIndexing::Done,
+            settled: true,
+        });
         let config = Config::from_sources(None, None, None);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -222,6 +251,11 @@ mod tests {
             "the folder is shown beside the name:\n{shown}"
         );
         assert!(!shown.contains("guide.md"), "{shown}");
+    }
+
+    #[test]
+    fn the_panel_is_titled_by_the_plugin() {
+        assert!(drawn("m", 120, 40).contains("find"));
     }
 
     #[test]
@@ -259,7 +293,16 @@ mod tests {
             let screen = Rect::new(0, 0, w, h);
             let panel = area(screen);
             assert!(panel.width <= screen.width && panel.height <= screen.height);
-            let _ = layout(screen);
+            let _ = layout(screen, true);
         }
+    }
+
+    #[test]
+    fn a_picker_without_a_preview_gives_the_whole_panel_to_the_list() {
+        let screen = Rect::new(0, 0, 200, 50);
+        assert!(layout(screen, true).preview.is_some());
+        let plain = layout(screen, false);
+        assert!(plain.preview.is_none());
+        assert_eq!(plain.frame, area(screen));
     }
 }

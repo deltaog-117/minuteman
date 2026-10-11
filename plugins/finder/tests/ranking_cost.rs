@@ -17,20 +17,21 @@
 //! What ranking a big index costs: the numbers behind the fuzzy finder keeping its work off the
 //! render thread and cutting it into slices. Ignored by default, because a figure from a debug
 //! build or a busy machine means nothing; run by hand with
-//! `cargo test --release -p browser --test finder_cost -- --ignored --nocapture`.
+//! `cargo test --release -p finder --test ranking_cost -- --ignored --nocapture`.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
-use browser::finder::{Candidate, Ranking, SHOWN};
-use browser::search::Query;
+use finder::rank::{Ranking, SHOWN};
+use plugin_api::TreeEntry;
+use shared::Query;
 
 const ENTRIES: usize = 200_000;
-/// What the finder's engine scores between looks at its queue.
+/// What the finder scores between looks at its queue.
 const SLICE: usize = 2048;
 
 /// A tree shaped like a real one: folders a few levels deep holding files with ordinary names.
-fn index() -> Vec<Candidate> {
+fn index() -> Vec<TreeEntry> {
     const WORDS: [&str; 12] = [
         "src",
         "lib",
@@ -56,7 +57,7 @@ fn index() -> Vec<Candidate> {
                 i,
                 ["rs", "md", "toml", "txt"][i % 4]
             );
-            Candidate {
+            TreeEntry {
                 path: PathBuf::from("/root").join(&rel),
                 rel,
                 is_dir: false,

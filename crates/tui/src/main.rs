@@ -25,6 +25,7 @@ mod atlas_view;
 mod boot_splash;
 mod browser_drag;
 mod browser_mouse;
+mod bundled;
 mod cargo_fit;
 mod chooser;
 mod cli;
@@ -39,9 +40,6 @@ mod disk_usage;
 mod disk_usage_view;
 mod extract_popup;
 mod filmstrip_view;
-mod finder_job;
-mod finder_popup;
-mod finder_view;
 mod git_status;
 mod glyphs;
 mod gradient;
@@ -57,6 +55,8 @@ mod nav_job;
 mod open;
 mod osc52;
 mod overlay_view;
+mod picker_popup;
+mod picker_view;
 mod plugin_action;
 mod popup_shell;
 mod preview_hook;
@@ -118,10 +118,11 @@ use deck::{DeckState, Event as DeckEvent, Outcome as DeckKey};
 use disk_usage::DiskUsageView;
 use extract_popup::ExtractPopup;
 use file_ops::archive::Format;
-use finder_popup::{FinderPopup, Outcome as FinderOutcome};
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect::InspectView;
+use picker_popup::{Outcome as PickerOutcome, PickerPopup};
 use plugin_action::Browse;
+use plugin_host::UiRequest;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
@@ -413,8 +414,8 @@ struct Overlay<'a> {
     compress: Option<&'a CompressPopup>,
     extract: Option<&'a ExtractPopup>,
     appearance: Option<&'a AppearancePopup>,
-    /// The fuzzy finder, a panel over the browser while open.
-    finder: Option<&'a FinderPopup>,
+    /// A plugin's picker (the fuzzy finder's), a panel over the browser while open.
+    picker: Option<&'a PickerPopup>,
     /// The rail of devices, in the deck view.
     deck: Option<&'a DeckState>,
     /// The diagram of how the storage is wired, in the wiring view.
@@ -1350,8 +1351,8 @@ fn run(
     // The appearance popup (`a`, or "Appearance…" on blank space's right-click menu) while one is
     // open; modal too.
     let mut appearance: Option<AppearancePopup> = None;
-    // The fuzzy finder (`f`) while one is open; modal too.
-    let mut finder: Option<FinderPopup> = None;
+    // A plugin's picker (the fuzzy finder's, from `f`) while one is open; modal too.
+    let mut picker: Option<PickerPopup> = None;
     // The device cards of the deck view; exists only while that view is showing, so the machine
     // is not looked at for anyone who is not using it.
     let mut deck: Option<DeckState> = None;
@@ -1398,8 +1399,46 @@ fn run(
         if let Some(view) = trash_view.as_mut() {
             view.poll();
         }
-        if let Some(popup) = finder.as_mut() {
-            popup.poll();
+        // What the plugin behind a picker asked of the interface: to open it, to show new results,
+        // to close it. Taken until none is waiting.
+        while let Some(request) = app.take_ui_request() {
+            match request {
+                UiRequest::ShowPicker(request) if picker.is_some() => {
+                    request.refuse("another picker is open");
+                }
+                UiRequest::ShowPicker(request) => {
+                    picker = Some(app.begin_picker(request.plugin(), request.spec()));
+                    app.status = None;
+                    request.opened();
+                }
+                UiRequest::Items { plugin, update } => {
+                    if let Some(popup) = picker.as_mut()
+                        && popup.plugin() == plugin
+                    {
+                        popup.apply(update);
+                    }
+                }
+                UiRequest::Close {
+                    plugin,
+                    picker: number,
+                } => {
+                    if picker
+                        .as_ref()
+                        .is_some_and(|popup| popup.plugin() == plugin && popup.picker() == number)
+                    {
+                        picker = None;
+                    }
+                }
+            }
+        }
+        if let Some(popup) = picker.as_mut() {
+            // A picker whose plugin has stopped can no longer answer: close it, and say so.
+            if app.picker_alive(popup) {
+                popup.poll();
+            } else {
+                app.status = Some(format!("{} stopped; the picker was closed", popup.plugin()));
+                picker = None;
+            }
         }
         // The deck looks at the machine only while its view is showing. Work it finished in the
         // background (a mount, an eject) arrives here: a message, or a folder to go to.
@@ -1470,7 +1509,7 @@ fn run(
         app.poll_hud(browser, Instant::now());
         app.poll_plugins(browser, view_mode.label());
         // While the trash browser is open the preview follows its cursor, not the browser's.
-        match (trash_view.as_ref(), finder.as_ref()) {
+        match (trash_view.as_ref(), picker.as_ref()) {
             (Some(view), _) => {
                 previews.update(view.preview_subject().as_ref(), &config.preview_hooks)
             }
@@ -1605,7 +1644,7 @@ fn run(
                     compress: compress.as_ref(),
                     extract: extract.as_ref(),
                     appearance: appearance.as_ref(),
-                    finder: finder.as_ref(),
+                    picker: picker.as_ref(),
                     deck: deck.as_ref(),
                     wiring: wiring.as_ref(),
                     atlas: atlas.as_ref(),
@@ -1632,13 +1671,17 @@ fn run(
         let sliding = deck
             .as_ref()
             .is_some_and(|cards| cards.animating(Instant::now()));
-        let poll_timeout = if shells.is_some() || boot_splash.is_some() || revealing || sliding {
-            Duration::from_millis(16)
-        } else if drag.active().is_some() {
-            EDGE_SCROLL_EVERY
-        } else {
-            Duration::from_millis(100)
-        };
+        // A picker's plugin answers on its own time, so the loop looks often while one is open (or
+        // about to be) to show what it sends as it arrives, not on the next idle tick.
+        let picking = picker.is_some() || app.awaiting_picker();
+        let poll_timeout =
+            if shells.is_some() || boot_splash.is_some() || revealing || sliding || picking {
+                Duration::from_millis(16)
+            } else if drag.active().is_some() {
+                EDGE_SCROLL_EVERY
+            } else {
+                Duration::from_millis(100)
+            };
         // A plugin's `run_action` takes a turn of its own, in place of a terminal event, and goes
         // through the same handling as the key bound to it (see `plugin_action`).
         let mut browse = None;
@@ -1651,7 +1694,7 @@ fn run(
                 || extract.is_some()
                 || settings.is_some()
                 || appearance.is_some()
-                || finder.is_some();
+                || picker.is_some();
             browse = plugin_action::accept(request, mode, modal_open);
         }
         let event = if browse.is_some() {
@@ -1804,11 +1847,11 @@ fn run(
                     }
                     continue;
                 }
-                if let Some(popup) = finder.as_mut() {
+                if let Some(popup) = picker.as_mut() {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             let pointer = Position::new(mouse.column, mouse.row);
-                            let places = finder_view::layout(frame_area);
+                            let places = picker_view::layout(frame_area, popup.wants_preview());
                             match trash_view::row_at(
                                 &places,
                                 popup.top().get(),
@@ -1817,8 +1860,9 @@ fn run(
                             ) {
                                 Some(row) => popup.move_to(row),
                                 // A click off the panel closes it, as it does a menu.
-                                None if !finder_view::area(frame_area).contains(pointer) => {
-                                    finder = None;
+                                None if !picker_view::area(frame_area).contains(pointer) => {
+                                    app.picker_closed(popup);
+                                    picker = None;
                                 }
                                 None => {}
                             }
@@ -2688,7 +2732,7 @@ fn run(
                     }
                     continue;
                 }
-                if let Some(popup) = finder.as_mut() {
+                if let Some(popup) = picker.as_mut() {
                     // The preview scrolls with `Ctrl`-`D`/`Ctrl`-`U`, since every letter and the
                     // browser's own keys for it are text in the query.
                     let half = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -2696,10 +2740,14 @@ fn run(
                         KeyCode::Char('d') if half => previews.text.scroll_half_pages(1),
                         KeyCode::Char('u') if half => previews.text.scroll_half_pages(-1),
                         _ => match popup.key(key) {
-                            FinderOutcome::Stay => {}
-                            FinderOutcome::Close => finder = None,
-                            FinderOutcome::Reveal(path) => {
-                                finder = None;
+                            PickerOutcome::Stay => app.send_picker_query(popup),
+                            PickerOutcome::Close => {
+                                app.picker_closed(popup);
+                                picker = None;
+                            }
+                            PickerOutcome::Reveal(path) => {
+                                app.picker_closed(popup);
+                                picker = None;
                                 match browser.reveal(vfs, &path) {
                                     Ok(()) => app.status = None,
                                     Err(e) => app.status = Some(format!("cannot show it: {e}")),
@@ -3303,7 +3351,7 @@ fn run(
             Some(Action::Rename) => app.begin_rename(browser),
             Some(Action::Create) => app.begin_create(),
             Some(Action::Search) => app.begin_search(browser),
-            Some(Action::Find) => finder = Some(app.begin_finder(browser)),
+            Some(Action::Find) => app.begin_find(browser),
             Some(Action::Command) => app.begin_command(),
             Some(Action::Cancel) => app.cancel_all(browser),
             Some(Action::Select) => browser.toggle_mark(),
@@ -3730,7 +3778,7 @@ fn draw(
         compress,
         extract,
         appearance,
-        finder,
+        picker,
         deck,
         wiring,
         atlas,
@@ -4114,12 +4162,12 @@ fn draw(
     if let Some(view) = inspect {
         overlay_view::render_inspect(frame, view, config);
     }
-    if let Some(popup) = finder {
-        finder_view::render(frame, popup, config);
-        if let Some(area) = finder_view::layout(frame.area()).preview {
+    if let Some(popup) = picker {
+        picker_view::render(frame, popup, config);
+        if let Some(area) = picker_view::layout(frame.area(), popup.wants_preview()).preview {
             let subject = popup.preview_subject();
             // A folder's contents were read in the background when it was selected (see
-            // `FinderPopup::children`), so drawing never waits on the disk.
+            // `PickerPopup::children`), so drawing never waits on the disk.
             draw_preview_pane(
                 frame,
                 area,

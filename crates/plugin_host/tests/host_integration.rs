@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
 use plugin_host::{
-    EventKind, JobOutcome, PluginManager, PluginState, Restart, StateSnapshot, Triggers,
+    ActionDispatch, EventKind, JobOutcome, PluginManager, PluginState, Restart, StateSnapshot,
+    Triggers, UiRequest,
 };
 
 fn scratch_dir(label: &str) -> PathBuf {
@@ -1164,6 +1165,216 @@ fn the_python_plugin_runs_an_action_by_name_and_lists_them() {
     assert!(manager.dispatch_named("dir-stats", vec!["run".into(), "paste".into()], &dir, &[]));
     wait_for_action(&mut manager).refuse("a job is running");
     wait_for_log(&mut manager, "cannot run 'paste': a job is running");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn provides_find() -> Triggers {
+    Triggers {
+        actions: vec!["find".to_string()],
+        ..Triggers::default()
+    }
+}
+
+/// The next picker request waiting for the render thread.
+fn wait_for_ui(manager: &mut PluginManager) -> UiRequest {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(request) = manager.take_ui() {
+            return request;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("nothing arrived for the interface");
+}
+
+#[test]
+fn an_action_reaches_the_plugin_that_provides_it_and_no_other() {
+    let dir = scratch_dir("action-dispatch");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    assert_eq!(
+        manager.dispatch_action("find", &dir, &[]),
+        ActionDispatch::NoProvider,
+        "with no plugins, the interface handles it"
+    );
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &[],
+        provides_find(),
+    );
+
+    assert_eq!(
+        manager.dispatch_action("sort", &dir, &[]),
+        ActionDispatch::NoProvider
+    );
+    let mut state = StateSnapshot::default();
+    state.cwd.clone_from(&dir);
+    state.show_hidden = true;
+    manager.publish_state(state);
+    assert_eq!(
+        manager.dispatch_action("find", &dir, &[]),
+        ActionDispatch::Sent
+    );
+    wait_for_log(&mut manager, "action: find hidden=true");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_provider_that_cannot_run_is_reported_not_silently_skipped() {
+    let dir = scratch_dir("action-unavailable");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--exit-on-init=1"],
+        provides_find(),
+    );
+    // It crashes straight away every time, until the host stops starting it.
+    let mut last = ActionDispatch::Sent;
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(150));
+        last = manager.dispatch_action("find", &dir, &[]);
+    }
+    assert_eq!(last, ActionDispatch::Unavailable);
+    let said = manager.poll();
+    assert!(
+        said.iter().any(|m| m.message.contains("restart fixture")),
+        "the user is told how to start it again: {said:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugin_opens_a_picker_through_the_interface_and_hears_what_is_typed() {
+    let dir = scratch_dir("picker");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--picker-on-action"],
+        provides_find(),
+    );
+    assert_eq!(
+        manager.dispatch_action("find", &dir, &[]),
+        ActionDispatch::Sent
+    );
+
+    let UiRequest::ShowPicker(request) = wait_for_ui(&mut manager) else {
+        panic!("the first thing is the request to open the picker");
+    };
+    assert_eq!(request.plugin(), "fixture");
+    assert_eq!(request.spec().picker, 1);
+    assert_eq!(request.spec().title, "fixture");
+    assert!(!request.spec().preview);
+    request.opened();
+    wait_for_log(&mut manager, "picker: ok");
+
+    let UiRequest::Items { plugin, update } = wait_for_ui(&mut manager) else {
+        panic!("then what the picker lists");
+    };
+    assert_eq!(plugin, "fixture");
+    assert_eq!(
+        (update.picker, update.matches, update.items.len()),
+        (1, 1, 1)
+    );
+    assert_eq!(update.items[0].rel, "a.txt");
+
+    manager.send_picker_query("fixture", 1, 4, "ma");
+    wait_for_log(&mut manager, "picker_query: 1 4 ma");
+    manager.send_picker_closed("fixture", 1);
+    wait_for_log(&mut manager, "picker_closed: 1");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_refused_picker_tells_the_plugin_why() {
+    let dir = scratch_dir("picker-refused");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--picker-on-action"],
+        provides_find(),
+    );
+    manager.dispatch_action("find", &dir, &[]);
+    let UiRequest::ShowPicker(request) = wait_for_ui(&mut manager) else {
+        panic!("a picker was asked for");
+    };
+    request.refuse("another picker is open");
+    wait_for_log(
+        &mut manager,
+        "picker: cannot open the picker: another picker is open",
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_walk_comes_back_in_batches_through_the_hosts_own_paths_and_ends() {
+    let dir = scratch_dir("walk");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("a.txt"), b"").unwrap();
+    std::fs::write(dir.join("sub").join("b.txt"), b"").unwrap();
+    std::fs::write(dir.join(".hidden"), b"").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--picker-on-action"],
+        provides_find(),
+    );
+    manager.dispatch_action("find", &dir, &[]);
+    let UiRequest::ShowPicker(request) = wait_for_ui(&mut manager) else {
+        panic!("a picker was asked for");
+    };
+    request.opened();
+
+    // Two folders are listed, so two batches: the root's two visible entries, then `sub`'s one.
+    let seen = wait_for_log(&mut manager, "walk_done: 7 done truncated=false");
+    assert!(seen.contains(&"walk: ok".to_string()), "{seen:?}");
+    assert!(seen.contains(&"walk_batch: 7 2".to_string()), "{seen:?}");
+    assert!(seen.contains(&"walk_batch: 7 1".to_string()), "{seen:?}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_stopped_plugin_is_no_longer_running() {
+    let dir = scratch_dir("running");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &[],
+        provides_find(),
+    );
+    wait_for_log(&mut manager, "ready");
+    assert!(manager.is_running("fixture"));
+    assert!(!manager.is_running("nobody"));
+    manager.restart("fixture");
+    drop(manager);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

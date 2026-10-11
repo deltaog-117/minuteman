@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- The fuzzy matcher (`Query`) moved from `browser` to `shared`, and the finder's walk now runs in
+  the plugin host, through the same paths the browser reads. `tui`'s finder popup and view are
+  now a general picker's, titled by the plugin. A plugin that dies while its picker is open
+  closes it.
+- While a picker is open, or has just been asked for, the event loop looks every 16 ms instead of
+  every 100 ms, so what the plugin sends appears as it arrives.
 - `plugins` crate renamed `plugin_host`, and its plain wire data (the event names, `EventKind`,
   `JobOutcome`, `Change`, `Job`, `StateSnapshot`, `LogLevel`, `WireEntry`) moved into a new
   `plugin_api` crate that depends only on `shared`. The host re-exports them under the paths they
@@ -145,6 +151,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- The fuzzy finder (`f`) is now a plugin that ships with Minuteman: the program `mman-finder`
+  (`cargo install --path plugins/finder`), started by itself when it is next to `mman` or on
+  `PATH`. It ranks and the interface draws, so how it looks and behaves is as before; without it
+  `f` says how to get it. A `[[plugin]]` of your own with `provides = ["find"]` takes its place.
+- Plugin protocol: a plugin can provide one of the interface's actions (`provides` in its
+  `[[plugin]]`, the `action` event), open a list the interface draws (`show_picker`,
+  `picker_items`, `picker_close`, and the `picker_query` and `picker_closed` events) and have the
+  tree below a folder listed through the host's own paths (`walk`, `walk_cancel`, and the
+  `walk_batch` and `walk_done` events). `plugin_api` has the shapes and a `client` module with the
+  line helpers a Rust plugin needs.
 - A `plugins/` folder for the plugins bundled with Minuteman, and a `dependency_direction` test
   that fails if a crate under `crates/` depends on one of them, if `plugin_api` depends on
   anything but `shared`, or if a bundled plugin depends on anything but `plugin_api` and `shared`.

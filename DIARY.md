@@ -90,6 +90,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-10 | Deck Rail | A grouped places-style rail at the left, entered with `Tab` and `↑`/`↓`, `hjkl` left to the files (COA A); stacked cards (B) and a rail that folds to icons (C) not taken | ✅ Confirmed |
 | 2026-10-10 | Browser File Chooser | A native portal backend, `mman-portal`, opening `mman --chooser-file` in a terminal (COA B); `xdg-desktop-portal-termfilechooser` with a wrapper script (A) and only a default folder handler (C) not taken | ✅ Confirmed |
 | 2026-10-11 | Core and Bundled Plugins | Move features out one at a time into bundled plugins, starting with a scaffold that changes no behavior (COA C: in-process traits and the plugin protocol); in-process traits alone (A) and everything over the protocol (B) not taken | ✅ Confirmed |
+| 2026-10-11 | Fuzzy Finder as a Plugin | The interface walks the tree and draws the list, the plugin ranks (COA B); a plugin that walks the tree itself through `read_dir` (A) and keeping the finder in-process behind a trait (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -6739,6 +6740,73 @@ clippy with warnings denied, the whole workspace's tests). New tests pin the JSO
 moved type and round-trip a `StateSnapshot` as a property; `dependency_direction` runs the rules on
 the real workspace and on made-up workspaces that break each one, so a rule that stopped firing
 would fail. No behavior changed, and no interface was run by hand for this reason.
+
+---
+
+## 2026-10-11 — The fuzzy finder becomes a bundled plugin (M2)
+
+**Context.** The finder was the first feature to move out of the interface because it forces the two
+things every later one needs: a plugin that takes the place of a built-in action, and a list the
+interface draws for a plugin. What made it more than a move was that its walk goes through
+`Vfs::list_dir`, so it works over ssh and inside archives, while the plugin protocol's file
+operations always read the local disk.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A generic picker; the plugin walks the tree itself with `read_dir` and ranks | Not taken: a round trip per folder, every finder plugin redoing hidden-file rules and loop protection, and the local-disk-only `read_dir` |
+| B | A generic picker plus a `walk` request the host runs through the browser's own `Vfs` and streams to the plugin in batches; the plugin ranks | Chosen |
+| C | The finder in-process behind a `PickerProvider` trait, external plugins using the same slot | Not taken: no process boundary, and `tui` would depend on `plugins/`, against the rule that the core never names a plugin |
+
+**Decision.** Three kinds of message, all in `plugin_api`. Providing an action: `provides` on a
+`[[plugin]]` makes the key bound to that action send the plugin an `action` event (with the folder
+and whether dot-files show) and do nothing else; the first plugin configured with the name gets
+it. The picker: the plugin asks for one with `show_picker` and chooses its number, sends
+`picker_items` (the best results, the counts, whether the walk is still going, whether it has
+caught up), and hears `picker_query` (with a generation number) and `picker_closed`; the interface
+drops an answer to any query but the newest, so typing never shows stale results. The walk: `walk`
+runs `browser::finder::walk` on the blocking pool through the same `Vfs` the browser reads
+through, sends each folder's entries as `walk_batch` (at most 1,000 to a line) and ends with
+`walk_done`; `walk_cancel` or the process ending stops it. The plugin picks the numbers, so it
+never waits on a reply to know which picker or walk an event is about.
+
+In the interface, `finder_popup` and `finder_view` became `picker_popup` and `picker_view`, which
+hold what was typed and the newest results and draw the panel under the plugin's title; the engine
+that ranked off the render thread (`finder_job`) is gone from `tui`. The ranking moved to
+`plugins/finder` unchanged, with its tests (including both property tests), and the matcher it
+and the browser's `/` search share, `Query`, moved to `shared` so a plugin can use it without
+depending on `browser`. The picker's panel can drop the preview pane (`preview = false`), which
+needed `trash_view::layout_with`. The finder plugin is found next to `mman` or on `PATH`
+(`tui::bundled`) and starts at launch unless a plugin of the same name or providing `find` is
+configured. When it is not found `f` says how to install it, as the user asked, rather than
+falling back to the old in-process finder.
+
+**Trade-offs.** The plugin starts at launch as an idle process rather than on first use; lazy
+start is a follow-up and the roadmap says so. `plugin_host` now depends on `browser`, for the
+walk, which keeps the rule that the core never depends on a plugin but widens what the host
+knows. A picker closed by choosing a result always means "show it in the browser"; letting the
+plugin say what choosing does waits for a second plugin that wants something else. A plugin that
+dies while its picker is open closes the picker, and its own exit line is what the status bar
+shows. The host and the plugin each count generations, so a restart of the plugin (a crash and the
+next `f`) starts clean with nothing carried over. The event loop wakes every 16 ms while a picker
+is open or has just been asked for, not every 100 ms, since its results now arrive on the
+plugin's schedule.
+
+**Verification.** `scripts/check` passes. The ranking's tests moved with it; new tests cover the
+finder's session (opening asks for the picker then the walk, a refusal puts it away and says why,
+stale numbers are ignored, closing cancels the walk), the real `mman-finder` binary on pipes (open,
+rank, narrow, close, and a host speaking another protocol version), every new message's JSON, the
+host's side of each (an action reaching only its provider, a provider that cannot start being
+reported, a picker opened and answered through the interface, a refusal reaching the plugin, a
+walk over a real folder with and without dot-files), the picker popup and its panel, and the
+bundled lookup. `dependency_direction` still holds. The real `mman` was driven through a
+pseudo-terminal with `mman-finder` beside it: `f` lists every entry, typing narrows to the two
+`main` files, a second result chosen with `Enter` leaves the browser in `docs/guide`, `Esc` closes
+and `f` opens again; with `mman` copied somewhere alone `f` says how to get the finder and opens
+nothing; with the finder killed while open the picker closes and `f` starts it afresh. Timing, 120,300
+entries in 300 folders, release builds, three runs each (index complete after `f` / a typed query
+ranked after its last letter): 0.68 s / 0.08 s before, 0.66 s / 0.04 s after. Not run: a remote
+backend or an archive through the plugin (the walk uses the same `Vfs` the browser does, and the
+walk's tests use an in-memory one), and a terminal other than the pseudo-terminal.
 
 ---
 

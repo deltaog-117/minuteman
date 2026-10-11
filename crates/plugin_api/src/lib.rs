@@ -28,6 +28,17 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use shared::DirEntryInfo;
 
+pub mod client;
+mod event;
+mod picker;
+
+pub use event::{EventParams, HostEvent};
+pub use picker::{
+    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_SHOW_PICKER, METHOD_WALK, METHOD_WALK_CANCEL,
+    PickerClose, PickerEvent, PickerIndexing, PickerSpec, PickerUpdate, TreeEntry, WalkCancel,
+    WalkEnd, WalkEvent, WalkOutcome, WalkRequest,
+};
+
 /// Bumped only for a breaking change to the shapes below and in `plugin_host::protocol`; sent
 /// with every event so a plugin can check it against what it was built for and refuse to run
 /// rather than misbehave silently.
@@ -46,6 +57,18 @@ pub const EVENT_DIR_CHANGED: &str = "dir_changed";
 pub const EVENT_SELECTION_CHANGED: &str = "selection_changed";
 /// The event name a subscribed plugin gets when a copy, move, delete or similar job ends.
 pub const EVENT_JOB_FINISHED: &str = "job_finished";
+
+/// The event name a plugin gets when the user triggers an action the plugin provides (see the
+/// `provides` setting of a `[[plugin]]` table).
+pub const EVENT_ACTION: &str = "action";
+/// The event name a plugin gets when what is typed into its picker changes.
+pub const EVENT_PICKER_QUERY: &str = "picker_query";
+/// The event name a plugin gets when its picker was closed from the keyboard or a result chosen.
+pub const EVENT_PICKER_CLOSED: &str = "picker_closed";
+/// The event name a plugin gets with more entries of a walk it asked for.
+pub const EVENT_WALK_BATCH: &str = "walk_batch";
+/// The event name a plugin gets when a walk it asked for has ended.
+pub const EVENT_WALK_DONE: &str = "walk_done";
 
 /// The events a plugin must ask for (`events = [...]` in its `[[plugin]]` table) because, unlike
 /// `init`, `key` and `command`, they fire without the user addressing the plugin.

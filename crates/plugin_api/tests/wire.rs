@@ -19,7 +19,12 @@
 
 use std::path::PathBuf;
 
-use plugin_api::{Change, EventKind, Job, JobOutcome, LogLevel, StateSnapshot, WireEntry};
+use plugin_api::client::{Incoming, notification_line, parse_incoming, request_line};
+use plugin_api::{
+    API_VERSION, Change, EventKind, HostEvent, Job, JobOutcome, LogLevel, METHOD_WALK,
+    PickerIndexing, PickerUpdate, StateSnapshot, TreeEntry, WalkEnd, WalkOutcome, WalkRequest,
+    WireEntry,
+};
 use proptest::prelude::*;
 use serde_json::json;
 use shared::DirEntryInfo;
@@ -107,6 +112,132 @@ fn an_entry_without_a_readable_time_reports_null() {
     assert!(value["modified"].is_null());
     assert!(value["mode"].is_null());
     assert_eq!(value["size"], 3);
+}
+
+fn event_of(event: &HostEvent) -> Box<plugin_api::EventParams> {
+    match parse_incoming(&event.to_line()).unwrap() {
+        Incoming::Event(params) => params,
+        other => panic!("expected an event, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_action_event_names_the_action_and_whether_dot_files_are_shown() {
+    let event = HostEvent::action("find", PathBuf::from("/a"), vec![], true);
+    let params = event_of(&event);
+    assert_eq!(params.name, "action");
+    assert_eq!(params.action.as_deref(), Some("find"));
+    assert_eq!(params.show_hidden, Some(true));
+    assert_eq!(params.cwd, PathBuf::from("/a"));
+    assert_eq!(params.api_version, API_VERSION);
+}
+
+#[test]
+fn picker_events_carry_the_picker_and_what_is_typed() {
+    let query = event_of(&HostEvent::picker_query(3, 9, "ma"));
+    let picker = query.picker.unwrap();
+    assert_eq!(query.name, "picker_query");
+    assert_eq!((picker.picker, picker.generation), (3, Some(9)));
+    assert_eq!(picker.text.as_deref(), Some("ma"));
+
+    let closed = event_of(&HostEvent::picker_closed(3));
+    let picker = closed.picker.unwrap();
+    assert_eq!(closed.name, "picker_closed");
+    assert_eq!((picker.generation, picker.text), (None, None));
+}
+
+#[test]
+fn walk_events_carry_the_entries_or_the_end() {
+    let entry = TreeEntry {
+        path: PathBuf::from("/r/a/b"),
+        rel: "a/b".to_string(),
+        is_dir: false,
+    };
+    let batch = event_of(&HostEvent::walk_batch(4, vec![entry.clone()]));
+    let walk = batch.walk.unwrap();
+    assert_eq!(batch.name, "walk_batch");
+    assert_eq!((walk.walk, walk.entries, walk.end), (4, vec![entry], None));
+
+    let end = WalkEnd {
+        outcome: WalkOutcome::Cancelled,
+        truncated: false,
+    };
+    let done = event_of(&HostEvent::walk_done(4, end));
+    let walk = done.walk.unwrap();
+    assert_eq!(done.name, "walk_done");
+    assert_eq!((walk.entries.len(), walk.end), (0, Some(end)));
+}
+
+#[test]
+fn an_entry_knows_its_name_and_its_folder() {
+    let nested = TreeEntry {
+        path: PathBuf::from("/r/src/ui/main.rs"),
+        rel: "src/ui/main.rs".to_string(),
+        is_dir: false,
+    };
+    assert_eq!((nested.name(), nested.parent_rel()), ("main.rs", "src/ui"));
+    let top = TreeEntry {
+        path: PathBuf::from("/r/main.rs"),
+        rel: "main.rs".to_string(),
+        is_dir: false,
+    };
+    assert_eq!((top.name(), top.parent_rel()), ("main.rs", ""));
+}
+
+#[test]
+fn indexing_progress_is_spelled_in_lowercase() {
+    for (state, spelled) in [
+        (PickerIndexing::Walking, "walking"),
+        (PickerIndexing::Done, "done"),
+        (PickerIndexing::Truncated, "truncated"),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), json!(spelled));
+    }
+}
+
+#[test]
+fn a_reply_is_read_with_its_id_and_the_reason_when_it_failed() {
+    let ok = parse_incoming(r#"{"jsonrpc":"2.0","id":3,"result":{"walk":1}}"#).unwrap();
+    assert!(matches!(ok, Incoming::Reply { error: None, .. }));
+    let failed = parse_incoming(r#"{"jsonrpc":"2.0","id":4,"error":{"message":"no"}}"#).unwrap();
+    match failed {
+        Incoming::Reply { id, error } => {
+            assert_eq!(id, json!(4));
+            assert_eq!(error.as_deref(), Some("no"));
+        }
+        other => panic!("expected a reply, got {other:?}"),
+    }
+    assert!(parse_incoming("{}").is_err());
+    assert!(parse_incoming("not json").is_err());
+}
+
+#[test]
+fn request_and_notification_lines_have_the_shape_the_host_reads() {
+    let request = WalkRequest {
+        walk: 2,
+        root: PathBuf::from("/r"),
+        show_hidden: false,
+    };
+    let line = request_line(7, METHOD_WALK, &request);
+    assert!(line.ends_with('\n'));
+    let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(value["id"], 7);
+    assert_eq!(value["method"], "walk");
+    assert_eq!(value["params"]["root"], "/r");
+
+    let update = PickerUpdate {
+        picker: 1,
+        generation: 2,
+        items: vec![],
+        matches: 0,
+        indexed: 0,
+        indexing: PickerIndexing::Walking,
+        settled: false,
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(notification_line("picker_items", &update).trim()).unwrap();
+    assert!(value.get("id").is_none());
+    assert_eq!(value["params"]["indexing"], "walking");
 }
 
 proptest! {

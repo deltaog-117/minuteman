@@ -37,8 +37,10 @@ use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
+use plugin_host::protocol::PickerSpec;
 use plugin_host::{
-    ActionRequest, EventKind, JobOutcome, PluginManager, Restart, StateSnapshot, Triggers,
+    ActionDispatch, ActionRequest, EventKind, JobOutcome, PluginManager, Restart, StateSnapshot,
+    Triggers, UiRequest,
 };
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
@@ -53,7 +55,6 @@ use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
 use crate::disk_usage::DiskUsageView;
 use crate::extract_popup::{self, ExtractPopup};
-use crate::finder_popup::FinderPopup;
 use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
 use crate::line_edit::LineEdit;
@@ -61,6 +62,7 @@ use crate::live_refresh::LiveRefresh;
 use crate::marked_size::{MarkedSize, Total};
 use crate::nav_job::{NavJob, NavPoll};
 use crate::open;
+use crate::picker_popup::PickerPopup;
 use crate::search_job::{SearchJob, SearchState};
 use crate::system_hud::SystemHud;
 use crate::wiring::WiringState;
@@ -536,6 +538,9 @@ pub struct App {
     plugins: PluginManager,
     /// Plugin actions run since the last tick, answered once it has published what they left.
     ran_actions: Vec<ActionRequest>,
+    /// When `find` was handed to its plugin and the picker has not opened yet, so the loop wakes
+    /// often enough to open it the moment the plugin asks.
+    finding_since: Option<Instant>,
     /// The filesystem being browsed. Every feature reaches a browsed path through this, and the
     /// background jobs take a clone, so a backend other than the local disk needs no change here.
     vfs: Arc<dyn Vfs>,
@@ -581,6 +586,7 @@ impl App {
                 plugins
             },
             ran_actions: Vec::new(),
+            finding_since: None,
             vfs,
             caps_lock: false,
         }
@@ -616,21 +622,72 @@ impl App {
         AtlasState::new(self.handle.clone(), Arc::clone(&self.vfs))
     }
 
-    /// The fuzzy finder over everything below the browsed directory, hidden entries only if the
-    /// browser is showing them.
-    pub fn begin_finder(&self, browser: &BrowserState) -> FinderPopup {
-        FinderPopup::open(
-            &self.handle,
-            Arc::clone(&self.vfs),
-            browser.current_dir().to_path_buf(),
-            browser.show_hidden(),
-        )
+    /// Hands the `find` action to the plugin that provides it (the fuzzy finder, which ships
+    /// bundled): it walks everything below the browsed directory, hidden entries only if the
+    /// browser is showing them, and opens its picker when it has something to show (see
+    /// `take_ui_request`). With no such plugin the status bar says how to get one.
+    pub fn begin_find(&mut self, browser: &BrowserState) {
+        // Asked a moment ago and not open yet: a second press must not open a second one.
+        if self.awaiting_picker() {
+            return;
+        }
+        let name = theming::Action::Find.name();
+        match self
+            .plugins
+            .dispatch_action(name, browser.current_dir(), &[])
+        {
+            ActionDispatch::Sent => {
+                self.status = Some("opening the finder…".to_string());
+                self.finding_since = Some(Instant::now());
+            }
+            ActionDispatch::NoProvider => self.status = Some(crate::bundled::missing(name)),
+            // The plugin's own log line says why, and `poll_plugins` puts it in the status bar.
+            ActionDispatch::Unavailable => {}
+        }
+    }
+
+    /// The picker `plugin` asked for with `spec`.
+    pub fn begin_picker(&mut self, plugin: &str, spec: &PickerSpec) -> PickerPopup {
+        self.finding_since = None;
+        PickerPopup::open(&self.handle, Arc::clone(&self.vfs), plugin, spec)
+    }
+
+    /// Whether a picker has been asked for and is expected any moment (for a couple of seconds at
+    /// most, since a plugin that never answers should not keep the loop busy).
+    pub fn awaiting_picker(&self) -> bool {
+        self.finding_since
+            .is_some_and(|since| since.elapsed() < Duration::from_secs(2))
+    }
+
+    /// The oldest thing a plugin asked of its picker that is waiting for this turn, if any.
+    pub fn take_ui_request(&mut self) -> Option<UiRequest> {
+        self.plugins.take_ui()
+    }
+
+    /// Passes what was typed into `popup` on to the plugin that owns it.
+    pub fn send_picker_query(&self, popup: &mut PickerPopup) {
+        if let Some((generation, text)) = popup.take_query() {
+            self.plugins
+                .send_picker_query(popup.plugin(), popup.picker(), generation, &text);
+        }
+    }
+
+    /// Tells the plugin that owns `popup` that it was closed, so it can stop its work.
+    pub fn picker_closed(&self, popup: &PickerPopup) {
+        self.plugins
+            .send_picker_closed(popup.plugin(), popup.picker());
+    }
+
+    /// Whether the plugin that owns `popup` is still there to answer it.
+    pub fn picker_alive(&self, popup: &PickerPopup) -> bool {
+        self.plugins.is_running(popup.plugin())
     }
 
     /// Turns the status bar's git segment on or off (`git_status` in `config.toml`).
     /// Browses `vfs` instead of the local disk: the background jobs, previews and scans started by
     /// this app all read through it.
     pub fn with_vfs(mut self, vfs: Arc<dyn Vfs>) -> Self {
+        self.plugins.set_vfs(Arc::clone(&vfs));
         self.live = LiveRefresh::new(self.handle.clone(), Arc::clone(&vfs));
         self.marked_size = MarkedSize::new(self.handle.clone(), Arc::clone(&vfs));
         self.clipboard_size = MarkedSize::new(self.handle.clone(), Arc::clone(&vfs));
@@ -669,7 +726,8 @@ impl App {
     /// than treated as fatal — the same "one bad entry must never take the whole session down"
     /// rule `theming::Config::load` already follows for a malformed config file.
     pub fn with_plugins(mut self, specs: Vec<PluginSpec>, cwd: &Path) -> Self {
-        for spec in specs {
+        let bundled = crate::bundled::specs(&specs);
+        for spec in specs.into_iter().chain(bundled) {
             if let Err(e) = self.plugins.spawn(
                 &self.handle,
                 &spec.name,
@@ -678,6 +736,7 @@ impl App {
                 Triggers {
                     keys: spec.on_keys,
                     commands: spec.commands,
+                    actions: spec.provides,
                     events: spec
                         .events
                         .iter()
@@ -5441,5 +5500,52 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(usage.rows()[0].name, "f.txt");
+    }
+
+    #[test]
+    fn find_with_no_plugin_to_answer_it_says_how_to_get_the_finder() {
+        let mut fx = Fixture::new("find-missing");
+        fx.app.begin_find(&fx.browser);
+        let status = fx.app.status.clone().expect("it says something");
+        assert!(status.contains("mman-finder"), "{status}");
+        assert!(!fx.app.awaiting_picker(), "nothing is on its way");
+    }
+
+    /// A plugin that provides `find` and then never says anything, standing in for a slow one.
+    fn silent_finder() -> PluginSpec {
+        PluginSpec {
+            name: "silent".to_string(),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "cat > /dev/null".to_string()],
+            on_keys: Vec::new(),
+            commands: Vec::new(),
+            events: Vec::new(),
+            provides: vec!["find".to_string()],
+        }
+    }
+
+    #[test]
+    fn find_hands_the_action_to_its_plugin_once_and_waits_for_the_picker() {
+        let mut fx = Fixture::new("find-provided");
+        fx.app = std::mem::replace(&mut fx.app, App::new(fx._runtime.handle().clone()))
+            .with_plugins(vec![silent_finder()], &fx.root);
+        fx.app.begin_find(&fx.browser);
+        assert_eq!(fx.app.status.as_deref(), Some("opening the finder…"));
+        assert!(fx.app.awaiting_picker());
+
+        fx.app.status = None;
+        fx.app.begin_find(&fx.browser);
+        assert_eq!(
+            fx.app.status, None,
+            "a second press while one is on its way does nothing"
+        );
+
+        let spec = PickerSpec {
+            picker: 1,
+            title: "find".to_string(),
+            preview: true,
+        };
+        let _popup = fx.app.begin_picker("silent", &spec);
+        assert!(!fx.app.awaiting_picker(), "it opened");
     }
 }

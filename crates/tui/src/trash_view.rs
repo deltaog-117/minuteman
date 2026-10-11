@@ -455,7 +455,12 @@ pub struct Layout {
 pub const PREVIEW_MIN_WIDTH: u16 = 100;
 
 pub fn layout(screen: Rect) -> Layout {
-    let (frame, preview) = if screen.width >= PREVIEW_MIN_WIDTH {
+    layout_with(screen, true)
+}
+
+/// `layout`, with `with_preview` false giving the list the whole width however wide the screen.
+pub fn layout_with(screen: Rect, with_preview: bool) -> Layout {
+    let (frame, preview) = if with_preview && screen.width >= PREVIEW_MIN_WIDTH {
         let list_width = screen.width * 55 / 100;
         (
             Rect {

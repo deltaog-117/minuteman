@@ -14,16 +14,17 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The fuzzy finder's state (`f`): what is typed, the newest snapshot of ranked results from the
-//! engine (see `finder_job`) and which result is selected. Like `settings_popup` it is pure: no
-//! `Frame`, no terminal. `finder_view` draws it and `main` applies what a key asks for, which is
-//! only ever to close it or to show a result in the browser.
+//! A plugin's picker (the fuzzy finder's `f` is the first): what is typed, the newest list of
+//! results the plugin sent and which result is selected. Like `settings_popup` it is pure: no
+//! `Frame`, no terminal. `picker_view` draws it and `main` applies what a key asks for, which is
+//! only ever to close it or to show a result in the browser, and passes what is typed on to the
+//! plugin (see `take_query`).
 //!
-//! Nothing here scores or sorts anything. A key that edits the query sends it to the engine and
-//! carries on; `poll` picks up whatever the engine has answered since. Until the answer to a new
-//! query arrives the previous results stay on screen, so typing never flashes an empty list. A
-//! folder's contents for the preview are read on the blocking pool for the same reason, once per
-//! selection, never in the middle of drawing.
+//! Nothing here scores or sorts anything: the plugin does. A key that edits the query records it
+//! for sending and carries on; `apply` takes in whatever the plugin has answered. Until the answer
+//! to a new query arrives the previous results stay on screen, so typing never flashes an empty
+//! list. A folder's contents for the preview are read on the blocking pool for the same reason,
+//! once per selection, never in the middle of drawing.
 //!
 //! Every key goes to the query, so `j` and `k` are letters here; the arrows and `Ctrl`-`N`/
 //! `Ctrl`-`P` move through the results.
@@ -33,13 +34,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use browser::finder::Candidate;
-use browser::search::Query;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use plugin_host::protocol::{PickerIndexing, PickerSpec, PickerUpdate, TreeEntry};
 use shared::{DirEntryInfo, Vfs};
 
-pub use crate::finder_job::Indexing;
-use crate::finder_job::{FinderJob, Snapshot};
 use crate::line_edit::LineEdit;
 
 /// A folder's preview lists no more than this many entries: the pane cannot show more than a
@@ -56,12 +54,18 @@ pub enum Outcome {
     Reveal(PathBuf),
 }
 
-pub struct FinderPopup {
+pub struct PickerPopup {
+    /// The plugin whose picker this is, and the number it gave it.
+    plugin: String,
+    picker: u64,
+    title: String,
+    preview: bool,
     query: LineEdit,
-    job: FinderJob,
-    /// Rises with every change of the query; the engine's snapshots say which one they answer.
+    /// Rises with every change of the query; the plugin's updates say which one they answer.
     generation: u64,
-    snapshot: Snapshot,
+    /// The newest query not yet passed on to the plugin (see `take_query`).
+    unsent: Option<(u64, String)>,
+    update: Update,
     selected: usize,
     /// The path the selection is on, to keep it there when results arrive and reorder. `None`
     /// right after the query changes, when the old selection means nothing.
@@ -79,21 +83,48 @@ pub struct FinderPopup {
     children_rx: Receiver<(PathBuf, Vec<DirEntryInfo>)>,
 }
 
-impl FinderPopup {
-    /// Opens the finder over everything below `root` and starts indexing it.
+/// What the plugin has said so far: the best results for the query it last ranked.
+struct Update {
+    generation: u64,
+    results: Vec<TreeEntry>,
+    matches: usize,
+    indexed: usize,
+    indexing: PickerIndexing,
+    settled: bool,
+}
+
+impl Update {
+    /// What the picker shows before the plugin has said anything.
+    fn empty() -> Self {
+        Self {
+            generation: 0,
+            results: Vec::new(),
+            matches: 0,
+            indexed: 0,
+            indexing: PickerIndexing::Walking,
+            settled: false,
+        }
+    }
+}
+
+impl PickerPopup {
+    /// Opens the picker `plugin` asked for with `spec`.
     pub fn open(
         handle: &tokio::runtime::Handle,
         vfs: Arc<dyn Vfs>,
-        root: PathBuf,
-        show_hidden: bool,
+        plugin: &str,
+        spec: &PickerSpec,
     ) -> Self {
-        let job = FinderJob::start(handle, Arc::clone(&vfs), root, show_hidden);
         let (children_tx, children_rx) = channel();
         Self {
+            plugin: plugin.to_string(),
+            picker: spec.picker,
+            title: spec.title.clone(),
+            preview: spec.preview,
             query: LineEdit::default(),
-            job,
             generation: 0,
-            snapshot: Snapshot::empty(),
+            unsent: None,
+            update: Update::empty(),
             selected: 0,
             anchor: None,
             top: Cell::new(0),
@@ -107,25 +138,60 @@ impl FinderPopup {
         }
     }
 
-    /// Takes in the engine's newest answer to the current query, if one has arrived, and sees to
-    /// the selected folder's preview. The selection stays on its entry when results reorder
-    /// under it, and moves to the nearest row only if that entry is no longer listed.
-    pub fn poll(&mut self) {
-        if let Some(snapshot) = self.job.poll()
-            && snapshot.generation == self.generation
-        {
-            let on = self.anchor.take();
-            self.snapshot = snapshot;
-            if let Some(path) = on
-                && let Some(row) = self.snapshot.results.iter().position(|c| c.path == path)
-            {
-                self.selected = row;
-            }
-            self.selected = self
-                .selected
-                .min(self.snapshot.results.len().saturating_sub(1));
-            self.anchor = self.selected_candidate().map(|c| c.path.clone());
+    /// The plugin that owns this picker.
+    pub fn plugin(&self) -> &str {
+        &self.plugin
+    }
+
+    /// The number the plugin gave this picker.
+    pub fn picker(&self) -> u64 {
+        self.picker
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Whether the selected result is previewed beside the list.
+    pub fn wants_preview(&self) -> bool {
+        self.preview
+    }
+
+    /// What was typed since the last call, as `(generation, text)`, to pass on to the plugin.
+    pub fn take_query(&mut self) -> Option<(u64, String)> {
+        self.unsent.take()
+    }
+
+    /// Takes in the plugin's newest answer, if it is for the current query. The selection stays on
+    /// its entry when results reorder under it, and moves to the nearest row only if that entry is
+    /// no longer listed. An answer to an earlier query, or to another picker, is dropped.
+    pub fn apply(&mut self, update: PickerUpdate) {
+        if update.picker != self.picker || update.generation != self.generation {
+            return;
         }
+        let on = self.anchor.take();
+        self.update = Update {
+            generation: update.generation,
+            results: update.items,
+            matches: update.matches,
+            indexed: update.indexed,
+            indexing: update.indexing,
+            settled: update.settled,
+        };
+        if let Some(path) = on
+            && let Some(row) = self.update.results.iter().position(|c| c.path == path)
+        {
+            self.selected = row;
+        }
+        self.selected = self
+            .selected
+            .min(self.update.results.len().saturating_sub(1));
+        self.anchor = self.selected_candidate().map(|c| c.path.clone());
+    }
+
+    /// Takes in a folder's contents read in the background, and starts reading the selected
+    /// folder's if it is not already.
+    pub fn poll(&mut self) {
         while let Ok(loaded) = self.children_rx.try_recv() {
             self.children = Some(loaded);
         }
@@ -152,7 +218,7 @@ impl FinderPopup {
 
     fn retype(&mut self) {
         self.generation += 1;
-        self.job.set_query(self.generation, Query::new(&self.query));
+        self.unsent = Some((self.generation, self.query.to_string()));
         self.selected = 0;
         self.anchor = None;
         self.top.set(0);
@@ -162,34 +228,34 @@ impl FinderPopup {
         &self.query
     }
 
-    pub fn indexing(&self) -> Indexing {
-        self.snapshot.indexing
+    pub fn indexing(&self) -> PickerIndexing {
+        self.update.indexing
     }
 
     /// Whether every indexed entry has been ranked against what is typed. False for a moment
     /// after typing into a large index, while the results below may still change.
     pub fn settled(&self) -> bool {
-        self.snapshot.settled && self.snapshot.generation == self.generation
+        self.update.settled && self.update.generation == self.generation
     }
 
     /// How many entries have been indexed so far.
     pub fn indexed(&self) -> usize {
-        self.snapshot.indexed
+        self.update.indexed
     }
 
     /// How many entries match what is typed (more than are listed when it is a lot).
     pub fn matches(&self) -> usize {
-        self.snapshot.matches
+        self.update.matches
     }
 
     /// The listed results, best first.
-    pub fn results(&self) -> impl ExactSizeIterator<Item = &Candidate> {
-        self.snapshot.results.iter()
+    pub fn results(&self) -> impl ExactSizeIterator<Item = &TreeEntry> {
+        self.update.results.iter()
     }
 
     /// How many results are listed.
     pub fn result_count(&self) -> usize {
-        self.snapshot.results.len()
+        self.update.results.len()
     }
 
     pub fn selected(&self) -> usize {
@@ -205,26 +271,26 @@ impl FinderPopup {
     }
 
     pub fn move_by(&mut self, by: isize) {
-        if self.snapshot.results.is_empty() {
+        if self.update.results.is_empty() {
             return;
         }
-        let last = self.snapshot.results.len() - 1;
+        let last = self.update.results.len() - 1;
         self.selected = self.selected.saturating_add_signed(by).min(last);
         self.anchor = self.selected_candidate().map(|c| c.path.clone());
     }
 
     pub fn move_to(&mut self, row: usize) {
-        if row < self.snapshot.results.len() {
+        if row < self.update.results.len() {
             self.selected = row;
             self.anchor = self.selected_candidate().map(|c| c.path.clone());
         }
     }
 
-    fn selected_candidate(&self) -> Option<&Candidate> {
-        self.snapshot.results.get(self.selected)
+    fn selected_candidate(&self) -> Option<&TreeEntry> {
+        self.update.results.get(self.selected)
     }
 
-    /// The selected result described for the browser's preview pipelines, so the finder shows a
+    /// The selected result described for the browser's preview pipelines, so the picker shows a
     /// file the way the browser does.
     pub fn preview_subject(&self) -> Option<DirEntryInfo> {
         let candidate = self.selected_candidate()?;
@@ -250,7 +316,7 @@ impl FinderPopup {
 
     /// `Esc` closes; `Enter` shows the selected result; `Down`/`Ctrl`-`N` and `Up`/`Ctrl`-`P`
     /// (and the page keys) move through the results, stopping at the ends; any other key edits
-    /// the query, which re-ranks.
+    /// the query, which the plugin re-ranks.
     pub fn key(&mut self, key: KeyEvent) -> Outcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let page = isize::try_from(self.viewport.get().max(1)).unwrap_or(isize::MAX);
@@ -289,39 +355,88 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn type_text(popup: &mut FinderPopup, text: &str) {
+    fn entry(rel: &str, is_dir: bool) -> TreeEntry {
+        TreeEntry {
+            path: PathBuf::from("/root").join(rel),
+            rel: rel.to_string(),
+            is_dir,
+        }
+    }
+
+    /// What the plugin knows: seven entries, as the old finder tests had.
+    fn universe() -> Vec<TreeEntry> {
+        vec![
+            entry("README.md", false),
+            entry("docs", true),
+            entry("docs/guide", true),
+            entry("docs/guide/main.md", false),
+            entry("src", true),
+            entry("src/lib.rs", false),
+            entry("src/main.rs", false),
+        ]
+    }
+
+    fn spec() -> PickerSpec {
+        PickerSpec {
+            picker: 11,
+            title: "find".to_string(),
+            preview: true,
+        }
+    }
+
+    fn update(generation: u64, items: Vec<TreeEntry>, settled: bool) -> PickerUpdate {
+        PickerUpdate {
+            picker: 11,
+            generation,
+            matches: items.len(),
+            indexed: 7,
+            items,
+            indexing: PickerIndexing::Done,
+            settled,
+        }
+    }
+
+    /// A stand-in for the plugin: answers the newest query by keeping the entries whose path
+    /// holds what was typed, or all of them for nothing typed.
+    fn answer(popup: &mut PickerPopup) {
+        let (generation, text) = popup
+            .take_query()
+            .unwrap_or((popup.generation, popup.query.to_string()));
+        let items = universe()
+            .into_iter()
+            .filter(|e| e.rel.to_lowercase().contains(&text.to_lowercase()))
+            .collect();
+        popup.apply(update(generation, items, true));
+    }
+
+    fn type_text(popup: &mut PickerPopup, text: &str) {
         for c in text.chars() {
             popup.key(press(KeyCode::Char(c)));
         }
     }
 
-    /// Polls until the engine has answered the current query in full and the walk is over.
-    fn settle(popup: &mut FinderPopup) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            popup.poll();
-            if popup.settled() && popup.indexing() != Indexing::Walking {
-                return;
-            }
-            assert!(Instant::now() < deadline, "the finder never settled");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    /// A finder over a small tree, once its walk has finished.
-    fn open(runtime: &tokio::runtime::Runtime) -> FinderPopup {
+    fn open(runtime: &tokio::runtime::Runtime) -> PickerPopup {
         let vfs = MemVfs::new();
         vfs.add_file("/root/README.md", b"");
         vfs.add_file("/root/src/main.rs", b"");
         vfs.add_file("/root/src/lib.rs", b"");
         vfs.add_file("/root/docs/guide/main.md", b"");
-        let mut popup = FinderPopup::open(runtime.handle(), Arc::new(vfs), "/root".into(), false);
-        settle(&mut popup);
+        let mut popup = PickerPopup::open(runtime.handle(), Arc::new(vfs), "finder", &spec());
+        answer(&mut popup);
         popup
     }
 
-    fn rels(popup: &FinderPopup) -> Vec<String> {
+    fn rels(popup: &PickerPopup) -> Vec<String> {
         popup.results().map(|c| c.rel.clone()).collect()
+    }
+
+    #[test]
+    fn it_remembers_whose_picker_it_is() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let popup = open(&runtime);
+        assert_eq!((popup.plugin(), popup.picker()), ("finder", 11));
+        assert_eq!(popup.title(), "find");
+        assert!(popup.wants_preview());
     }
 
     #[test]
@@ -331,18 +446,35 @@ mod tests {
         assert_eq!(popup.indexed(), 7);
         assert_eq!(popup.result_count(), 7);
         assert_eq!(popup.matches(), 7);
+        assert!(popup.settled());
     }
 
     #[test]
-    fn typing_narrows_and_ranks_the_results() {
+    fn each_edit_of_the_query_is_recorded_once_for_the_plugin() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut popup = open(&runtime);
+        assert_eq!(popup.take_query(), None);
+        type_text(&mut popup, "ma");
+        assert_eq!(popup.take_query(), Some((2, "ma".to_string())));
+        assert_eq!(popup.take_query(), None, "taking it consumes it");
+        popup.key(press(KeyCode::Backspace));
+        popup.key(press(KeyCode::Backspace));
+        assert_eq!(popup.take_query(), Some((4, String::new())));
+        popup.key(press(KeyCode::Left));
+        assert_eq!(
+            popup.take_query(),
+            None,
+            "moving the cursor changes nothing"
+        );
+    }
+
+    #[test]
+    fn typing_narrows_the_results_when_the_plugin_answers() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut popup = open(&runtime);
         type_text(&mut popup, "main");
-        settle(&mut popup);
-        let found = rels(&popup);
-        assert_eq!(found.len(), 2);
-        assert!(found.contains(&"src/main.rs".to_string()));
-        assert!(found.contains(&"docs/guide/main.md".to_string()));
+        answer(&mut popup);
+        assert_eq!(rels(&popup), ["docs/guide/main.md", "src/main.rs"]);
         assert_eq!(popup.matches(), 2);
     }
 
@@ -351,9 +483,24 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut popup = open(&runtime);
         type_text(&mut popup, "m");
-        // No poll yet: nothing has been answered, and the list has not gone blank.
+        // No answer yet: nothing has been said, and the list has not gone blank.
         assert_eq!(popup.result_count(), 7);
         assert!(!popup.settled());
+    }
+
+    #[test]
+    fn an_answer_to_an_earlier_query_or_another_picker_is_dropped() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut popup = open(&runtime);
+        type_text(&mut popup, "ma");
+        popup.apply(update(1, vec![entry("stale", false)], true));
+        assert_eq!(popup.result_count(), 7, "generation 1 is not the query");
+        let mut other = update(2, vec![entry("other", false)], true);
+        other.picker = 99;
+        popup.apply(other);
+        assert_eq!(popup.result_count(), 7, "another picker's answer");
+        popup.apply(update(2, vec![entry("fresh", false)], true));
+        assert_eq!(rels(&popup), ["fresh"]);
     }
 
     #[test]
@@ -364,7 +511,7 @@ mod tests {
         assert_eq!(popup.query().as_str(), "jk");
         popup.key(press(KeyCode::Backspace));
         popup.key(press(KeyCode::Backspace));
-        settle(&mut popup);
+        answer(&mut popup);
         assert_eq!(popup.selected(), 0);
         popup.key(press(KeyCode::Down));
         popup.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
@@ -392,11 +539,14 @@ mod tests {
     fn the_selection_stays_on_its_entry_when_results_change_under_it() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut popup = open(&runtime);
-        type_text(&mut popup, "main");
-        settle(&mut popup);
+        popup.key(press(KeyCode::Down));
         popup.key(press(KeyCode::Down));
         let on = popup.selected_candidate().unwrap().path.clone();
-        popup.poll();
+        // The same results arrive again in another order, with a new entry ahead of them.
+        let mut items = universe();
+        items.reverse();
+        items.insert(0, entry("new", false));
+        popup.apply(update(0, items, true));
         assert_eq!(popup.selected_candidate().unwrap().path, on);
     }
 
@@ -405,7 +555,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut popup = open(&runtime);
         type_text(&mut popup, "lib");
-        settle(&mut popup);
+        answer(&mut popup);
         assert_eq!(
             popup.key(press(KeyCode::Enter)),
             Outcome::Reveal(PathBuf::from("/root/src/lib.rs"))
@@ -418,7 +568,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut popup = open(&runtime);
         type_text(&mut popup, "zzzzz");
-        settle(&mut popup);
+        answer(&mut popup);
         assert_eq!(popup.result_count(), 0);
         assert_eq!(popup.key(press(KeyCode::Enter)), Outcome::Stay);
         assert!(popup.preview_subject().is_none());
@@ -429,7 +579,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut popup = open(&runtime);
         type_text(&mut popup, "guide");
-        settle(&mut popup);
+        answer(&mut popup);
         let subject = popup.preview_subject().expect("guide matches");
         assert_eq!(subject.name, "guide");
         assert!(subject.is_dir);
@@ -441,7 +591,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut popup = open(&runtime);
         type_text(&mut popup, "guide");
-        settle(&mut popup);
+        answer(&mut popup);
         assert!(popup.children().is_none(), "not read yet");
         let deadline = Instant::now() + Duration::from_secs(5);
         while popup.children().is_none() {
@@ -460,7 +610,8 @@ mod tests {
             popup.key(press(KeyCode::Backspace));
         }
         type_text(&mut popup, "lib");
-        settle(&mut popup);
+        answer(&mut popup);
+        popup.poll();
         assert!(popup.children().is_none(), "a file has no folder contents");
     }
 }

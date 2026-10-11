@@ -1809,10 +1809,24 @@ draws.
   now scans `plugins/` too. The client helper and the line-reading half of `protocol.rs` (which
   needs `file_ops` and `crossterm`) stay in the host until M2 gives a plugin something to use them
   for.
-- [ ] **M2 – picker slot and the fuzzy finder.** A plugin can claim an action name and a key
-  (`Provide`, `BindKey`) and open a host-drawn picker (`ShowPicker`, with the query, items and
-  chosen cycle, streamed and cancellable); the finder moves out of `tui` and `browser` into
-  `plugins/finder`. Measure it against `finder_cost` before and after.
+- [x] **M2 – picker slot and the fuzzy finder.** A plugin can provide one of the interface's
+  actions (`provides = ["find"]` on a `[[plugin]]`; the key then sends it an `action` event
+  instead of acting), open a list the interface draws (`show_picker`, then `picker_items` as it
+  ranks, `picker_query` and `picker_closed` coming back with a generation number so a stale answer
+  is dropped) and have the tree below a folder listed for it through the host's own paths
+  (`walk`, streamed as `walk_batch` events, cancellable), so the finder still works over ssh and
+  inside archives. The finder is now `plugins/finder`, the program `mman-finder`: it ranks, the
+  interface draws the panel and the preview and shows the chosen entry. It is found next to `mman`
+  or on `PATH` and starts by itself unless a plugin of the same name, or one providing `find`, is
+  configured; when it cannot be found `f` says how to get it, and when it crashes the picker closes
+  and the next `f` starts it again. The fuzzy matcher (`Query`) moved to `shared` so the browser's
+  search and the plugin score alike, and `plugin_api` gained the shapes and a line helper for a
+  Rust plugin. Timed on 120,300 entries in a release build: the index completes in 0.66 s against
+  0.68 s before, and a typed query is ranked 0.04 s after the last letter against 0.08 s.
+  Follow-ups: starting a bundled plugin only on first use instead of at startup, a config switch
+  to turn a bundled plugin off without writing a replacement, `preview = false` pickers have only
+  been laid out and not tried by a plugin, and a chosen result always means "show it in the
+  browser" (a plugin cannot yet say what choosing does).
 - [ ] **M3 – recursive search** on the same picker slot.
 - [ ] **M4 – pane and decoration slots (`SetPane`):** preview (text, hex, images, thumbnails),
   git status, the system HUD, marked size, inspect.
@@ -2119,7 +2133,8 @@ draws.
 ## 🎯 Next Actions (Immediate)
 
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
-   is on your `PATH`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
+   is on your `PATH`) and `cargo install --path plugins/finder` (the fuzzy finder, `mman-finder`,
+   which `f` now needs next to it; from a checkout `cargo build -p finder` once does it). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
 1. `cargo run -p tui` — the newest: `mman --chooser-file /tmp/pick --pick save --pick-name x.txt`, press `Q`, `Enter`,
    and `cat /tmp/pick` (the saved path; `--pick files` with `v` marks and `Q` picks several; `q` leaves it empty).

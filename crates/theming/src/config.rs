@@ -102,7 +102,7 @@ pub enum HookKind {
 }
 
 /// One `[[plugin]]` table: an external process Minuteman spawns at startup and fires on
-/// `on_key`, speaking the `plugins` crate's line-delimited JSON-RPC protocol over its own stdio.
+/// `on_key`, speaking the `plugin_host` crate's line-delimited JSON-RPC protocol over its own stdio.
 /// Any language that can read a line and print one works — no compile step, no per-language host
 /// bindings.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -118,6 +118,8 @@ struct RawPluginSpec {
     /// The events (`dir_changed`, `selection_changed`, `job_finished`) the plugin wants to hear
     /// about as they happen, on top of its keys and commands.
     events: Vec<String>,
+    /// The interface's actions (`find`, ...) this plugin answers in the interface's place.
+    provides: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +140,10 @@ pub struct PluginSpec {
     /// exist is `plugins`' to say, so an unknown one is kept here and reported when the plugin
     /// starts.
     pub events: Vec<String>,
+    /// The names of the interface's actions this plugin answers instead of the interface: the key
+    /// bound to one then fires this plugin with an `action` event. A blank name is dropped, and a
+    /// name no action has simply never fires.
+    pub provides: Vec<String>,
 }
 
 impl From<RawPluginSpec> for PluginSpec {
@@ -152,6 +158,12 @@ impl From<RawPluginSpec> for PluginSpec {
                 .into_iter()
                 .map(|word| word.trim().to_string())
                 .filter(|word| !word.is_empty() && !word.contains(char::is_whitespace))
+                .collect(),
+            provides: raw
+                .provides
+                .into_iter()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty() && !name.contains(char::is_whitespace))
                 .collect(),
             events: raw
                 .events
@@ -1270,6 +1282,20 @@ mod tests {
             [KeyCode::Char('b'), KeyCode::Char('B')]
         );
         assert_eq!(config.plugins[0].commands, ["blame", "log"]);
+    }
+
+    #[test]
+    fn a_plugin_lists_the_actions_it_provides_and_blank_names_are_dropped() {
+        let config = Config::from_sources(
+            Some(
+                "[[plugin]]\nname = \"p\"\ncommand = \"true\"\nprovides = [\" find \", \"\", \"two words\"]\n\
+                 [[plugin]]\nname = \"q\"\ncommand = \"true\"\n",
+            ),
+            None,
+            None,
+        );
+        assert_eq!(config.plugins[0].provides, ["find"]);
+        assert!(config.plugins[1].provides.is_empty());
     }
 
     #[test]

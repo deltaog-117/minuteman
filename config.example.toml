@@ -123,7 +123,7 @@ interactive_commands = [
 # kind = "image"
 
 # Plugins: external processes Minuteman spawns at startup, speaking a small line-delimited
-# JSON-RPC protocol over their own stdin/stdout (see the `plugins` crate). Any language that can
+# JSON-RPC protocol over their own stdin/stdout (see the `plugin_host` crate). Any language that can
 # read a line and print one works — no compile step, no per-language bindings — and a plugin
 # reaches the same read_dir/copy/mv/delete/create_dir/create_file/touch/rename operations the
 # built-in keys use, not a bolted-on subset of them. It can also send `get_state` at any time to
@@ -152,6 +152,15 @@ interactive_commands = [
 # three times in a row is left alone until `:plugins restart <name>`; `:plugins` lists them all.
 # Omit all of them for a plugin that only ever acts on its `init` event. A complete worked example
 # in Python, with no dependencies, is `examples/plugins/dir_stats.py`.
+# A plugin can also take the place of one of Minuteman's own actions with `provides`, a list of
+# action names (`provides = ["find"]`): the key bound to that action then fires the plugin with an
+# `action` event instead of doing what it does. The first plugin to list a name gets it. The fuzzy
+# finder is such a plugin: `mman-finder`, started by itself when it sits next to `mman` or on
+# `PATH`, providing `find`. Listing a plugin of your own with `name = "finder"`, or with
+# `provides = ["find"]`, stops the bundled one from starting. Such a plugin shows its list by
+# asking for a picker (`show_picker`), has the tree below a folder listed for it through the
+# host's own paths (`walk`) and sends the results back (`picker_items`); `plugin_api` has the
+# shapes, and `plugins/finder` is a worked example in Rust.
 # [[plugin]]
 # name = "dir-stats"
 # command = "python3"

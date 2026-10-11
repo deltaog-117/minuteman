@@ -27,9 +27,16 @@
 //!   `get_state`, which asks for the browser's cwd, cursor, marks and view settings, and
 //!   `register_command`/`unregister_command`, which add and remove a `:` command word, and
 //!   `run_action`, which runs one of the interface's own actions by name, such as `paste` or
-//!   `sort`, with `list_actions` naming them)
+//!   `sort`, with `list_actions` naming them, `show_picker`, which opens the list the interface
+//!   draws for the plugin, and `walk`, which has the tree below a folder listed through whatever
+//!   serves the browsed paths)
 //!   gets exactly one reply line carrying that same `id`; a `log` notification (no `id`) is
-//!   fire-and-forget and surfaces as the status bar message.
+//!   fire-and-forget and surfaces as the status bar message, and so are `picker_items` (what the
+//!   picker lists), `picker_close` and `walk_cancel`.
+//! - host -> plugin events for these are `action` (the user triggered an action the plugin
+//!   provides), `picker_query` and `picker_closed` (what is typed into its picker, and its end)
+//!   and `walk_batch` and `walk_done` (what a walk found, and its end). The shapes are in
+//!   `plugin_api`.
 //!
 //! Deliberately close to JSON-RPC 2.0 rather than a bespoke shape, and line-delimited rather
 //! than LSP's `Content-Length` framing, so a plugin author in any language needs nothing more
@@ -44,43 +51,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use plugin_api::{
-    API_VERSION, Change, EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT, EVENT_JOB_FINISHED,
-    EVENT_KEY, EVENT_SELECTION_CHANGED, EventKind, Job, JobOutcome, LogLevel, StateSnapshot,
-    WireEntry,
+    API_VERSION, Change, EVENT_ACTION, EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT,
+    EVENT_JOB_FINISHED, EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
+    EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH, EVENT_WALK_DONE, EventKind, HostEvent, Job,
+    JobOutcome, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, StateSnapshot,
+    TreeEntry, WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
 };
-
-/// A host -> plugin line: always a notification, never expects a reply.
-#[derive(Debug, Clone, Serialize)]
-pub struct HostEvent {
-    jsonrpc: &'static str,
-    method: &'static str,
-    params: EventParams,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EventParams {
-    name: String,
-    api_version: u32,
-    cwd: PathBuf,
-    selection: Vec<PathBuf>,
-    /// Which key fired a `key` event, spelled as in the config (`"b"`, `"enter"`, `"space"`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key: Option<String>,
-    /// The word a `command` event was run as: the `:` command the plugin declared, or `"plugin"`
-    /// for `:plugin <name>`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    command: Option<String>,
-    /// The words after the command, split the way a shell splits plain arguments.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    args: Vec<String>,
-    /// Present on `dir_changed` and `selection_changed`; its `from` and `to` sit beside the
-    /// other params.
-    #[serde(flatten)]
-    change: Option<Change>,
-    /// Present on `job_finished`; its `kind` and `outcome` sit beside the other params.
-    #[serde(flatten)]
-    job: Option<Job>,
-}
+use plugin_api::{
+    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_SHOW_PICKER, METHOD_WALK, METHOD_WALK_CANCEL,
+};
 
 /// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
 /// fired. Keys the config cannot name come out as their lowercase variant name.
@@ -92,56 +71,16 @@ pub fn key_name(code: KeyCode) -> String {
     }
 }
 
-impl HostEvent {
-    pub fn new(name: impl Into<String>, cwd: PathBuf, selection: Vec<PathBuf>) -> Self {
-        Self {
-            jsonrpc: "2.0",
-            method: "event",
-            params: EventParams {
-                name: name.into(),
-                api_version: API_VERSION,
-                cwd,
-                selection,
-                key: None,
-                command: None,
-                args: Vec::new(),
-                change: None,
-                job: None,
-            },
-        }
-    }
-
+/// The one part of building an event that needs the terminal's key type, kept here so
+/// `plugin_api` stays free of it.
+pub trait HostEventKey {
     /// Records which key fired this event (see `key_name`).
-    pub fn with_key(mut self, code: KeyCode) -> Self {
-        self.params.key = Some(key_name(code));
-        self
-    }
+    fn with_key(self, code: KeyCode) -> Self;
+}
 
-    /// Records the `:` command this event was run as, and its arguments.
-    pub fn with_command(mut self, command: impl Into<String>, args: Vec<String>) -> Self {
-        self.params.command = Some(command.into());
-        self.params.args = args;
-        self
-    }
-
-    /// Records what moved on a `dir_changed` or `selection_changed` event.
-    pub fn with_change(mut self, from: Option<PathBuf>, to: Option<PathBuf>) -> Self {
-        self.params.change = Some(Change { from, to });
-        self
-    }
-
-    /// Records which job ended, and how, on a `job_finished` event.
-    pub fn with_job(mut self, kind: impl Into<String>, outcome: JobOutcome) -> Self {
-        self.params.job = Some(Job {
-            kind: kind.into(),
-            outcome,
-        });
-        self
-    }
-
-    /// Serializes to exactly one `\n`-terminated line, ready to write to the plugin's stdin.
-    pub fn to_line(&self) -> String {
-        line(self)
+impl HostEventKey for HostEvent {
+    fn with_key(self, code: KeyCode) -> Self {
+        self.with_key_name(key_name(code))
     }
 }
 
@@ -189,6 +128,10 @@ pub enum PluginRequest {
     },
     /// Asks for the name of every action `run_action` can run; takes no parameters.
     ListActions,
+    /// Opens the picker the interface draws, with a list this plugin fills.
+    ShowPicker(PickerSpec),
+    /// Starts listing everything below a folder, through whatever serves the browsed paths.
+    Walk(WalkRequest),
     ReadDir {
         path: PathBuf,
     },
@@ -270,6 +213,10 @@ impl PluginRequest {
                     .name,
             }),
             "list_actions" => Ok(Self::ListActions),
+            METHOD_SHOW_PICKER => serde_json::from_value(params)
+                .map(Self::ShowPicker)
+                .map_err(bad),
+            METHOD_WALK => serde_json::from_value(params).map(Self::Walk).map_err(bad),
             "read_dir" => Ok(Self::ReadDir {
                 path: serde_json::from_value::<PathParams>(params)
                     .map_err(bad)?
@@ -342,7 +289,13 @@ pub enum Incoming {
         level: LogLevel,
         message: String,
     },
-    /// A well-formed notification (no `id`) whose method isn't `log` — ignored rather than
+    /// The plugin replaced what its picker lists.
+    PickerItems(PickerUpdate),
+    /// The plugin closed its picker.
+    PickerClose(PickerClose),
+    /// The plugin stopped a walk.
+    WalkCancel(WalkCancel),
+    /// A well-formed notification (no `id`) whose method isn't one of the above — ignored rather than
     /// treated as an error, so a plugin can send something a future host version understands
     /// without breaking against this one.
     UnknownNotification,
@@ -382,6 +335,31 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
             level: params.level.unwrap_or(LogLevel::Info),
             message: params.message,
         });
+    }
+
+    if raw.id.is_none() {
+        let bad = |e: serde_json::Error| LineError {
+            id: None,
+            message: format!("invalid params for '{}': {e}", raw.method),
+        };
+        match raw.method.as_str() {
+            METHOD_PICKER_ITEMS => {
+                return serde_json::from_value(raw.params)
+                    .map(Incoming::PickerItems)
+                    .map_err(bad);
+            }
+            METHOD_PICKER_CLOSE => {
+                return serde_json::from_value(raw.params)
+                    .map(Incoming::PickerClose)
+                    .map_err(bad);
+            }
+            METHOD_WALK_CANCEL => {
+                return serde_json::from_value(raw.params)
+                    .map(Incoming::WalkCancel)
+                    .map_err(bad);
+            }
+            _ => {}
+        }
     }
 
     match raw.id {
@@ -806,5 +784,72 @@ mod tests {
 
             prop_assert_eq!(WireEntry::from(&entry).modified, None);
         }
+    }
+
+    #[test]
+    fn show_picker_and_walk_requests_parse_into_their_typed_forms() {
+        let show = r#"{"jsonrpc":"2.0","id":1,"method":"show_picker","params":{"picker":3,"title":"find","preview":true}}"#;
+        match parse_line(show).unwrap() {
+            Incoming::Request {
+                request: PluginRequest::ShowPicker(spec),
+                ..
+            } => assert_eq!(
+                (spec.picker, spec.title.as_str(), spec.preview),
+                (3, "find", true)
+            ),
+            other => panic!("expected show_picker, got {other:?}"),
+        }
+        let walk = r#"{"jsonrpc":"2.0","id":2,"method":"walk","params":{"walk":4,"root":"/r","show_hidden":true}}"#;
+        match parse_line(walk).unwrap() {
+            Incoming::Request {
+                request: PluginRequest::Walk(request),
+                ..
+            } => assert_eq!(
+                (request.walk, request.root, request.show_hidden),
+                (4, PathBuf::from("/r"), true)
+            ),
+            other => panic!("expected walk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn picker_and_walk_notifications_need_no_id_and_get_no_reply() {
+        let items = r#"{"jsonrpc":"2.0","method":"picker_items","params":{"picker":1,"generation":2,"items":[{"path":"/r/a","rel":"a","is_dir":false}],"matches":1,"indexed":5,"indexing":"done","settled":true}}"#;
+        match parse_line(items).unwrap() {
+            Incoming::PickerItems(update) => {
+                assert_eq!(
+                    (update.picker, update.generation, update.indexed),
+                    (1, 2, 5)
+                );
+                assert_eq!(update.items[0].rel, "a");
+            }
+            other => panic!("expected picker_items, got {other:?}"),
+        }
+        assert!(matches!(
+            parse_line(r#"{"jsonrpc":"2.0","method":"picker_close","params":{"picker":9}}"#)
+                .unwrap(),
+            Incoming::PickerClose(close) if close.picker == 9
+        ));
+        assert!(matches!(
+            parse_line(r#"{"jsonrpc":"2.0","method":"walk_cancel","params":{"walk":6}}"#)
+                .unwrap(),
+            Incoming::WalkCancel(cancel) if cancel.walk == 6
+        ));
+    }
+
+    #[test]
+    fn a_malformed_picker_notification_is_an_error_without_an_id_to_answer() {
+        let error =
+            parse_line(r#"{"jsonrpc":"2.0","method":"picker_items","params":{"picker":"x"}}"#)
+                .unwrap_err();
+        assert_eq!(error.id, None);
+        assert!(error.message.contains("picker_items"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_key_event_names_the_key_the_same_through_the_extension_as_before() {
+        let event =
+            HostEvent::new(EVENT_KEY, PathBuf::from("/"), Vec::new()).with_key(KeyCode::Char(' '));
+        assert_eq!(event_json(&event)["params"]["key"], "space");
     }
 }
