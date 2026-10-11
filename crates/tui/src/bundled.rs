@@ -40,7 +40,7 @@ struct Bundled {
     how_to_get: &'static str,
 }
 
-const BUNDLED: [Bundled; 3] = [
+const BUNDLED: [Bundled; 4] = [
     Bundled {
         name: "finder",
         binary: "mman-finder",
@@ -66,6 +66,15 @@ const BUNDLED: [Bundled; 3] = [
         how_to_get: "the git status is a plugin and mman-git was not found; \
             install it with `cargo install --path plugins/git` (next to mman, or on PATH)",
     },
+    // Provides no action and follows no event: it fills the header pill on its own clock.
+    Bundled {
+        name: "hud",
+        binary: "mman-hud",
+        provides: &[],
+        events: &[],
+        how_to_get: "the system figures are a plugin and mman-hud was not found; \
+            install it with `cargo install --path plugins/hud` (next to mman, or on PATH)",
+    },
 ];
 
 /// The place a bundled program is looked for first: next to the running `mman`.
@@ -76,13 +85,17 @@ fn beside_mman(binary: &str) -> Option<String> {
 }
 
 /// The bundled plugins to start besides `configured`, with the command that runs each.
-/// `git_status = false` in the config leaves the git plugin out.
-pub fn specs(configured: &[PluginSpec], git_status: bool) -> Vec<PluginSpec> {
+/// `git_status = false` in the config leaves the git plugin out, and the system plugin starts
+/// only with `system_hud = true`.
+pub fn specs(configured: &[PluginSpec], git_status: bool, system_hud: bool) -> Vec<PluginSpec> {
     let mut found = specs_found(configured, |binary| {
         beside_mman(binary).or_else(|| program_exists(binary).then(|| binary.to_string()))
     });
     if !git_status {
         found.retain(|spec| spec.name != "git");
+    }
+    if !system_hud {
+        found.retain(|spec| spec.name != "hud");
     }
     found
 }
@@ -160,7 +173,7 @@ mod tests {
     #[test]
     fn a_fresh_install_starts_each_bundled_plugin_providing_its_action() {
         let started = specs_found(&[], found);
-        assert_eq!(started.len(), 3);
+        assert_eq!(started.len(), 4);
         assert_eq!(started[0].name, "finder");
         assert_eq!(started[0].command, "/opt/bin/mman-finder");
         assert_eq!(started[0].provides, ["find"]);
@@ -183,15 +196,30 @@ mod tests {
 
     #[test]
     fn switching_git_status_off_leaves_only_the_git_plugin_out() {
-        let names = |on: bool| -> Vec<String> {
+        let names = |git: bool, system: bool| -> Vec<String> {
             let mut found = specs_found(&[], found);
-            if !on {
+            if !git {
                 found.retain(|spec| spec.name != "git");
+            }
+            if !system {
+                found.retain(|spec| spec.name != "hud");
             }
             found.into_iter().map(|spec| spec.name).collect()
         };
-        assert_eq!(names(true), ["finder", "search", "git"]);
-        assert_eq!(names(false), ["finder", "search"]);
+        assert_eq!(names(true, true), ["finder", "search", "git", "hud"]);
+        assert_eq!(names(false, true), ["finder", "search", "hud"]);
+        assert_eq!(names(true, false), ["finder", "search", "git"]);
+    }
+
+    #[test]
+    fn the_system_plugin_follows_no_event_and_provides_no_action() {
+        let started = specs_found(&[], found);
+        let hud = started
+            .iter()
+            .find(|spec| spec.name == "hud")
+            .expect("bundled");
+        assert_eq!(hud.command, "/opt/bin/mman-hud");
+        assert!(hud.provides.is_empty() && hud.events.is_empty());
     }
 
     #[test]
@@ -212,21 +240,30 @@ mod tests {
                 .map(|spec| spec.name)
                 .collect()
         };
-        assert_eq!(names(&[configured("finder", &[])]), ["search", "git"]);
+        assert_eq!(
+            names(&[configured("finder", &[])]),
+            ["search", "git", "hud"]
+        );
         assert_eq!(
             names(&[configured("fzf-picker", &["find"])]),
-            ["search", "git"]
+            ["search", "git", "hud"]
         );
-        assert_eq!(names(&[configured("search", &[])]), ["finder", "git"]);
+        assert_eq!(
+            names(&[configured("search", &[])]),
+            ["finder", "git", "hud"]
+        );
         assert_eq!(
             names(&[configured("grep-ui", &["locate"])]),
-            ["finder", "git"]
+            ["finder", "git", "hud"]
         );
-        assert_eq!(names(&[configured("git", &[])]), ["finder", "search"]);
+        assert_eq!(
+            names(&[configured("git", &[])]),
+            ["finder", "search", "hud"]
+        );
         // A plugin providing nothing must not count as standing in for the git plugin.
         assert_eq!(
             names(&[configured("blame", &[])]),
-            ["finder", "search", "git"]
+            ["finder", "search", "git", "hud"]
         );
     }
 
@@ -234,7 +271,7 @@ mod tests {
     fn an_unrelated_plugin_leaves_the_bundled_ones_alone() {
         assert_eq!(
             specs_found(&[configured("blame", &["blame"])], found).len(),
-            3
+            4
         );
     }
 

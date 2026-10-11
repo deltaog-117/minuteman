@@ -66,7 +66,6 @@ mod settings_popup;
 mod shell_init;
 mod shell_layout;
 mod style;
-mod system_hud;
 mod terminal_init;
 mod terminal_palette;
 mod text_preview;
@@ -1508,7 +1507,7 @@ fn run(
         if app.poll_disk(browser, Instant::now()) {
             previews.reload(&config.preview_hooks);
         }
-        app.poll_hud(browser, Instant::now());
+        app.poll_hud(browser);
         app.poll_plugins(browser, view_mode.label());
         // While the trash browser is open the preview follows its cursor, not the browser's.
         match (trash_view.as_ref(), picker.as_ref()) {
@@ -3567,7 +3566,7 @@ fn leader_focus_dir(code: KeyCode) -> Option<NudgeDir> {
 
 /// What the header shows, gathered in one place so drawing it and hit-testing a click on its
 /// path build it the same way — the breadcrumb is only as wide as the pills leave it.
-fn header_view<'a>(browser: &'a BrowserState, app: &App) -> hud::HeaderView<'a> {
+fn header_view<'a>(browser: &'a BrowserState, app: &'a App) -> hud::HeaderView<'a> {
     hud::HeaderView {
         path: browser.current_dir(),
         home: std::env::var_os("HOME").map(PathBuf::from),
@@ -3576,7 +3575,7 @@ fn header_view<'a>(browser: &'a BrowserState, app: &App) -> hud::HeaderView<'a> 
         clipboard: app.clipboard.as_ref().map(|c| (c.mode, c.paths.len())),
         progress: app.progress(),
         caps_lock: app.caps_lock(),
-        system: app.system_summary(Instant::now()),
+        pill: app.slot_view(plugin_host::Slot::HeaderPill),
     }
 }
 

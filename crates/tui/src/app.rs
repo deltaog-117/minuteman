@@ -64,7 +64,6 @@ use crate::open;
 use crate::picker_popup::PickerPopup;
 use crate::plugin_views::Slots;
 use crate::search_job::{SearchJob, SearchState};
-use crate::system_hud::SystemHud;
 use crate::wiring::WiringState;
 
 /// How many lines of a shell command's output the status line shows before summarizing the rest.
@@ -510,8 +509,8 @@ pub struct App {
     slots: Slots,
     /// Whether the bundled git plugin is started (`git_status` in `config.toml`).
     git_status: bool,
-    /// The header's system segment (see `system_hud`), when `[config] system_hud` turns it on.
-    system: Option<SystemHud>,
+    /// Whether the bundled system plugin is started (`system_hud` in `config.toml`).
+    system_hud: bool,
     handle: tokio::runtime::Handle,
     /// Program names a `:` command hands the terminal to (see `command::parse`).
     interactive: Vec<String>,
@@ -569,7 +568,7 @@ impl App {
             clipboard_size: MarkedSize::new(handle.clone(), Arc::clone(&vfs)),
             slots: Slots::default(),
             git_status: true,
-            system: None,
+            system_hud: false,
             handle,
             interactive: Vec::new(),
             open_rules: Vec::new(),
@@ -717,9 +716,10 @@ impl App {
         self
     }
 
-    /// Turns the header's system segment on (`[config] system_hud`), starting its clock now.
+    /// Starts the bundled system plugin, whose figures fill the header pill (`system_hud` in
+    /// `config.toml`).
     pub fn with_system_hud(mut self, enabled: bool) -> Self {
-        self.system = enabled.then(|| SystemHud::new(Instant::now()));
+        self.system_hud = enabled;
         self
     }
 
@@ -743,7 +743,7 @@ impl App {
     /// than treated as fatal — the same "one bad entry must never take the whole session down"
     /// rule `theming::Config::load` already follows for a malformed config file.
     pub fn with_plugins(mut self, specs: Vec<PluginSpec>, cwd: &Path) -> Self {
-        let bundled = crate::bundled::specs(&specs, self.git_status);
+        let bundled = crate::bundled::specs(&specs, self.git_status, self.system_hud);
         for spec in specs.into_iter().chain(bundled) {
             if let Err(e) = self.plugins.spawn(
                 &self.handle,
@@ -937,7 +937,7 @@ impl App {
     /// Keeps the figures the HUD shows about the browsed directory and the marks up to date: the
     /// marked entries' total size. It runs its work on the blocking
     /// pool (see `marked_size`); call once per render tick.
-    pub fn poll_hud(&mut self, browser: &BrowserState, now: Instant) {
+    pub fn poll_hud(&mut self, browser: &BrowserState) {
         self.marked_size.poll(&browser.marked_paths());
         let clipped: Vec<PathBuf> = self
             .clipboard
@@ -945,9 +945,6 @@ impl App {
             .map(|clip| clip.paths.clone())
             .unwrap_or_default();
         self.clipboard_size.poll(&clipped);
-        if let Some(system) = self.system.as_mut() {
-            system.tick(now);
-        }
     }
 
     /// Surfaces every plugin's pending `log` line as the status message (last one wins, the same
@@ -1046,11 +1043,6 @@ impl App {
     pub fn prune_views(&mut self) {
         let plugins = &self.plugins;
         self.slots.retain_running(|name| plugins.is_running(name));
-    }
-
-    /// The header's system segment text, when `[config] system_hud` is on.
-    pub fn system_summary(&self, now: Instant) -> Option<String> {
-        self.system.as_ref().map(|system| system.summary(now))
     }
 
     /// Records whether the key event just read carried the keyboard protocol's Caps Lock flag.

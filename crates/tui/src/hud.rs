@@ -460,8 +460,8 @@ pub struct HeaderView<'a> {
     /// Whether Caps Lock is currently on (see `App::caps_lock`) — every letter binding reads as
     /// its flipped case while this is true, so it is worth a pill even outside a mini-shell.
     pub caps_lock: bool,
-    /// `SystemHud::summary`'s text, when `[config] system_hud` is on.
-    pub system: Option<String>,
+    /// What a plugin put in the `HeaderPill` slot: one short line, such as the system figures.
+    pub pill: Option<&'a View>,
 }
 
 /// A `cells`-wide gauge with `filled` cells lit (`▰▰▱▱▱` in the unicode set).
@@ -527,8 +527,14 @@ fn header_pills(view: &HeaderView<'_>, config: &Config) -> Line<'static> {
         }
         pills.push(pill(g.pill(g.marked, &text), &theme.accent_fg));
     }
-    if let Some(text) = &view.system {
-        pills.push(pill(text.clone(), &theme.status_fg));
+    if let Some((text, tone)) = view.pill.and_then(|view| plugin_views::line_text(view, g)) {
+        let fg = match tone {
+            Tone::Danger => &theme.danger_fg,
+            Tone::Dim => &theme.border_fg,
+            Tone::Normal => &theme.status_fg,
+            Tone::Accent => &theme.accent_fg,
+        };
+        pills.push(pill(text, fg));
     }
     let mut right = Vec::with_capacity(pills.len() * 2);
     for (i, p) in pills.into_iter().enumerate() {
@@ -1342,7 +1348,7 @@ mod tests {
                 clipboard: None,
                 progress: None,
                 caps_lock: false,
-                system: None,
+                pill: None,
             };
             let config = test_config();
             let drawn = render_to_text(width, |f, a| render_header(f, a, &view, &config));
@@ -1636,7 +1642,7 @@ mod tests {
                         batch: None,
                     }),
                     caps_lock: false,
-                    system: None,
+                    pill: None,
                 },
                 &config,
             )
@@ -1661,7 +1667,7 @@ mod tests {
                     clipboard: Some((ClipboardMode::Move, 2)),
                     progress: None,
                     caps_lock: false,
-                    system: None,
+                    pill: None,
                 },
                 &config,
             )
@@ -1671,9 +1677,9 @@ mod tests {
     }
 
     #[test]
-    fn the_system_pill_shows_only_when_the_summary_is_set() {
+    fn the_plugin_pill_shows_only_when_a_plugin_filled_the_slot() {
         let config = test_config();
-        let render = |system: Option<String>| {
+        let render = |pill: Option<&View>| {
             render_to_text(100, |f, a| {
                 render_header(
                     f,
@@ -1686,14 +1692,18 @@ mod tests {
                         clipboard: None,
                         progress: None,
                         caps_lock: false,
-                        system: system.clone(),
+                        pill,
                     },
                     &config,
                 )
             })
         };
         assert!(!render(None).contains("load"));
-        let text = render(Some("up 5m  load 0.42 0.38 0.31".into()));
+        let filled = View::line(vec![plugin_host::protocol::Span::text(
+            "up 5m  load 0.42 0.38 0.31",
+            Tone::Normal,
+        )]);
+        let text = render(Some(&filled));
         assert!(
             text.contains("up 5m") && text.contains("load 0.42"),
             "{text:?}"
@@ -1716,7 +1726,7 @@ mod tests {
                         clipboard: None,
                         progress: None,
                         caps_lock,
-                        system: None,
+                        pill: None,
                     },
                     &config,
                 )
@@ -1730,6 +1740,10 @@ mod tests {
     fn the_header_and_status_bar_never_panic_at_any_width() {
         let mut config = test_config();
         let file = entry("a-rather-long-file-name.txt", false);
+        let system = View::line(vec![plugin_host::protocol::Span::text(
+            "up 5m  load 0.42 0.38 0.31  mem 3.2G/16G",
+            Tone::Normal,
+        )]);
         let path = Path::new("/home/me/some/deeply/nested/directory/tree");
         for separator in ["flat", "arrow"] {
             config.theme.separator = separator.into();
@@ -1750,7 +1764,7 @@ mod tests {
                                 batch: Some((1, 3)),
                             }),
                             caps_lock: false,
-                            system: Some("up 5m  load 0.42 0.38 0.31  mem 3.2G/16G".into()),
+                            pill: Some(&system),
                         },
                         &config,
                     )
@@ -1902,7 +1916,7 @@ mod tests {
                         clipboard: None,
                         progress: None,
                         caps_lock: false,
-                        system: None,
+                        pill: None,
                     },
                     &config,
                 )

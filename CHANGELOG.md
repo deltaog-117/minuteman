@@ -17,7 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream, counts, and the state of the selected entry, as before but asked from a plugin. It follows
   `dir_changed` and `selection_changed`, and runs `git status` on a thread of its own.
 
+- `plugin_api`: a third slot, `header_pill`, one line drawn as a pill on the header's right edge.
+- `plugins/hud` (`mman-hud`), a fourth bundled plugin: the header's uptime, load average and
+  memory, as before but from a plugin that fills `header_pill` every two seconds.
+
 ### Changed
+- The system figures moved out of `tui` (`system_hud.rs`) into `plugins/hud`. `system_hud = true`
+  in `config.toml` still turns them on, now by starting the plugin; without `mman-hud` the header
+  has no such pill.
 - The git status moved out of `tui` (`git_status.rs`) into `plugins/git`. Without `mman-git` the
   status bar has no git segment; `git_status = false` in `config.toml` still turns it off, now by
   not starting the plugin. A plugin that stops no longer leaves its text on screen.

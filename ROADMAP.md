@@ -1877,6 +1877,10 @@ draws.
 - [ ] **M4b – more slots, then the pane:** `header_pill` (marked size, the system HUD) and
   `entry_badge` (a mark in the list for git), then `preview_pane` (text, hex, images, thumbnails)
   and inspect, which need a scrollable multi-line view and a way to hand an image to the interface.
+  - [x] `header_pill`, with the system figures (uptime, load, memory) as `plugins/hud`. The marked
+    size stays in the core: the paste checks use its total to see whether files fit.
+  - [ ] `entry_badge`; then a text-only `preview_pane` (text, hex, archive listing); images,
+    thumbnails and inspect last.
 - [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave
   `file_ops`; trash management (the trash view, restore, empty) becomes a plugin while moving a
   file to the trash stays in the core.

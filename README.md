@@ -92,6 +92,7 @@ cargo install --path crates/tui       # installs one executable: mman
 cargo install --path plugins/finder   # installs mman-finder, the fuzzy finder (`f`), next to it
 cargo install --path plugins/search   # installs mman-search, the structured search (`L`), next to it
 cargo install --path plugins/git      # installs mman-git, the git branch and file state in the status bar
+cargo install --path plugins/hud      # installs mman-hud, the header's uptime, load and memory (`system_hud = true`)
 mman
 mman /path/to/dir
 ```
@@ -102,7 +103,8 @@ A `[[plugin]]` of your own that lists `provides = ["find"]` takes its place (see
 `config.example.toml`). The structured search (`L`) works the same way with `mman-search` and
 `provides = ["locate"]`. The git branch and the state of the selected file in the status bar are a
 plugin too, `mman-git`: without it the status bar simply has no git segment, and `git_status =
-false` in `config.toml` keeps it from starting.
+false` in `config.toml` keeps it from starting. The header's system figures (`system_hud = true`)
+are `mman-hud`, and without it that pill is absent.
 
 From a checkout, without installing:
 
@@ -510,7 +512,8 @@ crates/
 plugins/
 ├── finder/             # `mman-finder`: the fuzzy finder, bundled as a plugin (`f`)
 ├── search/             # `mman-search`: the structured search, bundled as a plugin (`L`)
-└── git/                # `mman-git`: the status bar's git branch and file state, bundled as a plugin
+├── git/                # `mman-git`: the status bar's git branch and file state, bundled as a plugin
+└── hud/                # `mman-hud`: the header's uptime, load and memory, bundled as a plugin
 ```
 
 ---

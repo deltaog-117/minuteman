@@ -6936,6 +6936,44 @@ other than the pseudo-terminal.
 
 ---
 
+## 2026-10-11 — The header pill slot, and the system figures on it (M4b, first part)
+
+**Context.** M4b lists four things: `header_pill`, `entry_badge`, a text `preview_pane` and
+inspect. Of the two slots, the marked-size pill named in the roadmap cannot leave the core: the
+paste checks use its total to see whether the files fit on the target disk, so a plugin would be
+asked for a number the core needs to be sure of. The system figures (uptime, load, memory) are the
+other pill the header draws, are off by default, and need nothing from the browser, so they were
+the first to move and the right size to prove the slot with.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | Slots only (`header_pill`, `entry_badge`), the pane in a later milestone | Rejected |
+| B | Slots first, then a text-only pane, images left for later | Chosen: this entry is its first step |
+| C | The pane first, with the image hand-off | Rejected: the riskiest design first |
+
+**Decision.** `Slot::HeaderPill` holds one line. The header draws it as a pill after the ones it
+makes itself, in the tone of the first span (a normal tone keeps the old color of the system
+pill). `plugins/hud` (`mman-hud`) reads `/proc/loadavg` and `/proc/meminfo` every two seconds and
+sends the pill only when its words changed; the uptime is the plugin's own, which starts with the
+session. `system_hud = true` still turns it on, now by starting the plugin, and the bundled table
+gained a fourth row that provides nothing and follows no event. `tui::system_hud` is gone.
+
+**Trade-offs.** Without `mman-hud` there is no pill and nothing says so (the same silence the git
+plugin has). The size formatter is copied into the plugin, about 25 lines, rather than moved into
+`shared`, so the plugin depends on `plugin_api` only; the two will drift if one changes. The
+property test on the copy found that `format_size` prints six cells above about 1000 PiB, which
+the original does too and no memory size reaches; the test is bounded there and says why.
+
+**Verification.** `scripts/check` passes. New tests: the slot's wire name and line limit, the
+plugin's parsing, formatting, summary and driver (on in-memory pipes), the bundled table with a
+fourth row, and the header with and without a filled slot. The real `mman` was driven through a
+pseudo-terminal: with `system_hud = true` the header ended in `up now  load 5.35 3.35 2.11  mem
+7.4G/15G` and one `mman-hud` ran; with it off there was no pill and no `mman-hud`; an `mman`
+copied alone showed no pill and browsed. Not run: a non-Linux host, where the pill would be the
+uptime alone.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

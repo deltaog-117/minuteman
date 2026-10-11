@@ -48,13 +48,16 @@ pub enum Slot {
     StatusEntry,
     /// The status bar's right side, before the position: one line about the folder.
     StatusRight,
+    /// The header's right edge, after the pills the interface itself draws: one short line, drawn
+    /// as a pill in the one tone of its first span.
+    HeaderPill,
 }
 
 impl Slot {
     /// Most lines the slot has room for.
     pub fn line_limit(self) -> usize {
         match self {
-            Self::StatusEntry | Self::StatusRight => 1,
+            Self::StatusEntry | Self::StatusRight | Self::HeaderPill => 1,
         }
     }
 }
@@ -272,6 +275,16 @@ mod tests {
             (span.glyph, span.spaced, span.tone),
             (None, false, Tone::Normal)
         );
+    }
+
+    #[test]
+    fn the_header_pill_slot_has_its_documented_name_and_one_line() {
+        let set: SetView = serde_json::from_str(
+            r#"{"slot":"header_pill","view":{"lines":[{"spans":[{"text":"up 5m"}]}]}}"#,
+        )
+        .expect("a known slot");
+        assert_eq!(set.slot, Slot::HeaderPill);
+        assert_eq!(Slot::HeaderPill.line_limit(), 1);
     }
 
     #[test]

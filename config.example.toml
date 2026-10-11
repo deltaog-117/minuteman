@@ -64,7 +64,8 @@ typewriter_preview = true
 # An extra header segment built from /proc: how long this session has been running, the system's
 # load average, and memory used/total. Off by default because it is Linux-specific (it reads
 # nothing and shows nothing elsewhere) and, unlike the git segment, has nothing to do with the
-# files you're browsing.
+# files you're browsing. It is drawn by the bundled mman-hud plugin: without that program next
+# to mman (or on PATH) there is nothing to show.
 system_hud = false
 
 # Programs that take over the whole terminal. A `:` command whose first word is one of these
