@@ -1976,9 +1976,40 @@ draws.
     wire, as nothing in the panel used it; not tried in a real kitty, nor on an ssh folder or inside
     an archive (the host's `stat` is covered by tests on a memory backend). The thumbnail cache
     (`thumbnails`) goes with the alternate views in M7.
-- [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave
-  `file_ops`; trash management (the trash view, restore, empty) becomes a plugin while moving a
-  file to the trash stays in the core.
+- [x] **M5 – compress and extract as a plugin (`plugins/archive`, `mman-archive`).** Scope
+  changed from the original line, by decision: the trash (the browser, restore, empty and moving a
+  file to it) **and undo stay in the core**, because the trash is one of the file operations the
+  core is defined by and an undone copy goes to it; moving undo out would have put its "never lose
+  data" rules across a process boundary. M5 is archives alone. The interface names the work (the
+  `archive` event, sent to the plugin that `provides = ["archive"]`: a compress of one or more jobs,
+  or an extract) and keeps the forms, the password and overwrite prompts, the progress gauge, `Esc`
+  and `c` to cancel, and the trash; the plugin does it on a thread of its own on the local disk and
+  answers with `archive_progress` (the entry reached and a running total, thinned to about 25 a
+  second) and one `archive_done`: completed, cancelled, failed in words, `password_needed`,
+  `wrong_password`, plus the indices of the jobs that wrote something. The interface sends the
+  originals (or the archive) of those jobs to the trash afterward, so a failure still never costs a
+  file its only copy. An extract with no password finds out from the plugin before anything is
+  written, which also removes the read of the archive the interface did on its render thread. The
+  code (`file_ops::archive`, with its zip-slip and zip-bomb guards, AES-256 and about 40 tests)
+  moved unchanged except for its error type; `Format`, `Level`, `Conflict` and the wiped-on-drop
+  `Password` moved to `plugin_api` so both sides name the same types, and `mkdir -p` moved to
+  `shared::create_dir_all` since a plugin cannot use `file_ops`. Chosen as COA A (run the unchanged
+  code against `LocalVfs` on local paths) over serving the nine `Vfs` calls the code makes to the
+  plugin over the wire (B, which is M7's design problem done early) and keeping the code in the
+  core for remote paths behind a feature (C, which duplicates it). **Accepted regression:**
+  compressing or extracting where a path is on another machine or inside an archive is refused by
+  name until M7 gives a plugin files through the host. Verified against the real `mman` and
+  `mman-archive` over a PTY read through `pyte`, with `tar` and `7z` reading the results: a folder
+  packed to a real tar.gz and unpacked over an existing folder after the overwrite question, a
+  sealed zip asked for twice and opened by `7z` with the password and refused with another, the
+  extract asking for its password, refusing a wrong one without writing anything and extracting
+  with the right one, `Esc` stopping a 40,000-file compress with no archive or temporary file left,
+  the plugin killed mid-request ending the operation with a message after a second and starting
+  again for the next request, and an `mman` copied alone saying how to get the plugin.
+  Follow-ups: ssh and in-archive paths (M7); a plugin killed mid-request cannot remove the hidden
+  temporary file it was writing; the password reaches the plugin as one JSON line, and only the
+  `Password` type is wiped, not the line or the parser's copies; cancel is checked per entry, so
+  one very large file runs to its end first; not tried in a real kitty.
 - [ ] **M6 – devices, the places rail, disk usage.** First check how far the deck is tied to the
   browser keys.
 - [ ] **M7 – decide, then do:** Vfs schemes served by a plugin (ssh, browsing inside an archive),
@@ -2286,10 +2317,16 @@ draws.
    (`mman-preview`, which the preview column's text, hex dump, archive listing and pictures now
    need; from
    a checkout `cargo build -p previewer`), and `cargo install --path plugins/inspect`
-   (`mman-inspect`, which the Inspect panel now needs; from a checkout `cargo build -p inspector`).
+   (`mman-inspect`, which the Inspect panel now needs; from a checkout `cargo build -p inspector`),
+   and `cargo install --path plugins/archive` (`mman-archive`, which compress and extract now need;
+   from a checkout `cargo build -p archiver`).
    Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the newest: right-click a file and pick Inspect (then a folder: its row
+1. `cargo run -p tui` — the newest: mark a folder with `v` and `:compress x.tar.gz` (the header
+   shows the gauge; `Esc` stops it), then mark the archive and `:extract`; `:compress -p s.zip` asks
+   twice for a password and `:extract` of that zip asks once and says `wrong password` for a bad
+   one; with `mman-archive` missing each says where to get it, and on an `ssh://` folder each is
+   refused for now. Before that: right-click a file and pick Inspect (then a folder: its row
    says "counting…" and fills in), and `Esc` closes it; with `mman-inspect` missing it says where to
    get it. Before that: `mman --chooser-file /tmp/pick --pick save --pick-name x.txt`, press `Q`, `Enter`,
    and `cat /tmp/pick` (the saved path; `--pick files` with `v` marks and `Q` picks several; `q` leaves it empty).

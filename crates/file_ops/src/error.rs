@@ -30,26 +30,9 @@ pub enum FileOpsError {
     NoParent(PathBuf),
     #[error("operation cancelled")]
     Cancelled,
-    #[error("not a supported archive (zip, tar, tar.gz): {0}")]
-    UnsupportedArchive(PathBuf),
-    #[error("archive entry {name:?} would be written outside the destination")]
-    UnsafeEntry { name: PathBuf },
-    #[error("archive is over the {what} limit of {limit}")]
-    ArchiveLimit { what: &'static str, limit: u64 },
-    #[error("archive is damaged or unreadable: {0}")]
-    Archive(String),
-    #[error("nothing to archive")]
-    NothingToArchive,
-    #[error("name cannot be stored in the archive: {0}")]
-    UnarchivableName(PathBuf),
-    #[error("a password is needed to open {0}")]
-    PasswordRequired(PathBuf),
-    #[error("wrong password")]
-    WrongPassword,
-    #[error("the password is empty")]
-    EmptyPassword,
-    #[error("only zip archives can be encrypted")]
-    EncryptionNeedsZip,
+    /// What a plugin said went wrong, in words for the status line.
+    #[error("{0}")]
+    Plugin(String),
     #[error("could not send to trash: {0}")]
     Trash(#[from] trash::TrashError),
 }

@@ -73,6 +73,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `shared::format` (`format_size`, `mode_string`, `group_thousands`, `format_time`) and
   `shared::tally` (`tally_dir`), which the interface and the Inspect plugin both use.
 
+- `plugin_api`: what an archiving plugin and the host exchange. The `archive` event hands the
+  plugin work under a request number (a compress of one or more jobs, each a list of sources and an
+  archive to write, with a format, a level, what to do with a name that is taken and an optional
+  password; or an extract of one or more archives into folders); `archive_cancel` stops a request;
+  the plugin answers with `archive_progress` (the entry reached and a running total, thinned to
+  about 25 a second) and one `archive_done` that says how the request ended (completed, cancelled,
+  failed in words, a password needed, a wrong password) and which jobs wrote something. A plugin
+  lists `provides = ["archive"]` to be the one. A failure message is cleaned on arrival like every
+  text a plugin sends, and a result naming more than 100,000 jobs is refused. `Format`, `Level`,
+  `Conflict` and the typed `Password` (wiped on drop, never shown by `Debug`, at most 256
+  characters) moved here so the interface and the plugin name the same types.
+- `plugins/archive` (`mman-archive`), a seventh bundled plugin: compressing and extracting zip, tar
+  and tar.gz, as before but done by a plugin on this machine's disk. Each request runs on a thread
+  of its own, so a long one never holds up a cancel, and a request in flight when the host goes
+  away is stopped and its result written. An extract with no password reports `password_needed`
+  before it writes anything, and with one checks every encrypted archive of the batch first.
+  Install it with `cargo install --path plugins/archive`.
+- `shared::create_dir_all`, the `mkdir -p` over a `Vfs` that `file_ops` and the archive plugin both
+  use.
+
 ### Changed
 - Which files are pictures, and running `[[preview_hook]]` tables of kind `image`, moved out of
   `tui` into `plugins/preview` (`tui::preview_hook` is removed). The interface still decodes,
@@ -222,6 +242,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "loading…" until the first rows arrive.
 - `scripts/vfs-gate` allows `plugins/inspect/src/rows.rs` (this machine's `passwd` and `group`,
   read only for a path the host says is on the local disk) in place of `crates/tui/src/inspect.rs`.
+
+- Compressing and extracting moved out of `file_ops` (`file_ops::archive` is removed, and with it
+  the `zip`, `tar`, `flate2` and `zeroize` dependencies) into `plugins/archive`; the code and its
+  tests moved unchanged apart from the error type, which is the plugin's own. The interface keeps
+  the compress and extract forms, the password and overwrite prompts, the progress gauge, `Esc` and
+  `c` to cancel, and the trash: it sends the plugin the work, shows what it reports, and sends the
+  originals (or the archive) of the jobs the plugin finished to the trash. The extract password
+  question is now the plugin's answer instead of a read of the archive on the render thread, so an
+  encrypted archive no longer makes the interface do that I/O. Without `mman-archive`, `:compress`,
+  `:extract` and both forms say how to get it and start nothing. `FileOpsError` lost its archive
+  variants and gained `Plugin`, the words of a failure a plugin reported.
+- **Behavior change, until the plugin can be given files through the host:** compressing or
+  extracting where a path is on another machine (`ssh://`) or inside an archive is refused by name
+  with a reason. It used to work, because the archive code ran on the interface's own `Vfs`.
+- The trash browser, restore, empty and undo stay in the core by decision: the trash is one of the
+  file operations, and an undone copy goes to it.
 
 ### Fixed
 - `tui`: the permanent-delete and trash confirmations now take a capital `Y` as well as `y`.

@@ -17,7 +17,6 @@
 //! Copy/move/delete/create/rename orchestration on top of the `Vfs` trait — no direct
 //! `std::fs` calls here, so these operations work against any future `Vfs` backend.
 
-pub mod archive;
 pub mod error;
 pub mod history;
 
@@ -206,22 +205,7 @@ pub fn create_new_file(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
 /// Creates `path` and any missing parents, like `mkdir -p`: an already-existing directory is
 /// success, but an existing non-directory in the way is still an `AlreadyExists` error.
 pub fn create_directory_all(vfs: &dyn Vfs, path: &Path) -> Result<(), FileOpsError> {
-    if vfs.is_dir(path) {
-        return Ok(());
-    }
-    if vfs.exists(path) {
-        return Err(VfsError::AlreadyExists(path.to_path_buf()).into());
-    }
-    // Outermost missing ancestor first, so each `create_dir` finds its parent already made.
-    let mut missing: Vec<&Path> = path
-        .ancestors()
-        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !vfs.exists(ancestor))
-        .collect();
-    missing.reverse();
-    missing
-        .into_iter()
-        .try_for_each(|dir| vfs.create_dir(dir))
-        .map_err(Into::into)
+    shared::create_dir_all(vfs, path).map_err(Into::into)
 }
 
 /// Creates an empty file, or refreshes an existing file's modified time (see `Vfs::touch`).

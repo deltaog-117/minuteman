@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use shared::DirEntryInfo;
 
+mod archive;
 pub mod client;
 mod event;
 mod inspect;
@@ -35,6 +36,12 @@ mod picker;
 mod preview;
 mod view;
 
+pub use archive::{
+    ArchiveCancel, ArchiveDone, ArchiveError, ArchiveProgress, ArchiveRequest, ArchiveStatus,
+    ArchiveWork, CompressJob, Conflict, EVENT_ARCHIVE, EVENT_ARCHIVE_CANCEL, ExtractJob, Format,
+    Level, MAX_ARCHIVE_JOBS, MAX_ARCHIVE_TEXT_CHARS, MAX_PASSWORD_CHARS, METHOD_ARCHIVE_DONE,
+    METHOD_ARCHIVE_PROGRESS, PROVIDES_ARCHIVE, Password,
+};
 pub use event::{EventParams, HostEvent};
 pub use inspect::{
     EVENT_INSPECT, EVENT_TALLY_DONE, InspectError, InspectRow, InspectTarget, MAX_INSPECT_ROWS,

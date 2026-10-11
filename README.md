@@ -95,6 +95,7 @@ cargo install --path plugins/git      # installs mman-git, the git branch and fi
 cargo install --path plugins/hud      # installs mman-hud, the header's uptime, load and memory (`system_hud = true`)
 cargo install --path plugins/preview  # installs mman-preview, the preview column's text, hex dump and archive listing
 cargo install --path plugins/inspect  # installs mman-inspect, the Inspect panel's rows
+cargo install --path plugins/archive  # installs mman-archive, which compresses and extracts
 mman
 mman /path/to/dir
 ```
@@ -113,7 +114,13 @@ document, `mman` does the scrolling and drawing, and without it the column shows
 name and a notice at startup says how to get it (a `[[plugin]]` that lists `provides = ["preview"]`
 takes its place; images are still `mman`'s own). The Inspect panel's rows are `mman-inspect`:
 without it, Inspect says how to get it and opens nothing (a `[[plugin]]` that lists
-`provides = ["inspect"]` takes its place).
+`provides = ["inspect"]` takes its place). Compressing and extracting are `mman-archive`: `mman`
+keeps the forms, the password and overwrite prompts, the progress and the trash, and hands the
+work to the plugin, which does it on this machine's disk. Without it, `:compress`, `:extract` and
+the two forms say how to get it and start nothing (a `[[plugin]]` that lists
+`provides = ["archive"]` takes its place). For now it cannot compress or extract on another
+machine (`ssh://`) or inside an archive: those are refused by name until the plugin can be given
+files through `mman`.
 
 From a checkout, without installing:
 
@@ -526,7 +533,8 @@ plugins/
 ├── git/                # `mman-git`: the status bar's git branch and file state, bundled as a plugin
 ├── hud/                # `mman-hud`: the header's uptime, load and memory, bundled as a plugin
 ├── preview/            # `mman-preview` (package `previewer`): the preview column's documents, bundled as a plugin
-└── inspect/            # `mman-inspect` (package `inspector`): the Inspect panel's rows, bundled as a plugin
+├── inspect/            # `mman-inspect` (package `inspector`): the Inspect panel's rows, bundled as a plugin
+└── archive/            # `mman-archive` (package `archiver`): compress and extract zip, tar and tar.gz, bundled as a plugin
 ```
 
 ---

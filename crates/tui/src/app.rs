@@ -34,9 +34,12 @@ use anyhow::Result;
 use browser::search::{KEPT, Outcome as SearchOutcome, Query, rank_entries};
 use browser::{BrowserState, MovePlan};
 use crossterm::event::{KeyCode, KeyEvent};
-use file_ops::archive::{self, ExtractLimits, Format, Level, Password};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
+use plugin_api::{
+    ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, CompressJob, Conflict, ExtractJob,
+    Format, Level, Password,
+};
 use plugin_host::protocol::PickerSpec;
 use plugin_host::{
     ActionDispatch, ActionRequest, EventKind, JobOutcome, PluginManager, Restart, StateSnapshot,
@@ -415,12 +418,25 @@ fn lexists(vfs: &dyn Vfs, path: &Path) -> bool {
     vfs.symlink_metadata(path).is_ok()
 }
 
-/// One archive to write: `sources` packed into `out`.
-#[derive(Debug)]
-struct CompressJob {
-    sources: Vec<PathBuf>,
-    out: PathBuf,
+/// The request the archive plugin is working on. The plugin reports through the UI queue, so this
+/// holds what turns its answers back into the bulk operation the rest of the interface knows.
+struct ArchiveRun {
+    job: u64,
+    /// Where the running bulk operation reads its progress and result.
+    tx: UnboundedSender<BulkMsg>,
+    /// For each job of the request, the paths to send to the trash once that job has written its
+    /// archive (a compress that deletes its originals, an extract that deletes its archive).
+    trash_after: Vec<Vec<PathBuf>>,
+    /// An extract, kept so a password the plugin asks for can start it again.
+    again: Option<PendingExtract>,
+    /// Since when the plugin's process has not been running with no result, so a plugin that
+    /// died mid-request ends the operation instead of leaving it busy for ever.
+    gone_since: Option<Instant>,
 }
+
+/// How long the plugin may be gone before its request is given up on. Its last lines may still be
+/// on their way to the interface when its process is seen to end.
+const ARCHIVER_GRACE: Duration = Duration::from_secs(1);
 
 /// A compress waiting on an answer from the user: whether to replace an archive already there, or
 /// the password to seal it with (`:compress -p`).
@@ -443,15 +459,14 @@ pub struct PendingExtract {
     delete_archives: bool,
 }
 
-/// One archive to unpack: `archive` into the directory `dest`.
-#[derive(Debug)]
-struct ExtractJob {
-    archive: PathBuf,
-    dest: PathBuf,
-}
-
 enum BulkMsg {
     Progress {
+        path: String,
+    },
+    /// The archive plugin has reached the `done`th entry of its request, called `path`. A total,
+    /// not a step, because the plugin thins its messages.
+    Entries {
+        done: u64,
         path: String,
     },
     /// What a trash batch put in the trash, sent just before its `Done`; `untracked` counts the
@@ -495,6 +510,11 @@ pub struct App {
     /// The answer to that pick, once the user has given it. The event loop ends on seeing it.
     pub(crate) picked: Option<shared::chooser::Selection>,
     bulk: Option<BulkOp>,
+    /// The request the archive plugin is working on, while a compress or extract runs.
+    archive_run: Option<ArchiveRun>,
+    /// The number the next archive request is sent under, so a late answer to an old one can be
+    /// told from the current one.
+    next_archive_job: u64,
     /// What can be taken back with `Undo` and done again with `Redo` (see `file_ops::history`).
     history: History,
     /// How many items of the trash batch just run could not be tracked for undo, for the status line.
@@ -564,6 +584,8 @@ impl App {
             chooser: None,
             picked: None,
             bulk: None,
+            archive_run: None,
+            next_archive_job: 1,
             history: History::default(),
             untracked: 0,
             live: LiveRefresh::new(handle.clone(), Arc::clone(&vfs)),
@@ -1120,6 +1142,10 @@ impl App {
                     bulk.items_done += 1;
                     bulk.current = path;
                 }
+                BulkMsg::Entries { done, path } => {
+                    bulk.items_done = done;
+                    bulk.current = path;
+                }
                 BulkMsg::Trashed { changes, untracked } => {
                     trashed.extend(changes);
                     self.untracked += untracked;
@@ -1317,6 +1343,7 @@ impl App {
         match self.bulk.as_ref().and_then(|b| b.cancel.as_ref()) {
             Some(cancel) => {
                 cancel.store(true, Ordering::Relaxed);
+                self.signal_archive_cancel();
                 self.status = Some("cancelling…".into());
             }
             None => self.status = Some("nothing cancellable in progress".into()),
@@ -1337,6 +1364,7 @@ impl App {
             match &bulk.cancel {
                 Some(flag) => {
                     flag.store(true, Ordering::Relaxed);
+                    self.signal_archive_cancel();
                     cancelled.push(format!("running {}", bulk.kind.past_label()));
                 }
                 None => uncancellable = true,
@@ -2472,7 +2500,7 @@ impl App {
             self.prompt = Some(Prompt::Conflict(ConflictSource::Extract { pending, dest }));
             return;
         }
-        self.request_extract(pending.jobs, pending.policy, pending.delete_archives);
+        self.spawn_extract(pending.jobs, pending.policy, pending.delete_archives, None);
     }
 
     /// One job per archive, each into a folder of `dir` named after it.
@@ -2513,8 +2541,9 @@ impl App {
     ///
     /// # Errors
     ///
-    /// A message for the form to show when the job cannot start: another operation is running, or
-    /// (with existing files set to stop) a folder the job would create already exists.
+    /// A message for the form to show when the job cannot start: another operation is running,
+    /// (with existing files set to stop) a folder the job would create already exists, a path is
+    /// not on this machine's disk, or there is no archive plugin to do it.
     pub fn start_extract(&mut self, request: extract_popup::Request) -> Result<(), String> {
         if self.is_busy() {
             return Err("an operation is already in progress".into());
@@ -2523,8 +2552,7 @@ impl App {
             return Err(problem);
         }
         let jobs = Self::extract_jobs(&request);
-        self.request_extract(jobs, request.policy, request.delete_archives);
-        Ok(())
+        self.try_spawn_extract(jobs, request.policy, request.delete_archives, None)
     }
 
     /// The jobs an extract form's request describes.
@@ -2678,82 +2706,23 @@ impl App {
         }
     }
 
-    /// The channel and cancel flag every archive job reports through. The callback is what
-    /// `file_ops::archive` calls after each entry: it forwards the entry's name and asks the job
-    /// to stop once `cancel` is set.
-    fn archive_channel() -> (
-        UnboundedSender<BulkMsg>,
-        UnboundedReceiver<BulkMsg>,
-        Arc<AtomicBool>,
-    ) {
-        let (tx, rx) = unbounded_channel();
-        (tx, rx, Arc::new(AtomicBool::new(false)))
-    }
-
-    /// Starts `jobs`, asking for a password first if any of the archives is encrypted.
-    fn request_extract(
-        &mut self,
-        jobs: Vec<ExtractJob>,
-        policy: ConflictPolicy,
-        delete_archives: bool,
-    ) {
-        if self.is_busy() {
-            self.status = Some("an operation is already in progress".into());
-            return;
-        }
-        // An archive that cannot even be opened is left for the extraction to report.
-        let asking = jobs
-            .iter()
-            .find(|job| archive::needs_password(self.vfs.as_ref(), &job.archive).unwrap_or(false))
-            .map(|job| job.archive.clone());
-        match asking {
-            None => self.spawn_extract(jobs, policy, delete_archives, None),
-            Some(archive) => {
-                self.prompt = Some(Prompt::ExtractPassword {
-                    pending: PendingExtract {
-                        jobs,
-                        policy,
-                        delete_archives,
-                    },
-                    archive,
-                    buffer: Password::new(),
-                    error: None,
-                });
-            }
-        }
-    }
-
-    /// Checks the typed password against every encrypted archive of the batch before anything is
-    /// written, and asks again if one is refused.
+    /// Checks the typed password the way the plugin will, and starts the extract again with it.
+    /// The plugin checks it against every encrypted archive of the batch before writing anything,
+    /// and asks again if one is refused.
     fn submit_extract_password(
         &mut self,
         pending: PendingExtract,
         archive: PathBuf,
         buffer: Password,
     ) {
-        let reprompt = |pending, archive, error: &str| Prompt::ExtractPassword {
-            pending,
-            archive,
-            buffer: Password::new(),
-            error: Some(error.to_string()),
-        };
         if buffer.is_empty() {
-            self.prompt = Some(reprompt(pending, archive, "type the password"));
+            self.prompt = Some(Prompt::ExtractPassword {
+                pending,
+                archive,
+                buffer: Password::new(),
+                error: Some("type the password".to_string()),
+            });
             return;
-        }
-        for job in &pending.jobs {
-            match archive::check_password(self.vfs.as_ref(), &job.archive, &buffer) {
-                Ok(()) => {}
-                Err(FileOpsError::WrongPassword) => {
-                    let error = format!("wrong password for {}", display_name(&job.archive));
-                    self.prompt = Some(reprompt(pending, archive, &error));
-                    return;
-                }
-                Err(e) => {
-                    self.status = Some(format!("extract failed: {e}"));
-                    return;
-                }
-            }
         }
         self.spawn_extract(
             pending.jobs,
@@ -2763,9 +2732,94 @@ impl App {
         );
     }
 
+    /// The channel and cancel flag every archive job reports through: the plugin's answers are
+    /// turned into messages on the channel (see `archive_progress` and `archive_done`).
+    fn archive_channel() -> (
+        UnboundedSender<BulkMsg>,
+        UnboundedReceiver<BulkMsg>,
+        Arc<AtomicBool>,
+    ) {
+        let (tx, rx) = unbounded_channel();
+        (tx, rx, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Why `paths` cannot be handed to the archive plugin, if one cannot: it works on this
+    /// machine's disk only, so a folder on a remote machine or inside another archive is refused
+    /// until the plugin can be given files through the host.
+    fn archive_refusal<'a>(
+        verb: &str,
+        paths: impl IntoIterator<Item = &'a Path>,
+    ) -> Option<String> {
+        paths.into_iter().find_map(|path| {
+            let place = if vfs_ssh::is_remote(path) {
+                "a remote machine"
+            } else if vfs_archive::is_inside(path) {
+                "inside an archive"
+            } else {
+                return None;
+            };
+            Some(format!(
+                "{verb}: {} is on {place}; archives are only made and opened on this machine's \
+                 disk for now",
+                display_name(path)
+            ))
+        })
+    }
+
+    /// What the plugin does when a name is taken, from what the interface calls it.
+    fn conflict_of(policy: ConflictPolicy) -> Conflict {
+        match policy {
+            ConflictPolicy::Abort => Conflict::Abort,
+            ConflictPolicy::Skip => Conflict::Skip,
+            ConflictPolicy::Overwrite => Conflict::Overwrite,
+        }
+    }
+
+    /// Hands `work` to the archive plugin and shows it as a running operation of `kind`.
+    /// `trash_after` holds, for each job, what goes to the trash once that job has written its
+    /// archive; `again` lets an extract be started afresh when the plugin asks for a password.
+    ///
+    /// # Errors
+    ///
+    /// Why it did not start: another operation is running, a path is not on this machine's disk,
+    /// or no archive plugin is there to take it.
+    fn start_archive(
+        &mut self,
+        kind: BulkKind,
+        work: ArchiveWork,
+        trash_after: Vec<Vec<PathBuf>>,
+        again: Option<PendingExtract>,
+    ) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("an operation is already in progress".into());
+        }
+        let job = self.next_archive_job;
+        self.next_archive_job += 1;
+        if !self.plugins.dispatch_archive(job, work) {
+            return Err(crate::bundled::missing("archive"));
+        }
+        let (tx, rx, cancel) = Self::archive_channel();
+        self.archive_run = Some(ArchiveRun {
+            job,
+            tx,
+            trash_after,
+            again,
+            gone_since: None,
+        });
+        self.bulk = Some(BulkOp {
+            kind,
+            items_done: 0,
+            current: String::new(),
+            cancel: Some(cancel),
+            rx,
+        });
+        Ok(())
+    }
+
     /// Starts one extraction per entry of `jobs`, in order, stopping at the first failure. With
     /// `delete_archives`, each archive goes to the trash once it has been extracted, so a failure
-    /// never costs an archive its contents.
+    /// never costs an archive its contents. With no `password`, the plugin asks for one (see
+    /// `archive_done`) if an archive needs it.
     fn spawn_extract(
         &mut self,
         jobs: Vec<ExtractJob>,
@@ -2773,54 +2827,39 @@ impl App {
         delete_archives: bool,
         password: Option<Password>,
     ) {
-        if self.is_busy() {
-            self.status = Some("an operation is already in progress".into());
-            return;
+        if let Err(message) = self.try_spawn_extract(jobs, policy, delete_archives, password) {
+            self.status = Some(message);
         }
-        let (tx, rx, cancel) = Self::archive_channel();
-        let cancel_bg = Arc::clone(&cancel);
-        let vfs = Arc::clone(&self.vfs);
+    }
 
-        self.handle.spawn_blocking(move || {
-            let progress_tx = tx.clone();
-            let mut on_progress = move |path: &Path| -> ControlFlow<()> {
-                let _ = progress_tx.send(BulkMsg::Progress {
-                    path: display_name(path),
-                });
-                match cancel_bg.load(Ordering::Relaxed) {
-                    true => ControlFlow::Break(()),
-                    false => ControlFlow::Continue(()),
-                }
-            };
-            let mut result = Ok(Outcome::Completed);
-            for job in &jobs {
-                if let Err(e) = archive::extract_with_password(
-                    vfs.as_ref(),
-                    &job.archive,
-                    &job.dest,
-                    policy,
-                    ExtractLimits::default(),
-                    password.as_ref(),
-                    &mut on_progress,
-                ) {
-                    result = Err(e);
-                    break;
-                }
-                if delete_archives && let Err(e) = trash_here(&job.archive) {
-                    result = Err(e);
-                    break;
-                }
-            }
-            let _ = tx.send(BulkMsg::Done(result));
-        });
-
-        self.bulk = Some(BulkOp {
-            kind: BulkKind::Extract,
-            items_done: 0,
-            current: String::new(),
-            cancel: Some(cancel),
-            rx,
-        });
+    fn try_spawn_extract(
+        &mut self,
+        jobs: Vec<ExtractJob>,
+        policy: ConflictPolicy,
+        delete_archives: bool,
+        password: Option<Password>,
+    ) -> Result<(), String> {
+        let touched = jobs
+            .iter()
+            .flat_map(|job| [job.archive.as_path(), job.dest.as_path()]);
+        if let Some(refusal) = Self::archive_refusal("extract", touched) {
+            return Err(refusal);
+        }
+        let trash_after = match delete_archives {
+            true => jobs.iter().map(|job| vec![job.archive.clone()]).collect(),
+            false => Vec::new(),
+        };
+        let work = ArchiveWork::Extract {
+            jobs: jobs.clone(),
+            policy: Self::conflict_of(policy),
+            password,
+        };
+        let again = PendingExtract {
+            jobs,
+            policy,
+            delete_archives,
+        };
+        self.start_archive(BulkKind::Extract, work, trash_after, Some(again))
     }
 
     /// Starts one archive job per entry of `jobs`, in order, stopping at the first failure. With
@@ -2835,67 +2874,156 @@ impl App {
         policy: ConflictPolicy,
         delete_originals: bool,
     ) {
-        if self.is_busy() {
-            self.status = Some("an operation is already in progress".into());
+        if let Err(message) =
+            self.try_spawn_compress(jobs, format, level, password, policy, delete_originals)
+        {
+            self.status = Some(message);
+        }
+    }
+
+    fn try_spawn_compress(
+        &mut self,
+        jobs: Vec<CompressJob>,
+        format: Format,
+        level: Level,
+        password: Option<Password>,
+        policy: ConflictPolicy,
+        delete_originals: bool,
+    ) -> Result<(), String> {
+        let touched = jobs.iter().flat_map(|job| {
+            job.sources
+                .iter()
+                .map(PathBuf::as_path)
+                .chain(std::iter::once(job.out.as_path()))
+        });
+        if let Some(refusal) = Self::archive_refusal("compress", touched) {
+            return Err(refusal);
+        }
+        let trash_after = match delete_originals {
+            true => jobs.iter().map(|job| job.sources.clone()).collect(),
+            false => Vec::new(),
+        };
+        let work = ArchiveWork::Compress {
+            jobs,
+            format,
+            level,
+            policy: Self::conflict_of(policy),
+            password,
+        };
+        self.start_archive(BulkKind::Compress, work, trash_after, None)
+    }
+
+    /// Passes the archive plugin's progress on to the running operation, unless it is about a
+    /// request that has ended.
+    pub fn archive_progress(&mut self, progress: ArchiveProgress) {
+        if let Some(run) = self
+            .archive_run
+            .as_ref()
+            .filter(|run| run.job == progress.job)
+        {
+            let _ = run.tx.send(BulkMsg::Entries {
+                done: progress.done,
+                path: progress.path,
+            });
+        }
+    }
+
+    /// Ends the running operation the way the archive plugin says its request ended: a password
+    /// to ask for, or a result after the originals of the jobs that finished have gone to the
+    /// trash. An answer to a request that is no longer running is dropped.
+    pub fn archive_done(&mut self, done: ArchiveDone) {
+        if self
+            .archive_run
+            .as_ref()
+            .is_none_or(|run| run.job != done.job)
+        {
             return;
         }
-        let (tx, rx, cancel) = Self::archive_channel();
-        let cancel_bg = Arc::clone(&cancel);
-        let vfs = Arc::clone(&self.vfs);
-
+        let run = self.archive_run.take().expect("checked just above");
+        let outcome = match done.status {
+            ArchiveStatus::PasswordNeeded { archive } => {
+                return self.ask_extract_password(run, archive, None);
+            }
+            ArchiveStatus::WrongPassword { archive } => {
+                let error = format!("wrong password for {}", display_name(&archive));
+                return self.ask_extract_password(run, archive, Some(error));
+            }
+            ArchiveStatus::Completed => Ok(Outcome::Completed),
+            ArchiveStatus::Cancelled => Err(FileOpsError::Cancelled),
+            ArchiveStatus::Failed { message } => Err(FileOpsError::Plugin(message)),
+        };
+        let to_trash: Vec<PathBuf> = done
+            .finished
+            .iter()
+            .filter_map(|index| run.trash_after.get(*index))
+            .flatten()
+            .cloned()
+            .collect();
+        let tx = run.tx;
+        if to_trash.is_empty() {
+            let _ = tx.send(BulkMsg::Done(outcome));
+            return;
+        }
         self.handle.spawn_blocking(move || {
-            let progress_tx = tx.clone();
-            let mut on_progress = move |path: &Path| -> ControlFlow<()> {
-                let _ = progress_tx.send(BulkMsg::Progress {
-                    path: display_name(path),
-                });
-                match cancel_bg.load(Ordering::Relaxed) {
-                    true => ControlFlow::Break(()),
-                    false => ControlFlow::Continue(()),
-                }
-            };
-            let mut result = Ok(Outcome::Completed);
-            'jobs: for job in &jobs {
-                let options = archive::CompressOptions {
-                    format,
-                    level,
-                    password: password.as_ref(),
-                    policy,
-                };
-                match archive::compress_with_options(
-                    vfs.as_ref(),
-                    &job.sources,
-                    &job.out,
-                    &options,
-                    &mut on_progress,
-                ) {
-                    Ok(Outcome::Completed) => {}
-                    // Nothing was written, so the originals must not be trashed either.
-                    Ok(Outcome::Skipped) => continue,
-                    Err(e) => {
+            let mut result = outcome;
+            for path in &to_trash {
+                if let Err(e) = trash_here(path) {
+                    // What failed in the archive stays the headline; a path that stayed behind is
+                    // only worth saying when the archive itself was fine.
+                    if result.is_ok() {
                         result = Err(e);
-                        break;
                     }
-                }
-                if delete_originals {
-                    for source in &job.sources {
-                        if let Err(e) = trash_here(source) {
-                            result = Err(e);
-                            break 'jobs;
-                        }
-                    }
+                    break;
                 }
             }
             let _ = tx.send(BulkMsg::Done(result));
         });
+    }
 
-        self.bulk = Some(BulkOp {
-            kind: BulkKind::Compress,
-            items_done: 0,
-            current: String::new(),
-            cancel: Some(cancel),
-            rx,
+    /// Ends the running extract and asks for the password `archive` needs, to start it again with.
+    fn ask_extract_password(&mut self, run: ArchiveRun, archive: PathBuf, error: Option<String>) {
+        self.bulk = None;
+        let Some(pending) = run.again else {
+            self.status = Some(
+                "extract failed: a password was asked for by a request that could not take one"
+                    .into(),
+            );
+            return;
+        };
+        self.prompt = Some(Prompt::ExtractPassword {
+            pending,
+            archive,
+            buffer: Password::new(),
+            error,
         });
+    }
+
+    /// Gives up on a request whose plugin has stopped without ending it. Call once per render
+    /// tick, after the plugin's queued answers have been taken: they can still be on their way
+    /// when its process is seen to end, so it is given `ARCHIVER_GRACE` first.
+    pub fn check_archiver(&mut self, now: Instant) {
+        let running = self.plugins.archiver_running();
+        let Some(run) = self.archive_run.as_mut() else {
+            return;
+        };
+        if running {
+            run.gone_since = None;
+            return;
+        }
+        let since = *run.gone_since.get_or_insert(now);
+        if now.duration_since(since) >= ARCHIVER_GRACE {
+            let run = self.archive_run.take().expect("checked just above");
+            let _ = run.tx.send(BulkMsg::Done(Err(FileOpsError::Plugin(
+                "the archive plugin stopped before it finished".into(),
+            ))));
+        }
+    }
+
+    /// Tells the archive plugin to stop the request in flight, if there is one.
+    fn signal_archive_cancel(&self) {
+        if let Some(run) = &self.archive_run {
+            self.plugins.cancel_archive(run.job);
+        }
     }
 
     /// The compress form for the marked (or selected) entries, or `None` if there are none.
@@ -2919,8 +3047,9 @@ impl App {
     ///
     /// # Errors
     ///
-    /// A message for the form to show when the job cannot start: another operation is running, or
-    /// a file the job would create already exists (nothing is ever overwritten).
+    /// A message for the form to show when the job cannot start: another operation is running,
+    /// a file the job would create already exists (nothing is ever overwritten), a path is not on
+    /// this machine's disk, or there is no archive plugin to do it.
     pub fn start_compress(&mut self, request: compress_popup::Request) -> Result<(), String> {
         if self.is_busy() {
             return Err("an operation is already in progress".into());
@@ -2929,15 +3058,14 @@ impl App {
             return Err(problem);
         }
         let jobs = Self::compress_jobs(&request);
-        self.spawn_compress(
+        self.try_spawn_compress(
             jobs,
             request.format,
             request.level,
             request.password,
             ConflictPolicy::Abort,
             request.delete_originals,
-        );
-        Ok(())
+        )
     }
 
     /// The heads-up for the compress form as it stands, worked out from the filesystem.
@@ -3343,6 +3471,73 @@ mod tests {
                 .unwrap()
         }
 
+        /// Where the archive recorder writes what it is sent: beside the fixture's folder, so it
+        /// never shows up in the listing.
+        fn archive_log(&self) -> PathBuf {
+            PathBuf::from(format!("{}.archive-log", self.root.display()))
+        }
+
+        /// Attaches a plugin that provides `archive` and writes every line it is sent to a file,
+        /// standing in for `mman-archive`, whose work is tested in its own crate. What these tests
+        /// check is what the interface asks the plugin for, and what it does with each answer.
+        fn with_archiver(mut self) -> Self {
+            let spec = PluginSpec {
+                name: "archive-recorder".to_string(),
+                command: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    format!("cat > '{}'", self.archive_log().display()),
+                ],
+                on_keys: Vec::new(),
+                commands: Vec::new(),
+                events: Vec::new(),
+                provides: vec!["archive".to_string()],
+            };
+            let handle = self._runtime.handle().clone();
+            self.app = std::mem::replace(&mut self.app, App::new(handle))
+                .with_plugins(vec![spec], &self.root);
+            self
+        }
+
+        /// Every line the recorder has been sent so far that has the event `name`, oldest first.
+        fn recorded(&self, name: &str) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(self.archive_log())
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|line| line["params"]["name"] == name)
+                .map(|line| line["params"].clone())
+                .collect()
+        }
+
+        /// Waits for the recorder to have been sent `count` archive requests, and returns the
+        /// newest one's `archive` parameters.
+        fn request(&self, count: usize) -> serde_json::Value {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let seen = self.recorded("archive");
+                if seen.len() >= count {
+                    return seen[count - 1]["archive"].clone();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "request {count} never reached the plugin"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        /// Plays the plugin's answer to request number `count`: it ended with `status` having
+        /// written the jobs in `finished`.
+        fn archive_ends(&mut self, count: usize, finished: &[usize], status: ArchiveStatus) {
+            let job = self.request(count)["job"].as_u64().unwrap();
+            self.app.archive_done(ArchiveDone {
+                job,
+                finished: finished.to_vec(),
+                status,
+            });
+        }
+
         /// Runs a command that must not ask the app to quit.
         fn run(&mut self, line: &str) {
             assert_eq!(self.flow(line), ControlFlow::Continue(()), "{line}");
@@ -3404,6 +3599,7 @@ mod tests {
 
     impl Drop for Fixture {
         fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.archive_log());
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
@@ -3419,18 +3615,32 @@ mod tests {
     }
 
     #[test]
-    fn compress_then_extract_round_trips_a_selected_directory() {
-        let mut f = Fixture::new("archive-round-trip");
+    fn compress_and_extract_hand_their_work_to_the_archive_plugin_and_finish_on_its_word() {
+        let mut f = Fixture::new("archive-round-trip").with_archiver();
         std::fs::create_dir_all(f.root.join("proj/inner")).unwrap();
-        std::fs::write(f.root.join("proj/inner/a.txt"), b"alpha").unwrap();
         f.browser.reload(&LocalVfs).unwrap();
         select_named(&mut f, "proj");
 
         f.run("compress proj.tar.gz");
+        assert!(f.app.is_busy(), "the plugin has the work");
+        let request = f.request(1);
+        let work = &request["work"];
+        assert_eq!(work["op"], "compress");
+        assert_eq!(work["format"], "tar_gz");
+        assert_eq!(work["policy"], "abort");
+        assert_eq!(
+            work["jobs"],
+            serde_json::json!([{
+                "sources": [f.root.join("proj")],
+                "out": f.root.join("proj.tar.gz"),
+            }])
+        );
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
         f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("compress complete"));
-        assert!(f.listed().contains(&"proj.tar.gz".to_string()));
 
+        std::fs::write(f.root.join("proj.tar.gz"), b"").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
         select_named(&mut f, "proj.tar.gz");
         f.run("extract");
         // The folder the archive would go into is the original `proj`, which is still there.
@@ -3439,12 +3649,212 @@ mod tests {
             Some(Prompt::Conflict(ConflictSource::Extract { .. }))
         ));
         f.press(KeyCode::Char('o'));
+        let request = f.request(2);
+        let work = &request["work"];
+        assert_eq!(work["op"], "extract");
+        assert_eq!(work["policy"], "overwrite");
+        assert_eq!(
+            work["jobs"],
+            serde_json::json!([{
+                "archive": f.root.join("proj.tar.gz"),
+                "dest": f.root.join("proj"),
+            }])
+        );
+        f.archive_ends(2, &[0], ArchiveStatus::Completed);
         f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("extract complete"));
-        assert_eq!(
-            std::fs::read(f.root.join("proj/proj/inner/a.txt")).unwrap(),
-            b"alpha"
+    }
+
+    #[test]
+    fn the_plugins_progress_reaches_the_gauge_and_a_stale_answer_is_dropped() {
+        let mut f = Fixture::new("archive-progress").with_archiver();
+        f.run("touch a.txt");
+        select_named(&mut f, "a.txt");
+        f.run("compress a.zip");
+        let job = f.request(1)["job"].as_u64().unwrap();
+
+        f.app.archive_progress(ArchiveProgress {
+            job,
+            done: 7,
+            path: "x.txt".into(),
+        });
+        f.app.archive_progress(ArchiveProgress {
+            job: job + 1,
+            done: 99,
+            path: "old.txt".into(),
+        });
+        f.app.poll_bulk(&mut f.browser, &LocalVfs).unwrap();
+        let progress = f.app.progress().expect("still running");
+        assert_eq!((progress.label, progress.done), ("compressing", 7));
+
+        // An answer to another request does not end this one.
+        f.app.archive_done(ArchiveDone {
+            job: job + 1,
+            finished: vec![0],
+            status: ArchiveStatus::Completed,
+        });
+        f.app.poll_bulk(&mut f.browser, &LocalVfs).unwrap();
+        assert!(f.app.is_busy());
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
+    }
+
+    #[test]
+    fn a_failure_the_plugin_reports_is_shown_in_its_words() {
+        let mut f = Fixture::new("archive-failed").with_archiver();
+        f.run("touch a.txt");
+        select_named(&mut f, "a.txt");
+        f.run("compress a.zip");
+
+        f.archive_ends(
+            1,
+            &[],
+            ArchiveStatus::Failed {
+                message: "a.zip already exists".into(),
+            },
         );
+        f.wait_for_idle();
+
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("compress failed: a.zip already exists")
+        );
+    }
+
+    #[test]
+    fn escape_asks_the_plugin_to_stop_and_its_cancelled_result_ends_the_operation() {
+        let mut f = Fixture::new("archive-cancel").with_archiver();
+        f.run("touch a.txt");
+        select_named(&mut f, "a.txt");
+        f.run("compress a.zip");
+        let job = f.request(1)["job"].as_u64().unwrap();
+
+        f.app.cancel_bulk();
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while f.recorded("archive_cancel").is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the plugin was never told to stop"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            f.recorded("archive_cancel")[0]["archive_cancel"]["job"],
+            job
+        );
+        assert!(f.app.is_busy(), "it is over when the plugin says so");
+        f.archive_ends(1, &[], ArchiveStatus::Cancelled);
+        f.wait_for_idle();
+        assert_eq!(f.app.status.as_deref(), Some("compress cancelled"));
+    }
+
+    #[test]
+    fn with_no_archive_plugin_compress_and_extract_say_how_to_get_it_and_start_nothing() {
+        let mut f = Fixture::new("archive-missing");
+        f.run("touch a.txt out.zip");
+        select_named(&mut f, "a.txt");
+
+        f.run("compress b.zip");
+        let status = f.app.status.clone().expect("it says something");
+        assert!(status.contains("mman-archive"), "{status}");
+        assert!(!f.app.is_busy());
+
+        select_named(&mut f, "out.zip");
+        f.run("extract");
+        let status = f.app.status.clone().expect("it says something");
+        assert!(status.contains("mman-archive"), "{status}");
+        assert!(!f.app.is_busy());
+    }
+
+    #[test]
+    fn a_path_on_another_machine_or_inside_an_archive_is_refused_by_name() {
+        let inside = shared::mount_root(Path::new("/tmp/some.zip")).join("a.txt");
+        let refusal = App::archive_refusal("compress", [inside.as_path()]).expect("refused");
+        assert!(
+            refusal.contains("a.txt") && refusal.contains("inside an archive"),
+            "{refusal}"
+        );
+        let remote = Path::new("ssh://box/dir/x.zip");
+        let refusal = App::archive_refusal("extract", [remote]).expect("refused");
+        assert!(refusal.contains("a remote machine"), "{refusal}");
+        assert_eq!(
+            App::archive_refusal("extract", [Path::new("/home/me/x.zip")]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_stops_without_an_answer_ends_the_operation_after_a_moment() {
+        let mut f = Fixture::new("archive-dies");
+        let spec = PluginSpec {
+            name: "archive-mortal".to_string(),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "read line; exit 0".to_string()],
+            on_keys: Vec::new(),
+            commands: Vec::new(),
+            events: Vec::new(),
+            provides: vec!["archive".to_string()],
+        };
+        let handle = f._runtime.handle().clone();
+        f.app = std::mem::replace(&mut f.app, App::new(handle)).with_plugins(vec![spec], &f.root);
+        f.run("touch a.txt");
+        select_named(&mut f, "a.txt");
+        f.run("compress a.zip");
+        assert!(f.app.is_busy());
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while f.app.plugins.archiver_running() {
+            assert!(
+                Instant::now() < deadline,
+                "the stand-in plugin never exited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let now = Instant::now();
+        f.app.check_archiver(now);
+        assert!(
+            f.app.is_busy(),
+            "it is given a moment: its last words may be on the way"
+        );
+        f.app
+            .check_archiver(now + ARCHIVER_GRACE + std::time::Duration::from_millis(1));
+        f.wait_for_idle();
+
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some("compress failed: the archive plugin stopped before it finished")
+        );
+    }
+
+    #[test]
+    fn only_the_jobs_the_plugin_finished_have_their_originals_trashed() {
+        let mut f = Fixture::new("archive-trash-finished").with_archiver();
+        std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(f.root.join("b.txt"), b"beta").unwrap();
+        let mut req = request(&f, &["a.txt", "b.txt"], compress_popup::Layout::PerItem);
+        req.delete_originals = true;
+
+        f.app.start_compress(req).unwrap();
+        // The first archive was written; the second job failed.
+        f.archive_ends(
+            1,
+            &[0],
+            ArchiveStatus::Failed {
+                message: "disk full".into(),
+            },
+        );
+        f.wait_for_idle();
+
+        assert!(
+            !f.root.join("a.txt").exists(),
+            "a.txt was archived, so it is in the trash"
+        );
+        assert!(
+            f.root.join("b.txt").exists(),
+            "b.txt was not archived, so it stays"
+        );
+        assert_eq!(f.app.status.as_deref(), Some("compress failed: disk full"));
     }
 
     #[test]
@@ -3488,18 +3898,18 @@ mod tests {
     }
 
     #[test]
-    fn answering_overwrite_replaces_the_existing_archive() {
-        let mut f = Fixture::new("archive-overwrite");
+    fn answering_overwrite_asks_the_plugin_to_replace_the_existing_archive() {
+        let mut f = Fixture::new("archive-overwrite").with_archiver();
         f.run("touch a.txt out.zip");
         select_named(&mut f, "a.txt");
 
         f.run("compress out.zip");
         f.press(KeyCode::Char('o'));
-        f.wait_for_idle();
 
+        assert_eq!(f.request(1)["work"]["policy"], "overwrite");
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("compress complete"));
-        let bytes = std::fs::read(f.root.join("out.zip")).unwrap();
-        assert!(bytes.starts_with(b"PK"), "the empty file became a real zip");
     }
 
     #[test]
@@ -3518,12 +3928,9 @@ mod tests {
     }
 
     #[test]
-    fn extracting_into_a_folder_that_is_there_asks_and_skip_keeps_what_is_in_it() {
+    fn extracting_into_a_folder_that_is_there_asks_and_skip_is_passed_to_the_plugin() {
         let mut f = fixture_with_archive("extract-ask-skip");
-        // The archive holds `proj/inner/a.txt` and goes into the folder `proj`, so this is the
-        // file it would clash with.
-        std::fs::create_dir_all(f.root.join("proj/proj/inner")).unwrap();
-        std::fs::write(f.root.join("proj/proj/inner/a.txt"), b"mine").unwrap();
+        std::fs::create_dir_all(f.root.join("proj")).unwrap();
         f.browser.reload(&LocalVfs).unwrap();
         select_named(&mut f, "proj.tar.gz");
 
@@ -3533,17 +3940,14 @@ mod tests {
             Some(Prompt::Conflict(ConflictSource::Extract { .. }))
         ));
         f.press(KeyCode::Char('s'));
-        f.wait_for_idle();
 
-        assert_eq!(
-            std::fs::read(f.root.join("proj/proj/inner/a.txt")).unwrap(),
-            b"mine",
-            "skip keeps the file that was already there"
-        );
+        assert_eq!(f.request(1)["work"]["policy"], "skip");
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
     }
 
     #[test]
-    fn extracting_into_a_folder_that_is_there_and_aborting_writes_nothing() {
+    fn extracting_into_a_folder_that_is_there_and_aborting_sends_nothing_to_the_plugin() {
         let mut f = fixture_with_archive("extract-ask-abort");
         std::fs::create_dir(f.root.join("proj")).unwrap();
 
@@ -3552,12 +3956,12 @@ mod tests {
 
         assert_eq!(f.app.status.as_deref(), Some("aborted"));
         assert!(!f.app.is_busy());
-        assert!(!f.root.join("proj/inner").exists());
+        assert!(f.recorded("archive").is_empty());
     }
 
     #[test]
-    fn compress_with_p_asks_twice_and_makes_an_encrypted_zip() {
-        let mut f = Fixture::new("compress-p");
+    fn compress_with_p_asks_twice_and_sends_the_password_with_the_zip() {
+        let mut f = Fixture::new("compress-p").with_archiver();
         f.run("touch a.txt");
         select_named(&mut f, "a.txt");
 
@@ -3570,12 +3974,19 @@ mod tests {
         f.press(KeyCode::Enter);
         let shown = f.app.prompt.as_ref().unwrap().display();
         assert!(shown.starts_with("confirm password"), "{shown}");
+        assert!(
+            f.recorded("archive").is_empty(),
+            "nothing is sent before it is confirmed"
+        );
         f.type_text("hunter2");
         f.press(KeyCode::Enter);
-        f.wait_for_idle();
 
+        let request = f.request(1);
+        assert_eq!(request["work"]["format"], "zip");
+        assert_eq!(request["work"]["password"], "hunter2");
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("compress complete"));
-        assert!(archive::needs_password(&LocalVfs, &f.root.join("sealed.zip")).unwrap());
     }
 
     #[test]
@@ -3620,7 +4031,7 @@ mod tests {
 
     #[test]
     fn the_compress_form_can_save_into_another_folder_and_refuses_one_that_is_not_there() {
-        let mut f = Fixture::new("compress-save-in");
+        let mut f = Fixture::new("compress-save-in").with_archiver();
         std::fs::create_dir(f.root.join("backups")).unwrap();
         std::fs::write(f.root.join("a.txt"), b"a").unwrap();
         let mut req = request(
@@ -3633,10 +4044,13 @@ mod tests {
         req.dir = f.root.join("backups");
 
         f.app.start_compress(req).unwrap();
-        f.wait_for_idle();
 
-        assert!(f.root.join("backups/a.tar.gz").exists());
-        assert!(!f.root.join("a.tar.gz").exists());
+        assert_eq!(
+            f.request(1)["work"]["jobs"][0]["out"],
+            f.root.join("backups/a.tar.gz").to_str().unwrap()
+        );
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
 
         let mut missing = request(
             &f,
@@ -3701,15 +4115,11 @@ mod tests {
     }
 
     /// A fixture holding `proj.tar.gz`, made from a folder that held `inner/a.txt`.
+    /// A fixture holding `proj.tar.gz` and a recording archive plugin. The file is an empty
+    /// stand-in: the interface goes by its name, and opening it is the plugin's business.
     fn fixture_with_archive(name: &str) -> Fixture {
-        let mut f = Fixture::new(name);
-        std::fs::create_dir_all(f.root.join("proj/inner")).unwrap();
-        std::fs::write(f.root.join("proj/inner/a.txt"), b"alpha").unwrap();
-        f.browser.reload(&LocalVfs).unwrap();
-        select_named(&mut f, "proj");
-        f.run("compress proj.tar.gz");
-        f.wait_for_idle();
-        std::fs::remove_dir_all(f.root.join("proj")).unwrap();
+        let mut f = Fixture::new(name).with_archiver();
+        std::fs::write(f.root.join("proj.tar.gz"), b"").unwrap();
         f.browser.reload(&LocalVfs).unwrap();
         select_named(&mut f, "proj.tar.gz");
         f
@@ -3755,12 +4165,14 @@ mod tests {
             false,
         );
         f.app.start_extract(request).unwrap();
+
+        assert_eq!(
+            f.request(1)["work"]["jobs"][0]["dest"],
+            f.root.join("out").to_str().unwrap()
+        );
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
         f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("extract complete"));
-        assert_eq!(
-            std::fs::read(f.root.join("out/proj/inner/a.txt")).unwrap(),
-            b"alpha"
-        );
         // The archive stays unless asked otherwise.
         assert!(f.root.join("proj.tar.gz").exists());
     }
@@ -3775,9 +4187,18 @@ mod tests {
             true,
         );
         f.app.start_extract(request).unwrap();
+
+        assert_eq!(
+            f.request(1)["work"]["jobs"][0]["dest"],
+            f.root.to_str().unwrap()
+        );
+        assert!(
+            f.root.join("proj.tar.gz").exists(),
+            "the archive is trashed once it has been extracted, not before"
+        );
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
         f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("extract complete"));
-        assert!(f.root.join("proj/inner/a.txt").exists());
         assert!(!f.root.join("proj.tar.gz").exists());
     }
 
@@ -3796,6 +4217,7 @@ mod tests {
             Err("out already exists: set Existing files to skip or replace".into())
         );
         assert!(!f.app.is_busy());
+        assert!(f.recorded("archive").is_empty());
 
         // "Replace" is how a folder that is there gets filled.
         let request = extract_request(
@@ -3805,13 +4227,14 @@ mod tests {
             false,
         );
         f.app.start_extract(request).unwrap();
+        assert_eq!(f.request(1)["work"]["policy"], "overwrite");
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
         f.wait_for_idle();
-        assert!(f.root.join("out/proj/inner/a.txt").exists());
     }
 
     #[test]
     fn the_compress_form_makes_one_archive_of_the_marked_items() {
-        let mut f = Fixture::new("form-one");
+        let mut f = Fixture::new("form-one").with_archiver();
         std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
         std::fs::write(f.root.join("b.txt"), b"beta").unwrap();
         f.browser.reload(&LocalVfs).unwrap();
@@ -3823,29 +4246,29 @@ mod tests {
             .start_compress(request(&f, &["a.txt", "b.txt"], layout))
             .unwrap();
         assert!(f.app.is_busy());
-        f.wait_for_idle();
 
+        let request = f.request(1);
+        let work = &request["work"];
+        assert_eq!(work["level"], "best");
+        assert_eq!(
+            work["jobs"],
+            serde_json::json!([{
+                "sources": [f.root.join("a.txt"), f.root.join("b.txt")],
+                "out": f.root.join("both.tar.gz"),
+            }])
+        );
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("compress complete"));
-        // Read back the way a user would browse it: as the folder the archive opens as.
-        let archives = vfs_archive::ArchiveVfs::new(Arc::new(LocalVfs));
-        let inside = shared::mount_root(&f.root.join("both.tar.gz"));
-        let names: Vec<_> = archives
-            .list_dir(&inside)
-            .unwrap()
-            .into_iter()
-            .map(|entry| entry.name)
-            .collect();
-        assert_eq!(names, ["a.txt", "b.txt"]);
         // Nothing was deleted: the originals stay unless asked otherwise.
         assert!(f.root.join("a.txt").exists() && f.root.join("b.txt").exists());
     }
 
     #[test]
     fn the_compress_form_can_make_one_archive_per_item() {
-        let mut f = Fixture::new("form-per-item");
+        let mut f = Fixture::new("form-per-item").with_archiver();
         std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
         std::fs::create_dir(f.root.join("dir")).unwrap();
-        std::fs::write(f.root.join("dir/inner"), b"x").unwrap();
         f.browser.reload(&LocalVfs).unwrap();
 
         f.app
@@ -3855,11 +4278,18 @@ mod tests {
                 compress_popup::Layout::PerItem,
             ))
             .unwrap();
-        f.wait_for_idle();
 
+        let request = f.request(1);
+        assert_eq!(
+            request["work"]["jobs"],
+            serde_json::json!([
+                { "sources": [f.root.join("a.txt")], "out": f.root.join("a.txt.tar.gz") },
+                { "sources": [f.root.join("dir")], "out": f.root.join("dir.tar.gz") },
+            ])
+        );
+        f.archive_ends(1, &[0, 1], ArchiveStatus::Completed);
+        f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("compress complete"));
-        assert!(f.root.join("a.txt.tar.gz").is_file());
-        assert!(f.root.join("dir.tar.gz").is_file());
     }
 
     #[test]
@@ -3892,7 +4322,7 @@ mod tests {
 
     #[test]
     fn a_second_compress_cannot_start_while_one_runs() {
-        let mut f = Fixture::new("form-busy");
+        let mut f = Fixture::new("form-busy").with_archiver();
         std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
         let first = compress_popup::Layout::One {
             file_name: "one.zip".into(),
@@ -3905,7 +4335,13 @@ mod tests {
             .unwrap();
         let refused = f.app.start_compress(request(&f, &["a.txt"], second));
         assert_eq!(refused, Err("an operation is already in progress".into()));
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
         f.wait_for_idle();
+        assert_eq!(
+            f.recorded("archive").len(),
+            1,
+            "the second never reached the plugin"
+        );
     }
 
     #[test]
@@ -4472,17 +4908,20 @@ mod tests {
     #[test]
     fn compress_and_extract_spend_the_marks_they_use() {
         let mut f = three_files("archive-spends");
+        f = f.with_archiver();
         select_named(&mut f, "a.txt");
         f.run("compress out.zip");
-        f.wait_for_idle();
         assert!(f.browser.marked_paths().is_empty());
-        assert!(f.root.join("out.zip").exists());
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
 
+        std::fs::write(f.root.join("out.zip"), b"").unwrap();
         f.browser.reload(&LocalVfs).unwrap();
         select_named(&mut f, "out.zip");
         f.run("extract");
-        f.wait_for_idle();
         assert!(f.browser.marked_paths().is_empty());
+        f.archive_ends(2, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
     }
 
     #[test]
@@ -5148,32 +5587,37 @@ mod tests {
 
     /// A fixture holding `sealed.zip`, made from a folder that held `inner/a.txt`, with the
     /// password `open sesame`.
+    /// A fixture holding `sealed.zip` (an empty stand-in; the plugin is what knows it is
+    /// encrypted) and a recording archive plugin.
     fn fixture_with_sealed_zip(name: &str) -> Fixture {
-        let mut f = Fixture::new(name);
-        std::fs::create_dir_all(f.root.join("proj/inner")).unwrap();
-        std::fs::write(f.root.join("proj/inner/a.txt"), b"alpha").unwrap();
-        f.browser.reload(&LocalVfs).unwrap();
-        let mut request = request(
-            &f,
-            &["proj"],
-            compress_popup::Layout::One {
-                file_name: "sealed.zip".into(),
-            },
-        );
-        request.format = Format::Zip;
-        request.password = Some(password("open sesame"));
-        f.app.start_compress(request).unwrap();
-        f.wait_for_idle();
-        std::fs::remove_dir_all(f.root.join("proj")).unwrap();
+        let mut f = Fixture::new(name).with_archiver();
+        std::fs::write(f.root.join("sealed.zip"), b"").unwrap();
         f.browser.reload(&LocalVfs).unwrap();
         select_named(&mut f, "sealed.zip");
         f
     }
 
     #[test]
-    fn a_compress_with_a_password_makes_an_encrypted_zip() {
-        let f = fixture_with_sealed_zip("seal-compress");
-        assert!(archive::needs_password(&LocalVfs, &f.root.join("sealed.zip")).unwrap());
+    fn a_compress_form_with_a_password_sends_it_with_the_zip_format() {
+        let mut f = Fixture::new("seal-compress").with_archiver();
+        std::fs::write(f.root.join("a.txt"), b"alpha").unwrap();
+        let mut request = request(
+            &f,
+            &["a.txt"],
+            compress_popup::Layout::One {
+                file_name: "sealed.zip".into(),
+            },
+        );
+        request.format = Format::Zip;
+        request.password = Some(password("open sesame"));
+
+        f.app.start_compress(request).unwrap();
+
+        let sent = f.request(1);
+        assert_eq!(sent["work"]["format"], "zip");
+        assert_eq!(sent["work"]["password"], "open sesame");
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
     }
 
     #[test]
@@ -5181,35 +5625,55 @@ mod tests {
         let mut f = fixture_with_sealed_zip("seal-extract");
 
         f.run("extract");
+        assert!(f.request(1)["work"].get("password").is_none());
+        f.archive_ends(
+            1,
+            &[],
+            ArchiveStatus::PasswordNeeded {
+                archive: f.root.join("sealed.zip"),
+            },
+        );
         assert!(matches!(f.app.prompt, Some(Prompt::ExtractPassword { .. })));
         assert!(
-            !f.root.join("sealed").exists(),
-            "nothing is written before the password"
+            !f.app.is_busy(),
+            "it waits for the user, not for the plugin"
         );
         f.type_text("open sesame");
         f.press(KeyCode::Enter);
-        f.wait_for_idle();
 
+        let sent = f.request(2);
+        assert_eq!(sent["work"]["password"], "open sesame");
         assert_eq!(
-            std::fs::read(f.root.join("sealed/proj/inner/a.txt")).unwrap(),
-            b"alpha"
+            sent["work"]["jobs"][0]["archive"],
+            f.root.join("sealed.zip").to_str().unwrap()
         );
+        f.archive_ends(2, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
+        assert_eq!(f.app.status.as_deref(), Some("extract complete"));
     }
 
     #[test]
-    fn a_wrong_password_asks_again_and_writes_nothing() {
+    fn a_wrong_password_asks_again() {
         let mut f = fixture_with_sealed_zip("seal-wrong");
+        let sealed = f.root.join("sealed.zip");
 
         f.run("extract");
+        f.archive_ends(
+            1,
+            &[],
+            ArchiveStatus::PasswordNeeded {
+                archive: sealed.clone(),
+            },
+        );
         f.type_text("guess");
         f.press(KeyCode::Enter);
+        f.archive_ends(2, &[], ArchiveStatus::WrongPassword { archive: sealed });
 
         let Some(Prompt::ExtractPassword { buffer, error, .. }) = &f.app.prompt else {
-            panic!("the prompt stays open");
+            panic!("the prompt comes back");
         };
         assert!(buffer.is_empty(), "the wrong attempt is cleared");
         assert!(error.as_deref().unwrap().contains("wrong password"));
-        assert!(!f.root.join("sealed").exists());
         assert!(!f.app.is_busy());
     }
 
@@ -5218,6 +5682,13 @@ mod tests {
         let mut f = fixture_with_sealed_zip("seal-prompt");
 
         f.run("extract");
+        f.archive_ends(
+            1,
+            &[],
+            ArchiveStatus::PasswordNeeded {
+                archive: f.root.join("sealed.zip"),
+            },
+        );
         f.type_text("abc");
         let shown = f.app.prompt.as_ref().unwrap().display();
         assert!(shown.ends_with("•••") && !shown.contains("abc"), "{shown}");
@@ -5225,7 +5696,7 @@ mod tests {
         f.press(KeyCode::Esc);
         assert!(f.app.prompt.is_none());
         assert_eq!(f.app.status.as_deref(), Some("extract cancelled"));
-        assert!(!f.root.join("sealed").exists());
+        assert_eq!(f.recorded("archive").len(), 1, "no second request was sent");
     }
 
     #[test]
@@ -5233,9 +5704,17 @@ mod tests {
         let mut f = fixture_with_sealed_zip("seal-empty");
 
         f.run("extract");
+        f.archive_ends(
+            1,
+            &[],
+            ArchiveStatus::PasswordNeeded {
+                archive: f.root.join("sealed.zip"),
+            },
+        );
         f.press(KeyCode::Enter);
 
         assert!(matches!(f.app.prompt, Some(Prompt::ExtractPassword { .. })));
+        assert_eq!(f.recorded("archive").len(), 1);
     }
 
     #[test]
@@ -5243,7 +5722,9 @@ mod tests {
         let mut f = fixture_with_archive("seal-plain");
         f.run("extract");
         assert!(f.app.prompt.is_none());
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
         f.wait_for_idle();
+        assert!(f.app.prompt.is_none());
     }
 
     #[test]

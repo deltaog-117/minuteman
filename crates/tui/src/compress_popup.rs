@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::KeyCode;
-use file_ops::archive::{Format, Level, Password};
+use plugin_api::{Format, Level, Password};
 use shared::Vfs;
 
 /// The longest archive file name the form accepts, in characters. Well under the 255 bytes most

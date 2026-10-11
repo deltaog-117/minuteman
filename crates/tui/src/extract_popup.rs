@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::KeyCode;
 use file_ops::ConflictPolicy;
-use file_ops::archive::Format;
+use plugin_api::Format;
 
 use crate::compress_popup::check_name;
 

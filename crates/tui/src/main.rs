@@ -116,11 +116,11 @@ use crossterm::terminal::{
 use deck::{DeckState, Event as DeckEvent, Outcome as DeckKey};
 use disk_usage::DiskUsageView;
 use extract_popup::ExtractPopup;
-use file_ops::archive::Format;
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect_panel::InspectPanel;
 use picker_popup::{Outcome as PickerOutcome, PickerPopup};
 use plugin_action::Browse;
+use plugin_api::Format;
 use plugin_api::{PreviewContent, SetPreview};
 use plugin_host::UiRequest;
 use ratatui::Terminal;
@@ -1459,6 +1459,8 @@ fn run(
                         panel.accept(set);
                     }
                 }
+                UiRequest::ArchiveProgress { progress, .. } => app.archive_progress(progress),
+                UiRequest::ArchiveDone { done, .. } => app.archive_done(done),
                 UiRequest::Close {
                     plugin,
                     picker: number,
@@ -1472,6 +1474,7 @@ fn run(
                 }
             }
         }
+        app.check_archiver(Instant::now());
         app.prune_views();
         if let Some(popup) = picker.as_mut() {
             // A picker whose plugin has stopped can no longer answer: close it, and say so.

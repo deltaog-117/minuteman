@@ -22,9 +22,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    API_VERSION, Change, EVENT_ACTION, EVENT_INSPECT, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
-    EVENT_PREVIEW, EVENT_TALLY_DONE, EVENT_WALK_BATCH, EVENT_WALK_DONE, InspectTarget, Job,
-    JobOutcome, PickerEvent, PreviewTarget, TallyDone, TreeEntry, WalkEnd, WalkEvent,
+    API_VERSION, ArchiveCancel, ArchiveRequest, ArchiveWork, Change, EVENT_ACTION, EVENT_ARCHIVE,
+    EVENT_ARCHIVE_CANCEL, EVENT_INSPECT, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_PREVIEW,
+    EVENT_TALLY_DONE, EVENT_WALK_BATCH, EVENT_WALK_DONE, InspectTarget, Job, JobOutcome,
+    PickerEvent, PreviewTarget, TallyDone, TreeEntry, WalkEnd, WalkEvent,
 };
 
 /// A host -> plugin line: always a notification, never expects a reply.
@@ -73,6 +74,12 @@ pub struct EventParams {
     /// On a `tally_done` event: how a count the plugin asked for ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tally: Option<TallyDone>,
+    /// On an `archive` event: the work to do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<ArchiveRequest>,
+    /// On an `archive_cancel` event: the request to stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_cancel: Option<ArchiveCancel>,
     /// Present on `dir_changed` and `selection_changed`; its `from` and `to` sit beside the
     /// other params. (A reader of a `job_finished` may see an empty one: go by `name`.)
     #[serde(default, flatten)]
@@ -102,6 +109,8 @@ impl HostEvent {
                 preview: None,
                 inspect: None,
                 tally: None,
+                archive: None,
+                archive_cancel: None,
                 change: None,
                 job: None,
             },
@@ -212,6 +221,20 @@ impl HostEvent {
     pub fn tally_done(done: TallyDone) -> Self {
         let mut event = Self::new(EVENT_TALLY_DONE, PathBuf::new(), Vec::new());
         event.params.tally = Some(done);
+        event
+    }
+
+    /// An `archive` event: do `work`, and report under the number `job`.
+    pub fn archive(job: u64, work: ArchiveWork) -> Self {
+        let mut event = Self::new(EVENT_ARCHIVE, PathBuf::new(), Vec::new());
+        event.params.archive = Some(ArchiveRequest { job, work });
+        event
+    }
+
+    /// An `archive_cancel` event: stop the request numbered `job`.
+    pub fn archive_cancel(job: u64) -> Self {
+        let mut event = Self::new(EVENT_ARCHIVE_CANCEL, PathBuf::new(), Vec::new());
+        event.params.archive_cancel = Some(ArchiveCancel { job });
         event
     }
 

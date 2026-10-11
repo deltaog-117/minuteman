@@ -35,4 +35,6 @@ pub use fuzzy::Query;
 pub use memory::MemVfs;
 pub use mount::{MOUNT_MARK, archive_of_root, mount_root};
 pub use names::{clean_name, is_image, is_text};
-pub use vfs::{DirEntryInfo, FileKind, LocalVfs, Metadata, ReadSeek, ScanEntry, Vfs, WriteSeek};
+pub use vfs::{
+    DirEntryInfo, FileKind, LocalVfs, Metadata, ReadSeek, ScanEntry, Vfs, WriteSeek, create_dir_all,
+};

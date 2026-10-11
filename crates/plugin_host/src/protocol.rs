@@ -55,18 +55,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use plugin_api::{
-    API_VERSION, Change, EVENT_ACTION, EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT,
-    EVENT_JOB_FINISHED, EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
-    EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH, EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job,
-    JobOutcome, Line, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, ReadFile,
-    SetInspect, SetPreview, SetView, Slot, Span, Stat, StateSnapshot, TallyCancel, TallyDone,
-    TallyEnding, TallyRequest, Tone, TreeEntry, View, WalkCancel, WalkEnd, WalkOutcome,
-    WalkRequest, WireEntry,
+    API_VERSION, ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, Change, EVENT_ACTION,
+    EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT, EVENT_JOB_FINISHED, EVENT_KEY,
+    EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH,
+    EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job, JobOutcome, Line, LogLevel, PickerClose,
+    PickerIndexing, PickerSpec, PickerUpdate, ReadFile, SetInspect, SetPreview, SetView, Slot,
+    Span, Stat, StateSnapshot, TallyCancel, TallyDone, TallyEnding, TallyRequest, Tone, TreeEntry,
+    View, WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
 };
 use plugin_api::{
-    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_READ_FILE, METHOD_SET_INSPECT,
-    METHOD_SET_PREVIEW, METHOD_SET_VIEW, METHOD_SHOW_PICKER, METHOD_STAT, METHOD_TALLY,
-    METHOD_TALLY_CANCEL, METHOD_WALK, METHOD_WALK_CANCEL,
+    METHOD_ARCHIVE_DONE, METHOD_ARCHIVE_PROGRESS, METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS,
+    METHOD_READ_FILE, METHOD_SET_INSPECT, METHOD_SET_PREVIEW, METHOD_SET_VIEW, METHOD_SHOW_PICKER,
+    METHOD_STAT, METHOD_TALLY, METHOD_TALLY_CANCEL, METHOD_WALK, METHOD_WALK_CANCEL,
 };
 
 /// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
@@ -324,6 +324,11 @@ pub enum Incoming {
     SetPreview(SetPreview),
     /// The plugin gave the Inspect panel its rows; already cleaned by `SetInspect::checked`.
     SetInspect(SetInspect),
+    /// The plugin reached another entry of an archive request; already cleaned by
+    /// `ArchiveProgress::checked`.
+    ArchiveProgress(ArchiveProgress),
+    /// The plugin ended an archive request; already cleaned by `ArchiveDone::checked`.
+    ArchiveDone(ArchiveDone),
     /// A well-formed notification (no `id`) whose method isn't one of the above — ignored rather than
     /// treated as an error, so a plugin can send something a future host version understands
     /// without breaking against this one.
@@ -417,6 +422,21 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map_err(bad)?
                     .checked()
                     .map(Incoming::SetInspect)
+                    .map_err(|e| LineError {
+                        id: None,
+                        message: format!("refused '{}': {e}", raw.method),
+                    });
+            }
+            METHOD_ARCHIVE_PROGRESS => {
+                return serde_json::from_value::<ArchiveProgress>(raw.params)
+                    .map(|progress| Incoming::ArchiveProgress(progress.checked()))
+                    .map_err(bad);
+            }
+            METHOD_ARCHIVE_DONE => {
+                return serde_json::from_value::<ArchiveDone>(raw.params)
+                    .map_err(bad)?
+                    .checked()
+                    .map(Incoming::ArchiveDone)
                     .map_err(|e| LineError {
                         id: None,
                         message: format!("refused '{}': {e}", raw.method),

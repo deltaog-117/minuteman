@@ -35,8 +35,8 @@ use tokio::runtime::Handle;
 
 use crossterm::event::KeyCode;
 use plugin_api::{
-    ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_INSPECT, PROVIDES_PREVIEW, ReadFile, Stat,
-    StatKind, StatReply,
+    ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_ARCHIVE, PROVIDES_INSPECT, PROVIDES_PREVIEW,
+    ReadFile, Stat, StatKind, StatReply,
 };
 use serde_json::json;
 use shared::{FileKind, LocalVfs, Vfs};
@@ -601,6 +601,54 @@ impl PluginManager {
         })
     }
 
+    /// Hands `work` to the plugin that provides `archive`, to be reported under the number `job`.
+    /// Returns whether a plugin got it: `false` when none provides `archive`, or the one that does
+    /// cannot be started, so the interface can say where to get it instead of waiting for a result
+    /// that will not come. A plugin whose process has ended is started again first.
+    pub fn dispatch_archive(&mut self, job: u64, work: protocol::ArchiveWork) -> bool {
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins.iter_mut().find(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_ARCHIVE)
+        }) else {
+            return false;
+        };
+        if !plugin.ready_for_event(logs_tx, state_tx) {
+            return false;
+        }
+        let event = protocol::HostEvent::archive(job, work);
+        plugin.process.stdin_tx.send(event.to_line()).is_ok()
+    }
+
+    /// Asks the plugin that provides `archive` to stop the request numbered `job`. A plugin that
+    /// has gone has nothing to stop, so nothing is started to be told.
+    pub fn cancel_archive(&self, job: u64) {
+        if let Some(plugin) = self.plugins.iter().find(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_ARCHIVE)
+        }) {
+            self.write_to(&plugin.name, protocol::HostEvent::archive_cancel(job));
+        }
+    }
+
+    /// Whether a plugin that provides `archive` has a live process right now. A request that was
+    /// being worked on when that process died will never end, which the interface can tell by this.
+    pub fn archiver_running(&self) -> bool {
+        self.plugins.iter().any(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_ARCHIVE)
+                && p.process.life.exit() == Exit::Running
+        })
+    }
+
     /// Tells `plugin` that what is typed into its picker is now `text`. `generation` rises with
     /// every change, and the plugin's `picker_items` carry the one they answer. Nothing is sent to
     /// a plugin whose process has ended; the interface notices that through `is_running`.
@@ -878,6 +926,8 @@ async fn read_loop(
             Ok(Incoming::SetView(set)) => ui.set_view(&plugin, set),
             Ok(Incoming::SetPreview(set)) => ui.set_preview(&plugin, set),
             Ok(Incoming::SetInspect(set)) => ui.set_inspect(&plugin, set),
+            Ok(Incoming::ArchiveProgress(progress)) => ui.archive_progress(&plugin, progress),
+            Ok(Incoming::ArchiveDone(done)) => ui.archive_done(&plugin, done),
             Ok(Incoming::WalkCancel(cancel)) => walks.cancel(cancel.walk),
             Ok(Incoming::TallyCancel(cancel)) => tallies.cancel(cancel.tally),
             Ok(Incoming::UnknownNotification) => {}

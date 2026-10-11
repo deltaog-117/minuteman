@@ -92,6 +92,28 @@ pub trait WriteSeek: Write + Seek + Send {}
 
 impl<T: Write + Seek + Send> WriteSeek for T {}
 
+/// Creates `path` and any missing parents, like `mkdir -p`: an already-existing directory is
+/// success, but an existing non-directory in the way is still an `AlreadyExists` error.
+///
+/// # Errors
+///
+/// `AlreadyExists` when a file is in the way, and whatever `Vfs::create_dir` fails with.
+pub fn create_dir_all(vfs: &dyn Vfs, path: &Path) -> Result<(), VfsError> {
+    if vfs.is_dir(path) {
+        return Ok(());
+    }
+    if vfs.exists(path) {
+        return Err(VfsError::AlreadyExists(path.to_path_buf()));
+    }
+    // Outermost missing ancestor first, so each `create_dir` finds its parent already made.
+    let mut missing: Vec<&Path> = path
+        .ancestors()
+        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !vfs.exists(ancestor))
+        .collect();
+    missing.reverse();
+    missing.into_iter().try_for_each(|dir| vfs.create_dir(dir))
+}
+
 /// A filesystem the file manager can browse: the local disk, and in time remote ones. Every
 /// feature that touches a browsed path goes through this, so a backend added here works with all
 /// of them. `Send + Sync` because background jobs (copies, scans, previews) share one.

@@ -27,7 +27,9 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::protocol::{PickerSpec, PickerUpdate, SetInspect, SetPreview, SetView};
+use crate::protocol::{
+    ArchiveDone, ArchiveProgress, PickerSpec, PickerUpdate, SetInspect, SetPreview, SetView,
+};
 
 type Reply = Result<Value, String>;
 
@@ -92,6 +94,16 @@ pub enum UiRequest {
         plugin: String,
         set: SetInspect,
     },
+    /// The plugin reached another entry of an archive request.
+    ArchiveProgress {
+        plugin: String,
+        progress: ArchiveProgress,
+    },
+    /// The plugin ended an archive request.
+    ArchiveDone {
+        plugin: String,
+        done: ArchiveDone,
+    },
 }
 
 /// How a plugin's reader reaches the render thread for pickers, shared by every plugin.
@@ -146,6 +158,20 @@ impl UiLink {
         let _ = self.tx.send(UiRequest::SetInspect {
             plugin: plugin.to_string(),
             set,
+        });
+    }
+
+    pub(crate) fn archive_progress(&self, plugin: &str, progress: ArchiveProgress) {
+        let _ = self.tx.send(UiRequest::ArchiveProgress {
+            plugin: plugin.to_string(),
+            progress,
+        });
+    }
+
+    pub(crate) fn archive_done(&self, plugin: &str, done: ArchiveDone) {
+        let _ = self.tx.send(UiRequest::ArchiveDone {
+            plugin: plugin.to_string(),
+            done,
         });
     }
 

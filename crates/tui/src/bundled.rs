@@ -40,7 +40,7 @@ struct Bundled {
     how_to_get: &'static str,
 }
 
-const BUNDLED: [Bundled; 6] = [
+const BUNDLED: [Bundled; 7] = [
     Bundled {
         name: "finder",
         binary: "mman-finder",
@@ -94,6 +94,16 @@ const BUNDLED: [Bundled; 6] = [
         events: &[],
         how_to_get: "the Inspect panel is a plugin and mman-inspect was not found; \
             install it with `cargo install --path plugins/inspect` (next to mman, or on PATH)",
+    },
+    // Provides the `archive` role: the interface names the work (compress or extract) and the
+    // plugin does it on the local disk, reporting each entry and how the request ended.
+    Bundled {
+        name: "archive",
+        binary: "mman-archive",
+        provides: &["archive"],
+        events: &[],
+        how_to_get: "compressing and extracting are a plugin and mman-archive was not found; \
+            install it with `cargo install --path plugins/archive` (next to mman, or on PATH)",
     },
 ];
 
@@ -253,7 +263,7 @@ mod tests {
     #[test]
     fn a_fresh_install_starts_each_bundled_plugin_providing_its_action() {
         let started = specs_found(&[], found, &[]);
-        assert_eq!(started.len(), 6);
+        assert_eq!(started.len(), 7);
         assert_eq!(started[0].name, "finder");
         assert_eq!(started[0].command, "/opt/bin/mman-finder");
         assert_eq!(started[0].provides, ["find"]);
@@ -288,15 +298,17 @@ mod tests {
         };
         assert_eq!(
             names(true, true),
-            ["finder", "search", "git", "hud", "preview", "inspect"]
+            [
+                "finder", "search", "git", "hud", "preview", "inspect", "archive"
+            ]
         );
         assert_eq!(
             names(false, true),
-            ["finder", "search", "hud", "preview", "inspect"]
+            ["finder", "search", "hud", "preview", "inspect", "archive"]
         );
         assert_eq!(
             names(true, false),
-            ["finder", "search", "git", "preview", "inspect"]
+            ["finder", "search", "git", "preview", "inspect", "archive"]
         );
     }
 
@@ -309,6 +321,18 @@ mod tests {
             .expect("bundled");
         assert_eq!(hud.command, "/opt/bin/mman-hud");
         assert!(hud.provides.is_empty() && hud.events.is_empty());
+    }
+
+    #[test]
+    fn the_archive_plugin_provides_the_archive_role_and_says_how_to_get_it() {
+        let started = specs_found(&[], found, &[]);
+        let archive = started
+            .iter()
+            .find(|spec| spec.name == "archive")
+            .expect("bundled");
+        assert_eq!(archive.command, "/opt/bin/mman-archive");
+        assert_eq!(archive.provides, ["archive"]);
+        assert!(missing("archive").contains("mman-archive"));
     }
 
     #[test]
@@ -333,28 +357,30 @@ mod tests {
         };
         assert_eq!(
             names(&[configured("finder", &[])]),
-            ["search", "git", "hud", "preview", "inspect"]
+            ["search", "git", "hud", "preview", "inspect", "archive"]
         );
         assert_eq!(
             names(&[configured("fzf-picker", &["find"])]),
-            ["search", "git", "hud", "preview", "inspect"]
+            ["search", "git", "hud", "preview", "inspect", "archive"]
         );
         assert_eq!(
             names(&[configured("search", &[])]),
-            ["finder", "git", "hud", "preview", "inspect"]
+            ["finder", "git", "hud", "preview", "inspect", "archive"]
         );
         assert_eq!(
             names(&[configured("grep-ui", &["locate"])]),
-            ["finder", "git", "hud", "preview", "inspect"]
+            ["finder", "git", "hud", "preview", "inspect", "archive"]
         );
         assert_eq!(
             names(&[configured("git", &[])]),
-            ["finder", "search", "hud", "preview", "inspect"]
+            ["finder", "search", "hud", "preview", "inspect", "archive"]
         );
         // A plugin providing nothing must not count as standing in for the git plugin.
         assert_eq!(
             names(&[configured("blame", &[])]),
-            ["finder", "search", "git", "hud", "preview", "inspect"]
+            [
+                "finder", "search", "git", "hud", "preview", "inspect", "archive"
+            ]
         );
     }
 
@@ -362,7 +388,7 @@ mod tests {
     fn an_unrelated_plugin_leaves_the_bundled_ones_alone() {
         assert_eq!(
             specs_found(&[configured("blame", &["blame"])], found, &[]).len(),
-            6
+            7
         );
     }
 
@@ -372,6 +398,7 @@ mod tests {
         assert!(missing("locate").contains("cargo install --path plugins/search"));
         assert!(missing("preview").contains("cargo install --path plugins/preview"));
         assert!(missing("inspect").contains("cargo install --path plugins/inspect"));
+        assert!(missing("archive").contains("cargo install --path plugins/archive"));
         assert_eq!(missing("sort"), "no plugin provides 'sort'");
     }
 

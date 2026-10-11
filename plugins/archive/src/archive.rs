@@ -16,14 +16,16 @@
 
 //! Compressing files into, and extracting them from, `zip`, `tar` and `tar.gz` archives.
 //!
-//! Like `trash`, this works on the local filesystem directly rather than through `Vfs`: an
-//! archive is read and written as a stream, which a remote backend cannot offer.
+//! The plugin runs this against the local disk only: an archive is read and written as a stream,
+//! which the host cannot yet offer for a remote folder or the inside of another archive. The
+//! functions still take a `Vfs`, so the code does not name the disk and a backend that offers
+//! streams could be handed to it.
 //!
 //! An archive is untrusted input, and extracting one writes to disk, so every entry passes through
 //! [`SafePath`] before anything is created, and the rules below hold whatever the archive says:
 //!
 //! - A name that is absolute, climbs with `..`, or holds a control character is refused with
-//!   [`FileOpsError::UnsafeEntry`] (the "zip-slip" attack).
+//!   [`ArchiveError::UnsafeEntry`] (the "zip-slip" attack).
 //! - Nothing is written through a symlink: if a directory on the way to an entry is a symlink, the
 //!   entry is refused, and a file is created with `create_new`, which never follows a link.
 //! - A symlink entry is only created when its target descends (no `..`, not absolute), so no chain
@@ -52,149 +54,26 @@ use std::path::{Component, Path, PathBuf};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use plugin_api::{Conflict, Format, Level, Password};
 use shared::{FileKind, Metadata, ReadSeek, Vfs, VfsError};
-use zeroize::Zeroizing;
 
-use crate::{
-    ConflictPolicy, FileOpsError, Outcome, ProgressFn, guard_distinct, guard_not_recursive, report,
+use crate::error::{
+    ArchiveError, Outcome, ProgressFn, guard_distinct, guard_not_recursive, report,
 };
 
-/// The most characters a [`Password`] holds. The buffer is reserved at this size up front, so it
-/// never reallocates and leaves an old, unwiped copy of the password behind as it grows.
-const MAX_PASSWORD_CHARS: usize = 256;
+/// The deflate level (1 to 9) a [`Level`] maps to.
+fn deflate(level: Level) -> u32 {
+    match level {
+        Level::Fast => 1,
+        Level::Normal => 6,
+        Level::Best => 9,
+    }
+}
 
 /// The largest central directory a zip may declare before extraction refuses it: the `zip` crate
 /// reads the whole directory into memory when it opens a file, so this bounds what a hostile
 /// archive can make it allocate.
 const MAX_ZIP_DIRECTORY: u64 = 256 << 20;
-
-/// A password for an encrypted archive. It is wiped from memory when dropped, never shown by
-/// `Debug`, and capped at [`MAX_PASSWORD_CHARS`] characters.
-#[derive(Clone)]
-pub struct Password(Zeroizing<String>);
-
-impl Default for Password {
-    fn default() -> Self {
-        // Four bytes is the most one `char` takes in UTF-8.
-        Self(Zeroizing::new(String::with_capacity(
-            MAX_PASSWORD_CHARS * 4,
-        )))
-    }
-}
-
-impl Password {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds `c`, unless it is a control character or the password is already as long as allowed.
-    pub fn push(&mut self, c: char) {
-        if !c.is_control() && self.char_count() < MAX_PASSWORD_CHARS {
-            self.0.push(c);
-        }
-    }
-
-    pub fn pop(&mut self) {
-        self.0.pop();
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn char_count(&self) -> usize {
-        self.0.chars().count()
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for Password {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Password(..)")
-    }
-}
-
-impl PartialEq for Password {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_bytes() == other.0.as_bytes()
-    }
-}
-
-impl Eq for Password {}
-
-/// The archive formats that can be read and written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    Zip,
-    Tar,
-    TarGz,
-}
-
-impl Format {
-    /// Which format `path` is, going by its name alone (`.zip`, `.jar`, `.tar`, `.tar.gz`,
-    /// `.tgz`), the same rule the preview pane uses.
-    pub fn of(path: &Path) -> Option<Self> {
-        let name = path.file_name()?.to_str()?.to_lowercase();
-        if name.ends_with(".zip") || name.ends_with(".jar") {
-            Some(Self::Zip)
-        } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-            Some(Self::TarGz)
-        } else if name.ends_with(".tar") {
-            Some(Self::Tar)
-        } else {
-            None
-        }
-    }
-
-    /// `path`'s file name without its archive extension (`photos.tar.gz` gives `photos`), or
-    /// `None` if it is not an archive or nothing is left of the name.
-    pub fn stem_of(path: &Path) -> Option<String> {
-        let name = path.file_name()?.to_str()?;
-        let lower = name.to_lowercase();
-        let extension = [".tar.gz", ".tgz", ".tar", ".zip", ".jar"]
-            .into_iter()
-            .find(|extension| lower.ends_with(extension))?;
-        // Lower-casing can change a name's byte length, so cut the original by characters.
-        let kept = name.chars().count() - extension.chars().count();
-        let stem: String = name.chars().take(kept).collect();
-        (!stem.is_empty()).then_some(stem)
-    }
-
-    /// The file-name ending an archive of this format is given.
-    pub fn extension(self) -> &'static str {
-        match self {
-            Self::Zip => "zip",
-            Self::Tar => "tar",
-            Self::TarGz => "tar.gz",
-        }
-    }
-}
-
-/// How hard [`compress_with_level`] works to make an archive small. Ignored for a plain `tar`,
-/// which is not compressed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Level {
-    /// The quickest, for a big tree or a slow disk.
-    Fast,
-    #[default]
-    Normal,
-    /// The smallest, at the cost of time.
-    Best,
-}
-
-impl Level {
-    /// The deflate level (1 to 9) this maps to.
-    fn deflate(self) -> u32 {
-        match self {
-            Self::Fast => 1,
-            Self::Normal => 6,
-            Self::Best => 9,
-        }
-    }
-}
 
 /// How much an extraction may create before it is stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,10 +118,10 @@ impl SafePath {
     ///
     /// # Errors
     ///
-    /// [`FileOpsError::UnsafeEntry`] for an absolute path, one with `..` or a drive prefix, or a
+    /// [`ArchiveError::UnsafeEntry`] for an absolute path, one with `..` or a drive prefix, or a
     /// name with a control character (an escape sequence in a file name could repaint the
     /// terminal of whoever lists it).
-    pub fn try_new(raw: &Path) -> Result<Option<Self>, FileOpsError> {
+    pub fn try_new(raw: &Path) -> Result<Option<Self>, ArchiveError> {
         let mut safe = PathBuf::new();
         for component in raw.components() {
             match component {
@@ -266,19 +145,19 @@ impl SafePath {
     }
 }
 
-fn unsafe_entry(raw: &Path) -> FileOpsError {
-    FileOpsError::UnsafeEntry {
+fn unsafe_entry(raw: &Path) -> ArchiveError {
+    ArchiveError::UnsafeEntry {
         name: raw.to_path_buf(),
     }
 }
 
-fn io_error(path: &Path) -> impl FnOnce(io::Error) -> FileOpsError {
+fn io_error(path: &Path) -> impl FnOnce(io::Error) -> ArchiveError {
     let path = path.to_path_buf();
-    move |source| FileOpsError::Vfs(VfsError::Io { path, source })
+    move |source| ArchiveError::Vfs(VfsError::Io { path, source })
 }
 
-fn damaged(reason: impl std::fmt::Display) -> FileOpsError {
-    FileOpsError::Archive(reason.to_string())
+fn damaged(reason: impl std::fmt::Display) -> ArchiveError {
+    ArchiveError::Archive(reason.to_string())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -306,39 +185,39 @@ struct Incoming {
 ///
 /// # Errors
 ///
-/// [`FileOpsError::UnsupportedArchive`] for an unknown extension, [`FileOpsError::UnsafeEntry`]
-/// for an entry that would escape `dest`, [`FileOpsError::ArchiveLimit`] past `limits`,
-/// [`FileOpsError::Archive`] for a damaged archive, and [`FileOpsError::Cancelled`] when
+/// [`ArchiveError::UnsupportedArchive`] for an unknown extension, [`ArchiveError::UnsafeEntry`]
+/// for an entry that would escape `dest`, [`ArchiveError::ArchiveLimit`] past `limits`,
+/// [`ArchiveError::Archive`] for a damaged archive, and [`ArchiveError::Cancelled`] when
 /// `on_progress` asks to stop.
 pub fn extract(
     vfs: &dyn Vfs,
     archive: &Path,
     dest: &Path,
-    policy: ConflictPolicy,
+    policy: Conflict,
     limits: ExtractLimits,
     on_progress: &mut ProgressFn<'_>,
-) -> Result<ExtractSummary, FileOpsError> {
+) -> Result<ExtractSummary, ArchiveError> {
     extract_with_password(vfs, archive, dest, policy, limits, None, on_progress)
 }
 
 /// [`extract`] for an archive that may be encrypted. `password` is used for the entries that need
 /// one and ignored for the rest (and for a tar, which has none). An encrypted entry with no
-/// password fails with [`FileOpsError::PasswordRequired`], a wrong one with
-/// [`FileOpsError::WrongPassword`]; call [`check_password`] first to find out before anything is
+/// password fails with [`ArchiveError::PasswordRequired`], a wrong one with
+/// [`ArchiveError::WrongPassword`]; call [`check_password`] first to find out before anything is
 /// written.
 pub fn extract_with_password(
     vfs: &dyn Vfs,
     archive: &Path,
     dest: &Path,
-    policy: ConflictPolicy,
+    policy: Conflict,
     limits: ExtractLimits,
     password: Option<&Password>,
     on_progress: &mut ProgressFn<'_>,
-) -> Result<ExtractSummary, FileOpsError> {
+) -> Result<ExtractSummary, ArchiveError> {
     let format = Format::of(archive)
-        .ok_or_else(|| FileOpsError::UnsupportedArchive(archive.to_path_buf()))?;
+        .ok_or_else(|| ArchiveError::UnsupportedArchive(archive.to_path_buf()))?;
     let file = vfs.open_read(archive)?;
-    crate::create_directory_all(vfs, dest)?;
+    shared::create_dir_all(vfs, dest)?;
 
     let mut sink = Sink {
         vfs,
@@ -368,19 +247,19 @@ pub fn extract_with_password(
 
 /// Whether any entry of `archive` is encrypted, so a password has to be asked for before it is
 /// extracted. Only a zip can be.
-pub fn needs_password(vfs: &dyn Vfs, archive: &Path) -> Result<bool, FileOpsError> {
+pub fn needs_password(vfs: &dyn Vfs, archive: &Path) -> Result<bool, ArchiveError> {
     Ok(first_encrypted(vfs, archive)?.is_some())
 }
 
 /// Checks `password` against `archive` without extracting anything: `Ok` if nothing in it is
-/// encrypted or the password opens the first encrypted entry, [`FileOpsError::WrongPassword`] if
+/// encrypted or the password opens the first encrypted entry, [`ArchiveError::WrongPassword`] if
 /// it does not. (Every entry of an archive made here shares one password; one assembled by another
 /// tool may not, and then the extraction itself reports the entry that fails.)
 pub fn check_password(
     vfs: &dyn Vfs,
     archive: &Path,
     password: &Password,
-) -> Result<(), FileOpsError> {
+) -> Result<(), ArchiveError> {
     let Some(index) = first_encrypted(vfs, archive)? else {
         return Ok(());
     };
@@ -393,7 +272,7 @@ pub fn check_password(
 
 /// The index of the first encrypted entry of a zip, or `None` for one with none and for any
 /// other format.
-fn first_encrypted(vfs: &dyn Vfs, archive: &Path) -> Result<Option<usize>, FileOpsError> {
+fn first_encrypted(vfs: &dyn Vfs, archive: &Path) -> Result<Option<usize>, ArchiveError> {
     if Format::of(archive) != Some(Format::Zip) {
         return Ok(None);
     }
@@ -412,12 +291,12 @@ fn read_options(password: Option<&Password>) -> zip::ZipReadOptions<'_> {
 }
 
 /// A zip error with the two password failures told apart from a damaged archive.
-fn zip_error(error: zip::result::ZipError, archive: &Path) -> FileOpsError {
+fn zip_error(error: zip::result::ZipError, archive: &Path) -> ArchiveError {
     use zip::result::ZipError;
     match error {
-        ZipError::InvalidPassword => FileOpsError::WrongPassword,
+        ZipError::InvalidPassword => ArchiveError::WrongPassword,
         ZipError::UnsupportedArchive(reason) if reason == ZipError::PASSWORD_REQUIRED => {
-            FileOpsError::PasswordRequired(archive.to_path_buf())
+            ArchiveError::PasswordRequired(archive.to_path_buf())
         }
         other => damaged(other),
     }
@@ -429,7 +308,7 @@ fn zip_error(error: zip::result::ZipError, archive: &Path) -> FileOpsError {
 /// to be bogus and use an earlier one, so a small fake at the very end must not hide a large one.
 /// A record that cannot be made sense of is left for the `zip` crate to reject, which it does
 /// without allocating for it.
-fn check_zip_directory(file: &mut dyn ReadSeek, limits: ExtractLimits) -> Result<(), FileOpsError> {
+fn check_zip_directory(file: &mut dyn ReadSeek, limits: ExtractLimits) -> Result<(), ArchiveError> {
     const EOCD: &[u8] = b"PK\x05\x06";
     const EOCD_LEN: usize = 22;
     let len = file.seek(SeekFrom::End(0)).map_err(damaged)?;
@@ -463,13 +342,13 @@ fn check_zip_directory(file: &mut dyn ReadSeek, limits: ExtractLimits) -> Result
             (entries, size)
         };
         if entries > limits.max_entries {
-            return Err(FileOpsError::ArchiveLimit {
+            return Err(ArchiveError::ArchiveLimit {
                 what: "entry count",
                 limit: limits.max_entries,
             });
         }
         if size > MAX_ZIP_DIRECTORY {
-            return Err(FileOpsError::ArchiveLimit {
+            return Err(ArchiveError::ArchiveLimit {
                 what: "central directory size",
                 limit: MAX_ZIP_DIRECTORY,
             });
@@ -503,7 +382,7 @@ fn extract_zip(
     path: &Path,
     password: Option<&Password>,
     sink: &mut Sink<'_>,
-) -> Result<(), FileOpsError> {
+) -> Result<(), ArchiveError> {
     check_zip_directory(file.as_mut(), sink.limits)?;
     file.seek(SeekFrom::Start(0)).map_err(damaged)?;
     let mut archive = zip::ZipArchive::new(BufReader::new(file)).map_err(damaged)?;
@@ -536,7 +415,7 @@ fn extract_zip(
     Ok(())
 }
 
-fn extract_tar(reader: impl Read, sink: &mut Sink<'_>) -> Result<(), FileOpsError> {
+fn extract_tar(reader: impl Read, sink: &mut Sink<'_>) -> Result<(), ArchiveError> {
     let mut archive = tar::Archive::new(reader);
     for entry in archive.entries().map_err(damaged)? {
         let mut entry = entry.map_err(damaged)?;
@@ -560,7 +439,7 @@ fn extract_tar(reader: impl Read, sink: &mut Sink<'_>) -> Result<(), FileOpsErro
 struct Sink<'a> {
     vfs: &'a dyn Vfs,
     dest: &'a Path,
-    policy: ConflictPolicy,
+    policy: Conflict,
     limits: ExtractLimits,
     on_progress: &'a mut ProgressFn<'a>,
     summary: ExtractSummary,
@@ -572,10 +451,10 @@ struct Sink<'a> {
 }
 
 impl Sink<'_> {
-    fn accept(&mut self, incoming: Incoming, data: &mut dyn Read) -> Result<(), FileOpsError> {
+    fn accept(&mut self, incoming: Incoming, data: &mut dyn Read) -> Result<(), ArchiveError> {
         self.entries += 1;
         if self.entries > self.limits.max_entries {
-            return Err(FileOpsError::ArchiveLimit {
+            return Err(ArchiveError::ArchiveLimit {
                 what: "entry count",
                 limit: self.limits.max_entries,
             });
@@ -588,7 +467,7 @@ impl Sink<'_> {
 
         match incoming.kind {
             Kind::Dir => {
-                crate::create_directory_all(self.vfs, &target)?;
+                shared::create_dir_all(self.vfs, &target)?;
                 set_mode(self.vfs, &target, incoming.mode, 0o700)?;
                 self.summary.dirs += 1;
             }
@@ -618,7 +497,7 @@ impl Sink<'_> {
         target: &Path,
         mode: Option<u32>,
         data: &mut dyn Read,
-    ) -> Result<bool, FileOpsError> {
+    ) -> Result<bool, ArchiveError> {
         ensure_parent(self.vfs, target, &mut self.verified)?;
         let vfs = self.vfs;
         let Some(mut file) = self.create(target, |path| vfs.create_write(path))? else {
@@ -632,7 +511,7 @@ impl Sink<'_> {
                 drop(file);
                 let _ = self.vfs.remove_file(target);
                 return Err(match e.kind() {
-                    io::ErrorKind::FileTooLarge => FileOpsError::ArchiveLimit {
+                    io::ErrorKind::FileTooLarge => ArchiveError::ArchiveLimit {
                         what: "extracted size",
                         limit: self.limits.max_bytes,
                     },
@@ -646,7 +525,7 @@ impl Sink<'_> {
         Ok(true)
     }
 
-    fn write_symlink(&mut self, target: &Path, link: &Path) -> Result<bool, FileOpsError> {
+    fn write_symlink(&mut self, target: &Path, link: &Path) -> Result<bool, ArchiveError> {
         ensure_parent(self.vfs, target, &mut self.verified)?;
         let vfs = self.vfs;
         Ok(self
@@ -660,18 +539,18 @@ impl Sink<'_> {
         &mut self,
         target: &Path,
         make: impl Fn(&Path) -> Result<T, VfsError>,
-    ) -> Result<Option<T>, FileOpsError> {
+    ) -> Result<Option<T>, ArchiveError> {
         match make(target) {
             Ok(made) => Ok(Some(made)),
             Err(VfsError::AlreadyExists(_)) => match self.policy {
-                ConflictPolicy::Abort => Err(FileOpsError::Vfs(VfsError::AlreadyExists(
+                Conflict::Abort => Err(ArchiveError::Vfs(VfsError::AlreadyExists(
                     target.to_path_buf(),
                 ))),
-                ConflictPolicy::Skip => {
+                Conflict::Skip => {
                     self.summary.skipped += 1;
                     Ok(None)
                 }
-                ConflictPolicy::Overwrite => {
+                Conflict::Overwrite => {
                     // `remove_file` unlinks a symlink itself and refuses a directory, so an
                     // archive can neither redirect the write nor delete a tree.
                     self.vfs.remove_file(target)?;
@@ -687,11 +566,11 @@ fn ensure_parent(
     vfs: &dyn Vfs,
     target: &Path,
     verified: &mut HashSet<PathBuf>,
-) -> Result<(), FileOpsError> {
+) -> Result<(), ArchiveError> {
     if let Some(parent) = target.parent()
         && !verified.contains(parent)
     {
-        crate::create_directory_all(vfs, parent)?;
+        shared::create_dir_all(vfs, parent)?;
         // Folders this run just made are real folders, and the ancestors were checked already.
         verified.insert(parent.to_path_buf());
     }
@@ -705,7 +584,7 @@ fn refuse_symlinked_ancestors(
     dest: &Path,
     safe: &SafePath,
     verified: &mut HashSet<PathBuf>,
-) -> Result<(), FileOpsError> {
+) -> Result<(), ArchiveError> {
     let components: Vec<_> = safe.as_path().components().collect();
     let mut walked = dest.to_path_buf();
     let mut all_checked = true;
@@ -754,7 +633,7 @@ fn descends(link: &Path) -> bool {
 /// Applies an archive's permission bits, clamped: setuid, setgid, sticky and group/other write
 /// are dropped, and `floor` (owner read/write, or full owner access for a directory) is forced on.
 /// A backend with no permissions to set is not an error.
-fn set_mode(vfs: &dyn Vfs, path: &Path, mode: Option<u32>, floor: u32) -> Result<(), FileOpsError> {
+fn set_mode(vfs: &dyn Vfs, path: &Path, mode: Option<u32>, floor: u32) -> Result<(), ArchiveError> {
     let Some(mode) = mode else { return Ok(()) };
     let clamped = (mode & 0o777 & !0o022) | floor;
     match vfs.set_mode(path, clamped) {
@@ -816,18 +695,18 @@ impl<R: Read> Read for Capped<R> {
 ///
 /// # Errors
 ///
-/// [`FileOpsError::NothingToArchive`] for no sources, [`FileOpsError::SameLocation`] or
-/// [`FileOpsError::RecursiveDestination`] when `out` is a source or inside one,
-/// [`FileOpsError::UnarchivableName`] for a name a zip cannot hold (not UTF-8), and
-/// [`FileOpsError::Cancelled`] when `on_progress` asks to stop; on any error `out` is untouched.
+/// [`ArchiveError::NothingToArchive`] for no sources, [`ArchiveError::SameLocation`] or
+/// [`ArchiveError::RecursiveDestination`] when `out` is a source or inside one,
+/// [`ArchiveError::UnarchivableName`] for a name a zip cannot hold (not UTF-8), and
+/// [`ArchiveError::Cancelled`] when `on_progress` asks to stop; on any error `out` is untouched.
 pub fn compress(
     vfs: &dyn Vfs,
     sources: &[PathBuf],
     out: &Path,
     format: Format,
-    policy: ConflictPolicy,
+    policy: Conflict,
     on_progress: &mut ProgressFn<'_>,
-) -> Result<Outcome, FileOpsError> {
+) -> Result<Outcome, ArchiveError> {
     compress_with_level(
         vfs,
         sources,
@@ -846,9 +725,9 @@ pub fn compress_with_level(
     out: &Path,
     format: Format,
     level: Level,
-    policy: ConflictPolicy,
+    policy: Conflict,
     on_progress: &mut ProgressFn<'_>,
-) -> Result<Outcome, FileOpsError> {
+) -> Result<Outcome, ArchiveError> {
     let options = CompressOptions {
         format,
         level,
@@ -866,22 +745,22 @@ pub struct CompressOptions<'a> {
     /// Seals a zip (AES-256); never empty, and only for [`Format::Zip`].
     pub password: Option<&'a Password>,
     /// What to do when `out` already exists.
-    pub policy: ConflictPolicy,
+    pub policy: Conflict,
 }
 
 /// [`compress_with_level`], optionally sealing a zip with `password` (AES-256).
 ///
 /// # Errors
 ///
-/// As [`compress`], plus [`FileOpsError::EmptyPassword`] for an empty password and
-/// [`FileOpsError::EncryptionNeedsZip`] for a password given with a tar format.
+/// As [`compress`], plus [`ArchiveError::EmptyPassword`] for an empty password and
+/// [`ArchiveError::EncryptionNeedsZip`] for a password given with a tar format.
 pub fn compress_with_options(
     vfs: &dyn Vfs,
     sources: &[PathBuf],
     out: &Path,
     options: &CompressOptions<'_>,
     on_progress: &mut ProgressFn<'_>,
-) -> Result<Outcome, FileOpsError> {
+) -> Result<Outcome, ArchiveError> {
     let CompressOptions {
         format,
         level,
@@ -890,31 +769,31 @@ pub fn compress_with_options(
     } = *options;
     if let Some(password) = password {
         if password.is_empty() {
-            return Err(FileOpsError::EmptyPassword);
+            return Err(ArchiveError::EmptyPassword);
         }
         if format != Format::Zip {
-            return Err(FileOpsError::EncryptionNeedsZip);
+            return Err(ArchiveError::EncryptionNeedsZip);
         }
     }
     if sources.is_empty() {
-        return Err(FileOpsError::NothingToArchive);
+        return Err(ArchiveError::NothingToArchive);
     }
     for source in sources {
         guard_distinct(source, out)?;
         guard_not_recursive(source, out)?;
         source
             .file_name()
-            .ok_or_else(|| FileOpsError::NoParent(source.clone()))?;
+            .ok_or_else(|| ArchiveError::NoParent(source.clone()))?;
     }
     if vfs.symlink_metadata(out).is_ok() {
         match policy {
-            ConflictPolicy::Abort => {
-                return Err(FileOpsError::Vfs(VfsError::AlreadyExists(
+            Conflict::Abort => {
+                return Err(ArchiveError::Vfs(VfsError::AlreadyExists(
                     out.to_path_buf(),
                 )));
             }
-            ConflictPolicy::Skip => return Ok(Outcome::Skipped),
-            ConflictPolicy::Overwrite => {}
+            Conflict::Skip => return Ok(Outcome::Skipped),
+            Conflict::Overwrite => {}
         }
     }
 
@@ -924,10 +803,10 @@ pub fn compress_with_options(
             // Replacing is only for an archive the user chose to overwrite; otherwise a file that
             // appeared at `out` since the check above is a clash, not something to swap out.
             match policy {
-                ConflictPolicy::Overwrite => vfs.replace(&partial, out),
+                Conflict::Overwrite => vfs.replace(&partial, out),
                 _ => vfs.rename(&partial, out),
             }
-            .map_err(FileOpsError::from)
+            .map_err(ArchiveError::from)
         });
     if written.is_err() {
         let _ = vfs.remove_file(&partial);
@@ -936,10 +815,10 @@ pub fn compress_with_options(
 }
 
 /// A hidden sibling of `out` to build the archive in.
-fn partial_path(out: &Path) -> Result<PathBuf, FileOpsError> {
+fn partial_path(out: &Path) -> Result<PathBuf, ArchiveError> {
     let name = out
         .file_name()
-        .ok_or_else(|| FileOpsError::NoParent(out.to_path_buf()))?;
+        .ok_or_else(|| ArchiveError::NoParent(out.to_path_buf()))?;
     let mut partial = std::ffi::OsString::from(".");
     partial.push(name);
     partial.push(format!(".{}.partial", std::process::id()));
@@ -954,7 +833,7 @@ fn write_archive(
     level: Level,
     password: Option<&Password>,
     on_progress: &mut ProgressFn<'_>,
-) -> Result<(), FileOpsError> {
+) -> Result<(), ArchiveError> {
     let file = vfs.create_write(partial)?;
     let sink = BufWriter::new(file);
     match format {
@@ -971,8 +850,7 @@ fn write_archive(
             sink.flush().map_err(io_error(partial))
         }
         Format::TarGz => {
-            let mut packer =
-                TarPacker::new(GzEncoder::new(sink, Compression::new(level.deflate())));
+            let mut packer = TarPacker::new(GzEncoder::new(sink, Compression::new(deflate(level))));
             walk(vfs, sources, &mut packer, on_progress)?;
             let encoder = packer.0.into_inner().map_err(io_error(partial))?;
             let mut sink = encoder.finish().map_err(io_error(partial))?;
@@ -989,7 +867,7 @@ trait Packer {
         real: &Path,
         name: &Path,
         meta: &Metadata,
-    ) -> Result<(), FileOpsError>;
+    ) -> Result<(), ArchiveError>;
 }
 
 /// Adds every source, and everything under each directory, in name order so the same tree always
@@ -999,7 +877,7 @@ fn walk(
     sources: &[PathBuf],
     packer: &mut dyn Packer,
     on_progress: &mut ProgressFn<'_>,
-) -> Result<(), FileOpsError> {
+) -> Result<(), ArchiveError> {
     let mut pending: Vec<(PathBuf, PathBuf)> = sources
         .iter()
         .rev()
@@ -1059,7 +937,7 @@ impl<W: Write> Packer for TarPacker<W> {
         real: &Path,
         name: &Path,
         meta: &Metadata,
-    ) -> Result<(), FileOpsError> {
+    ) -> Result<(), ArchiveError> {
         let mut header = tar::Header::new_gnu();
         header.set_mode(meta.mode.map_or(0o644, |mode| mode & 0o7777));
         header.set_uid(u64::from(meta.uid.unwrap_or(0)));
@@ -1108,11 +986,11 @@ impl<W: Write + io::Seek> Packer for ZipPacker<'_, W> {
         real: &Path,
         name: &Path,
         meta: &Metadata,
-    ) -> Result<(), FileOpsError> {
+    ) -> Result<(), ArchiveError> {
         let stored = zip_name(name)?;
         let mut options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
-            .compression_level(Some(i64::from(self.1.deflate())))
+            .compression_level(Some(i64::from(deflate(self.1))))
             .unix_permissions(mode_of(meta))
             .large_file(meta.len > u64::from(u32::MAX));
         if let Some(time) = meta.modified.and_then(zip_time) {
@@ -1130,7 +1008,7 @@ impl<W: Write + io::Seek> Packer for ZipPacker<'_, W> {
             let target = vfs.read_link(real)?;
             let target = target
                 .to_str()
-                .ok_or_else(|| FileOpsError::UnarchivableName(target.clone()))?;
+                .ok_or_else(|| ArchiveError::UnarchivableName(target.clone()))?;
             self.0.add_symlink(stored, target, options).map_err(damaged)
         } else {
             self.0.start_file(stored, options).map_err(damaged)?;
@@ -1182,7 +1060,7 @@ fn civil_from_days(days: i64) -> (i64, u8, u8) {
 }
 
 /// `name` as a zip stores it: UTF-8, `/`-separated.
-fn zip_name(name: &Path) -> Result<String, FileOpsError> {
+fn zip_name(name: &Path) -> Result<String, ArchiveError> {
     let parts: Option<Vec<&str>> = name
         .components()
         .map(|c| match c {
@@ -1192,7 +1070,7 @@ fn zip_name(name: &Path) -> Result<String, FileOpsError> {
         .collect();
     parts
         .map(|parts| parts.join("/"))
-        .ok_or_else(|| FileOpsError::UnarchivableName(name.to_path_buf()))
+        .ok_or_else(|| ArchiveError::UnarchivableName(name.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -1225,8 +1103,8 @@ mod tests {
     fn unpack(
         archive: &Path,
         dest: &Path,
-        policy: ConflictPolicy,
-    ) -> Result<ExtractSummary, FileOpsError> {
+        policy: Conflict,
+    ) -> Result<ExtractSummary, ArchiveError> {
         extract(
             &LocalVfs,
             archive,
@@ -1308,14 +1186,14 @@ mod tests {
                 &[dir.join("src/top")],
                 &out,
                 format,
-                ConflictPolicy::Abort,
+                Conflict::Abort,
                 &mut go,
             )
             .unwrap();
             assert_eq!(made, Outcome::Completed);
             assert_eq!(Format::of(&out), Some(format));
 
-            let summary = unpack(&out, &dir.join("out"), ConflictPolicy::Abort).unwrap();
+            let summary = unpack(&out, &dir.join("out"), Conflict::Abort).unwrap();
             assert_sample_tree(&dir.join("out"));
             assert_eq!(summary.unsupported, 0, "{format:?}");
             fs::remove_dir_all(&dir).unwrap();
@@ -1334,9 +1212,9 @@ mod tests {
             let archive = dir.join("bad.tar");
             write_tar(&archive, &[tar_entry(name, b'0', "", b"pwned")]);
 
-            let result = unpack(&archive, &dir.join("dest"), ConflictPolicy::Abort);
+            let result = unpack(&archive, &dir.join("dest"), Conflict::Abort);
             assert!(
-                matches!(result, Err(FileOpsError::UnsafeEntry { .. })),
+                matches!(result, Err(ArchiveError::UnsafeEntry { .. })),
                 "{name}: {result:?}"
             );
             assert!(!dir.join("evil").exists(), "{name}");
@@ -1357,9 +1235,9 @@ mod tests {
         writer.write_all(b"pwned").unwrap();
         writer.finish().unwrap();
 
-        let result = unpack(&archive, &dir.join("dest"), ConflictPolicy::Abort);
+        let result = unpack(&archive, &dir.join("dest"), Conflict::Abort);
         assert!(
-            matches!(result, Err(FileOpsError::UnsafeEntry { .. })),
+            matches!(result, Err(ArchiveError::UnsafeEntry { .. })),
             "{result:?}"
         );
         assert!(!dir.join("evil").exists());
@@ -1372,9 +1250,9 @@ mod tests {
         let dir = scratch("control");
         let archive = dir.join("bad.tar");
         write_tar(&archive, &[tar_entry("esc\u{1b}[2J", b'0', "", b"x")]);
-        let result = unpack(&archive, &dir.join("dest"), ConflictPolicy::Abort);
+        let result = unpack(&archive, &dir.join("dest"), Conflict::Abort);
         assert!(
-            matches!(result, Err(FileOpsError::UnsafeEntry { .. })),
+            matches!(result, Err(ArchiveError::UnsafeEntry { .. })),
             "{result:?}"
         );
         fs::remove_dir_all(&dir).unwrap();
@@ -1398,7 +1276,7 @@ mod tests {
             ],
         );
 
-        let summary = unpack(&archive, &dir.join("dest"), ConflictPolicy::Abort).unwrap();
+        let summary = unpack(&archive, &dir.join("dest"), Conflict::Abort).unwrap();
         assert_eq!(summary.unsupported, 5);
         assert_eq!(summary.symlinks, 1);
         assert!(fs::symlink_metadata(dir.join("dest/abs")).is_err());
@@ -1418,9 +1296,9 @@ mod tests {
         let archive = dir.join("bad.tar");
         write_tar(&archive, &[tar_entry("link/planted", b'0', "", b"x")]);
 
-        let result = unpack(&archive, &dir.join("dest"), ConflictPolicy::Overwrite);
+        let result = unpack(&archive, &dir.join("dest"), Conflict::Overwrite);
         assert!(
-            matches!(result, Err(FileOpsError::UnsafeEntry { .. })),
+            matches!(result, Err(ArchiveError::UnsafeEntry { .. })),
             "{result:?}"
         );
         assert!(!outside.join("planted").exists());
@@ -1438,7 +1316,7 @@ mod tests {
         let archive = dir.join("a.tar");
         write_tar(&archive, &[tar_entry("f", b'0', "", b"new")]);
 
-        unpack(&archive, &dir.join("dest"), ConflictPolicy::Overwrite).unwrap();
+        unpack(&archive, &dir.join("dest"), Conflict::Overwrite).unwrap();
         assert_eq!(fs::read(&victim).unwrap(), b"keep");
         assert_eq!(fs::read(dir.join("dest/f")).unwrap(), b"new");
         fs::remove_dir_all(&dir).unwrap();
@@ -1461,7 +1339,7 @@ mod tests {
         }
         write_tar(&archive, &[hostile, locked]);
 
-        unpack(&archive, &dir.join("dest"), ConflictPolicy::Abort).unwrap();
+        unpack(&archive, &dir.join("dest"), Conflict::Abort).unwrap();
         let mode = |name: &str| {
             fs::metadata(dir.join("dest").join(name))
                 .unwrap()
@@ -1491,12 +1369,12 @@ mod tests {
             &LocalVfs,
             &archive,
             &dir.join("dest"),
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             limits,
             &mut go,
         );
         assert!(
-            matches!(result, Err(FileOpsError::ArchiveLimit { .. })),
+            matches!(result, Err(ArchiveError::ArchiveLimit { .. })),
             "{result:?}"
         );
         assert!(!dir.join("dest/zeros").exists());
@@ -1516,7 +1394,7 @@ mod tests {
             &LocalVfs,
             &archive,
             &dir.join("dest"),
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             limits,
             &mut go,
         )
@@ -1541,12 +1419,12 @@ mod tests {
             &LocalVfs,
             &archive,
             &dir.join("dest"),
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             limits,
             &mut go,
         );
         assert!(
-            matches!(result, Err(FileOpsError::ArchiveLimit { .. })),
+            matches!(result, Err(ArchiveError::ArchiveLimit { .. })),
             "{result:?}"
         );
         fs::remove_dir_all(&dir).unwrap();
@@ -1561,18 +1439,18 @@ mod tests {
         fs::create_dir(&dest).unwrap();
         fs::write(dest.join("f"), b"old").unwrap();
 
-        let abort = unpack(&archive, &dest, ConflictPolicy::Abort);
+        let abort = unpack(&archive, &dest, Conflict::Abort);
         assert!(matches!(
             abort,
-            Err(FileOpsError::Vfs(VfsError::AlreadyExists(_)))
+            Err(ArchiveError::Vfs(VfsError::AlreadyExists(_)))
         ));
         assert_eq!(fs::read(dest.join("f")).unwrap(), b"old");
 
-        let skip = unpack(&archive, &dest, ConflictPolicy::Skip).unwrap();
+        let skip = unpack(&archive, &dest, Conflict::Skip).unwrap();
         assert_eq!(skip.skipped, 1);
         assert_eq!(fs::read(dest.join("f")).unwrap(), b"old");
 
-        unpack(&archive, &dest, ConflictPolicy::Overwrite).unwrap();
+        unpack(&archive, &dest, Conflict::Overwrite).unwrap();
         assert_eq!(fs::read(dest.join("f")).unwrap(), b"new");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1586,7 +1464,7 @@ mod tests {
         fs::create_dir_all(dest.join("f")).unwrap();
         fs::write(dest.join("f/precious"), b"keep").unwrap();
 
-        assert!(unpack(&archive, &dest, ConflictPolicy::Overwrite).is_err());
+        assert!(unpack(&archive, &dest, Conflict::Overwrite).is_err());
         assert_eq!(fs::read(dest.join("f/precious")).unwrap(), b"keep");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1596,13 +1474,13 @@ mod tests {
         let dir = scratch("damaged");
         for name in ["x.zip", "x.tar", "x.tar.gz"] {
             fs::write(dir.join(name), b"this is not an archive at all").unwrap();
-            let result = unpack(&dir.join(name), &dir.join("dest"), ConflictPolicy::Abort);
+            let result = unpack(&dir.join(name), &dir.join("dest"), Conflict::Abort);
             assert!(result.is_err(), "{name}");
         }
         fs::write(dir.join("x.rar"), b"Rar!").unwrap();
         assert!(matches!(
-            unpack(&dir.join("x.rar"), &dir.join("dest"), ConflictPolicy::Abort),
-            Err(FileOpsError::UnsupportedArchive(_))
+            unpack(&dir.join("x.rar"), &dir.join("dest"), Conflict::Abort),
+            Err(ArchiveError::UnsupportedArchive(_))
         ));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1622,11 +1500,11 @@ mod tests {
             &LocalVfs,
             &archive,
             &dir.join("dest"),
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             ExtractLimits::default(),
             &mut |_| ControlFlow::Break(()),
         );
-        assert!(matches!(result, Err(FileOpsError::Cancelled)));
+        assert!(matches!(result, Err(ArchiveError::Cancelled)));
         assert!(!dir.join("dest/b").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1640,12 +1518,12 @@ mod tests {
             &[dir.join("top")],
             &dir.join("top/inside.zip"),
             Format::Zip,
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             &mut go,
         );
         assert!(matches!(
             result,
-            Err(FileOpsError::RecursiveDestination { .. })
+            Err(ArchiveError::RecursiveDestination { .. })
         ));
         assert!(matches!(
             compress(
@@ -1653,10 +1531,10 @@ mod tests {
                 &[],
                 &dir.join("x.zip"),
                 Format::Zip,
-                ConflictPolicy::Abort,
+                Conflict::Abort,
                 &mut go
             ),
-            Err(FileOpsError::NothingToArchive)
+            Err(ArchiveError::NothingToArchive)
         ));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1675,10 +1553,10 @@ mod tests {
                 &sources,
                 &out,
                 Format::Tar,
-                ConflictPolicy::Abort,
+                Conflict::Abort,
                 &mut go
             ),
-            Err(FileOpsError::Vfs(VfsError::AlreadyExists(_)))
+            Err(ArchiveError::Vfs(VfsError::AlreadyExists(_)))
         ));
         assert_eq!(
             compress(
@@ -1686,7 +1564,7 @@ mod tests {
                 &sources,
                 &out,
                 Format::Tar,
-                ConflictPolicy::Skip,
+                Conflict::Skip,
                 &mut go
             )
             .unwrap(),
@@ -1699,7 +1577,7 @@ mod tests {
             &sources,
             &out,
             Format::Tar,
-            ConflictPolicy::Overwrite,
+            Conflict::Overwrite,
             &mut go,
         )
         .unwrap();
@@ -1717,10 +1595,10 @@ mod tests {
             &[dir.join("top")],
             &out,
             Format::Zip,
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             &mut |_| ControlFlow::Break(()),
         );
-        assert!(matches!(result, Err(FileOpsError::Cancelled)));
+        assert!(matches!(result, Err(ArchiveError::Cancelled)));
         assert!(!out.exists());
         let leftovers: Vec<_> = fs::read_dir(&dir)
             .unwrap()
@@ -1745,12 +1623,12 @@ mod tests {
                     &out,
                     format,
                     level,
-                    ConflictPolicy::Abort,
+                    Conflict::Abort,
                     &mut go,
                 )
                 .unwrap();
                 let dest = dir.join(format!("out-{level:?}-{format:?}"));
-                unpack(&out, &dest, ConflictPolicy::Abort).unwrap();
+                unpack(&out, &dest, Conflict::Abort).unwrap();
                 assert_eq!(fs::read_to_string(dest.join("big.txt")).unwrap(), text);
                 fs::metadata(&out).unwrap().len()
             };
@@ -1759,16 +1637,6 @@ mod tests {
             assert!(best < text.len() as u64 / 4, "{format:?}: {best}");
         }
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn the_stem_drops_the_archive_extension() {
-        let stem = |name: &str| Format::stem_of(Path::new(name));
-        assert_eq!(stem("photos.tar.gz").as_deref(), Some("photos"));
-        assert_eq!(stem("/x/y/Photos.TGZ").as_deref(), Some("Photos"));
-        assert_eq!(stem("a.b.zip").as_deref(), Some("a.b"));
-        assert_eq!(stem("notes.txt"), None);
-        assert_eq!(stem(".zip"), None);
     }
 
     #[test]
@@ -1820,11 +1688,11 @@ mod tests {
         fs::write(&zip, bytes).unwrap();
 
         let dest = dir.join("out");
-        let result = unpack(&zip, &dest, ConflictPolicy::Abort);
+        let result = unpack(&zip, &dest, Conflict::Abort);
 
         assert!(matches!(
             result,
-            Err(FileOpsError::ArchiveLimit {
+            Err(ArchiveError::ArchiveLimit {
                 what: "central directory size",
                 ..
             })
@@ -1843,7 +1711,7 @@ mod tests {
             &LocalVfs,
             &zip,
             &dest,
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             ExtractLimits {
                 max_entries: 1,
                 ..ExtractLimits::default()
@@ -1853,7 +1721,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(FileOpsError::ArchiveLimit {
+            Err(ArchiveError::ArchiveLimit {
                 what: "entry count",
                 ..
             })
@@ -1874,9 +1742,9 @@ mod tests {
         let zip = dir.join("lying.zip");
         fs::write(&zip, bytes).unwrap();
 
-        let result = unpack(&zip, &dir.join("out"), ConflictPolicy::Abort);
+        let result = unpack(&zip, &dir.join("out"), Conflict::Abort);
 
-        assert!(matches!(result, Err(FileOpsError::ArchiveLimit { .. })));
+        assert!(matches!(result, Err(ArchiveError::ArchiveLimit { .. })));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1896,11 +1764,11 @@ mod tests {
         let zip = dir.join("big.zip");
         fs::write(&zip, bytes).unwrap();
 
-        let result = unpack(&zip, &dir.join("out"), ConflictPolicy::Abort);
+        let result = unpack(&zip, &dir.join("out"), Conflict::Abort);
 
         assert!(matches!(
             result,
-            Err(FileOpsError::ArchiveLimit {
+            Err(ArchiveError::ArchiveLimit {
                 what: "entry count",
                 ..
             })
@@ -1957,7 +1825,7 @@ mod tests {
             std::slice::from_ref(&file),
             &out,
             Format::Zip,
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             &mut go,
         )
         .unwrap();
@@ -1984,7 +1852,7 @@ mod tests {
             format,
             level: Level::default(),
             password,
-            policy: ConflictPolicy::Abort,
+            policy: Conflict::Abort,
         };
         compress_with_options(&LocalVfs, sources, out, &options, &mut go).unwrap();
     }
@@ -1993,12 +1861,12 @@ mod tests {
         archive: &Path,
         dest: &Path,
         password: Option<&Password>,
-    ) -> Result<ExtractSummary, FileOpsError> {
+    ) -> Result<ExtractSummary, ArchiveError> {
         extract_with_password(
             &LocalVfs,
             archive,
             dest,
-            ConflictPolicy::Abort,
+            Conflict::Abort,
             ExtractLimits::default(),
             password,
             &mut go,
@@ -2071,15 +1939,15 @@ mod tests {
         assert!(needs_password(&LocalVfs, &out).unwrap());
         assert!(matches!(
             unpack_with(&out, &dest, None),
-            Err(FileOpsError::PasswordRequired(_))
+            Err(ArchiveError::PasswordRequired(_))
         ));
         assert!(matches!(
             unpack_with(&out, &dest, Some(&secret("wrong"))),
-            Err(FileOpsError::WrongPassword)
+            Err(ArchiveError::WrongPassword)
         ));
         assert!(matches!(
             check_password(&LocalVfs, &out, &secret("wrong")),
-            Err(FileOpsError::WrongPassword)
+            Err(ArchiveError::WrongPassword)
         ));
         check_password(&LocalVfs, &out, &secret("right")).unwrap();
         fs::remove_dir_all(&dir).unwrap();
@@ -2112,7 +1980,7 @@ mod tests {
                 format,
                 level: Level::default(),
                 password: Some(password),
-                policy: ConflictPolicy::Abort,
+                policy: Conflict::Abort,
             };
             compress_with_options(
                 &LocalVfs,
@@ -2125,15 +1993,15 @@ mod tests {
 
         assert!(matches!(
             opts(Format::TarGz, &secret("pw")),
-            Err(FileOpsError::EncryptionNeedsZip)
+            Err(ArchiveError::EncryptionNeedsZip)
         ));
         assert!(matches!(
             opts(Format::Tar, &secret("pw")),
-            Err(FileOpsError::EncryptionNeedsZip)
+            Err(ArchiveError::EncryptionNeedsZip)
         ));
         assert!(matches!(
             opts(Format::Zip, &Password::new()),
-            Err(FileOpsError::EmptyPassword)
+            Err(ArchiveError::EmptyPassword)
         ));
         assert!(!dir.join("x").exists(), "a refused job writes nothing");
         fs::remove_dir_all(&dir).unwrap();
@@ -2159,21 +2027,6 @@ mod tests {
             PathBuf::from("real.txt")
         );
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_password_hides_itself_from_debug_output_and_stays_within_its_cap() {
-        let mut password = secret("hunter2");
-        assert_eq!(format!("{password:?}"), "Password(..)");
-
-        password.push('\n');
-        assert_eq!(password.char_count(), 7, "control characters are not typed");
-        for _ in 0..MAX_PASSWORD_CHARS * 2 {
-            password.push('é');
-        }
-        assert_eq!(password.char_count(), MAX_PASSWORD_CHARS);
-        password.pop();
-        assert_eq!(password.char_count(), MAX_PASSWORD_CHARS - 1);
     }
 
     proptest! {
@@ -2261,8 +2114,8 @@ mod tests {
                 fs::write(root.join(name), bytes).unwrap();
             }
             let out = dir.join("p.tar.gz");
-            compress(&LocalVfs, &[root], &out, Format::TarGz, ConflictPolicy::Abort, &mut go).unwrap();
-            unpack(&out, &dir.join("out"), ConflictPolicy::Abort).unwrap();
+            compress(&LocalVfs, &[root], &out, Format::TarGz, Conflict::Abort, &mut go).unwrap();
+            unpack(&out, &dir.join("out"), Conflict::Abort).unwrap();
             for (name, bytes) in &files {
                 prop_assert_eq!(&fs::read(dir.join("out/root").join(name)).unwrap(), bytes);
             }

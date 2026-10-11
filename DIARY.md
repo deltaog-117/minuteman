@@ -7206,6 +7206,81 @@ link, reopening, the plugin process running, and an `mman` copied alone showing 
 plugin while the browser stayed responsive. Not run: a real kitty, an ssh folder, and the inside
 of an archive.
 
+
+---
+
+## 2026-10-11 — Compress and extract become a plugin (M5)
+
+**Context.** M5 was written as "archives and undo leave `file_ops`; trash management becomes a
+plugin". Two decisions were taken before any code. First the slicing: the user ruled that the trash
+is a fundamental feature and stays whole in the core, and chose the cut that also keeps undo there,
+since an undone copy goes to the trash and every change is recorded by the core that performs the
+revert. M5 therefore shrank to archives alone. Second the boundary. The archive code was not
+"just local files": `compress` and `extract` took `&dyn Vfs` and called nine of its methods, and the
+interface ran them on its own `Vfs`, so compressing from and extracting to an ssh folder worked. A
+plugin is a separate process with no `Vfs`, and the host's requests (`read_file`, `stat`, `walk`,
+`tally`) are read-only.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | The plugin runs the unchanged code against `LocalVfs` on local paths; ssh and in-archive paths are refused | Chosen, with the regression accepted by the user |
+| B | The host serves the nine `Vfs` calls to the plugin over the wire, streamed | Rejected: that is a Vfs-over-the-wire protocol, M7's design problem done early and without its decision on process boundaries |
+| C | A, plus the core keeps its archive code for remote paths behind a feature | Rejected: it duplicates the code instead of moving it |
+
+**Decision.** `plugin_api::archive` holds the wire: an `archive` event carrying a request number and
+the work, `archive_cancel`, `archive_progress` (the entry reached and a running total) and one
+`archive_done`. The result names which jobs *wrote something* (`finished`), because the interface
+trashes originals per job: the old code trashed a job's sources right after its archive was
+complete and stopped at the first failure, and sending only the finished indices keeps that end
+state without the plugin touching the trash. `Format`, `Level`, `Conflict` and `Password` live in
+`plugin_api` because both sides name them; `Password` gained a serde form that refuses control
+characters and anything over 256 characters, wipes the parser's string when it is handed one, and is
+masked in `Debug`, so a logged event or `{:?}` of a request never shows it.
+
+The plugin is `Session` (a thread per request and a map of cancel flags, writing through one
+channel), `work::execute` (the jobs in order, with the password checks an extract makes before it
+writes), and a `run` loop with a forwarding thread so one place owns stdout. The interface turns the
+plugin's answers back into the bulk operation it already had: a new `BulkMsg::Entries` carries a
+total (not a step, because the plugin thins its messages to one per 40 ms, so counting messages
+would have undercounted a thousand-fold), `archive_done` sends `Done` after trashing on the blocking
+pool, and a `password_needed` answer ends the operation and opens the existing password prompt with
+the request kept to start again.
+
+**Departures from the plan.** (1) The first design had the interface ask `needs_password` before
+starting, as it did. The plugin answering `password_needed` is better: the archive read left the
+render thread, and one code path serves the first request and the retry. (2) I planned to keep
+`ConflictPolicy` and `Outcome` shared between `file_ops` and the archive code. A plugin may depend
+only on `plugin_api` and `shared` (a test over `cargo metadata` enforces it), so the plugin got its
+own `ArchiveError`, `Outcome` and progress callback, `Conflict` came from `plugin_api`, and `mkdir
+-p` moved to `shared::create_dir_all` with `file_ops::create_directory_all` as a wrapper. (3) A
+plugin that dies mid-request would leave the operation busy for ever, since the host does not watch
+for deaths. The interface now gives up on a request whose plugin is not running, after a second's
+grace because the plugin's last lines may still be on their way when its exit is seen.
+
+**Trade-offs.** One more process on a fresh install, and `:compress`/`:extract` do nothing but say
+where to get the plugin when it is missing. ssh and in-archive paths are refused until M7. The
+password crosses a pipe as one JSON line: only `Password` is wiped, not the line or the parser's
+copies. Cancel is still checked per entry, so one huge file runs to its end first (as before). A
+plugin killed with `SIGKILL` cannot remove the hidden temporary file it was writing (the real
+archive name is never half-written).
+
+**Verification.** `scripts/check` passes. The interface's 21 archive tests could not keep running
+the work in-process, so they were rewritten (and eight added) around a recording plugin (`sh -c 'cat > file'`) that
+stands in for `mman-archive`: they assert the exact request the interface sends (jobs, format,
+level, policy, password) and what it does with each answer (finished, cancelled, failed in words,
+password needed, wrong password, a stale answer dropped, trash only for finished jobs, a stopped
+plugin, no plugin, a remote or in-archive path); the work itself is covered where it lives, by the 38
+moved archive tests, the new `work`, `session` and wire tests (including properties on cleaning and
+on the password round trip) and a test that plays the host against the real `mman-archive` process.
+The real `mman` and `mman-archive` were driven over a PTY read through `pyte`, with `tar` and `7z`
+checking the files on disk: pack and unpack, the sealed zip (made, opened by `7z` with the password
+and refused with another, extracted through the prompts), `Esc` on a 40,000-file compress, the
+plugin killed mid-request, and an `mman` copied alone. My first run of the kill scenario failed
+because the harness pressed `Enter` and killed the plugin before the job had started (the listing
+of a 60,000-file folder made the interface slow to take keys); waiting for `compressing` first made
+it a real test, and it passed. Not run: a real kitty, an ssh folder, and the inside of an archive
+(both now refused).
+
 ---
 
 ---
