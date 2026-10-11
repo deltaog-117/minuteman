@@ -30,11 +30,18 @@ use shared::DirEntryInfo;
 
 pub mod client;
 mod event;
+mod inspect;
 mod picker;
 mod preview;
 mod view;
 
 pub use event::{EventParams, HostEvent};
+pub use inspect::{
+    EVENT_INSPECT, EVENT_TALLY_DONE, InspectError, InspectRow, InspectTarget, MAX_INSPECT_ROWS,
+    MAX_LABEL_CHARS, MAX_VALUE_CHARS, METHOD_SET_INSPECT, METHOD_STAT, METHOD_TALLY,
+    METHOD_TALLY_CANCEL, PROVIDES_INSPECT, SetInspect, Stat, StatKind, StatReply, TallyCancel,
+    TallyDone, TallyEnding, TallyRequest,
+};
 pub use picker::{
     METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_SHOW_PICKER, METHOD_WALK, METHOD_WALK_CANCEL,
     PickerClose, PickerEvent, PickerIndexing, PickerSpec, PickerUpdate, TreeEntry, WalkCancel,

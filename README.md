@@ -94,6 +94,7 @@ cargo install --path plugins/search   # installs mman-search, the structured sea
 cargo install --path plugins/git      # installs mman-git, the git branch and file state in the status bar
 cargo install --path plugins/hud      # installs mman-hud, the header's uptime, load and memory (`system_hud = true`)
 cargo install --path plugins/preview  # installs mman-preview, the preview column's text, hex dump and archive listing
+cargo install --path plugins/inspect  # installs mman-inspect, the Inspect panel's rows
 mman
 mman /path/to/dir
 ```
@@ -110,12 +111,14 @@ are `mman-hud`, and without it that pill is absent. The preview column's text, h
 listing are `mman-preview`: it reads the selected file through `mman` and sends back a finished
 document, `mman` does the scrolling and drawing, and without it the column shows only the file's
 name and a notice at startup says how to get it (a `[[plugin]]` that lists `provides = ["preview"]`
-takes its place; images are still `mman`'s own).
+takes its place; images are still `mman`'s own). The Inspect panel's rows are `mman-inspect`:
+without it, Inspect says how to get it and opens nothing (a `[[plugin]]` that lists
+`provides = ["inspect"]` takes its place).
 
 From a checkout, without installing:
 
 ```bash
-cargo build -p finder -p search -p git -p hud -p previewer   # once, so the plugins are built next to mman
+cargo build -p finder -p search -p git -p hud -p previewer -p inspector   # once, so the plugins are built next to mman
 cargo run -p tui
 # or, starting in a specific directory:
 cargo run -p tui -- /path/to/dir
@@ -241,7 +244,9 @@ on every marked entry when the clicked one is marked, and only on the clicked en
 **Inspect** opens a panel with the name, location, type, size (exact and on disk), permissions,
 owner and group, link count and the modified, accessed and created times (in your time zone). For a folder it
 also counts the files, subfolders and total size below it, in the background. `Esc`, `Enter` or a
-click closes it. Owner, on-disk size and link count come from the local filesystem only.
+click closes it. Owner, on-disk size and link count are shown only when the folder you are browsing
+reports them (the local disk does; an ssh folder or an archive may not). The panel is drawn by
+`mman` but its rows come from the bundled `mman-inspect` plugin.
 
 **Open with** lists, best first: the `[[open_rule]]` entries that match the file, the
 `[[open_with]]` entries from `config.toml` (see below), and the programs installed for the file's
@@ -519,7 +524,9 @@ plugins/
 ├── finder/             # `mman-finder`: the fuzzy finder, bundled as a plugin (`f`)
 ├── search/             # `mman-search`: the structured search, bundled as a plugin (`L`)
 ├── git/                # `mman-git`: the status bar's git branch and file state, bundled as a plugin
-└── hud/                # `mman-hud`: the header's uptime, load and memory, bundled as a plugin
+├── hud/                # `mman-hud`: the header's uptime, load and memory, bundled as a plugin
+├── preview/            # `mman-preview` (package `previewer`): the preview column's documents, bundled as a plugin
+└── inspect/            # `mman-inspect` (package `inspector`): the Inspect panel's rows, bundled as a plugin
 ```
 
 ---

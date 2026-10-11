@@ -55,7 +55,7 @@ use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
 use crate::disk_usage::DiskUsageView;
 use crate::extract_popup::{self, ExtractPopup};
-use crate::inspect::InspectView;
+use crate::inspect_panel::InspectPanel;
 use crate::line_edit::LineEdit;
 use crate::live_refresh::LiveRefresh;
 use crate::marked_size::{MarkedSize, Total};
@@ -1556,15 +1556,26 @@ impl App {
         self.spawn_paste_item(Clipboard { paths, mode }, dst_dir, 0, ConflictPolicy::Abort);
     }
 
-    /// Opens the Inspect panel for `path`, or says on the status line why it cannot.
-    pub fn begin_inspect(&mut self, path: &Path) -> Option<InspectView> {
-        match InspectView::open(&self.handle, Arc::clone(&self.vfs), path) {
-            Ok(view) => Some(view),
-            Err(message) => {
-                self.status = Some(message);
-                None
-            }
+    /// Opens the Inspect panel for `path` by asking the plugin that provides `inspect` to
+    /// describe it, or says on the status line why it cannot (usually: where to get the plugin).
+    pub fn begin_inspect(&mut self, path: &Path) -> Option<InspectPanel> {
+        if self.plugins.dispatch_inspect(Some(path)) {
+            Some(InspectPanel::open(path))
+        } else {
+            self.status = Some(crate::bundled::missing("inspect"));
+            None
         }
+    }
+
+    /// Tells the inspecting plugin the panel has closed, so a count under way stops.
+    pub fn end_inspect(&mut self) {
+        let _ = self.plugins.dispatch_inspect(None);
+    }
+
+    /// Whether the inspecting plugin has a live process right now: when it has not, a panel still
+    /// waiting for rows never gets them.
+    pub fn inspector_running(&self) -> bool {
+        self.plugins.inspector_running()
     }
 
     fn associations(&self) -> &Associations {
@@ -5558,15 +5569,18 @@ mod tests {
     }
 
     #[test]
-    fn inspect_and_disk_usage_open_on_the_injected_backend() {
+    fn inspect_without_a_plugin_says_how_to_get_it_and_disk_usage_opens_on_the_injected_backend() {
         let mut m = MemoryApp::new(|mem| mem.add_file("/w/f.txt", vec![0u8; 100]));
 
-        let inspect = m.app.begin_inspect(Path::new("/w/f.txt"));
-        assert!(inspect.is_some_and(|view| {
-            view.rows()
-                .iter()
-                .any(|(l, v)| *l == "Name" && v == "f.txt")
-        }));
+        assert!(m.app.begin_inspect(Path::new("/w/f.txt")).is_none());
+        assert!(
+            m.app
+                .status
+                .as_deref()
+                .is_some_and(|s| s.contains("cargo install --path plugins/inspect")),
+            "{:?}",
+            m.app.status
+        );
         let mut usage = m.app.begin_disk_usage(PathBuf::from("/w"));
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         while usage.end().is_none() && Instant::now() < deadline {

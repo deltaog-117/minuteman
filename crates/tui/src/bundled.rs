@@ -40,7 +40,7 @@ struct Bundled {
     how_to_get: &'static str,
 }
 
-const BUNDLED: [Bundled; 5] = [
+const BUNDLED: [Bundled; 6] = [
     Bundled {
         name: "finder",
         binary: "mman-finder",
@@ -84,6 +84,16 @@ const BUNDLED: [Bundled; 5] = [
         events: &[],
         how_to_get: "the preview column is a plugin and mman-preview was not found; \
             install it with `cargo install --path plugins/preview` (next to mman, or on PATH)",
+    },
+    // Provides the `inspect` role: the interface names the entry its panel is about and the plugin
+    // answers with the rows to show.
+    Bundled {
+        name: "inspect",
+        binary: "mman-inspect",
+        provides: &["inspect"],
+        events: &[],
+        how_to_get: "the Inspect panel is a plugin and mman-inspect was not found; \
+            install it with `cargo install --path plugins/inspect` (next to mman, or on PATH)",
     },
 ];
 
@@ -243,7 +253,7 @@ mod tests {
     #[test]
     fn a_fresh_install_starts_each_bundled_plugin_providing_its_action() {
         let started = specs_found(&[], found, &[]);
-        assert_eq!(started.len(), 5);
+        assert_eq!(started.len(), 6);
         assert_eq!(started[0].name, "finder");
         assert_eq!(started[0].command, "/opt/bin/mman-finder");
         assert_eq!(started[0].provides, ["find"]);
@@ -278,10 +288,16 @@ mod tests {
         };
         assert_eq!(
             names(true, true),
-            ["finder", "search", "git", "hud", "preview"]
+            ["finder", "search", "git", "hud", "preview", "inspect"]
         );
-        assert_eq!(names(false, true), ["finder", "search", "hud", "preview"]);
-        assert_eq!(names(true, false), ["finder", "search", "git", "preview"]);
+        assert_eq!(
+            names(false, true),
+            ["finder", "search", "hud", "preview", "inspect"]
+        );
+        assert_eq!(
+            names(true, false),
+            ["finder", "search", "git", "preview", "inspect"]
+        );
     }
 
     #[test]
@@ -317,28 +333,28 @@ mod tests {
         };
         assert_eq!(
             names(&[configured("finder", &[])]),
-            ["search", "git", "hud", "preview"]
+            ["search", "git", "hud", "preview", "inspect"]
         );
         assert_eq!(
             names(&[configured("fzf-picker", &["find"])]),
-            ["search", "git", "hud", "preview"]
+            ["search", "git", "hud", "preview", "inspect"]
         );
         assert_eq!(
             names(&[configured("search", &[])]),
-            ["finder", "git", "hud", "preview"]
+            ["finder", "git", "hud", "preview", "inspect"]
         );
         assert_eq!(
             names(&[configured("grep-ui", &["locate"])]),
-            ["finder", "git", "hud", "preview"]
+            ["finder", "git", "hud", "preview", "inspect"]
         );
         assert_eq!(
             names(&[configured("git", &[])]),
-            ["finder", "search", "hud", "preview"]
+            ["finder", "search", "hud", "preview", "inspect"]
         );
         // A plugin providing nothing must not count as standing in for the git plugin.
         assert_eq!(
             names(&[configured("blame", &[])]),
-            ["finder", "search", "git", "hud", "preview"]
+            ["finder", "search", "git", "hud", "preview", "inspect"]
         );
     }
 
@@ -346,7 +362,7 @@ mod tests {
     fn an_unrelated_plugin_leaves_the_bundled_ones_alone() {
         assert_eq!(
             specs_found(&[configured("blame", &["blame"])], found, &[]).len(),
-            5
+            6
         );
     }
 
@@ -355,6 +371,7 @@ mod tests {
         assert!(missing("find").contains("cargo install --path plugins/finder"));
         assert!(missing("locate").contains("cargo install --path plugins/search"));
         assert!(missing("preview").contains("cargo install --path plugins/preview"));
+        assert!(missing("inspect").contains("cargo install --path plugins/inspect"));
         assert_eq!(missing("sort"), "no plugin provides 'sort'");
     }
 
@@ -377,6 +394,18 @@ mod tests {
         assert_eq!(preview.command, "/opt/bin/mman-preview");
         assert_eq!(preview.provides, ["preview"]);
         assert!(preview.events.is_empty() && preview.args.is_empty());
+    }
+
+    #[test]
+    fn the_inspect_plugin_provides_inspect_and_follows_no_event() {
+        let started = specs_found(&[], found, &[]);
+        let inspect = started
+            .iter()
+            .find(|spec| spec.name == "inspect")
+            .expect("bundled");
+        assert_eq!(inspect.command, "/opt/bin/mman-inspect");
+        assert_eq!(inspect.provides, ["inspect"]);
+        assert!(inspect.events.is_empty() && inspect.args.is_empty());
     }
 
     #[test]

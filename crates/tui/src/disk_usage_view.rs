@@ -31,8 +31,8 @@ use theming::Config;
 use crate::disk_usage::{DiskUsageView, End, Kind, Row};
 use crate::glyphs;
 use crate::hud::{self, fit_width, format_size, text_width};
-use crate::inspect::group_thousands;
 use crate::style;
+use shared::format::group_thousands;
 
 /// Cells the bar takes.
 const GAUGE_CELLS: usize = 10;

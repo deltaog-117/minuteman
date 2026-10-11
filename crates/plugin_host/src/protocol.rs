@@ -59,12 +59,14 @@ pub use plugin_api::{
     EVENT_JOB_FINISHED, EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
     EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH, EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job,
     JobOutcome, Line, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, ReadFile,
-    SetPreview, SetView, Slot, Span, StateSnapshot, Tone, TreeEntry, View, WalkCancel, WalkEnd,
-    WalkOutcome, WalkRequest, WireEntry,
+    SetInspect, SetPreview, SetView, Slot, Span, Stat, StateSnapshot, TallyCancel, TallyDone,
+    TallyEnding, TallyRequest, Tone, TreeEntry, View, WalkCancel, WalkEnd, WalkOutcome,
+    WalkRequest, WireEntry,
 };
 use plugin_api::{
-    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_READ_FILE, METHOD_SET_PREVIEW,
-    METHOD_SET_VIEW, METHOD_SHOW_PICKER, METHOD_WALK, METHOD_WALK_CANCEL,
+    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_READ_FILE, METHOD_SET_INSPECT,
+    METHOD_SET_PREVIEW, METHOD_SET_VIEW, METHOD_SHOW_PICKER, METHOD_STAT, METHOD_TALLY,
+    METHOD_TALLY_CANCEL, METHOD_WALK, METHOD_WALK_CANCEL,
 };
 
 /// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
@@ -140,6 +142,10 @@ pub enum PluginRequest {
     Walk(WalkRequest),
     /// Reads part of a file through whatever serves the browsed paths.
     ReadFile(ReadFile),
+    /// Describes one entry through whatever serves the browsed paths.
+    Stat(Stat),
+    /// Starts counting what is below a folder, through whatever serves the browsed paths.
+    Tally(TallyRequest),
     ReadDir {
         path: PathBuf,
     },
@@ -228,6 +234,8 @@ impl PluginRequest {
             METHOD_READ_FILE => serde_json::from_value(params)
                 .map(Self::ReadFile)
                 .map_err(bad),
+            METHOD_STAT => serde_json::from_value(params).map(Self::Stat).map_err(bad),
+            METHOD_TALLY => serde_json::from_value(params).map(Self::Tally).map_err(bad),
             "read_dir" => Ok(Self::ReadDir {
                 path: serde_json::from_value::<PathParams>(params)
                     .map_err(bad)?
@@ -306,12 +314,16 @@ pub enum Incoming {
     PickerClose(PickerClose),
     /// The plugin stopped a walk.
     WalkCancel(WalkCancel),
+    /// The plugin stopped a count.
+    TallyCancel(TallyCancel),
     /// The plugin filled or emptied a slot of the interface; already cleaned by
     /// `SetView::checked`.
     SetView(SetView),
     /// The plugin gave the preview column a document; already cleaned by
     /// `SetPreview::checked`.
     SetPreview(SetPreview),
+    /// The plugin gave the Inspect panel its rows; already cleaned by `SetInspect::checked`.
+    SetInspect(SetInspect),
     /// A well-formed notification (no `id`) whose method isn't one of the above — ignored rather than
     /// treated as an error, so a plugin can send something a future host version understands
     /// without breaking against this one.
@@ -375,6 +387,11 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map(Incoming::WalkCancel)
                     .map_err(bad);
             }
+            METHOD_TALLY_CANCEL => {
+                return serde_json::from_value(raw.params)
+                    .map(Incoming::TallyCancel)
+                    .map_err(bad);
+            }
             METHOD_SET_VIEW => {
                 return serde_json::from_value::<SetView>(raw.params)
                     .map_err(bad)?
@@ -390,6 +407,16 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map_err(bad)?
                     .checked()
                     .map(Incoming::SetPreview)
+                    .map_err(|e| LineError {
+                        id: None,
+                        message: format!("refused '{}': {e}", raw.method),
+                    });
+            }
+            METHOD_SET_INSPECT => {
+                return serde_json::from_value::<SetInspect>(raw.params)
+                    .map_err(bad)?
+                    .checked()
+                    .map(Incoming::SetInspect)
                     .map_err(|e| LineError {
                         id: None,
                         message: format!("refused '{}': {e}", raw.method),
@@ -975,6 +1002,53 @@ mod tests {
             parse_line(r#"{"jsonrpc":"2.0","id":5,"method":"read_file","params":{"path":"/a"}}"#)
                 .unwrap_err();
         assert_eq!(missing.id, Some(serde_json::json!(5)));
+    }
+
+    #[test]
+    fn a_stat_request_parses_and_a_pathless_one_is_answered_with_an_error() {
+        let line = r#"{"jsonrpc":"2.0","id":6,"method":"stat","params":{"path":"/a"}}"#;
+        match parse_line(line).unwrap() {
+            Incoming::Request {
+                request: PluginRequest::Stat(stat),
+                ..
+            } => assert_eq!(stat.path, PathBuf::from("/a")),
+            other => panic!("expected a stat request, got {other:?}"),
+        }
+        let missing =
+            parse_line(r#"{"jsonrpc":"2.0","id":7,"method":"stat","params":{}}"#).unwrap_err();
+        assert_eq!(missing.id, Some(serde_json::json!(7)));
+    }
+
+    #[test]
+    fn a_tally_request_and_its_cancel_parse() {
+        let line = r#"{"jsonrpc":"2.0","id":8,"method":"tally","params":{"tally":3,"root":"/a"}}"#;
+        match parse_line(line).unwrap() {
+            Incoming::Request {
+                request: PluginRequest::Tally(tally),
+                ..
+            } => assert_eq!((tally.tally, tally.root), (3, PathBuf::from("/a"))),
+            other => panic!("expected a tally request, got {other:?}"),
+        }
+        let cancel = r#"{"jsonrpc":"2.0","method":"tally_cancel","params":{"tally":3}}"#;
+        assert_eq!(
+            parse_line(cancel).unwrap(),
+            Incoming::TallyCancel(TallyCancel { tally: 3 })
+        );
+    }
+
+    #[test]
+    fn set_inspect_is_a_notification_cleaned_before_the_host_sees_it() {
+        let line = r#"{"jsonrpc":"2.0","method":"set_inspect","params":{"path":"/a","rows":[["Na\u001bme","x\u202ey"]]}}"#;
+        match parse_line(line).unwrap() {
+            Incoming::SetInspect(set) => assert_eq!(set.rows, [("Name".into(), "xy".into())]),
+            other => panic!("expected set_inspect, got {other:?}"),
+        }
+        let many = format!(
+            r#"{{"jsonrpc":"2.0","method":"set_inspect","params":{{"path":"/a","rows":[{}]}}}}"#,
+            vec![r#"["a","b"]"#; 33].join(",")
+        );
+        let refused = parse_line(&many).unwrap_err();
+        assert!(refused.message.contains("refused"), "{}", refused.message);
     }
 
     #[test]

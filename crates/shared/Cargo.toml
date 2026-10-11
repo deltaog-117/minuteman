@@ -7,6 +7,8 @@ authors.workspace = true
 
 [dependencies]
 thiserror = "2.0.20"
+# Times shown in this machine's zone, for the Inspect plugin and the file lists.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
 proptest = "1.11"

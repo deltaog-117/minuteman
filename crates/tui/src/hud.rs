@@ -30,6 +30,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use shared::DirEntryInfo;
+pub use shared::format::format_size;
 use theming::{Action, Config};
 
 use crate::app::{ClipboardMode, Progress};
@@ -85,35 +86,6 @@ fn pad_left(s: &str, width: usize) -> String {
         "{}{fitted}",
         " ".repeat(width.saturating_sub(text_width(&fitted)))
     )
-}
-
-/// A byte count in at most five cells: `512B`, `1.2K`, `14K`, `3.4M`.
-pub fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
-    if bytes < 1024 {
-        return format!("{bytes}B");
-    }
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    // One decimal below 10, none above — and rounding up to 1024 must roll into the next unit
-    // rather than print "1024K".
-    let rounded = if value < 10.0 {
-        (value * 10.0).round() / 10.0
-    } else {
-        value.round()
-    };
-    if rounded >= 1024.0 && unit < UNITS.len() - 1 {
-        return format!("1.0{}", UNITS[unit + 1]);
-    }
-    if value < 10.0 {
-        format!("{rounded:.1}{}", UNITS[unit])
-    } else {
-        format!("{rounded:.0}{}", UNITS[unit])
-    }
 }
 
 /// How long ago `then` was, in at most three cells: `now`, `5m`, `2h`, `3d`, `4w`, `8mo`, `2y`.
@@ -326,7 +298,7 @@ pub fn plan_details_columns(inner_width: usize, gutter: usize) -> Columns {
 /// `2026-10-02 14:03` in this machine's time zone, or the glyph set's "none" mark for a missing
 /// time.
 pub fn modified_cell(time: Option<SystemTime>, none: &str) -> String {
-    cell_from(crate::inspect::format_time(time), none)
+    cell_from(shared::format::format_time(time), none)
 }
 
 /// [`modified_cell`] in a chosen zone, for tests that must not depend on the machine's.
@@ -336,7 +308,7 @@ where
     Tz: chrono::TimeZone,
     Tz::Offset: std::fmt::Display,
 {
-    cell_from(crate::inspect::format_in(time, zone), none)
+    cell_from(shared::format::format_in(time, zone), none)
 }
 
 fn cell_from(full: String, none: &str) -> String {
@@ -1121,25 +1093,6 @@ mod tests {
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
-    }
-
-    #[test]
-    fn sizes_stay_within_five_cells_and_never_print_1024() {
-        assert_eq!(format_size(0), "0B");
-        assert_eq!(format_size(1023), "1023B");
-        assert_eq!(format_size(1024), "1.0K");
-        assert_eq!(format_size(14 * 1024), "14K");
-        assert_eq!(format_size(1_048_575), "1.0M");
-        assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.0G");
-        // Up to just under 1 EiB — beyond any real file, and past the largest unit.
-        for exp in 0..60 {
-            let n = 1u64 << exp;
-            for bytes in [n - 1, n, n + 1] {
-                let s = format_size(bytes);
-                assert!(text_width(&s) <= 5, "{bytes} -> {s}");
-                assert!(!s.starts_with("1024"), "{bytes} -> {s}");
-            }
-        }
     }
 
     #[test]

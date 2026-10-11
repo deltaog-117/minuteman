@@ -1,0 +1,16 @@
+[package]
+name = "inspector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The Inspect panel Minuteman ships as a plugin: it describes one file, folder or link through the host and sends back the rows; the host draws them."
+
+[[bin]]
+name = "mman-inspect"
+path = "src/main.rs"
+
+[dependencies]
+plugin_api = { path = "../../crates/plugin_api" }
+shared = { path = "../../crates/shared" }
+serde_json = "1.0"

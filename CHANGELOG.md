@@ -57,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A startup notice, "the preview column is a plugin and mman-preview was not found", when the
   plugin is not installed and the user has not configured one of their own.
 
+- `plugin_api`: what an inspecting plugin and the host exchange. The `inspect` event names the
+  entry the Inspect panel is about (and is sent again with `null` when it closes); the `stat`
+  request describes one entry through the host's own paths (kind, size, link target, allocated
+  bytes, mode, owner and group ids, link count, times, and a `local_path` when the backend is the
+  local disk); the `tally` request starts counting what is below a folder and returns at once, the
+  count arriving as a `tally_done` event, with `tally_cancel` to stop it; the `set_inspect`
+  notification answers with the panel's rows. A plugin lists `provides = ["inspect"]` to be the
+  one. Rows are cleaned on arrival: control and direction-changing characters are removed, text
+  is cut to 32 characters a label and 1,024 a value, and more than 32 rows are refused.
+- `plugins/inspect` (`mman-inspect`), a sixth bundled plugin: the Inspect panel's rows, as before
+  but made by a plugin. It describes the entry with `stat`, counts a folder with `tally`, and sends
+  its rows at once and again when the count lands; opening another entry or closing the panel
+  stops the count. Install it with `cargo install --path plugins/inspect`.
+- `shared::format` (`format_size`, `mode_string`, `group_thousands`, `format_time`) and
+  `shared::tally` (`tally_dir`), which the interface and the Inspect plugin both use.
+
 ### Changed
 - Which files are pictures, and running `[[preview_hook]]` tables of kind `image`, moved out of
   `tui` into `plugins/preview` (`tui::preview_hook` is removed). The interface still decodes,
@@ -199,6 +215,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   program by its file name rather than its full path.
 - `tui`: a completed cut-and-paste now drops the marks on the files it moved, and only empties the
   clipboard when it still holds the cut that was just pasted.
+- The Inspect panel moved out of `tui` (`inspect.rs` is removed) into `plugins/inspect`. The
+  interface keeps the panel's frame, colors and keys and draws the rows the plugin sends. Without
+  `mman-inspect`, "Inspect" says how to get it and opens nothing. An entry that cannot be described
+  shows an `Error` row in the panel instead of a message on the status line. The panel shows
+  "loading…" until the first rows arrive.
+- `scripts/vfs-gate` allows `plugins/inspect/src/rows.rs` (this machine's `passwd` and `group`,
+  read only for a path the host says is on the local disk) in place of `crates/tui/src/inspect.rs`.
 
 ### Fixed
 - `tui`: the permanent-delete and trash confirmations now take a capital `Y` as well as `y`.

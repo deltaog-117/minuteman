@@ -22,10 +22,12 @@
 pub mod chooser;
 pub mod conformance;
 pub mod error;
+pub mod format;
 pub mod fuzzy;
 pub mod memory;
 pub mod mount;
 pub mod names;
+pub mod tally;
 pub mod vfs;
 
 pub use error::VfsError;

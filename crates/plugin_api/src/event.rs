@@ -22,9 +22,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    API_VERSION, Change, EVENT_ACTION, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_PREVIEW,
-    EVENT_WALK_BATCH, EVENT_WALK_DONE, Job, JobOutcome, PickerEvent, PreviewTarget, TreeEntry,
-    WalkEnd, WalkEvent,
+    API_VERSION, Change, EVENT_ACTION, EVENT_INSPECT, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
+    EVENT_PREVIEW, EVENT_TALLY_DONE, EVENT_WALK_BATCH, EVENT_WALK_DONE, InspectTarget, Job,
+    JobOutcome, PickerEvent, PreviewTarget, TallyDone, TreeEntry, WalkEnd, WalkEvent,
 };
 
 /// A host -> plugin line: always a notification, never expects a reply.
@@ -67,6 +67,12 @@ pub struct EventParams {
     /// On a `preview` event: the file the preview column is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<PreviewTarget>,
+    /// On an `inspect` event: the entry the Inspect panel is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspect: Option<InspectTarget>,
+    /// On a `tally_done` event: how a count the plugin asked for ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tally: Option<TallyDone>,
     /// Present on `dir_changed` and `selection_changed`; its `from` and `to` sit beside the
     /// other params. (A reader of a `job_finished` may see an empty one: go by `name`.)
     #[serde(default, flatten)]
@@ -94,6 +100,8 @@ impl HostEvent {
                 picker: None,
                 walk: None,
                 preview: None,
+                inspect: None,
+                tally: None,
                 change: None,
                 job: None,
             },
@@ -190,6 +198,20 @@ impl HostEvent {
     pub fn preview(path: Option<PathBuf>) -> Self {
         let mut event = Self::new(EVENT_PREVIEW, PathBuf::new(), Vec::new());
         event.params.preview = Some(PreviewTarget { path });
+        event
+    }
+
+    /// An `inspect` event: the Inspect panel is now about `path` (`None` when it closed).
+    pub fn inspect(path: Option<PathBuf>) -> Self {
+        let mut event = Self::new(EVENT_INSPECT, PathBuf::new(), Vec::new());
+        event.params.inspect = Some(InspectTarget { path });
+        event
+    }
+
+    /// A `tally_done` event: a count the plugin asked for has ended.
+    pub fn tally_done(done: TallyDone) -> Self {
+        let mut event = Self::new(EVENT_TALLY_DONE, PathBuf::new(), Vec::new());
+        event.params.tally = Some(done);
         event
     }
 

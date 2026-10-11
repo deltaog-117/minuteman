@@ -35,7 +35,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::hud::format_size;
-use crate::inspect::{Ending, TALLY_LIMIT, tally_dir};
+use shared::tally::{Ending, TALLY_LIMIT, tally_dir};
 
 /// What the marked entries add up to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

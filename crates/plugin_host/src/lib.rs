@@ -32,6 +32,7 @@ mod mailbox;
 mod picker;
 pub mod protocol;
 mod registry;
+mod tally;
 mod walk;
 
 pub use actions::ActionRequest;
@@ -40,5 +41,6 @@ pub use host::{ActionDispatch, LogMessage, PluginManager, Restart, Triggers};
 pub use life::{PluginInfo, PluginState};
 pub use picker::{PickerRequest, UiRequest};
 pub use protocol::{
-    API_VERSION, EventKind, JobOutcome, LogLevel, SetPreview, SetView, Slot, StateSnapshot,
+    API_VERSION, EventKind, JobOutcome, LogLevel, SetInspect, SetPreview, SetView, Slot,
+    StateSnapshot,
 };

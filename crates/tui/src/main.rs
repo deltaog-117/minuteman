@@ -46,7 +46,7 @@ mod grid_view;
 mod hex_dump;
 mod hud;
 mod image_preview;
-mod inspect;
+mod inspect_panel;
 mod line_edit;
 mod live_refresh;
 mod marked_size;
@@ -118,7 +118,7 @@ use disk_usage::DiskUsageView;
 use extract_popup::ExtractPopup;
 use file_ops::archive::Format;
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
-use inspect::InspectView;
+use inspect_panel::InspectPanel;
 use picker_popup::{Outcome as PickerOutcome, PickerPopup};
 use plugin_action::Browse;
 use plugin_api::{PreviewContent, SetPreview};
@@ -405,7 +405,7 @@ struct Overlay<'a> {
     /// The right-click menu, the Inspect panel and the settings popup, drawn last so they sit
     /// over everything.
     menu: Option<&'a ContextMenu>,
-    inspect: Option<&'a InspectView>,
+    inspect: Option<&'a InspectPanel>,
     /// The disk usage view, which covers the whole screen when open.
     usage: Option<&'a DiskUsageView>,
     /// The trash browser, which covers the whole screen when open.
@@ -439,7 +439,7 @@ struct Overlay<'a> {
 /// The panels a menu command can open, passed together so `run_menu_command` does not grow an
 /// argument for each one.
 struct Panels<'a> {
-    inspect: &'a mut Option<InspectView>,
+    inspect: &'a mut Option<InspectPanel>,
     usage: &'a mut Option<DiskUsageView>,
     appearance: &'a mut Option<AppearancePopup>,
     compress: &'a mut Option<CompressPopup>,
@@ -1368,7 +1368,7 @@ fn run(
     // closes, so nothing else has to know it exists.
     let mut menu: Option<ContextMenu> = None;
     // The Inspect panel while one is open; modal in the same way.
-    let mut inspect: Option<InspectView> = None;
+    let mut inspect: Option<InspectPanel> = None;
     // The disk usage view while one is open; modal, and drawn over the whole screen.
     let mut usage: Option<DiskUsageView> = None;
     // The trash browser while one is open; modal in the same way.
@@ -1421,8 +1421,11 @@ fn run(
         app.poll_bulk(browser, vfs)?;
         app.poll_search(browser, vfs);
         app.poll_nav(browser);
-        if let Some(view) = inspect.as_mut() {
-            view.poll();
+        if let Some(panel) = inspect.as_mut()
+            && panel.waiting()
+            && !app.inspector_running()
+        {
+            panel.mark_stopped();
         }
         if let Some(view) = usage.as_mut() {
             view.poll();
@@ -1451,6 +1454,11 @@ fn run(
                 }
                 UiRequest::SetView { plugin, set } => app.set_view(&plugin, set),
                 UiRequest::SetPreview { set, .. } => previews.accept(set),
+                UiRequest::SetInspect { set, .. } => {
+                    if let Some(panel) = inspect.as_mut() {
+                        panel.accept(set);
+                    }
+                }
                 UiRequest::Close {
                     plugin,
                     picker: number,
@@ -1911,6 +1919,7 @@ fn run(
                 }
                 if inspect.is_some() {
                     if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        app.end_inspect();
                         inspect = None;
                     }
                     continue;
@@ -2796,6 +2805,7 @@ fn run(
                         key.code,
                         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | 'i')
                     ) {
+                        app.end_inspect();
                         inspect = None;
                     }
                     continue;

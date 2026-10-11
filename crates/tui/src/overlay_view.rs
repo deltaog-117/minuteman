@@ -34,7 +34,7 @@ use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
 use crate::extract_popup::{ExtractPopup, Row as ExtractRow};
 use crate::glyphs;
 use crate::hud::{fit_width, pad_to, text_width};
-use crate::inspect::InspectView;
+use crate::inspect_panel::InspectPanel;
 use crate::settings_popup::{SettingsPopup, SettingsView};
 use crate::style;
 
@@ -508,7 +508,7 @@ fn fit_tail(text: &str, width: usize) -> String {
 }
 
 /// Draws the Inspect panel for `view` in the middle of the screen.
-pub fn render_inspect(frame: &mut Frame<'_>, view: &InspectView, config: &Config) {
+pub fn render_inspect(frame: &mut Frame<'_>, view: &InspectPanel, config: &Config) {
     let theme = &config.theme;
     let rows = view.rows();
     let area = panel_area(frame.area(), rows.len());
@@ -1212,18 +1212,23 @@ mod tests {
     }
 
     #[test]
-    fn the_inspect_panel_draws_the_rows_for_a_real_file() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let dir = std::env::temp_dir().join(format!("minuteman-overlay-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("note.txt"), b"hello").unwrap();
-        let view = InspectView::open(
-            runtime.handle(),
-            std::sync::Arc::new(shared::LocalVfs),
-            &dir.join("note.txt"),
-        )
-        .unwrap();
+    fn the_inspect_panel_draws_the_rows_the_plugin_sent() {
+        let mut view = InspectPanel::open(std::path::Path::new("/d/note.txt"));
+        let rows = [
+            ("Name", "note.txt"),
+            ("Permissions", "-rw-r--r-- (0644)"),
+            ("Modified", "2023-11-14 22:13:20 +00:00"),
+            ("Size", "5B (5 bytes)"),
+        ];
+        assert!(
+            view.accept(plugin_host::protocol::SetInspect {
+                path: "/d/note.txt".into(),
+                rows: rows
+                    .iter()
+                    .map(|(l, v)| ((*l).to_string(), (*v).to_string()))
+                    .collect(),
+            })
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
@@ -1238,6 +1243,19 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected}:\n{text}");
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_inspect_panel_waiting_for_its_rows_says_so() {
+        let view = InspectPanel::open(std::path::Path::new("/d/note.txt"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_inspect(frame, &view, &config()))
+            .unwrap();
+        let text = screen_text(&terminal);
+        assert!(
+            text.contains("inspect: note.txt") && text.contains("loading…"),
+            "{text}"
+        );
     }
 }

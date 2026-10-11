@@ -92,6 +92,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-11 | Core and Bundled Plugins | Move features out one at a time into bundled plugins, starting with a scaffold that changes no behavior (COA C: in-process traits and the plugin protocol); in-process traits alone (A) and everything over the protocol (B) not taken | ✅ Confirmed |
 | 2026-10-11 | Fuzzy Finder as a Plugin | The interface walks the tree and draws the list, the plugin ranks (COA B); a plugin that walks the tree itself through `read_dir` (A) and keeping the finder in-process behind a trait (C) not taken | ✅ Confirmed |
 | 2026-10-11 | Structured Search Plugin | A second bundled plugin on the picker slot, filters over the walk (COA C, delivered as B first); `/` and `f` kept as they are; content search (A) deferred | ✅ Confirmed |
+| 2026-10-11 | Inspect as a Plugin | A `stat` request, a `tally` job and a `set_inspect` document, rows worded by the plugin (COA A); a plugin that only formats what the core gathered (B) and a generic multi-line pane view (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -7151,6 +7152,59 @@ image hook turned a `.xyz` file into a green picture, a failing hook and a text 
 drew the name and the text, moving back redrew the first picture, nothing was left in the
 temporary folder, and an `mman` copied alone showed names and the notice. Not run: a real kitty,
 a remote host, and Inspect (not moved).
+
+---
+
+## 2026-10-11 — Inspect becomes a plugin (M4b, last part)
+
+**Context.** The Inspect panel was the one piece of M4b left in the core. Moving it meant a
+plugin could describe an entry that may live on ssh or in an archive, where a plugin has only
+`read_file`, and could count a folder, which takes seconds on a big tree.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A `stat` host request plus an `inspect` document; the plugin words the rows | Chosen |
+| B | The core gathers the metadata; a plugin only formats and orders the rows | Rejected: the plugin would barely do anything, and the `lstat` and the walk would stay in the core |
+| C | A generic multi-line pane view the core fills from a plugin's layout | Rejected: still gathers in the core, and needs a view type that does not exist yet |
+
+**Decision.** Three new wire pieces in `plugin_api::inspect`: `stat` (answered by the host from
+`symlink_metadata`, `read_link`, `exists` and `local_path`, with owner and group left as ids so the
+plugin names them only when `local_path` says they are this machine's), `tally` with its
+`tally_cancel` and `tally_done`, and `set_inspect` with the rows. The plugin is a state machine over
+lines (`Session`), tested without any stream, with a thin loop (`run`) and a process test that plays
+the host against the real program. `tui` keeps `InspectPanel` (the entry, the last rows, a
+placeholder) and the drawing.
+
+**Departures from the plan.** (1) I meant to count a folder with the host's existing `walk` and
+metadata, so no new request was needed. Reading `browser::finder::walk` showed it follows symlinks
+(its listing uses `stat`), stops at 16 levels and 200,000 entries, and drops unreadable folders:
+the panel's numbers would have changed and a link loop would have been counted 16 deep. So the
+count stayed the one `tally_dir` the marked-size pill uses, moved to `shared::tally`, and became a
+request of its own. (2) A request the host awaits inline would hold up the plugin's reader for the
+whole count, including its own `tally_cancel`. `tally` therefore returns at once and ends with an
+event, the way `walk` does, with a `Tallies` registry shaped like `Walks`. (3) The formatting
+helpers (`format_size`, `mode_string`, `group_thousands`, times) are used by both the lists and the
+plugin, so they moved to `shared::format` (which gained the `chrono` dependency) rather than being
+copied; `hud` re-exports `format_size` so its callers did not change. (4) A failed `stat` used to
+set a status-line message; the plugin has no way to set one, so the panel shows an `Error` row
+instead, which also means the panel never waits for ever.
+
+**Trade-offs.** One more process on a fresh install, and "Inspect" now does nothing but say where
+to get the plugin when it is missing (the status line cuts that message at 120 columns, as the
+finder's already does). The biggest file (`largest`) is not on the wire since nothing in the panel
+used it. Rows arrive twice for a folder (counting, then totals) and the second replaces the first;
+the interface drops rows for any entry but the one it is open on.
+
+**Verification.** `scripts/check` passes. New tests: the wire shapes and a property test that
+cleaned rows never hold unsafe characters or exceed their limits; `stat` against a memory backend
+(sizes, allocated bytes, links, a broken link) and the local disk (`local_path`); the `tally` job
+(totals, a refused repeat, a stop); the plugin's rows for each kind of entry, its session (a stale
+reply dropped, a count stopped by the next entry or by closing, a failure shown), and the real
+`mman-inspect` process. The real `mman` was driven over a PTY read through `pyte`: a file's panel
+(type, size, permissions, owner), a folder counted to `3 files, 1 folders, 18B`, a link, a broken
+link, reopening, the plugin process running, and an `mman` copied alone showing where to get the
+plugin while the browser stayed responsive. Not run: a real kitty, an ssh folder, and the inside
+of an archive.
 
 ---
 

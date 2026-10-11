@@ -34,7 +34,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::runtime::Handle;
 
 use crossterm::event::KeyCode;
-use plugin_api::{ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_PREVIEW, ReadFile};
+use plugin_api::{
+    ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_INSPECT, PROVIDES_PREVIEW, ReadFile, Stat,
+    StatKind, StatReply,
+};
 use serde_json::json;
 use shared::{FileKind, LocalVfs, Vfs};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -52,6 +55,7 @@ use crate::protocol::{
     WireEntry,
 };
 use crate::registry::SharedRegistry;
+use crate::tally::Tallies;
 use crate::walk::Walks;
 
 /// One line to show the user, from a plugin's own `log` notification or the host's diagnostics
@@ -561,6 +565,42 @@ impl PluginManager {
         })
     }
 
+    /// Tells the plugin that provides `inspect` which entry the Inspect panel is about (`None`
+    /// when the panel closed, so a count under way can stop). Returns whether a plugin got it:
+    /// `false` when none provides `inspect`, or the one that does cannot be started, so the
+    /// interface can say where to get it instead of waiting for rows that will not come.
+    pub fn dispatch_inspect(&mut self, path: Option<&Path>) -> bool {
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins.iter_mut().find(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_INSPECT)
+        }) else {
+            return false;
+        };
+        if !plugin.ready_for_event(logs_tx, state_tx) {
+            return false;
+        }
+        let event = protocol::HostEvent::inspect(path.map(Path::to_path_buf));
+        plugin.process.stdin_tx.send(event.to_line()).is_ok()
+    }
+
+    /// Whether a plugin that provides `inspect` has a live process right now. Rows that were
+    /// being made when that process died will never come, which the interface can tell by this.
+    pub fn inspector_running(&self) -> bool {
+        self.plugins.iter().any(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_INSPECT)
+                && p.process.life.exit() == Exit::Running
+        })
+    }
+
     /// Tells `plugin` that what is typed into its picker is now `text`. `generation` rises with
     /// every change, and the plugin's `picker_items` carry the one they answer. Nothing is sent to
     /// a plugin whose process has ended; the interface notices that through `is_running`.
@@ -806,6 +846,7 @@ async fn read_loop(
         ui,
     } = wiring;
     let walks = Arc::new(Walks::default());
+    let tallies = Arc::new(Tallies::default());
     let mut lines = BufReader::new(stdout).lines();
     loop {
         let next = match lines.next_line().await {
@@ -836,7 +877,9 @@ async fn read_loop(
             Ok(Incoming::PickerClose(close)) => ui.close(&plugin, close.picker),
             Ok(Incoming::SetView(set)) => ui.set_view(&plugin, set),
             Ok(Incoming::SetPreview(set)) => ui.set_preview(&plugin, set),
+            Ok(Incoming::SetInspect(set)) => ui.set_inspect(&plugin, set),
             Ok(Incoming::WalkCancel(cancel)) => walks.cancel(cancel.walk),
+            Ok(Incoming::TallyCancel(cancel)) => tallies.cancel(cancel.tally),
             Ok(Incoming::UnknownNotification) => {}
             Ok(Incoming::Request { id, request }) => {
                 let reply = match request {
@@ -860,10 +903,26 @@ async fn read_loop(
                             .start(&handle, Arc::clone(&vfs), request, stdin_tx.clone())
                             .map(|()| json!({ "walk": number }))
                     }
+                    PluginRequest::Tally(request) => {
+                        let number = request.tally;
+                        tallies
+                            .start(&handle, Arc::clone(&vfs), request, stdin_tx.clone())
+                            .map(|()| json!({ "tally": number }))
+                    }
                     PluginRequest::ReadFile(read) => {
                         let vfs = Arc::clone(&vfs);
                         match handle
                             .spawn_blocking(move || read_chunk(vfs.as_ref(), &read))
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => Err(format!("request task panicked: {e}")),
+                        }
+                    }
+                    PluginRequest::Stat(stat) => {
+                        let vfs = Arc::clone(&vfs);
+                        match handle
+                            .spawn_blocking(move || stat_entry(vfs.as_ref(), &stat))
                             .await
                         {
                             Ok(result) => result,
@@ -895,6 +954,7 @@ async fn read_loop(
     }
     // The process is gone (or its output is): nobody is left to read what its walks find.
     walks.cancel_all();
+    tallies.cancel_all();
 }
 
 /// Waits out the process so `kill_on_drop` has something alive to act on for its whole lifetime,
@@ -1004,7 +1064,9 @@ fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
         | PluginRequest::ListActions
         | PluginRequest::ShowPicker(_)
         | PluginRequest::Walk(_)
-        | PluginRequest::ReadFile(_) => Err("answered by the host's reader, not here".to_string()),
+        | PluginRequest::ReadFile(_)
+        | PluginRequest::Stat(_)
+        | PluginRequest::Tally(_) => Err("answered by the host's reader, not here".to_string()),
         PluginRequest::ReadDir { path } => vfs
             .list_dir(&path)
             .map(|entries| json!(entries.iter().map(WireEntry::from).collect::<Vec<_>>()))
@@ -1066,6 +1128,41 @@ fn read_chunk(vfs: &dyn Vfs, request: &ReadFile) -> Result<serde_json::Value, St
     .map_err(|e| e.to_string())
 }
 
+/// Answers a `stat`: the entry itself, not what a final symlink points at, with every field the
+/// backend has. Owner and group stay numbers; the plugin names them only when `local_path` says
+/// they are this machine's.
+fn stat_entry(vfs: &dyn Vfs, request: &Stat) -> Result<serde_json::Value, String> {
+    let path = request.path.as_path();
+    let meta = vfs.symlink_metadata(path).map_err(|e| e.to_string())?;
+    let kind = match meta.kind {
+        FileKind::File => StatKind::File,
+        FileKind::Dir => StatKind::Dir,
+        FileKind::Symlink => StatKind::Symlink,
+        FileKind::Other => StatKind::Other,
+    };
+    let is_link = kind == StatKind::Symlink;
+    let seconds = |time: Option<std::time::SystemTime>| {
+        time.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_secs())
+    };
+    serde_json::to_value(StatReply {
+        kind,
+        size: meta.len,
+        link_target: is_link.then(|| vfs.read_link(path).ok()).flatten(),
+        link_broken: is_link && !vfs.exists(path),
+        allocated: meta.allocated,
+        mode: meta.mode,
+        uid: meta.uid,
+        gid: meta.gid,
+        nlink: meta.nlink,
+        modified: seconds(meta.modified),
+        accessed: seconds(meta.accessed),
+        created: seconds(meta.created),
+        local_path: vfs.local_path(path),
+    })
+    .map_err(|e| e.to_string())
+}
+
 fn state_json(state: &StateSnapshot) -> serde_json::Value {
     serde_json::to_value(state).expect("a snapshot of plain strings and paths always serializes")
 }
@@ -1090,6 +1187,8 @@ mod tests {
         assert!(!manager.dispatch_key(KeyCode::Char('x'), Path::new("/"), &[]));
         assert!(!manager.dispatch_command("x", Vec::new(), Path::new("/"), &[]));
         assert!(!manager.dispatch_named("x", Vec::new(), Path::new("/"), &[]));
+        assert!(!manager.dispatch_inspect(Some(Path::new("/a"))));
+        assert!(!manager.inspector_running());
         assert!(manager.names().is_empty());
         assert!(manager.is_empty());
         assert!(manager.take_action().is_none());
@@ -1118,6 +1217,56 @@ mod tests {
         assert_eq!(past_the_end.data, b"89");
         let beyond = chunk(&vfs, "/f.txt", 50, 5).expect("readable");
         assert!(beyond.data.is_empty());
+    }
+
+    fn stat(vfs: &dyn Vfs, path: &str) -> Result<StatReply, String> {
+        let request = Stat {
+            path: PathBuf::from(path),
+        };
+        stat_entry(vfs, &request).map(|value| serde_json::from_value(value).expect("a reply"))
+    }
+
+    #[test]
+    fn stat_describes_a_file_and_a_folder_with_what_the_backend_has() {
+        let vfs = shared::MemVfs::new();
+        vfs.add_dir("/d");
+        vfs.add_file("/d/f", vec![0u8; 5000]);
+
+        let file = stat(&vfs, "/d/f").expect("described");
+        assert_eq!((file.kind, file.size), (StatKind::File, 5000));
+        assert_eq!((file.allocated, file.nlink), (Some(8192), Some(1)));
+        assert_eq!(
+            file.local_path, None,
+            "a memory backend is not the local disk"
+        );
+        assert_eq!(stat(&vfs, "/d").expect("described").kind, StatKind::Dir);
+        assert!(stat(&vfs, "/nowhere").is_err());
+    }
+
+    #[test]
+    fn stat_describes_a_link_as_a_link_and_says_when_it_is_broken() {
+        let vfs = shared::MemVfs::new();
+        vfs.add_file("/d/real", b"x".to_vec());
+        vfs.add_symlink("/d/ok", "/d/real");
+        vfs.add_symlink("/d/dangling", "/d/missing");
+
+        let ok = stat(&vfs, "/d/ok").expect("described");
+        assert_eq!(ok.kind, StatKind::Symlink);
+        assert_eq!(ok.link_target, Some(PathBuf::from("/d/real")));
+        assert!(!ok.link_broken);
+        let dangling = stat(&vfs, "/d/dangling").expect("described");
+        assert_eq!(dangling.link_target, Some(PathBuf::from("/d/missing")));
+        assert!(dangling.link_broken);
+    }
+
+    #[test]
+    fn stat_on_the_local_disk_names_the_same_path_for_the_plugin() {
+        let dir = std::env::temp_dir().join(format!("mman-stat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reply = stat(&LocalVfs, &dir.to_string_lossy()).expect("described");
+        assert_eq!(reply.local_path, Some(dir.clone()));
+        assert!(reply.uid.is_some() && reply.modified.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

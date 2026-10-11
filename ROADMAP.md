@@ -1874,7 +1874,7 @@ draws.
   a slot is a pane; an unfound `mman-git` is silent (the finder and search say how to get theirs,
   but nothing is pressed here to say it on); slots are not yet reachable by a user plugin's
   config.
-- [ ] **M4b – more slots, then the pane:** `header_pill` (marked size, the system HUD) and
+- [x] **M4b – more slots, then the pane:** `header_pill` (marked size, the system HUD) and
   `entry_badge` (a mark in the list for git), then `preview_pane` (text, hex, images, thumbnails)
   and inspect, which need a scrollable multi-line view and a way to hand an image to the interface.
   - [x] `header_pill`, with the system figures (uptime, load, memory) as `plugins/hud`. The marked
@@ -1947,10 +1947,35 @@ draws.
     picture is still decoded by the interface, so a very large image costs the interface that
     decode on a blocking thread, as before; the filmstrip, grid and tile views keep their own
     thumbnail cache in the core (they are alternate views, M7); not tried in a real kitty.
-  - [ ] Inspect (the modal panel and the folder tally behind it), which needs a scrollable
-    multi-line view and the owner, on-disk size and link count that only a local path has (`Vfs`
-    carries them, `read_file` does not). The thumbnail cache (`thumbnails`) goes with the
-    alternate views in M7.
+  - [x] Inspect, as `plugins/inspect` (`mman-inspect`). The interface names the entry the panel
+    opens on (the new `inspect` event, sent to the plugin that `provides = ["inspect"]`, and again
+    with `null` when the panel closes); the plugin describes it with the new `stat` request, which
+    the host answers from whatever serves the path (`symlink_metadata`, `read_link`, the owner and
+    group ids and a `local_path` that says whether they are this machine's), starts a folder's
+    count with the new `tally` request, and sends the rows as `set_inspect`, at once with
+    "counting…" and again when the count lands. `tally` returns at once and ends with a
+    `tally_done` event (cancelled by `tally_cancel`), like `walk`, because a count that takes
+    seconds must not hold up the plugin's other requests or its own cancel. The count is the same
+    `tally_dir` the marked-size pill uses (moved to `shared::tally`), so a folder's panel and the
+    header's total are one number. The row wording, the owner lookup and the count labels moved
+    with the plugin; `format_size`, `mode_string`, `group_thousands` and the time formatting moved
+    to `shared::format` since the lists and the plugin both print them. `tui` keeps only the
+    panel's state (`InspectPanel`: the entry, the last rows, a "loading…" placeholder) and its
+    drawing. Chosen as COA A (a `stat` request and an `inspect` document) over a plugin that only
+    formats what the core gathered (B) and a generic multi-line pane view (C). Rows are cleaned
+    on arrival (control and direction characters removed, at most 32 rows, 32-character labels,
+    1,024-character values). Without `mman-inspect`, "Inspect" says how to get it and opens
+    nothing; an entry that cannot be described shows an `Error` row instead of a status-line
+    message; a plugin that dies before answering ends the "loading…". Property-tested: nothing
+    unsafe or over-long survives cleaning, and cleaning twice changes nothing. Verified against the
+    real `mman` over a PTY read through `pyte`: a file's panel (type, size, permissions, owner), a
+    folder's count (`3 files, 1 folders, 18B`), a link, a broken link and reopening, and an `mman`
+    copied alone saying where to get the plugin and still browsing.
+    Follow-ups: the status line cuts the "how to get it" message at 120 columns; a folder shows
+    "counting…" with no progress until the count ends; `largest` (the biggest file) is not on the
+    wire, as nothing in the panel used it; not tried in a real kitty, nor on an ssh folder or inside
+    an archive (the host's `stat` is covered by tests on a memory backend). The thumbnail cache
+    (`thumbnails`) goes with the alternate views in M7.
 - [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave
   `file_ops`; trash management (the trash view, restore, empty) becomes a plugin while moving a
   file to the trash stays in the core.
@@ -2260,9 +2285,13 @@ draws.
    from a checkout `cargo build -p git`), and `cargo install --path plugins/preview`
    (`mman-preview`, which the preview column's text, hex dump, archive listing and pictures now
    need; from
-   a checkout `cargo build -p previewer`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
+   a checkout `cargo build -p previewer`), and `cargo install --path plugins/inspect`
+   (`mman-inspect`, which the Inspect panel now needs; from a checkout `cargo build -p inspector`).
+   Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the newest: `mman --chooser-file /tmp/pick --pick save --pick-name x.txt`, press `Q`, `Enter`,
+1. `cargo run -p tui` — the newest: right-click a file and pick Inspect (then a folder: its row
+   says "counting…" and fills in), and `Esc` closes it; with `mman-inspect` missing it says where to
+   get it. Before that: `mman --chooser-file /tmp/pick --pick save --pick-name x.txt`, press `Q`, `Enter`,
    and `cat /tmp/pick` (the saved path; `--pick files` with `v` marks and `Q` picks several; `q` leaves it empty).
    To try it from a browser, see "File chooser for browsers" in the README. Before that: mark two files with `v`, go into another folder and press `d`
    (they move there; `y` copies), then press `x` or `X` with nothing marked to delete the row under
