@@ -36,7 +36,7 @@ use tokio::runtime::Handle;
 use crossterm::event::KeyCode;
 use plugin_api::{
     ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_ARCHIVE, PROVIDES_DEVICES, PROVIDES_INSPECT,
-    PROVIDES_PREVIEW, ReadFile, Stat, StatKind, StatReply,
+    PROVIDES_PREVIEW, PROVIDES_VFS_ARCHIVE, ReadFile, Stat, StatKind, StatReply,
 };
 use serde_json::json;
 use shared::{FileKind, LocalVfs, Vfs};
@@ -55,6 +55,7 @@ use crate::protocol::{
     WireEntry,
 };
 use crate::registry::SharedRegistry;
+use crate::serve::{Pending, ServeLink};
 use crate::tally::Tallies;
 use crate::walk::Walks;
 
@@ -87,6 +88,8 @@ struct RunningPlugin {
     actions: ActionLink,
     vfs: Arc<dyn Vfs>,
     ui: UiLink,
+    /// Set for a plugin that answers for paths: each process it has is attached to this.
+    serve: Option<Arc<ServeLink>>,
     process: Process,
     /// Crashes in a row, each soon after starting (see `life::after_crash`).
     crashes: u32,
@@ -169,6 +172,7 @@ impl RunningPlugin {
                 actions: self.actions.clone(),
                 vfs: Arc::clone(&self.vfs),
                 ui: self.ui.clone(),
+                serve: self.serve.clone(),
             },
         )?;
         self.restarts += 1;
@@ -240,6 +244,8 @@ struct Wiring {
     /// What a `walk` request reads through: the same paths the browser shows.
     vfs: Arc<dyn Vfs>,
     ui: UiLink,
+    /// The link to attach the process to, when the plugin answers for paths.
+    serve: Option<Arc<ServeLink>>,
 }
 
 /// How `PluginManager::restart` went.
@@ -301,6 +307,8 @@ pub struct PluginManager {
     ui_rx: UnboundedReceiver<UiRequest>,
     /// What a plugin's `walk` reads through. The local disk until the interface says otherwise.
     vfs: Arc<dyn Vfs>,
+    /// The way to the plugin that answers for the paths inside archives.
+    serve: Arc<ServeLink>,
     /// Whether the interface has published at least once; the first publish is the browser
     /// arriving, not a change, so it fires no event.
     published: AtomicBool,
@@ -322,6 +330,7 @@ impl Default for PluginManager {
             ui: UiLink::new(ui_tx),
             ui_rx,
             vfs: Arc::new(LocalVfs),
+            serve: ServeLink::new(),
             published: AtomicBool::new(false),
         }
     }
@@ -365,6 +374,11 @@ impl PluginManager {
             }
         }
 
+        let serve = triggers
+            .actions
+            .iter()
+            .any(|provided| provided == PROVIDES_VFS_ARCHIVE)
+            .then(|| Arc::clone(&self.serve));
         let process = start(
             handle,
             name,
@@ -378,6 +392,7 @@ impl PluginManager {
                 actions: self.actions.clone(),
                 vfs: Arc::clone(&self.vfs),
                 ui: self.ui.clone(),
+                serve: serve.clone(),
             },
         )?;
         self.plugins.push(RunningPlugin {
@@ -392,6 +407,7 @@ impl PluginManager {
             actions: self.actions.clone(),
             vfs: Arc::clone(&self.vfs),
             ui: self.ui.clone(),
+            serve,
             process,
             crashes: 0,
             restarts: 0,
@@ -485,6 +501,24 @@ impl PluginManager {
     /// (the local disk until this is called). Call before spawning, like `declare_actions`.
     pub fn set_vfs(&mut self, vfs: Arc<dyn Vfs>) {
         self.vfs = vfs;
+    }
+
+    /// The way to the plugin that answers for the paths inside archives, for the `Vfs` that sends
+    /// them there. Hand it to that `Vfs` before the plugin is spawned: it is attached to each
+    /// process of the plugin as it starts, and says the plugin is unavailable until then.
+    pub fn serve_link(&self) -> Arc<ServeLink> {
+        Arc::clone(&self.serve)
+    }
+
+    /// Uses `link` as the way to the plugin that answers for the paths inside archives, for a
+    /// `Vfs` that was built with it before this manager existed. Call before spawning.
+    pub fn set_serve_link(&mut self, link: Arc<ServeLink>) {
+        self.serve = link;
+    }
+
+    /// Whether a plugin that answers for the paths inside archives is running right now.
+    pub fn serves_archives(&self) -> bool {
+        self.serve.is_running()
     }
 
     /// Hands the action `name` to the plugin that provides it (the first configured with that
@@ -874,9 +908,28 @@ impl PluginManager {
         self.plugins.iter().map(|p| p.name.as_str()).collect()
     }
 
+    /// Starts again a plugin that answers for paths and whose process has ended. Nothing else is
+    /// ever meant for such a plugin to wake it, and the interface waits on it in the middle of a
+    /// listing, so it is not left to the next key press; the usual limit on crashes in a row
+    /// applies (see `life`), after which only `restart` brings it back.
+    fn revive_servers(&mut self) {
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        for plugin in plugins.iter_mut().filter(|p| p.serve.is_some()) {
+            if plugin.process.life.exit() != Exit::Running {
+                plugin.ensure_alive(logs_tx, state_tx, false);
+            }
+        }
+    }
+
     /// Drains every plugin's pending log lines. Call once per render tick; the caller decides
     /// what to do with each one (the TUI folds it into the status bar).
     pub fn poll(&mut self) -> Vec<LogMessage> {
+        self.revive_servers();
         let mut messages = Vec::new();
         while let Ok(message) = self.logs_rx.try_recv() {
             messages.push(message);
@@ -924,6 +977,7 @@ async fn read_loop(
     plugin: String,
     stdout: ChildStdout,
     stdin_tx: UnboundedSender<String>,
+    pending: Arc<Pending>,
     wiring: Wiring,
     handle: tokio::runtime::Handle,
 ) {
@@ -934,6 +988,7 @@ async fn read_loop(
         actions,
         vfs,
         ui,
+        serve: _,
     } = wiring;
     let walks = Arc::new(Walks::default());
     let tallies = Arc::new(Tallies::default());
@@ -974,6 +1029,7 @@ async fn read_loop(
             Ok(Incoming::ArchiveDone(done)) => ui.archive_done(&plugin, done),
             Ok(Incoming::WalkCancel(cancel)) => walks.cancel(cancel.walk),
             Ok(Incoming::TallyCancel(cancel)) => tallies.cancel(cancel.tally),
+            Ok(Incoming::Response { id, outcome }) => pending.answer(&id, outcome),
             Ok(Incoming::UnknownNotification) => {}
             Ok(Incoming::Request { id, request }) => {
                 let reply = match request {
@@ -1046,7 +1102,9 @@ async fn read_loop(
             }
         }
     }
-    // The process is gone (or its output is): nobody is left to read what its walks find.
+    // The process is gone (or its output is): nobody is left to read what its walks find, and
+    // nothing will answer what the host asked of it.
+    pending.fail_all();
     walks.cancel_all();
     tallies.cancel_all();
 }
@@ -1124,12 +1182,15 @@ fn start(
     let (stdin_tx, stdin_rx) = unbounded_channel::<String>();
     let mailbox = Arc::new(Mailbox::default());
     let life = Life::new();
+    let pending = Arc::new(Pending::default());
+    let serve = wiring.serve.clone();
 
     handle.spawn(write_loop(stdin, stdin_rx, Arc::clone(&mailbox)));
     handle.spawn(read_loop(
         name.to_string(),
         stdout,
         stdin_tx.clone(),
+        Arc::clone(&pending),
         wiring,
         handle.clone(),
     ));
@@ -1137,6 +1198,10 @@ fn start(
 
     let init = protocol::HostEvent::new(protocol::EVENT_INIT, cwd.to_path_buf(), Vec::new());
     let _ = stdin_tx.send(init.to_line());
+    // After `init`, so the first thing the process reads is still the event it expects.
+    if let Some(serve) = serve {
+        serve.attach(stdin_tx.clone(), pending, Arc::clone(&life));
+    }
 
     Ok(Process {
         stdin_tx,
@@ -1216,6 +1281,10 @@ fn read_chunk(vfs: &dyn Vfs, request: &ReadFile) -> Result<serde_json::Value, St
     serde_json::to_value(FileChunk {
         kind,
         size: meta.len,
+        modified: meta
+            .modified
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_secs()),
         local_path: vfs.local_path(&request.path),
         data,
     })

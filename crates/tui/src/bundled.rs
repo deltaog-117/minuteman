@@ -96,13 +96,14 @@ const BUNDLED: [Bundled; 8] = [
             install it with `cargo install --path plugins/inspect` (next to mman, or on PATH)",
     },
     // Provides the `archive` role: the interface names the work (compress or extract) and the
-    // plugin does it on the local disk, reporting each entry and how the request ended.
+    // plugin does it on the local disk, reporting each entry and how the request ended. It also
+    // provides `vfs-archive`: the paths inside an archive are answered by this plugin.
     Bundled {
         name: "archive",
         binary: "mman-archive",
-        provides: &["archive"],
+        provides: &["archive", "vfs-archive"],
         events: &[],
-        how_to_get: "compressing and extracting are a plugin and mman-archive was not found; \
+        how_to_get: "archives are a plugin and mman-archive was not found; \
             install it with `cargo install --path plugins/archive` (next to mman, or on PATH)",
     },
     // Provides the `devices` role: the interface says when the deck's rail is showing and which
@@ -356,7 +357,7 @@ mod tests {
             .find(|spec| spec.name == "archive")
             .expect("bundled");
         assert_eq!(archive.command, "/opt/bin/mman-archive");
-        assert_eq!(archive.provides, ["archive"]);
+        assert_eq!(archive.provides, ["archive", "vfs-archive"]);
         assert!(missing("archive").contains("mman-archive"));
     }
 

@@ -61,7 +61,7 @@ pub use plugin_api::{
     EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job, JobOutcome, Line, LogLevel, PickerClose,
     PickerIndexing, PickerSpec, PickerUpdate, ReadFile, SetDevices, SetInspect, SetPreview,
     SetView, Slot, Span, Stat, StateSnapshot, TallyCancel, TallyDone, TallyEnding, TallyRequest,
-    Tone, TreeEntry, View, WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
+    Tone, TreeEntry, VfsFault, View, WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
 };
 use plugin_api::{
     METHOD_ARCHIVE_DONE, METHOD_ARCHIVE_PROGRESS, METHOD_DEVICES_NOTE, METHOD_PICKER_CLOSE,
@@ -335,6 +335,12 @@ pub enum Incoming {
     /// The plugin said what an action on a device came to; already cleaned by
     /// `DevicesNote::checked`. A note that cannot be shown safely is ignored.
     DevicesNote(DevicesNote),
+    /// The plugin answered a request the host made of it (see `plugin_api::VfsRequest`): the
+    /// `id` it was sent under and what came of it.
+    Response {
+        id: Value,
+        outcome: Result<Value, VfsFault>,
+    },
     /// A well-formed notification (no `id`) whose method isn't one of the above — ignored rather than
     /// treated as an error, so a plugin can send something a future host version understands
     /// without breaking against this one.
@@ -354,9 +360,25 @@ pub struct LineError {
 struct RawIncoming {
     #[serde(default)]
     id: Option<Value>,
-    method: String,
+    /// Absent on a reply to a request the host made.
+    #[serde(default)]
+    method: Option<String>,
     #[serde(default)]
     params: Value,
+    #[serde(default)]
+    result: Option<Value>,
+    #[serde(default)]
+    error: Option<RawFault>,
+}
+
+/// The `error` of a reply: the words, and when the plugin could say why in a way the host can act
+/// on, that too.
+#[derive(Debug, Deserialize)]
+struct RawFault {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    data: Option<VfsFault>,
 }
 
 /// Parses one line of a plugin's stdout.
@@ -366,7 +388,28 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
         message: format!("malformed JSON: {e}"),
     })?;
 
-    if raw.method == "log" {
+    let Some(method) = raw.method.clone() else {
+        // No method: either the answer to a request the host made, or nothing the host knows.
+        return match (raw.id, raw.result, raw.error) {
+            (Some(id), _, Some(error)) => Ok(Incoming::Response {
+                id,
+                outcome: Err(error.data.unwrap_or(VfsFault::Io {
+                    kind: plugin_api::IoKind::Other,
+                    message: error.message,
+                })),
+            }),
+            (Some(id), Some(result), None) => Ok(Incoming::Response {
+                id,
+                outcome: Ok(result),
+            }),
+            _ => Err(LineError {
+                id: None,
+                message: "malformed JSON: missing field `method`".to_string(),
+            }),
+        };
+    };
+
+    if method == "log" {
         let params: LogParams = serde_json::from_value(raw.params).map_err(|e| LineError {
             id: raw.id.clone(),
             message: format!("invalid log params: {e}"),
@@ -380,9 +423,9 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
     if raw.id.is_none() {
         let bad = |e: serde_json::Error| LineError {
             id: None,
-            message: format!("invalid params for '{}': {e}", raw.method),
+            message: format!("invalid params for '{}': {e}", method),
         };
-        match raw.method.as_str() {
+        match method.as_str() {
             METHOD_PICKER_ITEMS => {
                 return serde_json::from_value(raw.params)
                     .map(Incoming::PickerItems)
@@ -410,7 +453,7 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map(Incoming::SetView)
                     .map_err(|e| LineError {
                         id: None,
-                        message: format!("refused '{}': {e}", raw.method),
+                        message: format!("refused '{}': {e}", method),
                     });
             }
             METHOD_SET_PREVIEW => {
@@ -420,7 +463,7 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map(Incoming::SetPreview)
                     .map_err(|e| LineError {
                         id: None,
-                        message: format!("refused '{}': {e}", raw.method),
+                        message: format!("refused '{}': {e}", method),
                     });
             }
             METHOD_SET_INSPECT => {
@@ -430,7 +473,7 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map(Incoming::SetInspect)
                     .map_err(|e| LineError {
                         id: None,
-                        message: format!("refused '{}': {e}", raw.method),
+                        message: format!("refused '{}': {e}", method),
                     });
             }
             METHOD_SET_DEVICES => {
@@ -458,7 +501,7 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map(Incoming::ArchiveDone)
                     .map_err(|e| LineError {
                         id: None,
-                        message: format!("refused '{}': {e}", raw.method),
+                        message: format!("refused '{}': {e}", method),
                     });
             }
             _ => {}
@@ -468,7 +511,7 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
     match raw.id {
         Some(id) => {
             let request =
-                PluginRequest::parse(&raw.method, raw.params).map_err(|message| LineError {
+                PluginRequest::parse(&method, raw.params).map_err(|message| LineError {
                     id: Some(id.clone()),
                     message,
                 })?;

@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use flate2::read::GzDecoder;
 use shared::{ReadSeek, Vfs};
 
-use crate::address::Format;
+use shared::Format;
 
 /// Entries an archive may hold and still be browsed.
 pub const MAX_ENTRIES: usize = 200_000;

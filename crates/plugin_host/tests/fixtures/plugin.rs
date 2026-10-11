@@ -67,6 +67,26 @@ fn next_line(lines: &mut io::Lines<io::StdinLock<'_>>) -> Option<String> {
     held.or_else(|| lines.next().and_then(Result::ok))
 }
 
+/// Answers a `vfs` request the way a plugin that serves paths would, with fixed replies: a path
+/// with `missing` in it is not found, one with `die` in it ends the process without a reply, and
+/// anything else gets an answer that names the operation and this process.
+fn answer_vfs(stdout: &mut io::Stdout, request: &serde_json::Value) {
+    let path = request["params"]["path"].as_str().unwrap_or("");
+    let op = request["params"]["op"].as_str().unwrap_or("");
+    if path.contains("die") {
+        std::process::exit(3);
+    }
+    let line = if path.contains("missing") {
+        serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "error": {
+            "code": -32000, "message": "not found", "data": { "fault": "not_found" } } })
+    } else {
+        serde_json::json!({ "jsonrpc": "2.0", "id": request["id"],
+            "result": { "op": op, "pid": std::process::id() } })
+    };
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
+}
+
 /// Every value given as `--<flag>=VALUE`.
 fn flag_values(flag: &str) -> Vec<String> {
     std::env::args()
@@ -79,6 +99,7 @@ fn main() {
     let mut lines = stdin.lock().lines();
     let mut stdout = io::stdout();
     let mut next_id: u64 = 1;
+    let serve_vfs = std::env::args().any(|arg| arg == "--serve-vfs");
 
     while let Some(line) = next_line(&mut lines) {
         if line.trim().is_empty() {
@@ -87,6 +108,12 @@ fn main() {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+        if event["method"] == "vfs" {
+            if serve_vfs {
+                answer_vfs(&mut stdout, &event);
+            }
+            continue;
+        }
         let Some(name) = event["params"]["name"].as_str() else {
             continue;
         };

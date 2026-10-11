@@ -32,6 +32,7 @@ mod mailbox;
 mod picker;
 pub mod protocol;
 mod registry;
+pub mod serve;
 mod tally;
 mod walk;
 
@@ -44,3 +45,4 @@ pub use protocol::{
     API_VERSION, DevicesCommand, DevicesNote, EventKind, JobOutcome, LogLevel, SetDevices,
     SetInspect, SetPreview, SetView, Slot, StateSnapshot,
 };
+pub use serve::ServeLink;

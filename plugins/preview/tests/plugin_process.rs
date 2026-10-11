@@ -146,6 +146,7 @@ fn read_from_disk(params: &Value) -> Result<FileChunk, String> {
     Ok(FileChunk {
         kind,
         size: meta.len(),
+        modified: None,
         local_path: Some(request.path),
         data,
     })

@@ -4,15 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+description = "Browses an archive as a folder by asking the plugin that serves archives; the core keeps only the routing and the reading of what comes back."
 
 [dependencies]
 shared = { path = "../shared" }
-# Reading an entry needs deflate; the index only needs the central directory. No `aes-crypto`:
-# an encrypted entry is listed but cannot be opened from here (extract it instead, which asks for
-# the password).
-zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
-tar = { version = "0.4.46", default-features = false }
-flate2 = "1.1"
+plugin_api = { path = "../plugin_api" }
+serde = "1.0.229"
+serde_json = "1.0"
 
 [dev-dependencies]
 proptest = "1.11"

@@ -1378,3 +1378,123 @@ fn a_stopped_plugin_is_no_longer_running() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn serves_archives() -> Triggers {
+    Triggers {
+        actions: vec![plugin_api::PROVIDES_VFS_ARCHIVE.to_string()],
+        ..Triggers::default()
+    }
+}
+
+fn list_request(path: &str) -> plugin_api::VfsRequest {
+    plugin_api::VfsRequest::List { path: path.into() }
+}
+
+#[test]
+fn a_request_for_the_archive_paths_is_answered_by_the_plugin_that_provides_them() {
+    use plugin_api::{Epoch, Peer, PeerError, VfsFault};
+
+    let dir = scratch_dir("serve-answer");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    let link = manager.serve_link();
+    assert_eq!(
+        link.call(&list_request("/x/a.zip!"), None),
+        Err(PeerError::Unavailable),
+        "nothing answers before a plugin is started"
+    );
+
+    spawn_fixture_with(
+        &runtime,
+        &mut manager,
+        &dir,
+        "--serve-vfs",
+        serves_archives(),
+    );
+    wait_for_log(&mut manager, "ready pid=");
+    assert!(manager.serves_archives());
+
+    let answer = link.call(&list_request("/x/a.zip!"), None).unwrap();
+    assert_eq!(answer.epoch, Epoch(1));
+    assert_eq!(answer.value["op"], "list");
+
+    assert_eq!(
+        link.call(&list_request("/x/missing.zip!"), None),
+        Err(PeerError::Fault(VfsFault::NotFound)),
+        "the plugin's reason comes back as it was given"
+    );
+}
+
+#[test]
+fn a_plugin_that_does_not_provide_the_archive_paths_is_not_asked_for_them() {
+    use plugin_api::{Peer, PeerError};
+
+    let dir = scratch_dir("serve-not-provided");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    let link = manager.serve_link();
+    spawn_fixture_with(
+        &runtime,
+        &mut manager,
+        &dir,
+        "--serve-vfs",
+        Triggers::default(),
+    );
+    wait_for_log(&mut manager, "ready pid=");
+    assert_eq!(
+        link.call(&list_request("/x/a.zip!"), None),
+        Err(PeerError::Unavailable)
+    );
+}
+
+#[test]
+fn a_plugin_that_dies_in_the_middle_of_a_request_ends_the_call_and_comes_back() {
+    use plugin_api::{Epoch, Peer, PeerError, VfsRequest};
+
+    let dir = scratch_dir("serve-dies");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    let link = manager.serve_link();
+    spawn_fixture_with(
+        &runtime,
+        &mut manager,
+        &dir,
+        "--serve-vfs",
+        serves_archives(),
+    );
+    wait_for_log(&mut manager, "ready pid=");
+    let first = link.call(&list_request("/x/a.zip!"), None).unwrap();
+
+    assert_eq!(
+        link.call(&list_request("/x/die.zip!"), None),
+        Err(PeerError::Stopped),
+        "the call ends with the process instead of waiting out its timeout"
+    );
+
+    // The next tick of the interface starts it again, with no key or command to wake it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let second = loop {
+        manager.poll();
+        if let Ok(answer) = link.call(&list_request("/x/a.zip!"), None) {
+            break answer;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the plugin was not started again"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_ne!(
+        second.value["pid"], first.value["pid"],
+        "a new process answered"
+    );
+    assert_eq!(second.epoch, Epoch(first.epoch.0 + 1));
+
+    // A file opened in the first life must not be asked of the second.
+    let read = VfsRequest::Read {
+        handle: 1,
+        offset: 0,
+        len: 1,
+    };
+    assert_eq!(link.call(&read, Some(first.epoch)), Err(PeerError::Stale));
+}

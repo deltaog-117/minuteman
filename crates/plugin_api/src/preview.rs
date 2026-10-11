@@ -335,6 +335,11 @@ pub struct FileChunk {
     pub kind: ChunkKind,
     /// The file's whole length.
     pub size: u64,
+    /// When the file was last changed, in whole seconds since the Unix epoch; absent when the
+    /// backend does not know. A plugin that keeps something derived from a file (an archive's
+    /// index) compares it with the size to tell the file changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<u64>,
     /// The same file on this machine's own disk, when the backend is the local disk: what a
     /// program the plugin starts can be handed. Absent for any other backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -645,6 +650,7 @@ mod tests {
         let chunk = FileChunk {
             kind: ChunkKind::File,
             size: 3,
+            modified: None,
             local_path: None,
             data: b"abc".to_vec(),
         };

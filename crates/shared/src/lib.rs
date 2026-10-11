@@ -19,6 +19,7 @@
 //! This crate must never depend on a feature crate (`browser`, `file_ops`, `theming`, ...) —
 //! dependencies always point inward, toward `shared`.
 
+pub mod archive_path;
 pub mod chooser;
 pub mod conformance;
 pub mod devices;
@@ -31,6 +32,7 @@ pub mod names;
 pub mod tally;
 pub mod vfs;
 
+pub use archive_path::{Format, Mount, Route, is_archive, is_inside, route};
 pub use error::VfsError;
 pub use fuzzy::Query;
 pub use memory::MemVfs;

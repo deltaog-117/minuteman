@@ -2006,7 +2006,7 @@ draws.
   with the right one, `Esc` stopping a 40,000-file compress with no archive or temporary file left,
   the plugin killed mid-request ending the operation with a message after a second and starting
   again for the next request, and an `mman` copied alone saying how to get the plugin.
-  Follow-ups: ssh and in-archive paths (M7); a plugin killed mid-request cannot remove the hidden
+  Follow-ups: ssh paths (M7; inside an archive it is refused by design, archives being read-only); a plugin killed mid-request cannot remove the hidden
   temporary file it was writing; the password reaches the plugin as one JSON line, and only the
   `Password` type is wiped, not the line or the parser's copies; cancel is checked per entry, so
   one very large file runs to its end first; not tried in a real kitty.
@@ -2043,8 +2043,23 @@ draws.
   whole each second and the plugin keeps running (idle) after the rail goes; wiring and atlas
   still carry their own scan until M7; the status line cuts the install hint at the terminal's
   width.
-- [ ] **M7 – decide, then do:** Vfs schemes served by a plugin (ssh, browsing inside an archive),
-  which put a process boundary under a synchronous call, and the alternate views (grid, tiles,
+- [x] **M7a – browsing inside an archive is served by the archive plugin:** the host sends the
+  plugin `vfs` requests (`metadata`, `list`, `scan`, `read_link`, `open`, `read`, `close`) for each
+  path inside an archive and the plugin answers; `vfs_archive` is now only the `Vfs` that routes
+  those paths (`ServeLink` turns a synchronous call into a request and waits on a channel), and
+  the reading of zip, tar and tar.gz (the index, the codecs, the engine) moved into
+  `mman-archive`. A file is read through a handle the plugin keeps, at most 32 at a time; a
+  handle is tied to the plugin's process by an epoch, so one from a dead process can never reach a
+  restarted one. Archives stay read-only. This settles the question M7 posed for archives: the
+  process boundary under a synchronous call is a bounded wait (120 s, ended at once if the plugin
+  dies) and a window of the file read per round trip, and it holds. Verified against the real
+  `mman` and `mman-archive` over a PTY read through `pyte`: a zip opened as a folder with a
+  folder and a file listed, the file's text shown in the preview column, `Q` leaving the browser
+  inside `t.zip!`. Follow-ups: the missing-plugin message on `mman` copied alone was not read
+  off the screen (a unit test covers its words); no kill of the plugin mid-listing was tried on
+  the real binary; compress and extract inside an archive stay refused (they write).
+- [ ] **M7 – decide, then do, for what is left:** the `ssh` scheme served by a plugin, and the
+  alternate views (grid, tiles,
   filmstrip, atlas, wiring), which need `SetPane` to describe more than text spans. If either
   proves too costly, it stays in the core behind a cargo feature.
 

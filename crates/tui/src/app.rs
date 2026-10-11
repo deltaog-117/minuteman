@@ -788,6 +788,23 @@ impl App {
         self
     }
 
+    /// What to tell the user when an archive would not open: where to get the plugin when none is
+    /// running (the error alone starts with a long path and would hide it), the error otherwise.
+    pub fn archive_open_failure(&self, error: &shared::VfsError) -> String {
+        if self.plugins.serves_archives() {
+            format!("cannot open the archive: {error}")
+        } else {
+            crate::bundled::missing(plugin_api::PROVIDES_VFS_ARCHIVE)
+        }
+    }
+
+    /// Uses `link` to reach the plugin that serves the paths inside archives: the one the `Vfs`
+    /// given to `with_vfs` was built with. Call before `with_plugins`.
+    pub fn with_archive_link(mut self, link: Arc<plugin_host::ServeLink>) -> Self {
+        self.plugins.set_serve_link(link);
+        self
+    }
+
     /// Turns the status bar's git segment on or off (`git_status` in `config.toml`): off means the
     /// bundled git plugin is not started. Call before `with_plugins`.
     pub fn with_git_status(mut self, enabled: bool) -> Self {
@@ -3783,6 +3800,22 @@ mod tests {
         f.archive_ends(1, &[], ArchiveStatus::Cancelled);
         f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("compress cancelled"));
+    }
+
+    #[test]
+    fn with_no_archive_plugin_an_archive_that_will_not_open_says_how_to_get_the_plugin_first() {
+        let f = Fixture::new("archive-open-missing");
+        let error = shared::VfsError::NotFound(std::path::PathBuf::from("/some/long/path/a.zip!"));
+        let said = f.app.archive_open_failure(&error);
+        // The status line cuts the end of a long message, so the plugin must come before any path.
+        assert!(
+            said.starts_with("archives are a plugin and mman-archive"),
+            "{said}"
+        );
+        assert!(
+            said.contains("cargo install --path plugins/archive"),
+            "{said}"
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 plugin_api = { path = "../../crates/plugin_api" }
 shared = { path = "../../crates/shared" }
+serde = "1.0.229"
 serde_json = "1.0"
 thiserror = "2.0.20"
 # Zip needs its deflate codec to compress and extract (the preview plugin only reads headers);

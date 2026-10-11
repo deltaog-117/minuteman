@@ -19,12 +19,20 @@
 //! it has reached and how the whole request ended, and stops when told to. Nothing here touches the
 //! terminal, and the forms, prompts and trash stay in the interface.
 //!
+//! It also answers for the paths inside archives (`/x/a.zip!/dir/f`): the host asks about a folder or
+//! a file there (`serve`), and `engine` browses the archive as a folder, reading the archive file
+//! back through the host so one on another machine works the same. `index` is the table of contents
+//! it builds.
+//!
 //! `work` runs one request's jobs, `session` starts each request on its own thread and keeps the
 //! flags that stop them, and `run` only moves lines between the host's pipes and the session.
 
 pub mod archive;
+pub mod engine;
 pub mod error;
+pub mod index;
 pub mod run;
+pub mod serve;
 pub mod session;
 pub mod work;
 

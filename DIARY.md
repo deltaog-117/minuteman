@@ -93,6 +93,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-11 | Fuzzy Finder as a Plugin | The interface walks the tree and draws the list, the plugin ranks (COA B); a plugin that walks the tree itself through `read_dir` (A) and keeping the finder in-process behind a trait (C) not taken | ✅ Confirmed |
 | 2026-10-11 | Structured Search Plugin | A second bundled plugin on the picker slot, filters over the walk (COA C, delivered as B first); `/` and `f` kept as they are; content search (A) deferred | ✅ Confirmed |
 | 2026-10-11 | Inspect as a Plugin | A `stat` request, a `tally` job and a `set_inspect` document, rows worded by the plugin (COA A); a plugin that only formats what the core gathered (B) and a generic multi-line pane view (C) not taken | ✅ Confirmed |
+| 2026-10-11 | Archives Served by the Plugin | The host asks the archive plugin one request per `Vfs` call and the plugin answers; read-only, files read through handles tied to the plugin's process | ✅ Confirmed |
 
 ---
 
@@ -7337,6 +7338,59 @@ the activity pulse, `Tab` then `e` was refused in words, the plugin killed with 
 started again, and an `mman` copied alone showed "mman-devices was not found" and the hint. Not
 run: a real mount, unmount or eject (no stick or share here), a real kitty, a network share gone
 away.
+
+---
+
+## 2026-10-11 — Browsing inside an archive is served by the archive plugin (M7, first part)
+
+M5 moved compress and extract into `mman-archive` and left the browsing of an archive's inside in
+the interface (`vfs_archive`, a `Vfs` over the zip and tar code), refusing it for the plugin until
+M7 decided how a plugin serves files. This part answers that for archives. The hard part is that
+the `Vfs` trait is synchronous and used from the render thread, while a plugin is a process that
+speaks lines.
+
+**The decision.** The host asks and the plugin answers, one `vfs` request per `Vfs` call
+(`metadata`, `list`, `scan`, `read_link`, `open`, `read`, `close`), each reply carrying the
+request's `id`. This is the only message in the protocol that runs from the host to a plugin; the
+rest have the plugin ask. A plugin that `provides` `vfs-archive` gets the requests for every path
+at or inside an archive (`shared::archive_path::route`). What the plugin needs from the archive file itself it asks of the host with
+`read_file`, which already existed for the preview plugin and moved to `plugin_api::remote` as
+`RemoteVfs`, so an archive on an `ssh://` machine opens the same as a local one.
+
+**Why not the other direction.** Serving the interface's nine `Vfs` calls to the plugin over the
+wire was rejected in M5 and M6 as a protocol built before its decision on process boundaries; this
+is that decision, and it came out the other way round: the plugin is the server because it owns
+the archive code, and the interface keeps only a router.
+
+**Process boundary.** `plugin_host::ServeLink` is made before any plugin starts, since the `Vfs`
+that holds it is built first. A caller blocks on a std channel; the reader task of the plugin's
+connection delivers the reply. A request ends by exactly one of its reply, its process ending or a
+timeout of 120 s. The link counts each start of the plugin as an epoch; a request that names a
+handle is written only if the handle's epoch is the current one, checked under the lock that
+`attach` takes, so a handle from a dead process can never reach a restarted one. The plugin bounds
+its open files at 32 (each can hold an unpacked entry, since a zip or gzip entry cannot seek) and a
+read at 256 KiB. The interface reads a file in windows, so a small read costs no round trip.
+
+**Departures from the plan.** The crate `vfs_archive` was not removed: it is now the router and the
+translation between the wire and the `Vfs` types, because the browser, the preview and the disk
+usage view still want a `Vfs`. The codecs, the index and the engine moved to the plugin, and the
+path syntax (`address.rs`) to `shared::archive_path`, since both sides need it and a plugin may
+depend only on `plugin_api` and `shared`.
+
+**Trade-offs.** Browsing an archive now needs `mman-archive`; without it the status line says how
+to get it and nothing else changes. Every listing is a round trip and a large archive's table of
+contents is read through the host. Archives stay read-only, so compress and extract inside one
+remain refused by name.
+
+**Verification.** `scripts/check` passes. Tests: the wire, the link (replies in any order, a process that
+ends waking what waits on it, a handle from an earlier process never sent to a later one), the
+plugin's server (reading by handle, the cap on one read, handle numbers never reused, the limit on
+open files), and the plugin as a real process (a zip and a tar.gz read through the wire, an archive
+that changed listed again, an unknown request refused). The 120 s timeout itself has no test. The real `mman`
+and `mman-archive` were driven over a PTY read through `pyte`: a zip opened as a folder, its
+folder and file listed, the file's text in the preview column, and `Q` leaving the browser inside
+`t.zip!`. Not run on the real binary: the plugin killed mid-listing, a very large archive, an
+archive on an `ssh://` machine, and reading the missing-plugin message off the screen.
 
 ---
 

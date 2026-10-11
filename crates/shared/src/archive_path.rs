@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use shared::MOUNT_MARK;
+use crate::mount::MOUNT_MARK;
 
 /// The archive formats that can be browsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

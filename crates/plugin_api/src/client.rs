@@ -21,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::EventParams;
+use crate::{EventParams, METHOD_VFS, VfsRequest};
 
 /// Serializes `value` to exactly one `\n`-terminated line.
 pub(crate) fn line(value: &impl Serialize) -> String {
@@ -80,6 +80,43 @@ pub enum Incoming {
 #[derive(Deserialize)]
 struct EventLine {
     params: EventParams,
+}
+
+/// A request the host made of a plugin that provides [`crate::PROVIDES_VFS_ARCHIVE`]: the `id` to
+/// reply under, and what is asked.
+pub type VfsAsk = (Value, VfsRequest);
+
+/// Why a [`METHOD_VFS`] request could not be understood. `id` is there when the line carried one,
+/// so the plugin can still answer and the host does not wait for a reply that will not come.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VfsAskError {
+    pub id: Option<Value>,
+    pub message: String,
+}
+
+/// Reads `text` as a [`METHOD_VFS`] request. `None` means the line is something else, for
+/// [`parse_incoming`] to read.
+///
+/// A plugin that answers for paths tries this before [`parse_incoming`], which would take the
+/// request for a reply because it has an `id`.
+pub fn parse_vfs_request(text: &str) -> Option<Result<VfsAsk, VfsAskError>> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    if value.get("method").and_then(Value::as_str) != Some(METHOD_VFS) {
+        return None;
+    }
+    let id = value.get("id").cloned();
+    let params = value.get("params").cloned().unwrap_or(Value::Null);
+    Some(match (id, serde_json::from_value(params)) {
+        (Some(id), Ok(request)) => Ok((id, request)),
+        (id, Err(e)) => Err(VfsAskError {
+            id,
+            message: format!("invalid vfs request: {e}"),
+        }),
+        (None, Ok(_)) => Err(VfsAskError {
+            id: None,
+            message: "a vfs request with no id".to_string(),
+        }),
+    })
 }
 
 /// Reads one line from the host, or says why it is neither an event nor a reply.

@@ -104,6 +104,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the wiring diagram alike.
 - `shared::create_dir_all`, the `mkdir -p` over a `Vfs` that `file_ops` and the archive plugin both
   use.
+- `plugin_api::serve`, the first request that runs from the interface to a plugin: a plugin that
+  `provides` `vfs-archive` is sent `vfs` requests (`metadata`, `list`, `scan`, `read_link`, `open`,
+  `read`, `close`) for every path inside an archive and answers each with one reply carrying the
+  same `id`. A file is read through a handle the plugin keeps (at most 32 open, 256 KiB a read)
+  until `close`. `plugin_host::ServeLink` carries the call from a synchronous `Vfs` to the plugin
+  and back; it outlives the plugin's process and counts each start as an epoch, so a handle from a
+  process that died can never reach the next one, and a request ends by its reply, its process
+  ending or its timeout (120 s), whichever comes first.
+- `plugin_api::remote`, `RemoteVfs`: a `Vfs` over the `read_file` request, with a window that
+  doubles while reads continue, which the preview and archive plugins both use to read a file
+  through the host. It moved out of `plugins/preview`.
+- `mman-archive` now also serves the inside of archives (zip, tar, tar.gz): the browsing,
+  previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
 - The deck's rail of devices no longer scans the machine itself: `mman-devices` sends the list
@@ -277,6 +290,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a reason. It used to work, because the archive code ran on the interface's own `Vfs`.
 - The trash browser, restore, empty and undo stay in the core by decision: the trash is one of the
   file operations, and an undone copy goes to it.
+- Browsing inside an archive (`a.zip!/dir/f`) is now answered by `mman-archive` instead of code in
+  the interface: `vfs_archive` keeps only the `Vfs` that routes those paths to the plugin, and the
+  archive reading (`index`, the codecs and the engine) moved into the plugin. `address.rs` became
+  `shared::archive_path`. Archives stay read-only. Without the plugin, opening an archive says how
+  to get `mman-archive` and the rest of the file manager is untouched.
 
 ### Fixed
 - `tui`: the permanent-delete and trash confirmations now take a capital `Y` as well as `y`.

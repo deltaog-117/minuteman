@@ -35,6 +35,8 @@ mod event;
 mod inspect;
 mod picker;
 mod preview;
+pub mod remote;
+mod serve;
 mod view;
 
 pub use archive::{
@@ -65,6 +67,11 @@ pub use preview::{
     MAX_TEXT_CHARS, METHOD_READ_FILE, METHOD_SET_PREVIEW, PROVIDES_PREVIEW, Piece, PreviewContent,
     PreviewError, PreviewLine, PreviewTarget, ReadFile, SetPreview, Token, handoff_path,
     hex_string, is_handoff_path,
+};
+pub use serve::{
+    Answer, Bytes, Epoch, IoKind, LinkTarget, MAX_OPEN_HANDLES, MAX_VFS_READ, METHOD_VFS, Opened,
+    PROVIDES_VFS_ARCHIVE, Peer, PeerError, VfsFault, VfsRequest, WireKind, WireMeta, WireScan,
+    fault_line, reply_line, request_to_line,
 };
 pub use view::{
     Glyph, Line, MAX_BADGE_CHARS, MAX_BADGES, MAX_CHARS, MAX_KEY_CHARS, MAX_SPANS, METHOD_SET_VIEW,

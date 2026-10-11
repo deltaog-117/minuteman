@@ -577,7 +577,7 @@ fn open_file(app: &mut App, browser: &mut BrowserState, vfs: &dyn Vfs, path: &Pa
     if vfs_archive::is_archive(path) && !vfs_archive::is_inside(path) && !app.open_rule_covers(path)
     {
         if let Err(error) = browser.goto(vfs, &shared::mount_root(path)) {
-            app.status = Some(format!("cannot open the archive: {error}"));
+            app.status = Some(app.archive_open_failure(&error));
         }
         return;
     }
@@ -813,9 +813,13 @@ fn main() -> Result<()> {
     // machine and every other path to the local disk.
     // An archive is browsed as a folder by wrapping whatever serves the paths underneath it, so
     // one on a remote machine opens just the same.
-    let vfs: Arc<dyn Vfs> = Arc::new(ArchiveVfs::new(Arc::new(RoutedVfs::new(Arc::new(
-        LocalVfs,
-    ))?)));
+    // What is inside an archive is answered by a plugin, reached through this link; the link is
+    // handed to the plugins below so the one that serves archives is attached to it as it starts.
+    let archive_link = plugin_host::ServeLink::new();
+    let vfs: Arc<dyn Vfs> = Arc::new(ArchiveVfs::new(
+        Arc::new(RoutedVfs::new(Arc::new(LocalVfs))?),
+        archive_link.clone(),
+    ));
     let mut browser = BrowserState::with_show_hidden(vfs.as_ref(), start_dir, config.show_hidden)?;
 
     // Backs the blocking thread pool that copy/move/delete run on so a large operation never
@@ -824,6 +828,7 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let mut app = App::new(runtime.handle().clone())
         .with_vfs(Arc::clone(&vfs))
+        .with_archive_link(archive_link)
         .with_git_status(config.git_status)
         .with_system_hud(config.system_hud)
         .with_preview_hooks(config.preview_hooks.clone())
