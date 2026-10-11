@@ -260,6 +260,20 @@ impl Repo {
         }
     }
 
+    /// The state of every changed entry directly inside `dir`, by name — a folder among them when
+    /// something inside it has changed. Sorted by name so the same status always gives the same
+    /// answer, which is what lets the plugin send a view only when it differs.
+    pub fn states_in(&self, dir: &Path) -> Vec<(String, FileState)> {
+        let mut found: Vec<(String, FileState)> = self
+            .states
+            .iter()
+            .filter(|(path, _)| path.parent() == Some(dir))
+            .filter_map(|(path, state)| Some((path.file_name()?.to_str()?.to_string(), *state)))
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    }
+
     /// The state of `path` (an absolute path in the same spelling the browser uses), or `None`
     /// when it is clean, ignored or outside the repository.
     pub fn state_of(&self, path: &Path) -> Option<FileState> {
@@ -357,6 +371,57 @@ mod tests {
 
     use super::*;
     use proptest::prelude::*;
+
+    fn repo_with(entries: Vec<(PathBuf, FileState)>) -> Repo {
+        Repo::new(
+            PathBuf::from("/r"),
+            Parsed {
+                head: Head::Branch("main".into()),
+                ahead_behind: None,
+                counts: Counts::default(),
+                entries,
+            },
+        )
+    }
+
+    #[test]
+    fn states_in_lists_direct_children_and_the_folders_holding_a_change() {
+        let repo = repo_with(vec![
+            ("top.txt".into(), FileState::Modified),
+            ("dir/deep/x".into(), FileState::Untracked),
+            ("dir/y".into(), FileState::Staged),
+        ]);
+        assert_eq!(
+            repo.states_in(Path::new("/r")),
+            [
+                ("dir".to_string(), FileState::Staged),
+                ("top.txt".to_string(), FileState::Modified),
+            ]
+        );
+        assert_eq!(
+            repo.states_in(Path::new("/r/dir")),
+            [
+                ("deep".to_string(), FileState::Untracked),
+                ("y".to_string(), FileState::Staged),
+            ]
+        );
+        assert!(repo.states_in(Path::new("/r/none")).is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn every_changed_path_is_listed_in_its_own_folder_with_its_own_state(
+            names in prop::collection::btree_set("[a-z]{1,6}", 0..20),
+            pick in 0usize..5,
+        ) {
+            let state = ALL_STATES[pick];
+            let repo = repo_with(names.iter().map(|n| (PathBuf::from(n), state)).collect());
+            let listed = repo.states_in(Path::new("/r"));
+            prop_assert_eq!(listed.len(), names.len());
+            prop_assert!(listed.iter().all(|(_, s)| *s == state));
+            prop_assert!(listed.windows(2).all(|w| w[0].0 < w[1].0));
+        }
+    }
 
     const ALL_STATES: [FileState; 5] = [
         FileState::Conflicted,

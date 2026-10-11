@@ -1879,8 +1879,21 @@ draws.
   and inspect, which need a scrollable multi-line view and a way to hand an image to the interface.
   - [x] `header_pill`, with the system figures (uptime, load, memory) as `plugins/hud`. The marked
     size stays in the core: the paste checks use its total to see whether files fit.
-  - [ ] `entry_badge`; then a text-only `preview_pane` (text, hex, archive listing); images,
-    thumbnails and inspect last.
+  - [x] `entry_badge`, with git's marks as its first user. A line of the slot's view names its
+    entry with a new optional `key`, and the slot is bounded one badge at a time (2,000 lines, a
+    two-character badge, a 255-character key) since the per-view totals would refuse any real
+    folder. `mman-git` sends the marks of the folder it is in (`+` `~` `?` `!`, a folder merging
+    what it holds) and empties them out of a repository; the list reserves 3 cells at the end of
+    the name column once any row has a badge. Chosen as COA B (the existing `set_view`, with keyed
+    lines) over a separate `set_badges` message (A) and the host asking for the visible rows (C).
+    Verified against the real `mman` over a PTY read through `pyte`, in a scratch repository: the
+    marks sat beside the right rows and the folder, changed with the folder, vanished with
+    `mman-git` and with `git_status = false`, and an `mman` alone browsed without them.
+    Follow-ups: badges show in the middle column only (not the parent or preview lists, or the
+    grid, tile and filmstrip views); a staged file changed again shows the modified mark only; the
+    old folder's marks can sit beside the new names for one round trip after changing folder.
+  - [ ] A text-only `preview_pane` (text, hex, archive listing); images, thumbnails and inspect
+    last.
 - [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave
   `file_ops`; trash management (the trash view, restore, empty) becomes a plugin while moving a
   file to the trash stays in the core.

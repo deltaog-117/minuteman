@@ -6974,6 +6974,58 @@ uptime alone.
 
 ---
 
+## 2026-10-11 — The entry badge slot, and a mark beside changed files (M4b, second part)
+
+**Context.** The slots so far each hold one view of one to three lines; none belongs to a row.
+`entry_badge` is a mark beside every changed entry of the browsed folder, so the wire needed a way
+to say which entry a mark is for, and the git plugin, which already knows every path's state
+(`Repo::state_of`), was the obvious first user.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A separate `set_badges` notification with its own map and rules | Rejected: a second path beside `set_view` to own, clean and limit |
+| B | Reuse `set_view`: `Slot::EntryBadge`, with an optional `key` (the entry's name) on `Line` | Chosen |
+| C | The host asks the plugin for the badges of the visible rows | Rejected: a round trip per scroll, so marks would lag a frame, and request plumbing in the draw path |
+
+**Decision.** A line of the `EntryBadge` view is one badge and names its entry in `key`; the host
+indexes the keys once when the slot changes (`Slots::badge`), so a row's lookup per frame is a hash
+probe, not a scan. The one-owner rule, cleaning, and "a plugin that stops loses its slots" all
+applied unchanged. The per-view totals (64 spans, 512 characters) would have refused any folder
+with more than a few dozen marks, so `EntryBadge` is bounded one badge at a time instead: at most
+2,000 lines, one span of at most 2 characters each, a key of at most 255 characters, and a missing
+key is an error rather than a line nobody can find. `mman-git` sends the badges of the folder it
+knows the browser is in (`Repo::states_in`, sorted by name so an unchanged status is an unchanged
+view and nothing is re-sent); a folder shows the merged state of what is inside it, as the status
+bar's word already did.
+
+**Departure from the plan.** The plan said the host would drop the badges on `dir_changed`. It does
+not: if it did, the plugin's "send only when different" check would believe the host still held
+them and never send the next folder's marks again when the set happened to be equal. The plugin
+owns the slot, replaces it when it moves, and empties it when the folder has nothing to mark or is
+not in a repository. The cost is the same one the status word has: for the length of one round
+trip after changing folder, the old folder's marks can sit beside the new names.
+
+**Trade-offs.** A staged file changed again since shows the modified mark, as one span cannot hold
+both. The name column loses 3 cells (a space and two for the badge) in every row once any row has a
+badge, so names stay aligned; it only does so when the name column stays at least 12 cells.
+Badges are drawn in the middle column only, not the parent or preview lists, nor the grid, tile or
+filmstrip views. An unfound `mman-git` still says nothing.
+
+**Verification.** `scripts/check` passes. New tests: the slot's wire shape and bounds (including a
+property test that no checked badge breaks them, and that control characters are removed before
+measuring), the host's index (later line wins, only the owner can empty, a replaced or stopped
+plugin leaves no badge), `Repo::states_in` (direct children and folders holding a change, and a
+property test over random names), the plugin's badges and the session now sending three slots,
+including leaving a folder with nothing changed. The real `mman` was driven through a
+pseudo-terminal in a scratch repository with a modified, a staged, an untracked and a clean file
+and a folder holding a change: `~`, `+`, `?` and nothing sat beside them and `~` beside the folder;
+inside the folder the one file had `~`; back in the root the marks returned; killing `mman-git`
+removed them and gave the width back; with `git_status = false` there was no badge and no
+`mman-git`; and an `mman` copied alone browsed with none. Not run: a Nerd Font glyph set, and the
+colors of the marks were not read off the screen.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

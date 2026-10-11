@@ -20,7 +20,7 @@
 
 use std::path::Path;
 
-use plugin_api::{Glyph, SetView, Slot, Span, Tone, View};
+use plugin_api::{Glyph, Line, MAX_BADGES, SetView, Slot, Span, Tone, View};
 
 use crate::status::{FileState, Head, Repo};
 
@@ -82,6 +82,30 @@ pub fn entry(repo: &Repo, cursor: Option<&Path>) -> SetView {
     }
 }
 
+/// The badge slot: one mark beside each changed entry of `dir`, the glyph for its state. A change
+/// both staged and made again since shows the modified mark, since the work tree still differs.
+/// Entries past what the slot holds are left unmarked, nearest the top of the name order first.
+pub fn badges(repo: &Repo, dir: &Path) -> SetView {
+    let lines: Vec<Line> = repo
+        .states_in(dir)
+        .into_iter()
+        .take(MAX_BADGES)
+        .map(|(name, state)| {
+            let (glyph, tone) = match state {
+                FileState::Conflicted => (Glyph::Conflicted, Tone::Danger),
+                FileState::Untracked => (Glyph::Untracked, Tone::Dim),
+                FileState::Staged => (Glyph::Staged, Tone::Accent),
+                FileState::Modified | FileState::StagedModified => (Glyph::Modified, Tone::Accent),
+            };
+            Line::badge(name, Span::with_glyph(glyph, false, "", tone))
+        })
+        .collect();
+    SetView {
+        slot: Slot::EntryBadge,
+        view: (!lines.is_empty()).then_some(View { lines }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +125,30 @@ mod tests {
                 ],
             },
         )
+    }
+
+    #[test]
+    fn a_badge_is_keyed_by_name_and_only_for_entries_directly_in_the_folder() {
+        let r = repo(Head::Branch("main".into()), None, Counts::default());
+        let set = badges(&r, Path::new("/r"));
+        let lines = &set.view.as_ref().expect("two changes").lines;
+        let found: Vec<_> = lines
+            .iter()
+            .map(|line| (line.key.as_deref(), line.spans[0].glyph, line.spans[0].tone))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Some("a"), Some(Glyph::Modified), Tone::Accent),
+                (Some("c"), Some(Glyph::Conflicted), Tone::Danger),
+            ]
+        );
+        assert_eq!(badges(&r, Path::new("/r/elsewhere")).view, None);
+        assert_eq!(set.slot, Slot::EntryBadge);
+        assert!(
+            set.clone().checked().is_ok(),
+            "the host accepts what it sends"
+        );
     }
 
     fn glyphs_and_text(set: &SetView) -> Vec<(Option<Glyph>, String)> {

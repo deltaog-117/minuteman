@@ -33,7 +33,7 @@
 //!   gets exactly one reply line carrying that same `id`; a `log` notification (no `id`) is
 //!   fire-and-forget and surfaces as the status bar message, and so are `picker_items` (what the
 //!   picker lists), `picker_close`, `walk_cancel` and `set_view` (what fills a slot of the
-//!   interface, such as a status bar segment).
+//!   interface, such as a status bar segment or a mark beside each row).
 //! - host -> plugin events for these are `action` (the user triggered an action the plugin
 //!   provides), `picker_query` and `picker_closed` (what is typed into its picker, and its end)
 //!   and `walk_batch` and `walk_done` (what a walk found, and its end). The shapes are in

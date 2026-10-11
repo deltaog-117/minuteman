@@ -16,8 +16,9 @@
 
 //! The git status, as a plugin. It follows the browsed folder and the cursor through the host's
 //! `dir_changed` and `selection_changed` events, asks git about the folder's repository, and
-//! fills two slots of the status bar with `set_view`: the repository (branch, distance from its
-//! upstream, counts) and the state of the entry under the cursor. The host decides the colors and
+//! fills three slots with `set_view`: the repository (branch, distance from its upstream, counts)
+//! and the state of the entry under the cursor in the status bar, and a mark beside each changed
+//! entry of the browsed folder in the list. The host decides the colors and
 //! symbols and what to drop on a narrow bar; nothing here touches the terminal.
 //!
 //! `status` is git itself (running it and reading what it says), `view` turns an answer into what

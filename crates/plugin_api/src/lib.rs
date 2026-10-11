@@ -40,7 +40,8 @@ pub use picker::{
     WalkEnd, WalkEvent, WalkOutcome, WalkRequest,
 };
 pub use view::{
-    Glyph, Line, MAX_CHARS, MAX_SPANS, METHOD_SET_VIEW, SetView, Slot, Span, Tone, View, ViewError,
+    Glyph, Line, MAX_BADGE_CHARS, MAX_BADGES, MAX_CHARS, MAX_KEY_CHARS, MAX_SPANS, METHOD_SET_VIEW,
+    SetView, Slot, Span, Tone, View, ViewError,
 };
 
 /// Bumped only for a breaking change to the shapes below and in `plugin_host::protocol`; sent

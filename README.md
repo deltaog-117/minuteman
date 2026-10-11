@@ -102,8 +102,9 @@ next to `mman` (or on your `PATH`). Without it everything else works, and `f` sa
 A `[[plugin]]` of your own that lists `provides = ["find"]` takes its place (see
 `config.example.toml`). The structured search (`L`) works the same way with `mman-search` and
 `provides = ["locate"]`. The git branch and the state of the selected file in the status bar are a
-plugin too, `mman-git`: without it the status bar simply has no git segment, and `git_status =
-false` in `config.toml` keeps it from starting. The header's system figures (`system_hud = true`)
+plugin too, `mman-git`: without it the status bar simply has no git segment and the list no
+marks beside changed files (`+` staged, `~` modified, `?` untracked, `!` conflicted), and
+`git_status = false` in `config.toml` keeps it from starting. The header's system figures (`system_hud = true`)
 are `mman-hud`, and without it that pill is absent.
 
 From a checkout, without installing:

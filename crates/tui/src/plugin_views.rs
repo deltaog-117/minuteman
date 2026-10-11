@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 
-use plugin_host::protocol::{Glyph, Tone, View};
+use plugin_host::protocol::{Glyph, Line, Tone, View};
 use plugin_host::{SetView, Slot};
 
 use crate::glyphs::Glyphs;
@@ -30,22 +30,51 @@ use crate::glyphs::Glyphs;
 #[derive(Default)]
 pub struct Slots {
     filled: HashMap<Slot, (String, View)>,
+    /// Entry name to its line in the `EntryBadge` view, rebuilt whenever that slot changes: every
+    /// visible row asks for its badge on every frame, so the lookup must not scan the view.
+    badge_rows: HashMap<String, usize>,
 }
 
 impl Slots {
     /// Applies what `plugin` asked for.
     pub fn apply(&mut self, plugin: &str, set: SetView) {
+        let slot = set.slot;
         match set.view {
             Some(view) => {
-                self.filled.insert(set.slot, (plugin.to_string(), view));
+                self.filled.insert(slot, (plugin.to_string(), view));
             }
             None => {
                 if self
                     .filled
-                    .get(&set.slot)
+                    .get(&slot)
                     .is_some_and(|(owner, _)| owner == plugin)
                 {
-                    self.filled.remove(&set.slot);
+                    self.filled.remove(&slot);
+                }
+            }
+        }
+        if slot == Slot::EntryBadge {
+            self.reindex_badges();
+        }
+    }
+
+    /// The badge for the entry called `name` in the current folder, if the plugin that fills the
+    /// `EntryBadge` slot gave it one. A name given twice has the later line.
+    pub fn badge(&self, name: &str) -> Option<&Line> {
+        let row = *self.badge_rows.get(name)?;
+        self.filled.get(&Slot::EntryBadge)?.1.lines.get(row)
+    }
+
+    pub fn has_badges(&self) -> bool {
+        !self.badge_rows.is_empty()
+    }
+
+    fn reindex_badges(&mut self) {
+        self.badge_rows.clear();
+        if let Some((_, view)) = self.filled.get(&Slot::EntryBadge) {
+            for (row, line) in view.lines.iter().enumerate() {
+                if let Some(key) = &line.key {
+                    self.badge_rows.insert(key.clone(), row);
                 }
             }
         }
@@ -59,6 +88,7 @@ impl Slots {
     /// would otherwise stay on screen, wrong, until the session ends.
     pub fn retain_running(&mut self, running: impl Fn(&str) -> bool) {
         self.filled.retain(|_, (owner, _)| running(owner));
+        self.reindex_badges();
     }
 }
 
@@ -78,7 +108,12 @@ fn symbol(glyph: Glyph, g: &Glyphs) -> &'static str {
 /// first span; `None` when there is nothing to draw. A status segment is one block of one
 /// color, so the tones of later spans do not show there.
 pub fn line_text(view: &View, g: &Glyphs) -> Option<(String, Tone)> {
-    let line = view.lines.first()?;
+    spans_text(view.lines.first()?, g)
+}
+
+/// `line` as one block of text, in the user's glyph set, and the tone of its first span that
+/// draws anything.
+pub fn spans_text(line: &Line, g: &Glyphs) -> Option<(String, Tone)> {
     let mut tone = None;
     let mut parts = Vec::new();
     for span in &line.spans {
@@ -121,6 +156,73 @@ mod tests {
         assert!(slots.view(Slot::StatusRight).is_some(), "a lost it to b");
         slots.apply("b", set(Slot::StatusRight, None));
         assert!(slots.view(Slot::StatusRight).is_none());
+    }
+
+    fn badge_set(plugin_lines: &[(&str, &str)]) -> SetView {
+        SetView {
+            slot: Slot::EntryBadge,
+            view: Some(View {
+                lines: plugin_lines
+                    .iter()
+                    .map(|(key, text)| Line::badge(*key, Span::text(*text, Tone::Accent)))
+                    .collect(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_badge_is_found_by_entry_name_and_follows_the_slot() {
+        let mut slots = Slots::default();
+        assert!(slots.badge("a.txt").is_none());
+        slots.apply(
+            "git",
+            badge_set(&[("a.txt", "M"), ("b.txt", "?"), ("a.txt", "S")]),
+        );
+        let text = |slots: &Slots, name| {
+            slots
+                .badge(name)
+                .and_then(|line| line.spans.first())
+                .map(|span| span.text.clone())
+        };
+        assert_eq!(
+            text(&slots, "a.txt").as_deref(),
+            Some("S"),
+            "the later line wins"
+        );
+        assert_eq!(text(&slots, "b.txt").as_deref(), Some("?"));
+        assert_eq!(text(&slots, "c.txt"), None);
+        slots.apply(
+            "other",
+            SetView {
+                slot: Slot::EntryBadge,
+                view: None,
+            },
+        );
+        assert!(
+            slots.badge("b.txt").is_some(),
+            "only the owner can empty it"
+        );
+        slots.apply("git", badge_set(&[("c.txt", "M")]));
+        assert!(
+            slots.badge("b.txt").is_none(),
+            "a new view replaces the old one"
+        );
+        slots.apply(
+            "git",
+            SetView {
+                slot: Slot::EntryBadge,
+                view: None,
+            },
+        );
+        assert!(slots.badge("c.txt").is_none());
+    }
+
+    #[test]
+    fn a_plugin_that_stopped_leaves_no_stale_badge() {
+        let mut slots = Slots::default();
+        slots.apply("git", badge_set(&[("a.txt", "M")]));
+        slots.retain_running(|_| false);
+        assert!(slots.badge("a.txt").is_none());
     }
 
     #[test]

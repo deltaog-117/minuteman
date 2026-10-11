@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `plugins/hud` (`mman-hud`), a fourth bundled plugin: the header's uptime, load average and
   memory, as before but from a plugin that fills `header_pill` every two seconds.
 
+- `plugin_api`: a fourth slot, `entry_badge`: a mark beside each row of the browsed folder. Each
+  line of its view names an entry with the new optional `Line::key`, and is bounded one badge at a
+  time (2,000 lines, one span of at most 2 characters, a key of at most 255) rather than by the
+  per-view totals; a line with no key is refused.
+- `mman-git` now also marks changed entries in the list: `+` staged, `~` modified, `?` untracked,
+  `!` conflicted (in the user's glyph set), and a folder shows the merged state of what it holds.
+
 ### Changed
 - The system figures moved out of `tui` (`system_hud.rs`) into `plugins/hud`. `system_hud = true`
   in `config.toml` still turns them on, now by starting the plugin; without `mman-hud` the header

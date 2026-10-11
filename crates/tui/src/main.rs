@@ -3736,7 +3736,7 @@ fn draw_preview_pane(
     } else if let Some(children) = subject.children {
         let items: Vec<ListItem> = children
             .iter()
-            .map(|e| entry_item(e, config, Row::PLAIN, None))
+            .map(|e| entry_item(e, config, Row::PLAIN, None, None))
             .collect();
         frame.render_widget(
             List::new(items).block(style::themed_block(config, "preview", false)),
@@ -3941,7 +3941,7 @@ fn draw(
                     drop: drop_dir == Some(e.path.as_path()),
                     ..Row::PLAIN
                 };
-                entry_item(e, config, row, None)
+                entry_item(e, config, row, None, None)
             })
             .collect();
         frame.render_widget(
@@ -3975,6 +3975,7 @@ fn draw(
                 Rect::new(row.x + 1, row.y, row.width.saturating_sub(2), row.height),
             );
         }
+        let badge_room = app.has_badges();
         let current_items: Vec<ListItem> = browser
             .current_entries()
             .iter()
@@ -3985,8 +3986,12 @@ fn draw(
                     selected: has_selection && i == browser.selected_index(),
                     marked: browser.is_marked(&e.path),
                     drop: drop_dir == Some(e.path.as_path()),
+                    badge_room: badge_room && plan.name_width > BADGE_ROOM + hud::MIN_NAME_WIDTH,
                 };
-                entry_item(e, config, row, Some((plan, now)))
+                let badge = app
+                    .entry_badge(&e.name)
+                    .and_then(|line| plugin_views::spans_text(line, glyphs::of(config)));
+                entry_item(e, config, row, Some((plan, now)), badge)
             })
             .collect();
         // `select(None)` also rewinds the scroll offset, so an emptied directory doesn't leave the
@@ -4247,7 +4252,14 @@ struct Row {
     marked: bool,
     /// The folder a drag would drop into: drawn inverted so it stands out from the selection.
     drop: bool,
+    /// Keep `BADGE_ROOM` cells at the end of the name column for a plugin's badge. Set for every
+    /// row of a list once any row has one, so names stay aligned instead of shifting for the
+    /// rows that happen to have a badge.
+    badge_room: bool,
 }
+
+/// Cells a badge column takes out of the name column: a space, then the badge's own two.
+const BADGE_ROOM: usize = 3;
 
 impl Row {
     const PLAIN: Row = Row {
@@ -4255,6 +4267,7 @@ impl Row {
         selected: false,
         marked: false,
         drop: false,
+        badge_room: false,
     };
 }
 
@@ -4265,6 +4278,7 @@ fn entry_item(
     config: &Config,
     row: Row,
     columns: Option<(hud::Columns, SystemTime)>,
+    badge: Option<(String, plugin_host::protocol::Tone)>,
 ) -> ListItem<'static> {
     let theme = &config.theme;
     let g = glyphs::of(config);
@@ -4312,10 +4326,30 @@ fn entry_item(
     let label = entry_label(entry);
     match columns {
         Some((plan, now)) => {
-            spans.push(Span::styled(
-                hud::pad_to(&label, plan.name_width),
-                name_style,
-            ));
+            let name_width = if row.badge_room {
+                plan.name_width - BADGE_ROOM
+            } else {
+                plan.name_width
+            };
+            spans.push(Span::styled(hud::pad_to(&label, name_width), name_style));
+            if row.badge_room {
+                let cell = badge.map_or_else(
+                    || Span::raw(" ".repeat(BADGE_ROOM)),
+                    |(text, tone)| {
+                        let color = match tone {
+                            plugin_host::protocol::Tone::Danger => &theme.danger_fg,
+                            plugin_host::protocol::Tone::Dim => &theme.border_fg,
+                            plugin_host::protocol::Tone::Normal => &theme.file_fg,
+                            plugin_host::protocol::Tone::Accent => &theme.accent_fg,
+                        };
+                        Span::styled(
+                            format!(" {}", hud::pad_to(&text, BADGE_ROOM - 1)),
+                            Style::default().fg(color_from_name(color)),
+                        )
+                    },
+                );
+                spans.push(cell);
+            }
             // Dim, so the eye lands on names first.
             let dim = style::styled(
                 Style::default().fg(color_from_name(&theme.status_fg)),

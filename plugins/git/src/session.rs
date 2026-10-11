@@ -203,16 +203,18 @@ impl Session {
     }
 
     /// What each slot should hold now.
-    fn wanted(&self) -> [(Slot, SetView); 2] {
+    fn wanted(&self) -> [(Slot, SetView); 3] {
         let empty = |slot| SetView { slot, view: None };
-        match &self.repo {
-            Some(repo) => [
+        match (&self.repo, &self.dir) {
+            (Some(repo), Some(dir)) => [
                 (Slot::StatusRight, view::repository(repo)),
                 (Slot::StatusEntry, view::entry(repo, self.cursor.as_deref())),
+                (Slot::EntryBadge, view::badges(repo, dir)),
             ],
-            None => [
+            _ => [
                 (Slot::StatusRight, empty(Slot::StatusRight)),
                 (Slot::StatusEntry, empty(Slot::StatusEntry)),
+                (Slot::EntryBadge, empty(Slot::EntryBadge)),
             ],
         }
     }
@@ -276,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_fills_both_slots_once_and_a_repeat_sends_nothing() {
+    fn an_answer_fills_every_slot_once_and_a_repeat_sends_nothing() {
         let (mut session, now) = (Session::new(), Instant::now());
         session.handle(Command::Init { cwd: "/r".into() }, now);
         session.handle(
@@ -289,7 +291,11 @@ mod tests {
         let effects = session.handle(answered(1, repo("/r")), now);
         assert_eq!(
             shown(&effects),
-            [(Slot::StatusRight, true), (Slot::StatusEntry, true)]
+            [
+                (Slot::StatusRight, true),
+                (Slot::StatusEntry, true),
+                (Slot::EntryBadge, true)
+            ]
         );
         // The next run's identical answer changes nothing on screen.
         let later = now + REFRESH_AFTER;
@@ -323,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_the_repository_empties_both_slots_before_any_run_answers() {
+    fn leaving_the_repository_empties_every_slot_before_any_run_answers() {
         let (mut session, now) = (Session::new(), Instant::now());
         session.handle(Command::Init { cwd: "/r".into() }, now);
         session.handle(Command::CursorChanged(Some("/r/a.txt".into())), now);
@@ -331,19 +337,34 @@ mod tests {
         let effects = session.handle(Command::DirChanged("/elsewhere".into()), now);
         assert_eq!(
             shown(&effects),
-            [(Slot::StatusRight, false), (Slot::StatusEntry, false)]
+            [
+                (Slot::StatusRight, false),
+                (Slot::StatusEntry, false),
+                (Slot::EntryBadge, false)
+            ]
         );
         assert_eq!(runs(&effects), [(2, PathBuf::from("/elsewhere"))]);
     }
 
     #[test]
-    fn moving_within_the_repository_keeps_what_is_shown() {
+    fn moving_within_the_repository_keeps_the_status_and_re_marks_the_new_folder() {
         let (mut session, now) = (Session::new(), Instant::now());
         session.handle(Command::Init { cwd: "/r".into() }, now);
         session.handle(answered(1, repo("/r")), now);
         let effects = session.handle(Command::DirChanged("/r/sub".into()), now);
-        assert!(shown(&effects).is_empty());
+        // Nothing in /r/sub changed, so the marks of /r are taken away; the branch stays.
+        assert_eq!(shown(&effects), [(Slot::EntryBadge, false)]);
         assert_eq!(session.dir(), Some(std::path::Path::new("/r/sub")));
+    }
+
+    #[test]
+    fn the_marks_follow_the_folder_not_the_repository() {
+        let (mut session, now) = (Session::new(), Instant::now());
+        session.handle(Command::Init { cwd: "/r".into() }, now);
+        session.handle(answered(1, repo("/r")), now);
+        session.handle(Command::DirChanged("/r/sub".into()), now);
+        let effects = session.handle(Command::DirChanged("/r".into()), now);
+        assert_eq!(shown(&effects), [(Slot::EntryBadge, true)]);
     }
 
     #[test]
@@ -390,7 +411,11 @@ mod tests {
         );
         assert_eq!(
             shown(&effects),
-            [(Slot::StatusRight, false), (Slot::StatusEntry, false)]
+            [
+                (Slot::StatusRight, false),
+                (Slot::StatusEntry, false),
+                (Slot::EntryBadge, false)
+            ]
         );
     }
 

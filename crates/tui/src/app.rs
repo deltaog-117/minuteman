@@ -1038,6 +1038,16 @@ impl App {
         self.slots.view(slot)
     }
 
+    /// The badge a plugin gave the entry called `name` in the current folder.
+    pub fn entry_badge(&self, name: &str) -> Option<&plugin_host::protocol::Line> {
+        self.slots.badge(name)
+    }
+
+    /// Whether any entry has a badge, so the list reserves room for them only when one shows.
+    pub fn has_badges(&self) -> bool {
+        self.slots.has_badges()
+    }
+
     /// Drops what plugins that have stopped had put in the slots, so a dead plugin's text never
     /// lingers. Call once per render tick.
     pub fn prune_views(&mut self) {

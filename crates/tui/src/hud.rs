@@ -244,7 +244,7 @@ pub const BASE_GUTTER: usize = 2;
 const SIZE_WIDTH: usize = 5;
 const AGE_WIDTH: usize = 3;
 /// A name never gets squeezed below this to make room for a column.
-const MIN_NAME_WIDTH: usize = 12;
+pub const MIN_NAME_WIDTH: usize = 12;
 
 /// Which right-hand columns fit a pane, and how wide the name column then is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

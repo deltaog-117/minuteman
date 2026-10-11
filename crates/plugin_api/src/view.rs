@@ -39,6 +39,15 @@ pub const MAX_SPANS: usize = 64;
 /// Most characters a view may hold, in all its spans.
 pub const MAX_CHARS: usize = 512;
 
+/// Most keyed lines the `EntryBadge` slot holds: one badge per row of a folder.
+pub const MAX_BADGES: usize = 2000;
+
+/// Most characters a badge's text may hold: a badge is one or two cells beside a name.
+pub const MAX_BADGE_CHARS: usize = 2;
+
+/// Most characters a badge's key (the entry's name) may hold; no file name is longer.
+pub const MAX_KEY_CHARS: usize = 255;
+
 /// A place in the interface a plugin can fill. New slots are added over time (never removed or
 /// renamed), and a plugin names only the ones it knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -51,6 +60,10 @@ pub enum Slot {
     /// The header's right edge, after the pills the interface itself draws: one short line, drawn
     /// as a pill in the one tone of its first span.
     HeaderPill,
+    /// A mark beside each row of the current folder's list. Every line of the view is one badge
+    /// and carries the `key` of the entry it belongs to (its name in the folder); a line holds
+    /// one span of at most [`MAX_BADGE_CHARS`] characters.
+    EntryBadge,
 }
 
 impl Slot {
@@ -58,6 +71,7 @@ impl Slot {
     pub fn line_limit(self) -> usize {
         match self {
             Self::StatusEntry | Self::StatusRight | Self::HeaderPill => 1,
+            Self::EntryBadge => MAX_BADGES,
         }
     }
 }
@@ -131,6 +145,20 @@ impl Span {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
     pub spans: Vec<Span>,
+    /// Which entry the line is about, by name in the current folder. Only the `EntryBadge` slot
+    /// reads it, and there it is required; every other slot ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl Line {
+    /// A badge for the entry called `key`.
+    pub fn badge(key: impl Into<String>, span: Span) -> Self {
+        Self {
+            spans: vec![span],
+            key: Some(key.into()),
+        }
+    }
 }
 
 /// What fills a slot.
@@ -143,7 +171,7 @@ impl View {
     /// A view of the one line made of `spans`.
     pub fn line(spans: Vec<Span>) -> Self {
         Self {
-            lines: vec![Line { spans }],
+            lines: vec![Line { spans, key: None }],
         }
     }
 }
@@ -160,9 +188,14 @@ pub struct SetView {
 /// Why a view was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewError {
-    TooManyLines { slot: Slot, limit: usize },
+    TooManyLines {
+        slot: Slot,
+        limit: usize,
+    },
     TooManySpans,
     TooMuchText,
+    /// A line of the `EntryBadge` slot that names no entry.
+    MissingKey,
 }
 
 impl fmt::Display for ViewError {
@@ -173,6 +206,7 @@ impl fmt::Display for ViewError {
             }
             Self::TooManySpans => write!(f, "a view holds at most {MAX_SPANS} spans"),
             Self::TooMuchText => write!(f, "a view holds at most {MAX_CHARS} characters"),
+            Self::MissingKey => write!(f, "every badge names the entry it marks"),
         }
     }
 }
@@ -207,13 +241,37 @@ impl SetView {
                 limit,
             });
         }
-        let mut spans = 0;
-        let mut chars = 0;
         for span in view.lines.iter_mut().flat_map(|line| line.spans.iter_mut()) {
             span.text.retain(|c| !is_unsafe(c));
-            spans += 1;
-            chars += span.text.chars().count();
         }
+        if self.slot == Slot::EntryBadge {
+            // A badge is one small mark per row, so the per-view totals below would refuse any
+            // folder with more than a few dozen of them; each badge is bounded on its own.
+            for line in &view.lines {
+                let key = line.key.as_deref().ok_or(ViewError::MissingKey)?;
+                if key.chars().count() > MAX_KEY_CHARS {
+                    return Err(ViewError::TooMuchText);
+                }
+                if line.spans.len() > 1 {
+                    return Err(ViewError::TooManySpans);
+                }
+                if line
+                    .spans
+                    .iter()
+                    .any(|span| span.text.chars().count() > MAX_BADGE_CHARS)
+                {
+                    return Err(ViewError::TooMuchText);
+                }
+            }
+            return Ok(self);
+        }
+        let spans: usize = view.lines.iter().map(|line| line.spans.len()).sum();
+        let chars: usize = view
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.text.chars().count())
+            .sum();
         if spans > MAX_SPANS {
             return Err(ViewError::TooManySpans);
         }
@@ -285,6 +343,75 @@ mod tests {
         .expect("a known slot");
         assert_eq!(set.slot, Slot::HeaderPill);
         assert_eq!(Slot::HeaderPill.line_limit(), 1);
+    }
+
+    fn badges(keys_and_texts: &[(Option<&str>, &str)]) -> SetView {
+        SetView {
+            slot: Slot::EntryBadge,
+            view: Some(View {
+                lines: keys_and_texts
+                    .iter()
+                    .map(|(key, text)| Line {
+                        spans: vec![Span::text(*text, Tone::Accent)],
+                        key: key.map(str::to_string),
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    #[test]
+    fn the_entry_badge_slot_has_its_documented_wire_shape() {
+        let set: SetView = serde_json::from_str(
+            r#"{"slot":"entry_badge","view":{"lines":[{"key":"a.txt","spans":[{"text":"M","tone":"accent"}]}]}}"#,
+        )
+        .expect("a known slot with a keyed line");
+        assert_eq!(set.slot, Slot::EntryBadge);
+        assert_eq!(
+            set.view.expect("sent").lines[0].key.as_deref(),
+            Some("a.txt")
+        );
+        assert_eq!(Slot::EntryBadge.line_limit(), MAX_BADGES);
+        // A line with no key stays off the wire, so the other slots' shape is unchanged.
+        let json = serde_json::to_string(&one_line("x")).expect("plain data serializes");
+        assert!(!json.contains("key"), "{json}");
+    }
+
+    #[test]
+    fn badges_are_bounded_one_by_one_not_by_the_view_totals() {
+        let many: Vec<(Option<&str>, &str)> = (0..MAX_BADGES).map(|_| (Some("n"), "M")).collect();
+        assert!(badges(&many).checked().is_ok(), "far past MAX_SPANS");
+        let too_many: Vec<(Option<&str>, &str)> =
+            (0..=MAX_BADGES).map(|_| (Some("n"), "M")).collect();
+        assert_eq!(
+            badges(&too_many).checked(),
+            Err(ViewError::TooManyLines {
+                slot: Slot::EntryBadge,
+                limit: MAX_BADGES
+            })
+        );
+        assert_eq!(
+            badges(&[(Some("n"), "abc")]).checked(),
+            Err(ViewError::TooMuchText)
+        );
+        assert_eq!(badges(&[(None, "M")]).checked(), Err(ViewError::MissingKey));
+        let long_key = "k".repeat(MAX_KEY_CHARS + 1);
+        assert_eq!(
+            badges(&[(Some(&long_key), "M")]).checked(),
+            Err(ViewError::TooMuchText)
+        );
+        let mut two_spans = badges(&[(Some("n"), "M")]);
+        two_spans.view.as_mut().expect("set").lines[0]
+            .spans
+            .push(Span::text("x", Tone::Dim));
+        assert_eq!(two_spans.checked(), Err(ViewError::TooManySpans));
+    }
+
+    #[test]
+    fn a_badge_loses_control_characters_before_it_is_measured() {
+        // Two control characters and one letter: only the letter is drawn, so it fits.
+        let set = badges(&[(Some("n"), "\u{1b}\u{7}M\u{202e}")]).checked();
+        assert_eq!(texts(&set.expect("cleaned")), ["M"]);
     }
 
     #[test]
@@ -359,6 +486,23 @@ mod tests {
                 let all = texts(&set);
                 prop_assert!(all.len() <= MAX_SPANS);
                 prop_assert!(all.iter().map(|t| t.chars().count()).sum::<usize>() <= MAX_CHARS);
+            }
+        }
+
+        #[test]
+        fn checked_badges_stay_within_their_bounds(
+            pairs in prop::collection::vec((any::<String>(), any::<String>()), 0..40),
+        ) {
+            let lines: Vec<(Option<&str>, &str)> =
+                pairs.iter().map(|(k, t)| (Some(k.as_str()), t.as_str())).collect();
+            if let Ok(set) = badges(&lines).checked() {
+                for line in set.view.iter().flat_map(|view| &view.lines) {
+                    let key_ok = line.key.as_deref().is_some_and(|k| k.chars().count() <= MAX_KEY_CHARS);
+                    let spans_ok = line.spans.iter().all(|s| {
+                        s.text.chars().count() <= MAX_BADGE_CHARS && !s.text.chars().any(is_unsafe)
+                    });
+                    prop_assert!(key_ok && spans_ok);
+                }
             }
         }
 
