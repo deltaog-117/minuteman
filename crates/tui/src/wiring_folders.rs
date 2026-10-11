@@ -33,8 +33,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use devices::topology::{Node, NodeKind, Topology};
 use shared::Vfs;
+use shared::devices::topology::{Node, NodeKind, Topology};
 
 /// The most subfolders a folder shows before the rest are folded into "+N more"; the layout
 /// asks for fewer when the window is too small for that many.

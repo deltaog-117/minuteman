@@ -2010,8 +2010,39 @@ draws.
   temporary file it was writing; the password reaches the plugin as one JSON line, and only the
   `Password` type is wiped, not the line or the parser's copies; cancel is checked per entry, so
   one very large file runs to its end first; not tried in a real kitty.
-- [ ] **M6 – devices, the places rail, disk usage.** First check how far the deck is tied to the
-  browser keys.
+- [x] **M6 – the devices rail as a plugin (`plugins/devices`, `mman-devices`).** Scope changed from
+  the original line, by decision: the rail of devices only. Places (home, the XDG folders,
+  bookmarks) is left for later, and disk usage stays in the core because the atlas draws on its
+  scanner; wiring and atlas keep reading the machine themselves until M7. The first check, how far
+  the deck is tied to the browser keys, found it is not: `DeckState::key` is a self-contained
+  state machine (the rail takes `Tab`, the arrows, `Enter`, `m`, `e`, `p` and `Esc` only while it
+  has focus; `h/j/k/l` were never its). What tied it down was the data and the actions. The plugin
+  now owns both: while the rail shows, the interface sends `devices` with `watch`, and the plugin
+  looks at the mounts, `statvfs`, udev and `/proc/diskstats` on a thread of its own and sends the
+  whole list about once a second (`set_devices`: every device with its read and write rate and a
+  short history, and whether an action is under way). The interface asks it to `open`, `toggle` or
+  `eject` a device by its node and it answers with a `devices_note` (a message, or a folder to go
+  to). The interface keeps what is its own: the selection, the focus and keys, the slide-in of a
+  device that has just appeared, the drawing, and whether carried files fit (`cargo_fit`, so `p`
+  is still refused with its reason before any copy). Text from the plugin is cleaned on arrival,
+  a device with no node or a node already listed is dropped (the selection follows a node), the
+  list is cut to 256 and a mount path that could act on the terminal counts as no mount. To let a
+  plugin use the code, the `devices` crate moved into `shared::devices` (a plugin may depend on
+  `plugin_api` and `shared` only), and what to do to a device (`Plan`: open, toggle, eject, eject a
+  whole disk) moved into `shared::devices::plan`, so the plugin and the wiring diagram run the same
+  steps. Without the plugin the rail says "mman-devices was not found" and the status line says how
+  to get it; a plugin that dies is started again, at most once in three seconds. Chosen as COA A
+  (a rail fed by a plugin, disk usage left) over moving the whole storage cluster (B, which is M7's
+  pane design done early) and a cargo feature (C, which makes nothing replaceable). Verified
+  against the real `mman` and `mman-devices` over a PTY read through `pyte`: the rail listed this
+  machine's root volume with its gauge and the `▌` mark, `e` on it was refused in words, the
+  plugin killed with `SIGTERM` showed its exit and came back within the grace, and an `mman`
+  copied alone showed the note and the install hint.
+  Follow-ups: no mount, unmount or eject was run against a real stick or a network share (this
+  machine had neither; the steps are the code that ran before); the rail's list is replaced
+  whole each second and the plugin keeps running (idle) after the rail goes; wiring and atlas
+  still carry their own scan until M7; the status line cuts the install hint at the terminal's
+  width.
 - [ ] **M7 – decide, then do:** Vfs schemes served by a plugin (ssh, browsing inside an archive),
   which put a process boundary under a synchronous call, and the alternate views (grid, tiles,
   filmstrip, atlas, wiring), which need `SetPane` to describe more than text spans. If either

@@ -30,6 +30,7 @@ use shared::DirEntryInfo;
 
 mod archive;
 pub mod client;
+mod devices;
 mod event;
 mod inspect;
 mod picker;
@@ -41,6 +42,10 @@ pub use archive::{
     ArchiveWork, CompressJob, Conflict, EVENT_ARCHIVE, EVENT_ARCHIVE_CANCEL, ExtractJob, Format,
     Level, MAX_ARCHIVE_JOBS, MAX_ARCHIVE_TEXT_CHARS, MAX_PASSWORD_CHARS, METHOD_ARCHIVE_DONE,
     METHOD_ARCHIVE_PROGRESS, PROVIDES_ARCHIVE, Password,
+};
+pub use devices::{
+    DeviceKind, DevicesCommand, DevicesNote, EVENT_DEVICES, MAX_DEVICE_TEXT_CHARS, MAX_DEVICES,
+    METHOD_DEVICES_NOTE, METHOD_SET_DEVICES, PROVIDES_DEVICES, SetDevices, WireDevice,
 };
 pub use event::{EventParams, HostEvent};
 pub use inspect::{

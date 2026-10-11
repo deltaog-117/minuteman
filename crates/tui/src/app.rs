@@ -37,8 +37,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 use file_ops::history::{Change, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use plugin_api::{
-    ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, CompressJob, Conflict, ExtractJob,
-    Format, Level, Password,
+    ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, CompressJob, Conflict,
+    DevicesCommand, ExtractJob, Format, Level, Password,
 };
 use plugin_host::protocol::PickerSpec;
 use plugin_host::{
@@ -633,9 +633,45 @@ impl App {
         DiskUsageView::open(self.handle.clone(), Arc::clone(&self.vfs), path)
     }
 
-    /// The deck of device cards (`V`, the deck view). It looks at the machine only while it exists.
-    pub fn begin_deck(&self) -> DeckState {
-        DeckState::new(self.handle.clone())
+    /// The deck of device cards (`V`, the deck view). The plugin that provides `devices` looks at
+    /// the machine only while it exists; with none to ask, the rail says so and the status line
+    /// says where to get it.
+    pub fn begin_deck(&mut self) -> DeckState {
+        let mut deck = DeckState::new();
+        if !self
+            .plugins
+            .dispatch_devices(DevicesCommand::Watch { on: true })
+        {
+            deck.set_missing(Some("mman-devices was not found".into()));
+            self.status = Some(crate::bundled::missing("devices"));
+        }
+        deck
+    }
+
+    /// Tells the devices plugin the rail has gone, so it stops looking at the machine.
+    pub fn end_deck(&mut self) {
+        let _ = self
+            .plugins
+            .dispatch_devices(DevicesCommand::Watch { on: false });
+    }
+
+    /// Whether the devices plugin has a live process right now.
+    pub fn devices_running(&self) -> bool {
+        self.plugins.devices_running()
+    }
+
+    /// Asks the devices plugin to start watching again after it stopped. `false` when it cannot
+    /// be started.
+    pub fn restart_devices(&mut self) -> bool {
+        self.plugins
+            .dispatch_devices(DevicesCommand::Watch { on: true })
+    }
+
+    /// Asks the devices plugin to do `command` to a device, or says where to get the plugin.
+    pub fn ask_devices(&mut self, command: DevicesCommand) {
+        if !self.plugins.dispatch_devices(command) {
+            self.status = Some(crate::bundled::missing("devices"));
+        }
     }
 
     /// The wiring diagram of the machine's storage (`V`, the wiring view). It looks at the machine

@@ -558,6 +558,17 @@ const REMOTE_SHELL: &str =
 
 /// Opens a file: an archive is entered as a folder, unless an `[[open_rule]]` claims it, and
 /// anything else goes to its program.
+/// Shows what became of an action on a device, or goes to the folder it opened.
+fn apply_device_event(event: DeckEvent, app: &mut App, browser: &mut BrowserState) {
+    match event {
+        DeckEvent::Status(text) => app.status = Some(text),
+        DeckEvent::Goto(path, text) => {
+            let plan = browser.plan_goto(&path);
+            app.begin_move(browser, plan, Some(text), "device");
+        }
+    }
+}
+
 fn open_file(app: &mut App, browser: &mut BrowserState, vfs: &dyn Vfs, path: &Path) {
     // While another program waits for a pick, a file is chosen, not launched — an archive too.
     if app.choose_file(browser, vfs, path) {
@@ -1459,6 +1470,25 @@ fn run(
                         panel.accept(set);
                     }
                 }
+                UiRequest::SetDevices { set, .. } => {
+                    if let Some(cards) = deck.as_mut() {
+                        cards.accept(set, Instant::now());
+                    }
+                }
+                UiRequest::DevicesNote { note, .. } => match deck.as_mut() {
+                    Some(cards) => cards.note(note),
+                    // The rail has gone since the action began: its news is still the user's.
+                    None => apply_device_event(
+                        match note {
+                            plugin_api::DevicesNote::Status { text } => DeckEvent::Status(text),
+                            plugin_api::DevicesNote::Goto { path, text } => {
+                                DeckEvent::Goto(path, text)
+                            }
+                        },
+                        app,
+                        browser,
+                    ),
+                },
                 UiRequest::ArchiveProgress { progress, .. } => app.archive_progress(progress),
                 UiRequest::ArchiveDone { done, .. } => app.archive_done(done),
                 UiRequest::Close {
@@ -1488,20 +1518,25 @@ fn run(
         // The deck looks at the machine only while its view is showing. Work it finished in the
         // background (a mount, an eject) arrives here: a message, or a folder to go to.
         if view_mode == ViewMode::Deck {
-            let cards = deck.get_or_insert_with(|| app.begin_deck());
-            cards.poll(Instant::now());
-            cards.set_load(app.load(browser));
-            while let Some(event) = cards.take_event() {
-                match event {
-                    DeckEvent::Status(text) => app.status = Some(text),
-                    DeckEvent::Goto(path, text) => {
-                        let plan = browser.plan_goto(&path);
-                        app.begin_move(browser, plan, Some(text), "device");
-                    }
+            if deck.is_none() {
+                deck = Some(app.begin_deck());
+            }
+            if let Some(cards) = deck.as_mut() {
+                // A plugin that stopped is started again, but not in a loop; one that was never
+                // found stays missing.
+                if cards.missing().is_none()
+                    && cards.should_restart(app.devices_running(), Instant::now())
+                    && !app.restart_devices()
+                {
+                    cards.set_missing(Some("mman-devices stopped".into()));
+                }
+                cards.set_load(app.load(browser));
+                while let Some(event) = cards.take_event() {
+                    apply_device_event(event, app, browser);
                 }
             }
-        } else {
-            deck = None;
+        } else if deck.take().is_some() {
+            app.end_deck();
         }
         if view_mode == ViewMode::Wiring {
             let diagram = wiring.get_or_insert_with(|| app.begin_wiring(browser.show_hidden()));
@@ -2252,14 +2287,18 @@ fn run(
                         if layout.deck.contains(at) {
                             match mouse.kind {
                                 MouseEventKind::Down(MouseButton::Left) => {
-                                    if let DeckKey::Goto(path) = cards.click(layout.deck, at) {
-                                        let plan = browser.plan_goto(&path);
-                                        app.begin_move(
-                                            browser,
-                                            plan,
-                                            Some("opened device".into()),
-                                            "device",
-                                        );
+                                    match cards.click(layout.deck, at) {
+                                        DeckKey::Goto(path) => {
+                                            let plan = browser.plan_goto(&path);
+                                            app.begin_move(
+                                                browser,
+                                                plan,
+                                                Some("opened device".into()),
+                                                "device",
+                                            );
+                                        }
+                                        DeckKey::Do(command) => app.ask_devices(command),
+                                        DeckKey::Pass | DeckKey::Handled | DeckKey::Send(_) => {}
                                     }
                                 }
                                 kind => {
@@ -3260,6 +3299,10 @@ fn run(
                         // Copy what is carried to the device. The marks are yanked first if
                         // they are all there is, the way `y` then `p` would; with neither, the
                         // yank says nothing is marked.
+                        DeckKey::Do(command) => {
+                            app.ask_devices(command);
+                            continue;
+                        }
                         DeckKey::Send(root) => {
                             if app.clipboard.is_none() {
                                 app.yank(browser);

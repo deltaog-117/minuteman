@@ -7283,6 +7283,63 @@ it a real test, and it passed. Not run: a real kitty, an ssh folder, and the ins
 
 ---
 
+## 2026-10-11 — The rail of devices becomes a plugin (M6)
+
+**Context.** M6 was written as "devices, the places rail, disk usage", with the note to first check
+how far the deck is tied to the browser keys. The check found it is not: `DeckState::key` is a
+self-contained state machine that `main` offers each key first, and `h/j/k/l` were never its. The
+ties were elsewhere. The deck scanned the machine itself and ran `udisksctl` itself; wiring and
+atlas shared its action code, the atlas imported its `holding` and the disk usage scanner, and the
+disk usage scanner feeds the atlas. Two decisions were taken before any code: the rail of devices
+only (Places was never built and stays for later), and wiring and atlas keep reading the machine
+until M7.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A plugin fills the rail: it scans and mounts, the interface keeps the rail, the selection, the keys and the fit check; disk usage stays | Chosen |
+| B | Move the whole storage cluster (rail, wiring, atlas, disk usage) behind a general pane description | Rejected: it is M7's `SetPane` design done early |
+| C | A `storage` cargo feature in the core | Rejected: nothing becomes replaceable and the core does not shrink |
+
+**Decision.** The wire is `plugin_api::devices`: a `devices` event with a `watch`, `open`, `toggle`
+or `eject` command; `set_devices` with the whole list (each device with its rates and history, and
+a busy flag); `devices_note` with a message or a folder to go to. Rates and history are the
+plugin's (it keeps `Activity`); the slide-in of a new device stays the interface's, since it is
+about what the user sees, and so does `cargo_fit`, because `p` must refuse a copy that will not fit
+before it starts and that needs the carried files, which the plugin has no way to see. The
+interface sends no scan: `DeckState` lost its scanner, its runtime handle and its action queue and
+gained `accept` (the list), `note` (the plugin's news) and `Outcome::Do` (a command for the
+plugin). A plugin may depend only on `plugin_api` and `shared`, so the `devices` crate became
+`shared::devices` (files moved with `git mv`, only `crate::` paths changed), and the steps to open,
+toggle and eject became `shared::devices::plan::Plan`, which `device_actions` (still used by the
+wiring diagram) and the plugin both run, so the refusal texts and the messages exist once.
+
+**Departures from the plan.** (1) I first thought of keeping `Actions` in the deck and sending the
+plugin only data. Then a mount would still run in the interface, which defeats the move, so the
+plugin owns the actions and the interface only asks. (2) The scan has to survive a `statvfs` that
+blocks on a dead network share; the plugin scans on its own thread and takes commands on a
+channel, so a stuck scan delays the next list but never an action or the host's lines.
+
+**Trade-offs.** One more process on a fresh install; with it missing the rail says so and mounting
+does nothing. The plugin sends the whole list every second, a few hundred bytes. It idles when the
+rail is not showing but does not exit. A plugin that dies is started again at most every three
+seconds, and one that was never found is not retried. The wiring and atlas views still carry their
+own scan and `device_actions` until M7, so the code that reads `/proc` and runs `udisksctl` has
+two callers.
+
+**Verification.** `scripts/check` passes. Tests: the wire (shape, the checking, a property that
+nothing unsafe, over-long or repeated survives), `Plan`, the scanner (silent until watched, a list
+at once, a refresh, stops when told, ends when the host goes), the session (open, toggle, eject,
+refusals, a gone device, one action at a time, busy in the list), the real program played by a
+stand-in host, the deck over a list and notes, and the bundled entry. The deck tests that
+scanned in-process were rewritten around lists. The real `mman` and `mman-devices` were driven over
+a PTY read through `pyte`: the rail drew this machine's root volume with its gauge, the `▌` mark and
+the activity pulse, `Tab` then `e` was refused in words, the plugin killed with `SIGTERM` was
+started again, and an `mman` copied alone showed "mman-devices was not found" and the hint. Not
+run: a real mount, unmount or eject (no stick or share here), a real kitty, a network share gone
+away.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

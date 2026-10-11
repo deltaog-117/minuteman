@@ -90,10 +90,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   away is stopped and its result written. An extract with no password reports `password_needed`
   before it writes anything, and with one checks every encrypted archive of the batch first.
   Install it with `cargo install --path plugins/archive`.
+- `plugin_api`: what a plugin that fills the deck's rail of devices and the host exchange. The
+  `devices` event carries a command (`watch` on or off, `open`, `toggle` or `eject` a device by its
+  node); the plugin answers with `set_devices` (every device with its read and write rate, a short
+  history and whether an action is under way) and `devices_note` (a message, or a folder to go
+  to). Every text is cleaned on arrival, a device with no node or a repeated node is dropped, and
+  the list is cut to 256 devices. A plugin lists `provides = ["devices"]` to be the one.
+- `plugins/devices` (`mman-devices`), an eighth bundled plugin: the devices behind the deck's rail,
+  as before but from a plugin. It looks at the machine once a second while the rail shows, and
+  runs mount, unmount and eject through `udisksctl` one at a time. Install it with
+  `cargo install --path plugins/devices`.
+- `shared::devices::plan`, the steps to open, mount, unmount or eject a device, used by the plugin
+  and the wiring diagram alike.
 - `shared::create_dir_all`, the `mkdir -p` over a `Vfs` that `file_ops` and the archive plugin both
   use.
 
 ### Changed
+- The deck's rail of devices no longer scans the machine itself: `mman-devices` sends the list
+  and does the mounting. The rail, its keys, the selection, the slide-in of a new device and the
+  check of whether carried files fit are unchanged. Without the plugin the rail says
+  "mman-devices was not found" and the status line says how to get it; a plugin that stops is
+  started again, at most once in three seconds.
+- The `devices` crate is now the `shared::devices` module, so a plugin can use it. Nothing about
+  what it reads or how changed.
 - Which files are pictures, and running `[[preview_hook]]` tables of kind `image`, moved out of
   `tui` into `plugins/preview` (`tui::preview_hook` is removed). The interface still decodes,
   fits and draws the picture. Without `mman-preview` a picture shows only its file name, as text

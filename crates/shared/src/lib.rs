@@ -21,6 +21,7 @@
 
 pub mod chooser;
 pub mod conformance;
+pub mod devices;
 pub mod error;
 pub mod format;
 pub mod fuzzy;

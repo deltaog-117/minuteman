@@ -36,12 +36,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use devices::Device;
-use devices::activity::{Activity, Counters, Rates};
-use devices::probe::Sys;
-use devices::topology::{NodeKind, Topology};
 use ratatui::layout::{Position, Rect};
 use shared::Vfs;
+use shared::devices::Device;
+use shared::devices::activity::{Activity, Counters, Rates};
+use shared::devices::probe::Sys;
+use shared::devices::topology::{NodeKind, Topology};
 
 use crate::cargo_fit::{Load, Verdict, verdict};
 use crate::device_actions::Actions;
@@ -705,7 +705,7 @@ impl WiringState {
 
 #[cfg(test)]
 mod tests {
-    use devices::topology::{Layer, Node};
+    use shared::devices::topology::{Layer, Node};
 
     use super::*;
     use crate::device_actions::Event;
@@ -1132,7 +1132,7 @@ mod tests {
             .nodes
             .iter()
             .filter(|n| n.kind == kind)
-            .map(devices::topology::Node::title)
+            .map(shared::devices::topology::Node::title)
             .collect()
     }
 
@@ -1255,7 +1255,7 @@ mod tests {
         }
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut topology = Topology::default();
-        let mut node = devices::topology::Node::new("sdz1", NodeKind::Partition);
+        let mut node = shared::devices::topology::Node::new("sdz1", NodeKind::Partition);
         node.mount = Some("/big".into());
         node.usage = Some("filesystem".into());
         node.total = 100 << 30;

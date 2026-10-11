@@ -28,12 +28,12 @@
 use std::path::Path;
 use std::time::Instant;
 
-use devices::{Device, Kind};
 use ratatui::Frame;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
+use shared::devices::{Device, Kind};
 use theming::Config;
 
 use crate::cargo_fit::{self, Verdict};
@@ -238,12 +238,17 @@ pub fn render(
     let dim = Style::default().fg(style::color(&theme.status_fg));
     let block = style::themed_block(config, "devices", deck.focused());
     if deck.devices().is_empty() {
-        let note = if deck.has_scanned() {
-            "no devices found"
-        } else {
-            "looking for devices…"
+        let note = match deck.missing() {
+            Some(why) => why,
+            None if deck.has_scanned() => "no devices found",
+            None => "looking for devices…",
         };
-        frame.render_widget(Paragraph::new(Span::styled(note, dim)).block(block), area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(note, dim))
+                .wrap(Wrap { trim: true })
+                .block(block),
+            area,
+        );
         return;
     }
     frame.render_widget(block, area);
@@ -350,7 +355,7 @@ fn row_lines(
     let pulse = (busy && width >= indent + 8).then(|| {
         sparkline(
             &deck.history(device),
-            PULSE_WIDTH.min(devices::activity::HISTORY),
+            PULSE_WIDTH.min(shared::devices::activity::HISTORY),
             ascii,
         )
     });
@@ -442,8 +447,8 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn deck(runtime: &tokio::runtime::Runtime, devices: Vec<Device>) -> DeckState {
-        DeckState::with_devices(runtime.handle().clone(), devices)
+    fn deck(devices: Vec<Device>) -> DeckState {
+        DeckState::with_devices(devices)
     }
 
     fn many(n: usize) -> Vec<Device> {
@@ -488,14 +493,10 @@ mod tests {
 
     #[test]
     fn the_rail_groups_devices_under_headings_and_stacks_two_lines_each() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = deck(
-            &runtime,
-            vec![
-                device("sda1", "", Some("/"), Kind::Internal, 250),
-                device("sdb1", "STICK", Some("/m/STICK"), Kind::Removable, 900),
-            ],
-        );
+        let deck = deck(vec![
+            device("sda1", "", Some("/"), Kind::Internal, 250),
+            device("sdb1", "STICK", Some("/m/STICK"), Kind::Removable, 900),
+        ]);
         let area = Rect::new(2, 3, 26, 12);
         let placed = rows(area, &deck, Instant::now()).placed;
         let slots: Vec<Slot> = placed.iter().map(|&(slot, _)| slot).collect();
@@ -539,7 +540,6 @@ mod tests {
 
     #[test]
     fn a_heading_is_kept_with_the_first_device_scrolled_to() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut devices = many(4);
         devices.push(device(
             "sdz1",
@@ -548,7 +548,7 @@ mod tests {
             Kind::Removable,
             900,
         ));
-        let mut deck = deck(&runtime, devices);
+        let mut deck = deck(devices);
         deck.key(press(KeyCode::Tab), true);
         for _ in 0..4 {
             deck.key(press(KeyCode::Down), true);
@@ -569,8 +569,7 @@ mod tests {
 
     #[test]
     fn a_click_finds_the_device_that_was_drawn_there() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = deck(&runtime, many(3));
+        let deck = deck(many(3));
         let area = Rect::new(0, 0, 26, 20);
         assert_eq!(card_at(area, &deck, Position::new(3, 0)), None, "the frame");
         assert_eq!(
@@ -590,8 +589,7 @@ mod tests {
 
     #[test]
     fn a_device_sliding_in_is_short_and_grows_to_its_full_height() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut deck = deck(&runtime, many(1));
+        let mut deck = deck(many(1));
         let now = Instant::now();
         deck.mark_arrived("sd01", now);
         let area = Rect::new(0, 0, 26, 12);
@@ -629,21 +627,17 @@ mod tests {
 
     #[test]
     fn each_device_shows_its_name_how_full_and_which_group_it_is_in() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = deck(
-            &runtime,
-            vec![
-                device("sda1", "", Some("/"), Kind::Internal, 250),
-                device(
-                    "sdb1",
-                    "HOLIDAY",
-                    Some("/run/media/me/HOLIDAY"),
-                    Kind::Removable,
-                    900,
-                ),
-                device("sdc1", "BACKUP", None, Kind::Removable, 0),
-            ],
-        );
+        let deck = deck(vec![
+            device("sda1", "", Some("/"), Kind::Internal, 250),
+            device(
+                "sdb1",
+                "HOLIDAY",
+                Some("/run/media/me/HOLIDAY"),
+                Kind::Removable,
+                900,
+            ),
+            device("sdc1", "BACKUP", None, Kind::Removable, 0),
+        ]);
         let shown = drawn(&deck, "/run/media/me/HOLIDAY/photos", 26, 14);
         for text in [
             "devices",
@@ -663,8 +657,7 @@ mod tests {
 
     #[test]
     fn the_device_holding_the_browsed_folder_has_the_bar_at_its_edge() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = deck(&runtime, many(2));
+        let deck = deck(many(2));
         let shown = drawn(&deck, "/mnt/1/deep", 26, 10);
         let lines: Vec<&str> = shown.lines().collect();
         // Row 0 is the frame, row 1 the heading, rows 2-3 the first device, 4-5 the second.
@@ -674,8 +667,7 @@ mod tests {
 
     #[test]
     fn an_empty_deck_says_it_is_looking_and_then_that_it_found_nothing() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut deck = deck(&runtime, Vec::new());
+        let mut deck = deck(Vec::new());
         deck.set_scanned(false);
         assert!(drawn(&deck, "/", 26, 10).contains("looking for devices"));
         deck.set_scanned(true);
@@ -685,21 +677,17 @@ mod tests {
     #[test]
     fn while_files_are_carried_each_device_says_whether_they_fit() {
         use crate::cargo_fit::{Carry, Load};
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut deck = deck(
-            &runtime,
-            vec![
-                device("sda1", "", Some("/"), Kind::Internal, 900),
-                device(
-                    "sdb1",
-                    "HOLIDAY",
-                    Some("/run/media/me/HOLIDAY"),
-                    Kind::Removable,
-                    10,
-                ),
-                device("sdc1", "BACKUP", None, Kind::Removable, 0),
-            ],
-        );
+        let mut deck = deck(vec![
+            device("sda1", "", Some("/"), Kind::Internal, 900),
+            device(
+                "sdb1",
+                "HOLIDAY",
+                Some("/run/media/me/HOLIDAY"),
+                Kind::Removable,
+                10,
+            ),
+            device("sdc1", "BACKUP", None, Kind::Removable, 0),
+        ]);
         for d in 0..2 {
             let device = &mut deck.devices_mut()[d];
             device.total = 1 << 40;
@@ -728,16 +716,14 @@ mod tests {
 
     #[test]
     fn an_idle_disk_shows_no_pulse() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = deck(&runtime, many(1));
+        let deck = deck(many(1));
         let shown = drawn(&deck, "/mnt/0", 26, 8);
         assert!(!shown.contains('█'), "idle:\n{shown}");
     }
 
     #[test]
     fn it_draws_at_any_size_without_panicking() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = deck(&runtime, many(6));
+        let deck = deck(many(6));
         for (w, h) in [
             (0, 0),
             (1, 1),
@@ -755,8 +741,7 @@ mod tests {
 
     #[test]
     fn hidden_devices_are_marked_at_the_edges() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = deck(&runtime, many(6));
+        let deck = deck(many(6));
         let shown = drawn(&deck, "/mnt/0", 26, 8);
         assert!(shown.contains('▾') && !shown.contains('▴'), "{shown}");
     }

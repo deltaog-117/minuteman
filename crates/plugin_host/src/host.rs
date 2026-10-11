@@ -35,8 +35,8 @@ use tokio::runtime::Handle;
 
 use crossterm::event::KeyCode;
 use plugin_api::{
-    ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_ARCHIVE, PROVIDES_INSPECT, PROVIDES_PREVIEW,
-    ReadFile, Stat, StatKind, StatReply,
+    ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_ARCHIVE, PROVIDES_DEVICES, PROVIDES_INSPECT,
+    PROVIDES_PREVIEW, ReadFile, Stat, StatKind, StatReply,
 };
 use serde_json::json;
 use shared::{FileKind, LocalVfs, Vfs};
@@ -601,6 +601,48 @@ impl PluginManager {
         })
     }
 
+    /// Hands `command` to the plugin that provides `devices`. Returns whether a plugin got it:
+    /// `false` when none provides `devices`, or the one that does cannot be started, so the
+    /// interface can say where to get it instead of waiting for a list that will not come. A
+    /// plugin whose process has ended is started again first, except to be told to stop
+    /// watching: that never starts a process just to tell it so.
+    pub fn dispatch_devices(&mut self, command: protocol::DevicesCommand) -> bool {
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins.iter_mut().find(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_DEVICES)
+        }) else {
+            return false;
+        };
+        let stopping = matches!(command, protocol::DevicesCommand::Watch { on: false });
+        if stopping && plugin.process.life.exit() != Exit::Running {
+            return true;
+        }
+        if !plugin.ready_for_event(logs_tx, state_tx) {
+            return false;
+        }
+        let event = protocol::HostEvent::devices(command);
+        plugin.process.stdin_tx.send(event.to_line()).is_ok()
+    }
+
+    /// Whether a plugin that provides `devices` has a live process right now. A list that was
+    /// being kept current when that process died will never be updated, which the interface can
+    /// tell by this.
+    pub fn devices_running(&self) -> bool {
+        self.plugins.iter().any(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_DEVICES)
+                && p.process.life.exit() == Exit::Running
+        })
+    }
+
     /// Hands `work` to the plugin that provides `archive`, to be reported under the number `job`.
     /// Returns whether a plugin got it: `false` when none provides `archive`, or the one that does
     /// cannot be started, so the interface can say where to get it instead of waiting for a result
@@ -926,6 +968,8 @@ async fn read_loop(
             Ok(Incoming::SetView(set)) => ui.set_view(&plugin, set),
             Ok(Incoming::SetPreview(set)) => ui.set_preview(&plugin, set),
             Ok(Incoming::SetInspect(set)) => ui.set_inspect(&plugin, set),
+            Ok(Incoming::SetDevices(set)) => ui.set_devices(&plugin, set),
+            Ok(Incoming::DevicesNote(note)) => ui.devices_note(&plugin, note),
             Ok(Incoming::ArchiveProgress(progress)) => ui.archive_progress(&plugin, progress),
             Ok(Incoming::ArchiveDone(done)) => ui.archive_done(&plugin, done),
             Ok(Incoming::WalkCancel(cancel)) => walks.cancel(cancel.walk),

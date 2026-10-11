@@ -26,8 +26,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use crate::probe::{Space, Sys, is_virtual, read};
-use crate::{Device, Kind, mountinfo, udev};
+use super::probe::{Space, Sys, is_virtual, read};
+use super::{Device, Kind, mountinfo, udev};
 
 /// What a stacked device is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

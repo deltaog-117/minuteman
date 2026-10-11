@@ -25,13 +25,13 @@
 
 use std::path::Path;
 
-use devices::{Device, Kind as DeviceKind};
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use shared::devices::{Device, Kind as DeviceKind};
 use theming::Config;
 
 use crate::atlas::AtlasState;

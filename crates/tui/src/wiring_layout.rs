@@ -26,8 +26,8 @@
 
 use std::collections::HashMap;
 
-use devices::topology::{NodeKind, Topology};
 use ratatui::layout::Rect;
+use shared::devices::topology::{NodeKind, Topology};
 
 use crate::wiring_folders::MAX_SHOWN;
 
@@ -609,7 +609,7 @@ pub fn path_into(layout: &Layout, parent: usize, child: usize) -> Vec<(u16, u16)
 
 #[cfg(test)]
 mod tests {
-    use devices::topology::{Layer, Node, NodeKind};
+    use shared::devices::topology::{Layer, Node, NodeKind};
 
     use super::*;
 

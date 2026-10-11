@@ -55,18 +55,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use plugin_api::{
-    API_VERSION, ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, Change, EVENT_ACTION,
-    EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT, EVENT_JOB_FINISHED, EVENT_KEY,
-    EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH,
+    API_VERSION, ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, Change, DevicesCommand,
+    DevicesNote, EVENT_ACTION, EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT, EVENT_JOB_FINISHED,
+    EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH,
     EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job, JobOutcome, Line, LogLevel, PickerClose,
-    PickerIndexing, PickerSpec, PickerUpdate, ReadFile, SetInspect, SetPreview, SetView, Slot,
-    Span, Stat, StateSnapshot, TallyCancel, TallyDone, TallyEnding, TallyRequest, Tone, TreeEntry,
-    View, WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
+    PickerIndexing, PickerSpec, PickerUpdate, ReadFile, SetDevices, SetInspect, SetPreview,
+    SetView, Slot, Span, Stat, StateSnapshot, TallyCancel, TallyDone, TallyEnding, TallyRequest,
+    Tone, TreeEntry, View, WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
 };
 use plugin_api::{
-    METHOD_ARCHIVE_DONE, METHOD_ARCHIVE_PROGRESS, METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS,
-    METHOD_READ_FILE, METHOD_SET_INSPECT, METHOD_SET_PREVIEW, METHOD_SET_VIEW, METHOD_SHOW_PICKER,
-    METHOD_STAT, METHOD_TALLY, METHOD_TALLY_CANCEL, METHOD_WALK, METHOD_WALK_CANCEL,
+    METHOD_ARCHIVE_DONE, METHOD_ARCHIVE_PROGRESS, METHOD_DEVICES_NOTE, METHOD_PICKER_CLOSE,
+    METHOD_PICKER_ITEMS, METHOD_READ_FILE, METHOD_SET_DEVICES, METHOD_SET_INSPECT,
+    METHOD_SET_PREVIEW, METHOD_SET_VIEW, METHOD_SHOW_PICKER, METHOD_STAT, METHOD_TALLY,
+    METHOD_TALLY_CANCEL, METHOD_WALK, METHOD_WALK_CANCEL,
 };
 
 /// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
@@ -329,6 +330,11 @@ pub enum Incoming {
     ArchiveProgress(ArchiveProgress),
     /// The plugin ended an archive request; already cleaned by `ArchiveDone::checked`.
     ArchiveDone(ArchiveDone),
+    /// The plugin gave the rail its devices; already cleaned by `SetDevices::checked`.
+    SetDevices(SetDevices),
+    /// The plugin said what an action on a device came to; already cleaned by
+    /// `DevicesNote::checked`. A note that cannot be shown safely is ignored.
+    DevicesNote(DevicesNote),
     /// A well-formed notification (no `id`) whose method isn't one of the above — ignored rather than
     /// treated as an error, so a plugin can send something a future host version understands
     /// without breaking against this one.
@@ -426,6 +432,19 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                         id: None,
                         message: format!("refused '{}': {e}", raw.method),
                     });
+            }
+            METHOD_SET_DEVICES => {
+                return serde_json::from_value::<SetDevices>(raw.params)
+                    .map(|set| Incoming::SetDevices(set.checked()))
+                    .map_err(bad);
+            }
+            METHOD_DEVICES_NOTE => {
+                return serde_json::from_value::<DevicesNote>(raw.params)
+                    .map(|note| {
+                        note.checked()
+                            .map_or(Incoming::UnknownNotification, Incoming::DevicesNote)
+                    })
+                    .map_err(bad);
             }
             METHOD_ARCHIVE_PROGRESS => {
                 return serde_json::from_value::<ArchiveProgress>(raw.params)

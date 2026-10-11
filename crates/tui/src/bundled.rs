@@ -40,7 +40,7 @@ struct Bundled {
     how_to_get: &'static str,
 }
 
-const BUNDLED: [Bundled; 7] = [
+const BUNDLED: [Bundled; 8] = [
     Bundled {
         name: "finder",
         binary: "mman-finder",
@@ -104,6 +104,16 @@ const BUNDLED: [Bundled; 7] = [
         events: &[],
         how_to_get: "compressing and extracting are a plugin and mman-archive was not found; \
             install it with `cargo install --path plugins/archive` (next to mman, or on PATH)",
+    },
+    // Provides the `devices` role: the interface says when the deck's rail is showing and which
+    // device was chosen, and the plugin sends the list of devices and does the mounting.
+    Bundled {
+        name: "devices",
+        binary: "mman-devices",
+        provides: &["devices"],
+        events: &[],
+        how_to_get: "the rail of devices is a plugin and mman-devices was not found; \
+            install it with `cargo install --path plugins/devices` (next to mman, or on PATH)",
     },
 ];
 
@@ -263,7 +273,7 @@ mod tests {
     #[test]
     fn a_fresh_install_starts_each_bundled_plugin_providing_its_action() {
         let started = specs_found(&[], found, &[]);
-        assert_eq!(started.len(), 7);
+        assert_eq!(started.len(), 8);
         assert_eq!(started[0].name, "finder");
         assert_eq!(started[0].command, "/opt/bin/mman-finder");
         assert_eq!(started[0].provides, ["find"]);
@@ -299,16 +309,20 @@ mod tests {
         assert_eq!(
             names(true, true),
             [
-                "finder", "search", "git", "hud", "preview", "inspect", "archive"
+                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices"
             ]
         );
         assert_eq!(
             names(false, true),
-            ["finder", "search", "hud", "preview", "inspect", "archive"]
+            [
+                "finder", "search", "hud", "preview", "inspect", "archive", "devices"
+            ]
         );
         assert_eq!(
             names(true, false),
-            ["finder", "search", "git", "preview", "inspect", "archive"]
+            [
+                "finder", "search", "git", "preview", "inspect", "archive", "devices"
+            ]
         );
     }
 
@@ -321,6 +335,17 @@ mod tests {
             .expect("bundled");
         assert_eq!(hud.command, "/opt/bin/mman-hud");
         assert!(hud.provides.is_empty() && hud.events.is_empty());
+    }
+
+    #[test]
+    fn the_devices_plugin_provides_the_devices_role_and_says_how_to_get_it() {
+        let devices = specs_found(&[], found, &[])
+            .into_iter()
+            .find(|spec| spec.name == "devices")
+            .expect("it starts on a fresh install");
+        assert_eq!(devices.command, "/opt/bin/mman-devices");
+        assert_eq!(devices.provides, ["devices"]);
+        assert!(missing("devices").contains("mman-devices"));
     }
 
     #[test]
@@ -357,29 +382,39 @@ mod tests {
         };
         assert_eq!(
             names(&[configured("finder", &[])]),
-            ["search", "git", "hud", "preview", "inspect", "archive"]
+            [
+                "search", "git", "hud", "preview", "inspect", "archive", "devices"
+            ]
         );
         assert_eq!(
             names(&[configured("fzf-picker", &["find"])]),
-            ["search", "git", "hud", "preview", "inspect", "archive"]
+            [
+                "search", "git", "hud", "preview", "inspect", "archive", "devices"
+            ]
         );
         assert_eq!(
             names(&[configured("search", &[])]),
-            ["finder", "git", "hud", "preview", "inspect", "archive"]
+            [
+                "finder", "git", "hud", "preview", "inspect", "archive", "devices"
+            ]
         );
         assert_eq!(
             names(&[configured("grep-ui", &["locate"])]),
-            ["finder", "git", "hud", "preview", "inspect", "archive"]
+            [
+                "finder", "git", "hud", "preview", "inspect", "archive", "devices"
+            ]
         );
         assert_eq!(
             names(&[configured("git", &[])]),
-            ["finder", "search", "hud", "preview", "inspect", "archive"]
+            [
+                "finder", "search", "hud", "preview", "inspect", "archive", "devices"
+            ]
         );
         // A plugin providing nothing must not count as standing in for the git plugin.
         assert_eq!(
             names(&[configured("blame", &[])]),
             [
-                "finder", "search", "git", "hud", "preview", "inspect", "archive"
+                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices"
             ]
         );
     }
@@ -388,7 +423,7 @@ mod tests {
     fn an_unrelated_plugin_leaves_the_bundled_ones_alone() {
         assert_eq!(
             specs_found(&[configured("blame", &["blame"])], found, &[]).len(),
-            7
+            8
         );
     }
 

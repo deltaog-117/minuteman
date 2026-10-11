@@ -26,13 +26,13 @@
 use std::path::Path;
 use std::time::Instant;
 
-use devices::topology::{Layer, Node, NodeKind};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Widget};
+use shared::devices::topology::{Layer, Node, NodeKind};
 use theming::Config;
 
 use crate::cargo_fit::{self, Verdict};
@@ -554,10 +554,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use devices::topology::{Node, Topology};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
+    use shared::devices::topology::{Node, Topology};
 
     use super::*;
     use crate::cargo_fit::{Carry, Load};
@@ -736,7 +736,7 @@ mod tests {
         let mut counters = std::collections::HashMap::new();
         counters.insert(
             "nvme0n1".to_string(),
-            devices::activity::Counters {
+            shared::devices::activity::Counters {
                 read: 0,
                 written: 0,
             },
@@ -744,7 +744,7 @@ mod tests {
         s.activity_update(&counters);
         counters.insert(
             "nvme0n1".to_string(),
-            devices::activity::Counters {
+            shared::devices::activity::Counters {
                 read: 4096,
                 written: 0,
             },

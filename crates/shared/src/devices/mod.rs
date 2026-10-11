@@ -25,6 +25,7 @@
 
 pub mod activity;
 pub mod mountinfo;
+pub mod plan;
 pub mod probe;
 pub mod topology;
 pub mod udev;

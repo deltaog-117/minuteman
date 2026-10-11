@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::Kind;
+use super::Kind;
 
 /// One line of `mountinfo` that is a mount worth showing.
 #[derive(Debug, Clone, PartialEq, Eq)]

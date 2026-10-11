@@ -9,7 +9,6 @@ members = [
     "crates/preview",
     "crates/shell_overlay",
     "crates/trash",
-    "crates/devices",
     "crates/plugin_host",
     "crates/plugin_api",
     "crates/theming",
@@ -20,6 +19,7 @@ members = [
     "plugins/git",
     "plugins/hud",
     "plugins/inspect",
+    "plugins/devices",
     "plugins/archive",
     "plugins/preview",
 ]

@@ -24,10 +24,10 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::activity::{Counters, parse_diskstats};
-use crate::mountinfo::{self, Mount};
-use crate::udev;
-use crate::{Device, Kind};
+use super::activity::{Counters, parse_diskstats};
+use super::mountinfo::{self, Mount};
+use super::udev;
+use super::{Device, Kind};
 
 /// How big a mounted filesystem is and how much of it an ordinary user can still fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

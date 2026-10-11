@@ -37,10 +37,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use devices::Device;
-use devices::probe::Sys;
 use ratatui::layout::{Position, Rect};
 use shared::Vfs;
+use shared::devices::Device;
+use shared::devices::probe::Sys;
 
 use crate::atlas_layout::{self, Dir, Item, Tile};
 use crate::deck::holding;
@@ -420,8 +420,8 @@ impl AtlasState {
 mod tests {
     use std::path::Path;
 
-    use devices::Kind;
     use shared::LocalVfs;
+    use shared::devices::Kind;
 
     use super::*;
 

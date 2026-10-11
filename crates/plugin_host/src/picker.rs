@@ -28,7 +28,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::protocol::{
-    ArchiveDone, ArchiveProgress, PickerSpec, PickerUpdate, SetInspect, SetPreview, SetView,
+    ArchiveDone, ArchiveProgress, DevicesNote, PickerSpec, PickerUpdate, SetDevices, SetInspect,
+    SetPreview, SetView,
 };
 
 type Reply = Result<Value, String>;
@@ -94,6 +95,16 @@ pub enum UiRequest {
         plugin: String,
         set: SetInspect,
     },
+    /// The plugin gave the rail of devices its list.
+    SetDevices {
+        plugin: String,
+        set: SetDevices,
+    },
+    /// The plugin said what an action on a device came to.
+    DevicesNote {
+        plugin: String,
+        note: DevicesNote,
+    },
     /// The plugin reached another entry of an archive request.
     ArchiveProgress {
         plugin: String,
@@ -158,6 +169,20 @@ impl UiLink {
         let _ = self.tx.send(UiRequest::SetInspect {
             plugin: plugin.to_string(),
             set,
+        });
+    }
+
+    pub(crate) fn set_devices(&self, plugin: &str, set: SetDevices) {
+        let _ = self.tx.send(UiRequest::SetDevices {
+            plugin: plugin.to_string(),
+            set,
+        });
+    }
+
+    pub(crate) fn devices_note(&self, plugin: &str, note: DevicesNote) {
+        let _ = self.tx.send(UiRequest::DevicesNote {
+            plugin: plugin.to_string(),
+            note,
         });
     }
 

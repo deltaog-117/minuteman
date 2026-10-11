@@ -27,8 +27,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use devices::udisks::{self, Action};
-use devices::{Device, Kind};
+use shared::devices::Device;
+use shared::devices::plan::{Outcome, Plan};
 
 use crate::cargo_fit::{self, Verdict};
 
@@ -40,12 +40,30 @@ pub enum Event {
     Goto(PathBuf, String),
 }
 
-/// What to do to one device, in order.
-struct Plan {
-    title: String,
-    steps: Vec<(Action, String)>,
-    /// Go to where it was mounted, once it is.
-    then_open: bool,
+impl From<Outcome> for Event {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Status(text) => Self::Status(text),
+            Outcome::Goto(path, text) => Self::Goto(path, text),
+        }
+    }
+}
+
+/// Where to send the carried files on `device`, or why not. The check is made before any copy
+/// starts, which is the point of asking.
+///
+/// # Errors
+///
+/// The reason, in words for the status line: the device is not mounted, or the load will not fit.
+pub fn send_check(device: &Device, verdict: Option<Verdict>) -> Result<PathBuf, String> {
+    let title = device.title();
+    let Some(mount) = device.mount.clone() else {
+        return Err(cargo_fit::refusal(&Verdict::Unmounted, &title));
+    };
+    match verdict {
+        Some(verdict) if !verdict.allows() => Err(cargo_fit::refusal(&verdict, &title)),
+        _ => Ok(mount),
+    }
 }
 
 pub struct Actions {
@@ -101,127 +119,50 @@ impl Actions {
         if let Some(mount) = &device.mount {
             return Some(mount.clone());
         }
-        self.start(Plan {
-            title: device.title(),
-            steps: vec![(Action::Mount, device.node.clone())],
-            then_open: true,
-        });
+        self.start(&Plan::mount_and_open(device));
         None
     }
 
     /// Mounts a device that is not mounted and unmounts one that is.
     pub fn toggle(&self, device: &Device) {
-        if device.kind == Kind::Network {
-            self.say("a network share cannot be mounted or unmounted from here");
-            return;
+        match Plan::toggle(device) {
+            Ok(plan) => self.start(&plan),
+            Err(why) => self.say(why),
         }
-        let action = if device.is_mounted() {
-            Action::Unmount
-        } else {
-            Action::Mount
-        };
-        self.start(Plan {
-            title: device.title(),
-            steps: vec![(action, device.node.clone())],
-            then_open: false,
-        });
-    }
-
-    /// Unmounts a removable device if it is mounted and powers its disk off, so it is safe to pull
-    /// out.
-    pub fn eject(&self, device: &Device) {
-        if !device.can_eject() {
-            self.say(format!("{} cannot be ejected", device.title()));
-            return;
-        }
-        let mut steps = Vec::new();
-        if device.is_mounted() {
-            steps.push((Action::Unmount, device.node.clone()));
-        }
-        steps.push((Action::PowerOff, device.disk.clone()));
-        self.start(Plan {
-            title: device.title(),
-            steps,
-            then_open: false,
-        });
     }
 
     /// Unmounts every mounted volume in `mounted`, all on the disk `disk`, then powers the disk
     /// off, so the whole stick can be pulled out. `title` names it in the messages.
     pub fn eject_all(&self, title: &str, mounted: &[Device], disk: &str) {
-        let mut steps: Vec<(Action, String)> = mounted
-            .iter()
-            .map(|device| (Action::Unmount, device.node.clone()))
-            .collect();
-        steps.push((Action::PowerOff, disk.to_string()));
-        self.start(Plan {
-            title: title.to_string(),
-            steps,
-            then_open: false,
-        });
+        self.start(&Plan::eject_all(title, mounted, disk));
     }
 
-    /// Where to send the carried files on `device`, or `None` after saying why not. The check is
-    /// made here, before any copy starts, which is the point of asking.
+    /// Where to send the carried files on `device`, or `None` after saying why not.
     pub fn send_to(&self, device: &Device, verdict: Option<Verdict>) -> Option<PathBuf> {
-        let title = device.title();
-        let Some(mount) = device.mount.clone() else {
-            self.say(cargo_fit::refusal(&Verdict::Unmounted, &title));
-            return None;
-        };
-        match verdict {
-            Some(verdict) if !verdict.allows() => {
-                self.say(cargo_fit::refusal(&verdict, &title));
-                None
-            }
-            _ => Some(mount),
-        }
+        send_check(device, verdict)
+            .map_err(|why| self.say(why))
+            .ok()
     }
 
     /// Runs `plan` on the blocking pool, one thing at a time, and reports what came of it.
-    fn start(&self, plan: Plan) {
+    fn start(&self, plan: &Plan) {
         if self.working.swap(true, Ordering::AcqRel) {
             self.say("still working on the last one");
             return;
         }
-        self.say(match plan.steps.last() {
-            Some((Action::Mount, _)) => format!("mounting {}…", plan.title),
-            Some((Action::Unmount, _)) => format!("unmounting {}…", plan.title),
-            _ => format!("ejecting {}…", plan.title),
-        });
-        let (tx, working) = (self.tx.clone(), Arc::clone(&self.working));
+        self.say(plan.starting());
+        let (tx, working, plan) = (self.tx.clone(), Arc::clone(&self.working), plan.clone());
         self.handle.spawn_blocking(move || {
-            let event = carry_out(&plan);
-            let _ = tx.send(event);
+            let _ = tx.send(plan.run().into());
             working.store(false, Ordering::Release);
         });
     }
 }
 
-/// Does each step of `plan` in turn, stopping at the first that fails.
-fn carry_out(plan: &Plan) -> Event {
-    let mut mounted_at = None;
-    for (action, node) in &plan.steps {
-        match udisks::run(*action, node) {
-            Ok(done) => mounted_at = done.mounted_at.or(mounted_at),
-            Err(why) => return Event::Status(format!("{}: {why}", plan.title)),
-        }
-    }
-    match (plan.steps.last(), mounted_at) {
-        (Some((Action::Mount, _)), Some(at)) if plan.then_open => {
-            Event::Goto(at, format!("mounted {}", plan.title))
-        }
-        (Some((Action::Mount, _)), at) => Event::Status(match at {
-            Some(at) => format!("mounted {} at {}", plan.title, at.display()),
-            None => format!("mounted {}", plan.title),
-        }),
-        (Some((Action::Unmount, _)), _) => Event::Status(format!("unmounted {}", plan.title)),
-        _ => Event::Status(format!("{} ejected, safe to remove", plan.title)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use shared::devices::Kind;
+
     use super::*;
 
     fn device(kind: Kind, mount: Option<&str>) -> Device {
@@ -263,13 +204,12 @@ mod tests {
     }
 
     #[test]
-    fn a_network_share_cannot_be_mounted_and_a_fixed_disk_cannot_be_ejected() {
+    fn a_network_share_cannot_be_mounted_from_here() {
         let (_rt, mut actions) = actions();
         actions.toggle(&device(Kind::Network, Some("/mnt/nas")));
-        actions.eject(&device(Kind::Internal, Some("/")));
         let said = said(&mut actions);
-        assert_eq!(said.len(), 2, "{said:?}");
-        assert!(said[0].contains("network share") && said[1].contains("cannot be ejected"));
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("network share"));
         assert!(!actions.is_working());
     }
 

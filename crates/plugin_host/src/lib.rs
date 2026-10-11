@@ -41,6 +41,6 @@ pub use host::{ActionDispatch, LogMessage, PluginManager, Restart, Triggers};
 pub use life::{PluginInfo, PluginState};
 pub use picker::{PickerRequest, UiRequest};
 pub use protocol::{
-    API_VERSION, EventKind, JobOutcome, LogLevel, SetInspect, SetPreview, SetView, Slot,
-    StateSnapshot,
+    API_VERSION, DevicesCommand, DevicesNote, EventKind, JobOutcome, LogLevel, SetDevices,
+    SetInspect, SetPreview, SetView, Slot, StateSnapshot,
 };

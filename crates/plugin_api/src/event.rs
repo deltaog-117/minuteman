@@ -22,10 +22,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    API_VERSION, ArchiveCancel, ArchiveRequest, ArchiveWork, Change, EVENT_ACTION, EVENT_ARCHIVE,
-    EVENT_ARCHIVE_CANCEL, EVENT_INSPECT, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_PREVIEW,
-    EVENT_TALLY_DONE, EVENT_WALK_BATCH, EVENT_WALK_DONE, InspectTarget, Job, JobOutcome,
-    PickerEvent, PreviewTarget, TallyDone, TreeEntry, WalkEnd, WalkEvent,
+    API_VERSION, ArchiveCancel, ArchiveRequest, ArchiveWork, Change, DevicesCommand, EVENT_ACTION,
+    EVENT_ARCHIVE, EVENT_ARCHIVE_CANCEL, EVENT_DEVICES, EVENT_INSPECT, EVENT_PICKER_CLOSED,
+    EVENT_PICKER_QUERY, EVENT_PREVIEW, EVENT_TALLY_DONE, EVENT_WALK_BATCH, EVENT_WALK_DONE,
+    InspectTarget, Job, JobOutcome, PickerEvent, PreviewTarget, TallyDone, TreeEntry, WalkEnd,
+    WalkEvent,
 };
 
 /// A host -> plugin line: always a notification, never expects a reply.
@@ -80,6 +81,9 @@ pub struct EventParams {
     /// On an `archive_cancel` event: the request to stop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_cancel: Option<ArchiveCancel>,
+    /// On a `devices` event: what the interface asks of the plugin that fills the rail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<DevicesCommand>,
     /// Present on `dir_changed` and `selection_changed`; its `from` and `to` sit beside the
     /// other params. (A reader of a `job_finished` may see an empty one: go by `name`.)
     #[serde(default, flatten)]
@@ -111,6 +115,7 @@ impl HostEvent {
                 tally: None,
                 archive: None,
                 archive_cancel: None,
+                devices: None,
                 change: None,
                 job: None,
             },
@@ -235,6 +240,13 @@ impl HostEvent {
     pub fn archive_cancel(job: u64) -> Self {
         let mut event = Self::new(EVENT_ARCHIVE_CANCEL, PathBuf::new(), Vec::new());
         event.params.archive_cancel = Some(ArchiveCancel { job });
+        event
+    }
+
+    /// A `devices` event: the interface asks the plugin that fills the rail to do `command`.
+    pub fn devices(command: DevicesCommand) -> Self {
+        let mut event = Self::new(EVENT_DEVICES, PathBuf::new(), Vec::new());
+        event.params.devices = Some(command);
         event
     }
 

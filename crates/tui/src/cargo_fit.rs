@@ -24,7 +24,7 @@
 
 use std::path::PathBuf;
 
-use devices::Device;
+use shared::devices::Device;
 
 use crate::hud::format_size;
 
@@ -167,7 +167,7 @@ pub fn refusal(verdict: &Verdict, title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use devices::Kind;
+    use shared::devices::Kind;
 
     use super::*;
 

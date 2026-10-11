@@ -15,38 +15,37 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! The deck's state (`V`, the deck view): the devices found, how busy each is, which card is
-//! selected and whether the keys are going to the rail, and what is being done to a device. Like
-//! `settings_popup` it is pure: no `Frame`, no terminal; `deck_view` draws it and `main` applies
-//! the few things it asks for, which are to go to a folder and to show a message.
+//! selected and whether the keys are going to the rail. Like `settings_popup` it is pure: no
+//! `Frame`, no terminal; `deck_view` draws it and `main` applies the few things it asks for, which
+//! are to go to a folder, to show a message and to ask the devices plugin to do something.
 //!
-//! Nothing here waits on the machine. A scan of the devices runs on the blocking pool once a
-//! second (a `statvfs` on a network share that has gone away can block for a long time, and a
-//! scan still running is simply not started again), and mounting, unmounting and ejecting run
-//! there too. What arrives is picked up by `poll` on the loop's next turn.
+//! Nothing here looks at the machine. The plugin that provides `devices` does that, and sends the
+//! whole list about once a second while the rail is showing (`accept`); mounting, unmounting and
+//! ejecting are asked of it as a `DevicesCommand` and what came of them arrives as a note. What
+//! the deck keeps is what the interface decides: the selection, the focus, the slide-in of a
+//! device that has just appeared, and whether carried files will fit (`cargo_fit`).
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use devices::Device;
-use devices::activity::{Activity, Counters, Rates};
-use devices::probe::Sys;
+use plugin_api::{DevicesCommand, DevicesNote, SetDevices};
 use ratatui::layout::{Position, Rect};
+use shared::devices::Device;
+use shared::devices::activity::Rates;
+use shared::devices::plan::Plan;
 
 use crate::cargo_fit::{self, Load, Verdict};
 use crate::deck_view;
-use crate::device_actions::Actions;
-
-/// How often the machine is looked at again.
-const SCAN_EVERY: Duration = Duration::from_secs(1);
+use crate::device_actions::send_check;
 
 /// How long a card takes to slide in when a device is plugged in.
 pub const SLIDE_IN: Duration = Duration::from_millis(260);
+
+/// How long the interface waits before it tries to start a devices plugin that stopped again.
+const RESTART_AFTER: Duration = Duration::from_secs(3);
 
 /// Shown when the keys go to the cards.
 pub const HINT: &str =
@@ -64,23 +63,17 @@ pub enum Outcome {
     /// Copy what is being carried into this folder, the root of the chosen device. The caller
     /// holds the files, so it does the copy; the deck has already checked that it will fit.
     Send(PathBuf),
+    /// Ask the devices plugin to do this to a device.
+    Do(DevicesCommand),
 }
 
 pub use crate::device_actions::Event;
 
-struct Scan {
-    at: Instant,
-    devices: Vec<Device>,
-    counters: HashMap<String, Counters>,
-}
-
 pub struct DeckState {
-    handle: tokio::runtime::Handle,
     devices: Vec<Device>,
-    activity: Activity,
-    /// When the counters behind `activity` were read, to turn the difference into a rate.
-    activity_at: Option<Instant>,
-    /// When each device was first seen, so a new one slides in. The first scan marks everything
+    rates: HashMap<String, Rates>,
+    histories: HashMap<String, Vec<u64>>,
+    /// When each device was first seen, so a new one slides in. The first list marks everything
     /// as long since seen.
     first_seen: HashMap<String, Instant>,
     scanned: bool,
@@ -89,42 +82,41 @@ pub struct DeckState {
     focused: bool,
     /// The first line item (a heading or a card) drawn, kept by the renderer between frames.
     first_card: Cell<usize>,
-    scans: Receiver<Scan>,
-    scan_tx: Sender<Scan>,
-    scanning: Arc<AtomicBool>,
-    last_scan: Option<Instant>,
-    actions: Actions,
+    /// A mount, unmount or eject is in progress, as the plugin last said.
+    busy: bool,
+    /// Why there is nothing to show: no devices plugin, or it stopped. Cleared by a list.
+    missing: Option<String>,
+    /// When a stopped plugin was last tried again.
+    restarted: Option<Instant>,
+    events: VecDeque<Event>,
     /// What the user is carrying, for the cards to say whether it fits.
     load: Option<Load>,
 }
 
 impl DeckState {
-    pub fn new(handle: tokio::runtime::Handle) -> Self {
-        let (scan_tx, scans) = channel();
+    pub fn new() -> Self {
         Self {
-            actions: Actions::new(handle.clone()),
-            handle,
             devices: Vec::new(),
-            activity: Activity::new(),
-            activity_at: None,
+            rates: HashMap::new(),
+            histories: HashMap::new(),
             first_seen: HashMap::new(),
             scanned: false,
             selected_node: None,
             focused: false,
             first_card: Cell::new(0),
-            scans,
-            scan_tx,
-            scanning: Arc::new(AtomicBool::new(false)),
-            last_scan: None,
+            busy: false,
+            missing: None,
+            restarted: None,
+            events: VecDeque::new(),
             load: None,
         }
     }
 
-    /// A deck that already holds `devices`, without ever looking at the real machine: for the
-    /// tests of this module and of how it is drawn.
+    /// A deck that already holds `devices`, without ever hearing from a plugin: for the tests of
+    /// this module and of how it is drawn.
     #[cfg(test)]
-    pub fn with_devices(handle: tokio::runtime::Handle, devices: Vec<Device>) -> Self {
-        let mut deck = Self::new(handle);
+    pub fn with_devices(devices: Vec<Device>) -> Self {
+        let mut deck = Self::new();
         deck.devices = devices;
         deck.scanned = true;
         deck.reselect();
@@ -147,55 +139,76 @@ impl DeckState {
         self.scanned = scanned;
     }
 
-    /// Takes in a finished scan and starts the next when it is time. Call it every turn of the
-    /// loop; it never waits.
-    pub fn poll(&mut self, now: Instant) {
-        while let Ok(scan) = self.scans.try_recv() {
-            self.take(scan, now);
-        }
-        if self.actions.poll() {
-            // Whatever was just done changed what is mounted: look again at once.
-            self.last_scan = None;
-        }
-        let due = self
-            .last_scan
-            .is_none_or(|at| now.duration_since(at) >= SCAN_EVERY);
-        if due && !self.scanning.swap(true, Ordering::AcqRel) {
-            self.last_scan = Some(now);
-            let (tx, scanning) = (self.scan_tx.clone(), Arc::clone(&self.scanning));
-            self.handle.spawn_blocking(move || {
-                let sys = Sys::real();
-                let devices = sys.scan();
-                let counters = sys.counters();
-                let _ = tx.send(Scan {
-                    at: Instant::now(),
-                    devices,
-                    counters,
-                });
-                scanning.store(false, Ordering::Release);
-            });
-        }
-    }
-
-    fn take(&mut self, scan: Scan, now: Instant) {
-        let seconds = self
-            .activity_at
-            .map_or(1.0, |before| scan.at.duration_since(before).as_secs_f64());
-        self.activity_at = Some(scan.at);
-        self.activity.update(&scan.counters, seconds);
-        // A device seen for the first time slides in, except on the very first scan, when
+    /// Takes in the plugin's list, which replaces the last one.
+    pub fn accept(&mut self, set: SetDevices, now: Instant) {
+        self.missing = None;
+        self.busy = set.busy;
+        self.rates = set
+            .devices
+            .iter()
+            .map(|d| (d.node.clone(), d.rates()))
+            .collect();
+        self.histories = set
+            .devices
+            .iter()
+            .map(|d| (d.node.clone(), d.history.clone()))
+            .collect();
+        let devices: Vec<Device> = set.devices.iter().map(|d| d.device()).collect();
+        // A device seen for the first time slides in, except on the very first list, when
         // everything is already there.
         let long_ago = now.checked_sub(SLIDE_IN * 4).unwrap_or(now);
         self.first_seen
-            .retain(|node, _| scan.devices.iter().any(|d| &d.node == node));
-        for device in &scan.devices {
+            .retain(|node, _| devices.iter().any(|d| &d.node == node));
+        for device in &devices {
             self.first_seen
                 .entry(device.node.clone())
                 .or_insert(if self.scanned { now } else { long_ago });
         }
         self.scanned = true;
-        self.devices = scan.devices;
+        self.devices = devices;
         self.reselect();
+    }
+
+    /// Takes in what the plugin said an action came to.
+    pub fn note(&mut self, note: DevicesNote) {
+        self.events.push_back(match note {
+            DevicesNote::Status { text } => Event::Status(text),
+            DevicesNote::Goto { path, text } => Event::Goto(path, text),
+        });
+    }
+
+    /// Queues a message for the caller to show.
+    pub fn say(&mut self, text: impl Into<String>) {
+        self.events.push_back(Event::Status(text.into()));
+    }
+
+    /// Says there is no one to fill the rail (`Some(why)`), or that there is again (`None`).
+    pub fn set_missing(&mut self, why: Option<String>) {
+        if why.is_some() {
+            self.busy = false;
+        }
+        self.missing = why;
+    }
+
+    /// Why there is nothing to show, when there is a reason.
+    pub fn missing(&self) -> Option<&str> {
+        self.missing.as_deref()
+    }
+
+    /// Whether to start a plugin that has stopped again now: at most once in a while, so one that
+    /// dies at once is not started in a loop.
+    pub fn should_restart(&mut self, running: bool, now: Instant) -> bool {
+        if running {
+            self.restarted = None;
+            return false;
+        }
+        let due = self
+            .restarted
+            .is_none_or(|at| now.duration_since(at) >= RESTART_AFTER);
+        if due {
+            self.restarted = Some(now);
+        }
+        due
     }
 
     /// Puts the selection back on the device it was on, or on the nearest card if that is gone.
@@ -226,7 +239,7 @@ impl DeckState {
         &self.devices
     }
 
-    /// Whether the first scan has come back: until it has, an empty deck means "looking".
+    /// Whether the first list has come: until it has, an empty deck means "looking".
     pub fn has_scanned(&self) -> bool {
         self.scanned
     }
@@ -251,11 +264,14 @@ impl DeckState {
     }
 
     pub fn rates(&self, device: &Device) -> Rates {
-        self.activity.rates(&device.node)
+        self.rates.get(&device.node).copied().unwrap_or_default()
     }
 
     pub fn history(&self, device: &Device) -> Vec<u64> {
-        self.activity.history(&device.node).collect()
+        self.histories
+            .get(&device.node)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// How far through its slide in the card of `device` is, from 0 (just plugged in) to 1.
@@ -272,12 +288,12 @@ impl DeckState {
 
     /// Whether a mount, unmount or eject is in progress.
     pub fn is_working(&self) -> bool {
-        self.actions.is_working()
+        self.busy
     }
 
-    /// The next message or folder change from background work, if any.
+    /// The next message or folder change, if any.
     pub fn take_event(&mut self) -> Option<Event> {
-        self.actions.take_event()
+        self.events.pop_front()
     }
 
     /// The device whose mount holds `dir`, if any: the one with the longest mount path that is a
@@ -319,8 +335,8 @@ impl DeckState {
             KeyCode::Down => self.step(1),
             KeyCode::Enter => return self.open_selected(),
             KeyCode::Char('p') => return self.send_selected(),
-            KeyCode::Char('m') => self.toggle_selected(),
-            KeyCode::Char('e') => self.eject_selected(),
+            KeyCode::Char('m') => return self.toggle_selected(),
+            KeyCode::Char('e') => return self.eject_selected(),
             _ => return Outcome::Pass,
         }
         Outcome::Handled
@@ -356,9 +372,9 @@ impl DeckState {
         let Some(device) = self.selected_device().cloned() else {
             return Outcome::Handled;
         };
-        match self.actions.open(&device) {
+        match device.mount {
             Some(mount) => Outcome::Goto(mount),
-            None => Outcome::Handled,
+            None => Outcome::Do(DevicesCommand::Open { node: device.node }),
         }
     }
 
@@ -369,22 +385,45 @@ impl DeckState {
         let Some(device) = self.selected_device().cloned() else {
             return Outcome::Handled;
         };
-        match self.actions.send_to(&device, self.verdict(self.selected())) {
-            Some(mount) => Outcome::Send(mount),
-            None => Outcome::Handled,
+        match send_check(&device, self.verdict(self.selected())) {
+            Ok(mount) => Outcome::Send(mount),
+            Err(why) => {
+                self.say(why);
+                Outcome::Handled
+            }
         }
     }
 
-    fn toggle_selected(&mut self) {
-        if let Some(device) = self.selected_device().cloned() {
-            self.actions.toggle(&device);
+    fn toggle_selected(&mut self) -> Outcome {
+        let Some(device) = self.selected_device().cloned() else {
+            return Outcome::Handled;
+        };
+        match Plan::toggle(&device) {
+            Ok(_) => Outcome::Do(DevicesCommand::Toggle { node: device.node }),
+            Err(why) => {
+                self.say(why);
+                Outcome::Handled
+            }
         }
     }
 
-    fn eject_selected(&mut self) {
-        if let Some(device) = self.selected_device().cloned() {
-            self.actions.eject(&device);
+    fn eject_selected(&mut self) -> Outcome {
+        let Some(device) = self.selected_device().cloned() else {
+            return Outcome::Handled;
+        };
+        match Plan::eject(&device) {
+            Ok(_) => Outcome::Do(DevicesCommand::Eject { node: device.node }),
+            Err(why) => {
+                self.say(why);
+                Outcome::Handled
+            }
         }
+    }
+}
+
+impl Default for DeckState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -404,7 +443,7 @@ pub fn holding(devices: &[Device], dir: &Path) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use devices::Kind;
+    use shared::devices::Kind;
 
     use super::*;
 
@@ -421,11 +460,27 @@ mod tests {
         }
     }
 
-    /// A deck that already holds `devices`, without ever looking at the real machine.
-    fn deck_with(devices: Vec<Device>) -> (tokio::runtime::Runtime, DeckState) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let deck = DeckState::with_devices(runtime.handle().clone(), devices);
-        (runtime, deck)
+    /// A deck that already holds `devices`, without ever hearing from a plugin.
+    fn deck_with(devices: Vec<Device>) -> DeckState {
+        DeckState::with_devices(devices)
+    }
+
+    fn said(deck: &mut DeckState) -> Vec<String> {
+        let mut said = Vec::new();
+        while let Some(Event::Status(text)) = deck.take_event() {
+            said.push(text);
+        }
+        said
+    }
+
+    fn listed(devices: &[Device]) -> SetDevices {
+        SetDevices {
+            devices: devices
+                .iter()
+                .map(|d| plugin_api::WireDevice::new(d, Rates::default(), Vec::new()))
+                .collect(),
+            busy: false,
+        }
     }
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -459,7 +514,7 @@ mod tests {
 
     #[test]
     fn tab_takes_the_keys_to_the_rail_and_gives_them_back() {
-        let (_rt, mut deck) = deck_with(three());
+        let mut deck = deck_with(three());
         assert!(!deck.focused());
         assert_eq!(
             deck.key(press(KeyCode::Down), true),
@@ -477,7 +532,7 @@ mod tests {
 
     #[test]
     fn hjkl_are_the_browsers_whether_or_not_the_rail_has_the_keys() {
-        let (_rt, mut deck) = deck_with(three());
+        let mut deck = deck_with(three());
         for focused in [false, true] {
             if focused {
                 deck.key(press(KeyCode::Tab), true);
@@ -498,7 +553,7 @@ mod tests {
 
     #[test]
     fn the_up_and_down_arrows_choose_cards_and_stop_at_the_ends() {
-        let (_rt, mut deck) = deck_with(three());
+        let mut deck = deck_with(three());
         assert_eq!(
             deck.key(press(KeyCode::Down), true),
             Outcome::Pass,
@@ -518,7 +573,7 @@ mod tests {
 
     #[test]
     fn keys_the_deck_does_not_use_stay_the_browsers_even_with_it_focused() {
-        let (_rt, mut deck) = deck_with(three());
+        let mut deck = deck_with(three());
         deck.key(press(KeyCode::Tab), true);
         for code in [KeyCode::Char('q'), KeyCode::Char('x'), KeyCode::Backspace] {
             assert_eq!(deck.key(press(code), true), Outcome::Pass, "{code:?}");
@@ -534,7 +589,7 @@ mod tests {
 
     #[test]
     fn with_no_room_for_the_rail_every_key_is_the_browsers() {
-        let (_rt, mut deck) = deck_with(three());
+        let mut deck = deck_with(three());
         deck.key(press(KeyCode::Tab), true);
         for code in [KeyCode::Tab, KeyCode::Down, KeyCode::Enter] {
             assert_eq!(deck.key(press(code), false), Outcome::Pass, "{code:?}");
@@ -547,7 +602,7 @@ mod tests {
 
     #[test]
     fn enter_on_a_mounted_card_goes_to_its_folder() {
-        let (_rt, mut deck) = deck_with(three());
+        let mut deck = deck_with(three());
         deck.key(press(KeyCode::Tab), true);
         deck.key(press(KeyCode::Down), true);
         assert_eq!(
@@ -557,24 +612,112 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_card_that_is_not_mounted_asks_the_plugin_to_mount_and_open_it() {
+        let mut deck = deck_with(three());
+        deck.key(press(KeyCode::Tab), true);
+        deck.key(press(KeyCode::Down), true);
+        deck.key(press(KeyCode::Down), true);
+        assert_eq!(
+            deck.key(press(KeyCode::Enter), true),
+            Outcome::Do(DevicesCommand::Open {
+                node: "sdc1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn m_and_e_ask_the_plugin_to_mount_or_eject_the_chosen_device() {
+        let mut deck = deck_with(three());
+        deck.key(press(KeyCode::Tab), true);
+        deck.key(press(KeyCode::Down), true);
+        assert_eq!(
+            deck.key(press(KeyCode::Char('m')), true),
+            Outcome::Do(DevicesCommand::Toggle {
+                node: "sdb1".into()
+            })
+        );
+        assert_eq!(
+            deck.key(press(KeyCode::Char('e')), true),
+            Outcome::Do(DevicesCommand::Eject {
+                node: "sdb1".into()
+            })
+        );
+    }
+
+    #[test]
     fn a_network_share_and_a_fixed_disk_refuse_what_they_cannot_do_and_say_why() {
-        let (_rt, mut deck) = deck_with(vec![
+        let mut deck = deck_with(vec![
             device("nas:/export", Some("/mnt/nas"), Kind::Network),
             device("sda1", Some("/"), Kind::Internal),
         ]);
         deck.key(press(KeyCode::Tab), true);
-        deck.key(press(KeyCode::Char('m')), true);
+        assert_eq!(deck.key(press(KeyCode::Char('m')), true), Outcome::Handled);
         deck.key(press(KeyCode::Down), true);
-        deck.key(press(KeyCode::Char('e')), true);
-        deck.poll(Instant::now());
-        let mut said = Vec::new();
-        while let Some(Event::Status(text)) = deck.take_event() {
-            said.push(text);
-        }
+        assert_eq!(deck.key(press(KeyCode::Char('e')), true), Outcome::Handled);
+        let said = said(&mut deck);
         assert_eq!(said.len(), 2, "{said:?}");
         assert!(said[0].contains("network share"));
         assert!(said[1].contains("cannot be ejected"));
+    }
+
+    #[test]
+    fn a_list_replaces_the_last_one_with_how_busy_each_device_is() {
+        let mut deck = deck_with(Vec::new());
+        let mut set = listed(&three());
+        set.devices[1].read = 7;
+        set.devices[1].history = vec![1, 2, 3];
+        set.busy = true;
+        deck.accept(set, Instant::now());
+        assert_eq!(deck.devices().len(), 3);
+        let stick = deck.devices()[1].clone();
+        assert_eq!(deck.rates(&stick).read, 7);
+        assert_eq!(deck.history(&stick), [1, 2, 3]);
+        assert!(deck.is_working());
+        deck.accept(listed(&three()[..1]), Instant::now());
+        assert_eq!(deck.devices().len(), 1);
+        assert_eq!(
+            deck.rates(&stick),
+            Rates::default(),
+            "a device that left has no rate"
+        );
         assert!(!deck.is_working());
+    }
+
+    #[test]
+    fn a_list_clears_the_reason_nothing_was_shown_and_a_missing_plugin_stops_the_busy_mark() {
+        let mut deck = deck_with(Vec::new());
+        deck.set_missing(Some("no plugin".into()));
+        assert_eq!(deck.missing(), Some("no plugin"));
+        deck.accept(listed(&three()), Instant::now());
+        assert_eq!(deck.missing(), None);
+    }
+
+    #[test]
+    fn the_plugins_notes_come_out_as_messages_and_folders_in_order() {
+        let mut deck = deck_with(Vec::new());
+        deck.note(DevicesNote::Status { text: "a".into() });
+        deck.note(DevicesNote::Goto {
+            path: "/mnt".into(),
+            text: "b".into(),
+        });
+        assert_eq!(deck.take_event(), Some(Event::Status("a".into())));
+        assert_eq!(
+            deck.take_event(),
+            Some(Event::Goto("/mnt".into(), "b".into()))
+        );
+        assert_eq!(deck.take_event(), None);
+    }
+
+    #[test]
+    fn a_stopped_plugin_is_started_again_but_not_in_a_loop() {
+        let mut deck = deck_with(Vec::new());
+        let now = Instant::now();
+        assert!(!deck.should_restart(true, now));
+        assert!(deck.should_restart(false, now));
+        assert!(!deck.should_restart(false, now + Duration::from_secs(1)));
+        assert!(deck.should_restart(false, now + RESTART_AFTER));
+        assert!(!deck.should_restart(true, now + RESTART_AFTER));
+        assert!(deck.should_restart(false, now + RESTART_AFTER));
     }
 
     fn load(bytes: u64, largest: u64) -> Load {
@@ -597,7 +740,7 @@ mod tests {
 
     #[test]
     fn each_card_gets_its_own_verdict_for_what_is_carried() {
-        let (_rt, mut deck) = deck_with(with_sizes(three(), &[1 << 39, 1 << 20, 0]));
+        let mut deck = deck_with(with_sizes(three(), &[1 << 39, 1 << 20, 0]));
         assert_eq!(deck.verdict(0), None, "nothing carried, nothing to judge");
         deck.set_load(Some(load(1 << 30, 1 << 20)));
         assert!(matches!(deck.verdict(0), Some(Verdict::Fits { .. })));
@@ -610,7 +753,7 @@ mod tests {
 
     #[test]
     fn p_sends_to_a_device_it_fits_on_and_refuses_one_it_does_not_with_the_reason() {
-        let (_rt, mut deck) = deck_with(with_sizes(three(), &[1 << 39, 1 << 20, 0]));
+        let mut deck = deck_with(with_sizes(three(), &[1 << 39, 1 << 20, 0]));
         deck.set_load(Some(load(1 << 30, 1 << 20)));
         deck.key(press(KeyCode::Tab), true);
         assert_eq!(
@@ -622,11 +765,7 @@ mod tests {
         assert_eq!(deck.key(press(KeyCode::Char('p')), true), Outcome::Handled);
         deck.key(press(KeyCode::Down), true);
         assert_eq!(deck.key(press(KeyCode::Char('p')), true), Outcome::Handled);
-        deck.poll(Instant::now());
-        let mut said = Vec::new();
-        while let Some(Event::Status(text)) = deck.take_event() {
-            said.push(text);
-        }
+        let said = said(&mut deck);
         assert_eq!(said.len(), 2, "{said:?}");
         assert!(
             said[0].contains("needs") && said[0].contains("more room"),
@@ -637,7 +776,7 @@ mod tests {
 
     #[test]
     fn p_with_nothing_carried_still_goes_to_the_caller_who_says_so() {
-        let (_rt, mut deck) = deck_with(with_sizes(three(), &[1 << 39, 1 << 39, 0]));
+        let mut deck = deck_with(with_sizes(three(), &[1 << 39, 1 << 39, 0]));
         deck.key(press(KeyCode::Tab), true);
         assert_eq!(
             deck.key(press(KeyCode::Char('p')), true),
@@ -649,7 +788,7 @@ mod tests {
     fn a_move_within_the_disk_it_is_on_is_allowed_whatever_is_free() {
         let mut devices = with_sizes(three(), &[0, 1 << 39, 0]);
         devices[0].mount = Some("/home".into());
-        let (_rt, mut deck) = deck_with(devices);
+        let mut deck = deck_with(devices);
         let mut moving = load(1 << 38, 1 << 20);
         moving.carry = cargo_fit::Carry::Move;
         deck.set_load(Some(moving));
@@ -663,7 +802,7 @@ mod tests {
 
     #[test]
     fn the_selection_follows_its_device_when_the_list_changes() {
-        let (_rt, mut deck) = deck_with(three());
+        let mut deck = deck_with(three());
         deck.key(press(KeyCode::Tab), true);
         deck.key(press(KeyCode::Down), true);
         assert_eq!(deck.devices()[deck.selected()].node, "sdb1");
@@ -682,30 +821,16 @@ mod tests {
 
     #[test]
     fn a_device_plugged_in_after_the_first_scan_slides_in_and_the_first_ones_do_not() {
-        let (_rt, mut deck) = deck_with(Vec::new());
+        let mut deck = deck_with(Vec::new());
         let now = Instant::now();
         deck.scanned = false;
-        deck.take(
-            Scan {
-                at: now,
-                devices: vec![device("sda1", Some("/"), Kind::Internal)],
-                counters: HashMap::new(),
-            },
-            now,
-        );
+        deck.accept(listed(&[device("sda1", Some("/"), Kind::Internal)]), now);
         assert!(
             !deck.animating(now),
             "everything already there is not an arrival"
         );
         let later = now + Duration::from_secs(2);
-        deck.take(
-            Scan {
-                at: later,
-                devices: three(),
-                counters: HashMap::new(),
-            },
-            later,
-        );
+        deck.accept(listed(&three()), later);
         let stick = deck
             .devices()
             .iter()

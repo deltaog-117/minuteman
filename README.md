@@ -96,6 +96,7 @@ cargo install --path plugins/hud      # installs mman-hud, the header's uptime, 
 cargo install --path plugins/preview  # installs mman-preview, the preview column's text, hex dump and archive listing
 cargo install --path plugins/inspect  # installs mman-inspect, the Inspect panel's rows
 cargo install --path plugins/archive  # installs mman-archive, which compresses and extracts
+cargo install --path plugins/devices  # installs mman-devices, the devices behind the deck's rail
 mman
 mman /path/to/dir
 ```
@@ -120,7 +121,11 @@ work to the plugin, which does it on this machine's disk. Without it, `:compress
 the two forms say how to get it and start nothing (a `[[plugin]]` that lists
 `provides = ["archive"]` takes its place). For now it cannot compress or extract on another
 machine (`ssh://`) or inside an archive: those are refused by name until the plugin can be given
-files through `mman`.
+files through `mman`. The deck's rail of devices is `mman-devices`: it looks at the disks and mounts
+while the rail shows and does the mounting, unmounting and ejecting, and `mman` keeps the rail, its
+keys and the check of whether carried files fit. Without it the rail says it was not found and the
+status line says how to get it (a `[[plugin]]` that lists `provides = ["devices"]` takes its
+place).
 
 From a checkout, without installing:
 
@@ -534,7 +539,8 @@ plugins/
 ├── hud/                # `mman-hud`: the header's uptime, load and memory, bundled as a plugin
 ├── preview/            # `mman-preview` (package `previewer`): the preview column's documents, bundled as a plugin
 ├── inspect/            # `mman-inspect` (package `inspector`): the Inspect panel's rows, bundled as a plugin
-└── archive/            # `mman-archive` (package `archiver`): compress and extract zip, tar and tar.gz, bundled as a plugin
+├── archive/            # `mman-archive` (package `archiver`): compress and extract zip, tar and tar.gz, bundled as a plugin
+└── devices/            # `mman-devices`: the deck's rail of devices and mounting, bundled as a plugin
 ```
 
 ---
