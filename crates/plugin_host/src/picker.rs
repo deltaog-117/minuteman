@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::protocol::{PickerSpec, PickerUpdate, SetView};
+use crate::protocol::{PickerSpec, PickerUpdate, SetPreview, SetView};
 
 type Reply = Result<Value, String>;
 
@@ -82,6 +82,11 @@ pub enum UiRequest {
         plugin: String,
         set: SetView,
     },
+    /// The plugin gave the preview column a document.
+    SetPreview {
+        plugin: String,
+        set: SetPreview,
+    },
 }
 
 /// How a plugin's reader reaches the render thread for pickers, shared by every plugin.
@@ -120,6 +125,13 @@ impl UiLink {
 
     pub(crate) fn set_view(&self, plugin: &str, set: SetView) {
         let _ = self.tx.send(UiRequest::SetView {
+            plugin: plugin.to_string(),
+            set,
+        });
+    }
+
+    pub(crate) fn set_preview(&self, plugin: &str, set: SetPreview) {
+        let _ = self.tx.send(UiRequest::SetPreview {
             plugin: plugin.to_string(),
             set,
         });

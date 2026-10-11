@@ -111,7 +111,8 @@ interactive_commands = [
 # extension the built-in preview can't otherwise show (a PDF, a video, ...). `command` runs under
 # `sh -c`; `{in}` stands for the source file's quoted path and `{out}` for a scratch path the
 # command must write its result to. `kind` is "image" (decoded and shown like a real image file)
-# or "text" (read back and shown like a text file). A missing program, a non-zero exit, a
+# or "text" (read back and shown like a text file; a text hook runs inside the `mman-preview`
+# plugin, which reads the file, so it needs that plugin installed). A missing program, a non-zero exit, a
 # timeout, or output `kind` can't make sense of all fall back to just the file's name, quietly —
 # never a hard error. `timeout_ms` defaults to 10000 (10 seconds) when left out.
 # [[preview_hook]]

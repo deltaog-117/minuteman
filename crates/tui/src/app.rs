@@ -44,7 +44,7 @@ use plugin_host::{
 };
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
-use theming::{OpenRule, OpenWith, PluginSpec};
+use theming::{OpenRule, OpenWith, PluginSpec, PreviewHook};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::associations::{self, Associations};
@@ -511,6 +511,9 @@ pub struct App {
     git_status: bool,
     /// Whether the bundled system plugin is started (`system_hud` in `config.toml`).
     system_hud: bool,
+    /// The `[[preview_hook]]` tables, of which the ones that extract text go to the bundled
+    /// preview plugin when it starts.
+    preview_hooks: Vec<PreviewHook>,
     handle: tokio::runtime::Handle,
     /// Program names a `:` command hands the terminal to (see `command::parse`).
     interactive: Vec<String>,
@@ -569,6 +572,7 @@ impl App {
             slots: Slots::default(),
             git_status: true,
             system_hud: false,
+            preview_hooks: Vec::new(),
             handle,
             interactive: Vec::new(),
             open_rules: Vec::new(),
@@ -679,6 +683,23 @@ impl App {
         self.plugins.take_ui()
     }
 
+    /// Whether a plugin is configured to preview files. Without one the preview column shows only
+    /// the file's name.
+    pub fn has_previewer(&self) -> bool {
+        self.plugins.has_previewer()
+    }
+
+    /// Whether the previewing plugin has a live process right now.
+    pub fn previewer_running(&self) -> bool {
+        self.plugins.previewer_running()
+    }
+
+    /// Tells the previewing plugin which file the preview column is about, or that it is about
+    /// none. Returns whether the plugin got it; `false` means no document will come.
+    pub fn tell_previewer(&mut self, ask: &crate::text_preview::PreviewAsk) -> bool {
+        self.plugins.dispatch_preview(ask.0.as_deref())
+    }
+
     /// Passes what was typed into `popup` on to the plugin that owns it.
     pub fn send_picker_query(&self, popup: &mut PickerPopup) {
         if let Some((generation, text)) = popup.take_query() {
@@ -723,6 +744,13 @@ impl App {
         self
     }
 
+    /// Hands the `[[preview_hook]]` tables to the bundled preview plugin, which runs the ones
+    /// that extract text. Call before `with_plugins`.
+    pub fn with_preview_hooks(mut self, hooks: Vec<PreviewHook>) -> Self {
+        self.preview_hooks = hooks;
+        self
+    }
+
     /// Sets which program names `:` hands the terminal to.
     pub fn with_interactive_commands(mut self, interactive: Vec<String>) -> Self {
         self.interactive = interactive;
@@ -743,7 +771,16 @@ impl App {
     /// than treated as fatal — the same "one bad entry must never take the whole session down"
     /// rule `theming::Config::load` already follows for a malformed config file.
     pub fn with_plugins(mut self, specs: Vec<PluginSpec>, cwd: &Path) -> Self {
-        let bundled = crate::bundled::specs(&specs, self.git_status, self.system_hud);
+        let bundled = crate::bundled::specs(
+            &specs,
+            self.git_status,
+            self.system_hud,
+            &self.preview_hooks,
+        );
+        // Without a previewer the column shows only names; say why instead of leaving it a mystery.
+        if let Some(notice) = crate::bundled::missing_previewer(&specs, &bundled) {
+            self.status = Some(notice);
+        }
         for spec in specs.into_iter().chain(bundled) {
             if let Err(e) = self.plugins.spawn(
                 &self.handle,
@@ -3778,8 +3815,15 @@ mod tests {
         f.wait_for_idle();
 
         assert_eq!(f.app.status.as_deref(), Some("compress complete"));
-        let listing = preview::archive::list(&LocalVfs, &f.root.join("both.tar.gz")).unwrap();
-        let names: Vec<_> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        // Read back the way a user would browse it: as the folder the archive opens as.
+        let archives = vfs_archive::ArchiveVfs::new(Arc::new(LocalVfs));
+        let inside = shared::mount_root(&f.root.join("both.tar.gz"));
+        let names: Vec<_> = archives
+            .list_dir(&inside)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
         assert_eq!(names, ["a.txt", "b.txt"]);
         // Nothing was deleted: the originals stay unless asked otherwise.
         assert!(f.root.join("a.txt").exists() && f.root.join("b.txt").exists());

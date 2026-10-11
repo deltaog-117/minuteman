@@ -1,0 +1,32 @@
+[package]
+name = "previewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The preview column Minuteman ships as a plugin: it reads the selected file through the host and sends back colored text, a hex dump or an archive listing; the host draws it."
+
+[[bin]]
+name = "mman-preview"
+path = "src/main.rs"
+
+[dependencies]
+plugin_api = { path = "../../crates/plugin_api" }
+shared = { path = "../../crates/shared" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+# Listing an archive reads only its directory (a zip's central directory, a tar's headers), so no
+# compression codecs are needed for zip; `flate2` is here for the gzip layer of `.tar.gz`.
+zip = { version = "8.6", default-features = false }
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1"
+# Only the parser and its bundled syntax defs, no theme/HTML/dump-create machinery — we classify
+# tokens by their raw scope name ourselves rather than asking syntect to resolve colors.
+syntect = { version = "5.3", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+] }
+
+[dev-dependencies]
+proptest = "1.11"

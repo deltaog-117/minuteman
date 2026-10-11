@@ -7026,6 +7026,80 @@ colors of the marks were not read off the screen.
 
 ---
 
+## 2026-10-11 — The preview column becomes a plugin: text, hex and archives (M4b, third part)
+
+**Context.** The preview column was the largest piece of the interface still doing a plugin's job:
+`preview` loaded, tokenized, hex-dumped and listed; `tui::text_preview` read it off-thread and
+kept the scroll; `tui::preview_view` drew it. The earlier slots carry a line or a badge, so the
+open question was what crosses the process boundary for a megabyte of source with scrolling.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A whole typed document (`Text`, `Hex`, `Archive`) pushed once; the interface keeps scroll, wrap, scrollbar and reveal | Chosen |
+| B | The plugin owns scroll and wrap and sends only the visible rows, on `scroll` and `resize` events | Rejected: every key and wheel notch becomes a round trip, wrap logic moves out, and the feel changes |
+| C | Add the slot and `read_file`, keep the built-in preview as a fallback | Rejected: nothing leaves the core, and the code would exist twice |
+
+**Decision.** Three additions to `plugin_api`: the `preview` event (the file the column is about),
+the `read_file` request (up to 4 MiB of a file from an offset, through the host's own `Vfs`, so ssh
+and archives preview like the disk) and the `set_preview` notification (the document). The
+plugin, `plugins/preview` (`mman-preview`), turns `read_file` into a read-only `Vfs`
+(`RemoteVfs`: a window that starts at 8 KiB and doubles while reads run on, falling back after a
+seek), which is what let `archive`, `head` (hex), `highlight` and the text-or-binary decision move
+over with their tests unchanged. Each `preview` event starts a worker thread; the loop sends a
+finished document only if no newer event arrived, and a cancelled worker stops asking at its next
+request. The interface keeps the document, the scroll offset and the wrap cache, so scrolling
+needs no round trip, and `hex_dump` (how many bytes fit in a row) stays in `tui` because it depends
+on the pane's width.
+
+**Departures from the plan.** (1) The plan had the plugin follow `selection_changed`. That is the
+browser's cursor, but the preview column is also drawn for the trash browser's cursor and the
+finder's highlighted result, so the interface now says which file the column is about with its own
+`preview` event, sent only to the plugin that `provides = ["preview"]`. (2) `PreviewContent` was
+first tagged `kind`, and an archive listing has a `kind` of its own (zip, tar): the two collide
+when flattened. The unit tests did not see it because they never sent an archive through the real
+serializer; the process test that runs the real `mman-preview` did, on the first archive. The tag
+is `type` now, and there is a round trip for every variant. (3) A hook's precedence. Before, the
+first hook naming an extension decided it, whatever its kind, and only then was it checked for
+being text. Passing the plugin just the text hooks would have let a text hook run for an
+extension an earlier image hook owned, so the interface takes each extension out of every later
+hook before passing them. (4) A plugin that died with a document half made left "loading
+preview…" up until the cursor moved. The interface now notices the process is gone and shows the
+name; the next file starts it again. (5) The options table I gave before building mentioned a
+`preview_scroll` event for `J`/`K` and the wheel; with scroll kept in the interface (COA A) it is
+not needed, so there is none.
+
+**Trade-offs.** The whole document is tokenized before any of it is sent, so a file near the 1 MiB
+cap says "loading preview…" for about 3.4 s in a release build (`syntect`, exactly as before the
+move; the megabyte reaching the interface as one 4.7 MB line adds about 0.1 s). A debug build
+takes most of a minute on the same file. Sending plain text first and the colors after would hide
+that, and is left as a follow-up. A plugin can read any file the user can, as it always could.
+Without `mman-preview` the column shows only names, and a notice at startup says how to get it
+unless the user configured a `preview` provider of their own. Dependencies: `syntect`, `zip`,
+`tar` and `flate2` now belong to the plugin, and `preview` only decodes images.
+
+**Verification.** `scripts/check` passes. Tests moved with the code (archive limits and the
+hostile-zip property tests, the hex head with a named pipe, the text-or-binary decision, the hook
+runner) and new ones were added: the wire shapes and limits of a document (a property test that
+no accepted text holds a character that could act on the terminal), `read_file` against an
+in-memory backend (a range, a past-the-end range, the cap, a folder never opened), `RemoteVfs`
+(a property test that any mix of reads and seeks matches a plain reader, few round trips for a
+straight read, a zip listed through it), the loop's bookkeeping (replies reach only the worker
+waiting for them, a host that goes away wakes every worker), the interface's state (a document for
+a file the cursor left is dropped, a reload keeps the scroll, no previewer means only the name), and
+the hook arguments. The real `mman-preview` runs in a process test with the test as the host,
+including the stale-document case (the first file's request held while the cursor moves on: only
+the newer file is answered). The real `mman` was driven through a pseudo-terminal read with
+`pyte`: source with keyword and comment colors apart, `J` four half pages down to row 72 and `K`
+back to 36, a hex dump, zip and tar.gz listings, a `pdf` shown as its hook's text, a picture still
+drawn by the core, the finder's preview of a file the cursor is not on, the last of a burst of
+moves being the file shown, a change on disk reaching the column, a killed plugin restarting for
+the next file and ending the wait while a debug-build megabyte was still tokenizing, and an `mman`
+copied alone browsing with the notice. A 1 MiB file previewed in 3.8 s end to end in a release
+build and scrolled at once. Not run: the trash browser's preview (same call as the others, by
+construction), a remote host, and a real kitty.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

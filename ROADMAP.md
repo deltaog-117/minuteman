@@ -1892,8 +1892,40 @@ draws.
     Follow-ups: badges show in the middle column only (not the parent or preview lists, or the
     grid, tile and filmstrip views); a staged file changed again shows the modified mark only; the
     old folder's marks can sit beside the new names for one round trip after changing folder.
-  - [ ] A text-only `preview_pane` (text, hex, archive listing); images, thumbnails and inspect
-    last.
+  - [x] A text-only preview plugin (text, hex, archive listing), `plugins/preview`
+    (`mman-preview`). The interface names the file the column is about (the new `preview` event,
+    sent to the plugin that `provides = ["preview"]`, for the browser's cursor, the trash
+    browser's and the finder's alike); the plugin reads it through the host (the new `read_file`
+    request, over whatever serves the browsed paths) and answers with a whole finished document
+    (`set_preview`): source as lines of pieces in seven token kinds, a binary's first 64 KiB, or
+    an archive listing. The interface keeps the scrolling, wrapping, scrollbar, colors and
+    typewriter reveal, so `J`/`K` and the wheel never wait on the plugin. Chosen as COA A (a typed
+    document, scroll in the interface) over a plugin that owns the scroll and sends only the
+    visible rows (B) and a slot with the built-in preview kept as a fallback (C). The document is
+    a new notification rather than a `set_view` slot because it is not spans of one status line:
+    its limits are a megabyte of text, 64 KiB of bytes and 5,000 entries, cleaned on arrival like
+    every view. The code that read, tokenized, listed and hex-dumped moved with its tests
+    (`syntect`, `zip`, `tar`, `flate2` now belong to the plugin); the file-name rules moved to
+    `shared::names`; `[[preview_hook]]` tables of kind `text` run in the plugin. Timed on a 1 MiB
+    source file in a release build: 3.5 s to a finished document, of which 3.4 s is `syntect`
+    tokenizing (as before the move) and about 0.1 s is the megabyte reaching the interface as a
+    4.7 MB line. Verified against the real `mman` over a PTY read through `pyte`: source with its
+    keyword and comment colored apart, `J`/`K` four half pages down and two back, a hex dump, zip
+    and tar.gz listings, a `pdf` shown as what its hook extracted, a picture still drawn by the
+    core, the finder's preview of a file the cursor is not on, the last of a burst of moves being
+    the file shown, a change on disk reaching the column, a killed plugin ending "loading
+    preview…" and starting again for the next file, and an `mman` alone browsing with a notice
+    saying how to get the plugin.
+    Follow-ups: the whole document is tokenized before any of it is sent, so a file near the cap
+    shows "loading preview…" for seconds (sending plain text first and the colors after would
+    fix it); a document is one message, so a megabyte of text is a line of several megabytes for
+    the host to parse; `read_file` lets a plugin read anything the user can, as a plugin always
+    could; the trash browser's preview goes through the same code but was not tried in the PTY; a
+    plugin of the user's own that provides `preview` replaces this one, and its contract is only
+    what `plugin_api` says.
+  - [ ] Images, thumbnails and inspect, which need a way to hand a picture to the interface and a
+    scrollable multi-line view for the Inspect panel. The image pipeline (`image_preview`,
+    `thumbnails`) and `[[preview_hook]]` tables of kind `image` stay in the core until then.
 - [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave
   `file_ops`; trash management (the trash view, restore, empty) becomes a plugin while moving a
   file to the trash stays in the core.
@@ -2200,7 +2232,9 @@ draws.
    is on your `PATH`) and `cargo install --path plugins/finder` (the fuzzy finder, `mman-finder`,
    which `f` now needs next to it; from a checkout `cargo build -p finder` once does it), and
    `cargo install --path plugins/git` (`mman-git`, which the status bar's git segment now needs;
-   from a checkout `cargo build -p git`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
+   from a checkout `cargo build -p git`), and `cargo install --path plugins/preview`
+   (`mman-preview`, which the preview column's text, hex dump and archive listing now need; from
+   a checkout `cargo build -p previewer`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
 1. `cargo run -p tui` — the newest: `mman --chooser-file /tmp/pick --pick save --pick-name x.txt`, press `Q`, `Enter`,
    and `cat /tmp/pick` (the saved path; `--pick files` with `v` marks and `Q` picks several; `q` leaves it empty).

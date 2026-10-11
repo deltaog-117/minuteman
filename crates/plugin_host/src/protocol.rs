@@ -32,11 +32,14 @@
 //!   serves the browsed paths)
 //!   gets exactly one reply line carrying that same `id`; a `log` notification (no `id`) is
 //!   fire-and-forget and surfaces as the status bar message, and so are `picker_items` (what the
-//!   picker lists), `picker_close`, `walk_cancel` and `set_view` (what fills a slot of the
-//!   interface, such as a status bar segment or a mark beside each row).
+//!   picker lists), `picker_close`, `walk_cancel`, `set_view` (what fills a slot of the
+//!   interface, such as a status bar segment or a mark beside each row) and `set_preview` (the
+//!   document the preview column shows). A `read_file` request reads part of a file through
+//!   whatever serves the browsed paths.
 //! - host -> plugin events for these are `action` (the user triggered an action the plugin
 //!   provides), `picker_query` and `picker_closed` (what is typed into its picker, and its end)
-//!   and `walk_batch` and `walk_done` (what a walk found, and its end). The shapes are in
+//!   `walk_batch` and `walk_done` (what a walk found, and its end) and `preview` (the file the
+//!   preview column is about, sent to the plugin that provides `preview`). The shapes are in
 //!   `plugin_api`.
 //!
 //! Deliberately close to JSON-RPC 2.0 rather than a bespoke shape, and line-delimited rather
@@ -55,13 +58,13 @@ pub use plugin_api::{
     API_VERSION, Change, EVENT_ACTION, EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT,
     EVENT_JOB_FINISHED, EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
     EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH, EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job,
-    JobOutcome, Line, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, SetView,
-    Slot, Span, StateSnapshot, Tone, TreeEntry, View, WalkCancel, WalkEnd, WalkOutcome,
-    WalkRequest, WireEntry,
+    JobOutcome, Line, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, ReadFile,
+    SetPreview, SetView, Slot, Span, StateSnapshot, Tone, TreeEntry, View, WalkCancel, WalkEnd,
+    WalkOutcome, WalkRequest, WireEntry,
 };
 use plugin_api::{
-    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_SET_VIEW, METHOD_SHOW_PICKER, METHOD_WALK,
-    METHOD_WALK_CANCEL,
+    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_READ_FILE, METHOD_SET_PREVIEW,
+    METHOD_SET_VIEW, METHOD_SHOW_PICKER, METHOD_WALK, METHOD_WALK_CANCEL,
 };
 
 /// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
@@ -135,6 +138,8 @@ pub enum PluginRequest {
     ShowPicker(PickerSpec),
     /// Starts listing everything below a folder, through whatever serves the browsed paths.
     Walk(WalkRequest),
+    /// Reads part of a file through whatever serves the browsed paths.
+    ReadFile(ReadFile),
     ReadDir {
         path: PathBuf,
     },
@@ -220,6 +225,9 @@ impl PluginRequest {
                 .map(Self::ShowPicker)
                 .map_err(bad),
             METHOD_WALK => serde_json::from_value(params).map(Self::Walk).map_err(bad),
+            METHOD_READ_FILE => serde_json::from_value(params)
+                .map(Self::ReadFile)
+                .map_err(bad),
             "read_dir" => Ok(Self::ReadDir {
                 path: serde_json::from_value::<PathParams>(params)
                     .map_err(bad)?
@@ -301,6 +309,9 @@ pub enum Incoming {
     /// The plugin filled or emptied a slot of the interface; already cleaned by
     /// `SetView::checked`.
     SetView(SetView),
+    /// The plugin gave the preview column a document; already cleaned by
+    /// `SetPreview::checked`.
+    SetPreview(SetPreview),
     /// A well-formed notification (no `id`) whose method isn't one of the above — ignored rather than
     /// treated as an error, so a plugin can send something a future host version understands
     /// without breaking against this one.
@@ -369,6 +380,16 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map_err(bad)?
                     .checked()
                     .map(Incoming::SetView)
+                    .map_err(|e| LineError {
+                        id: None,
+                        message: format!("refused '{}': {e}", raw.method),
+                    });
+            }
+            METHOD_SET_PREVIEW => {
+                return serde_json::from_value::<SetPreview>(raw.params)
+                    .map_err(bad)?
+                    .checked()
+                    .map(Incoming::SetPreview)
                     .map_err(|e| LineError {
                         id: None,
                         message: format!("refused '{}': {e}", raw.method),
@@ -896,6 +917,64 @@ mod tests {
             "{}",
             two_lines.message
         );
+    }
+
+    #[test]
+    fn set_preview_is_a_notification_cleaned_before_the_host_sees_it() {
+        let line = r#"{"jsonrpc":"2.0","method":"set_preview","params":{"path":"/a.rs","content":{"type":"text","lines":[[["keyword","f\u001bn"],["plain"," x"]]]}}}"#;
+        match parse_line(line).unwrap() {
+            Incoming::SetPreview(set) => {
+                assert_eq!(set.path, PathBuf::from("/a.rs"));
+                match set.content {
+                    plugin_api::PreviewContent::Text { lines } => {
+                        assert_eq!(lines[0][0].1, "fn");
+                        assert_eq!(lines[0][1].1, " x");
+                    }
+                    other => panic!("expected text, got {other:?}"),
+                }
+            }
+            other => panic!("expected set_preview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_set_preview_that_cannot_be_shown_is_an_error_not_a_crash() {
+        let unknown = parse_line(
+            r#"{"jsonrpc":"2.0","method":"set_preview","params":{"path":"/a","content":{"type":"nope"}}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(unknown.id, None);
+        assert!(
+            unknown.message.contains("set_preview"),
+            "{}",
+            unknown.message
+        );
+        let over_the_limit = format!(
+            r#"{{"jsonrpc":"2.0","method":"set_preview","params":{{"path":"/b","content":{{"type":"hex","bytes":"{}","total":1}}}}}}"#,
+            "00".repeat(plugin_api::MAX_HEX_BYTES + 1)
+        );
+        let refused = parse_line(&over_the_limit).unwrap_err();
+        assert!(refused.message.contains("refused"), "{}", refused.message);
+    }
+
+    #[test]
+    fn a_read_file_request_parses_with_the_offset_optional() {
+        let line =
+            r#"{"jsonrpc":"2.0","id":4,"method":"read_file","params":{"path":"/a","len":10}}"#;
+        match parse_line(line).unwrap() {
+            Incoming::Request {
+                id,
+                request: PluginRequest::ReadFile(read),
+            } => {
+                assert_eq!(id, serde_json::json!(4));
+                assert_eq!((read.path, read.offset, read.len), ("/a".into(), 0, 10));
+            }
+            other => panic!("expected a read_file request, got {other:?}"),
+        }
+        let missing =
+            parse_line(r#"{"jsonrpc":"2.0","id":5,"method":"read_file","params":{"path":"/a"}}"#)
+                .unwrap_err();
+        assert_eq!(missing.id, Some(serde_json::json!(5)));
     }
 
     #[test]

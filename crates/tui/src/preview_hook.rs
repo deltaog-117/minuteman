@@ -15,8 +15,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Runs a configured `[[preview_hook]]` command (see `theming::PreviewHook`) to produce a
-//! thumbnail image or extracted text for a file extension the built-in previews can't otherwise
-//! show — a PDF, a video, or anything else a `pdftoppm`/`ffmpegthumbnailer`-style tool handles.
+//! thumbnail image for a file extension the built-in previews can't otherwise show — a PDF, a
+//! video, or anything else a `pdftoppm`/`ffmpegthumbnailer`-style tool handles. A hook that
+//! extracts text instead belongs to the preview plugin, which runs it where it reads the file.
 //! Spawned with the same spawn/poll/timeout/kill shape `git_status` already uses for `git`: a
 //! user-chosen external tool is exactly as capable of hanging or never finishing as `git status`
 //! is, and must never block the render loop.
@@ -37,17 +38,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often a running hook is checked for exit.
 const POLL_EVERY: Duration = Duration::from_millis(15);
 
-/// Caps how much of a `Text`-kind hook's output is read back — the same size a browsed text file
-/// is capped at, for the same reason: a runaway tool's output must not stall the read or bloat
-/// memory.
-const MAX_TEXT_BYTES: u64 = 1 << 20;
-
 #[derive(Debug)]
 pub enum HookOutcome {
     Image(DynamicImage),
-    Text(String),
     /// The program is missing, exited non-zero, timed out, or its output couldn't be read back
-    /// as its declared `kind` — the caller falls back to just the file's name, quietly.
+    /// as an image — the caller falls back to just the file's name, quietly.
     Failed,
 }
 
@@ -118,15 +113,8 @@ fn read_output(path: &Path, kind: HookKind) -> Option<HookOutcome> {
     match kind {
         // A hook's scratch output is always a file on this machine, whatever backend is browsed.
         HookKind::Image => preview::load_image(&shared::LocalVfs, path).map(HookOutcome::Image),
-        HookKind::Text => {
-            let metadata = std::fs::metadata(path).ok()?;
-            if metadata.len() > MAX_TEXT_BYTES {
-                return None;
-            }
-            String::from_utf8(std::fs::read(path).ok()?)
-                .ok()
-                .map(HookOutcome::Text)
-        }
+        // The preview plugin runs these; the interface only ever draws pictures.
+        HookKind::Text => None,
     }
 }
 
@@ -145,19 +133,10 @@ mod tests {
 
     #[test]
     fn a_matching_extension_is_found_case_insensitively() {
-        let hooks = vec![hook("true", HookKind::Text)];
+        let hooks = vec![hook("true", HookKind::Image)];
         assert!(hook_for(&hooks, Path::new("report.PDF")).is_some());
         assert!(hook_for(&hooks, Path::new("report.txt")).is_none());
         assert!(hook_for(&hooks, Path::new("no_extension")).is_none());
-    }
-
-    #[test]
-    fn a_successful_text_hook_reads_back_what_it_wrote() {
-        let outcome = run(
-            &hook("printf hello > {out}", HookKind::Text),
-            Path::new("in.pdf"),
-        );
-        assert!(matches!(outcome, HookOutcome::Text(ref t) if t == "hello"));
     }
 
     #[test]
@@ -182,20 +161,29 @@ mod tests {
     }
 
     #[test]
+    fn a_text_hook_is_not_this_modules_to_run() {
+        let outcome = run(
+            &hook("printf hello > {out}", HookKind::Text),
+            Path::new("in.pdf"),
+        );
+        assert!(matches!(outcome, HookOutcome::Failed));
+    }
+
+    #[test]
     fn a_missing_program_a_failing_exit_and_a_timeout_all_fail_quietly() {
         assert!(matches!(
             run(
-                &hook("minuteman-no-such-program", HookKind::Text),
+                &hook("minuteman-no-such-program", HookKind::Image),
                 Path::new("in.pdf")
             ),
             HookOutcome::Failed
         ));
         assert!(matches!(
-            run(&hook("false", HookKind::Text), Path::new("in.pdf")),
+            run(&hook("false", HookKind::Image), Path::new("in.pdf")),
             HookOutcome::Failed
         ));
 
-        let mut slow = hook("sleep 5", HookKind::Text);
+        let mut slow = hook("sleep 5", HookKind::Image);
         slow.timeout_ms = Some(50);
         let started = Instant::now();
         assert!(matches!(
@@ -206,12 +194,5 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "a timed-out hook should be killed near-immediately, not waited out"
         );
-    }
-
-    #[test]
-    fn oversized_text_output_is_rejected_rather_than_read_in_full() {
-        let command = format!("yes | head -c {} > {{out}}", MAX_TEXT_BYTES + 1);
-        let outcome = run(&hook(&command, HookKind::Text), Path::new("in.pdf"));
-        assert!(matches!(outcome, HookOutcome::Failed));
     }
 }

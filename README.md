@@ -93,6 +93,7 @@ cargo install --path plugins/finder   # installs mman-finder, the fuzzy finder (
 cargo install --path plugins/search   # installs mman-search, the structured search (`L`), next to it
 cargo install --path plugins/git      # installs mman-git, the git branch and file state in the status bar
 cargo install --path plugins/hud      # installs mman-hud, the header's uptime, load and memory (`system_hud = true`)
+cargo install --path plugins/preview  # installs mman-preview, the preview column's text, hex dump and archive listing
 mman
 mman /path/to/dir
 ```
@@ -105,12 +106,16 @@ A `[[plugin]]` of your own that lists `provides = ["find"]` takes its place (see
 plugin too, `mman-git`: without it the status bar simply has no git segment and the list no
 marks beside changed files (`+` staged, `~` modified, `?` untracked, `!` conflicted), and
 `git_status = false` in `config.toml` keeps it from starting. The header's system figures (`system_hud = true`)
-are `mman-hud`, and without it that pill is absent.
+are `mman-hud`, and without it that pill is absent. The preview column's text, hex dump and archive
+listing are `mman-preview`: it reads the selected file through `mman` and sends back a finished
+document, `mman` does the scrolling and drawing, and without it the column shows only the file's
+name and a notice at startup says how to get it (a `[[plugin]]` that lists `provides = ["preview"]`
+takes its place; images are still `mman`'s own).
 
 From a checkout, without installing:
 
 ```bash
-cargo build -p finder -p search -p git   # once, so the plugins are built next to mman
+cargo build -p finder -p search -p git -p hud -p previewer   # once, so the plugins are built next to mman
 cargo run -p tui
 # or, starting in a specific directory:
 cargo run -p tui -- /path/to/dir

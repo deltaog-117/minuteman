@@ -8,19 +8,3 @@ authors.workspace = true
 [dependencies]
 shared = { path = "../shared" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "tiff", "webp"] }
-# Listing an archive reads only its directory (a zip's central directory, a tar's headers), so no
-# compression codecs are needed for zip; `flate2` is here for the gzip layer of `.tar.gz`, and is
-# already built for `image`.
-zip = { version = "8.6", default-features = false }
-tar = { version = "0.4.46", default-features = false }
-flate2 = "1.1"
-# Only the parser and its bundled syntax defs, no theme/HTML/dump-create machinery — we classify
-# tokens by their raw scope name ourselves rather than asking syntect to resolve colors.
-syntect = { version = "5.3", default-features = false, features = [
-    "parsing",
-    "default-syntaxes",
-    "regex-fancy",
-] }
-
-[dev-dependencies]
-proptest = "1.11"

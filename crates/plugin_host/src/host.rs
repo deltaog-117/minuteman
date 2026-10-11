@@ -26,6 +26,7 @@
 //! plugin whose process has ended is started again the next time something is meant for it (see
 //! `life`).
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -33,8 +34,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::runtime::Handle;
 
 use crossterm::event::KeyCode;
+use plugin_api::{ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_PREVIEW, ReadFile};
 use serde_json::json;
-use shared::{LocalVfs, Vfs};
+use shared::{FileKind, LocalVfs, Vfs};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -513,6 +515,52 @@ impl PluginManager {
         ActionDispatch::Sent
     }
 
+    /// Tells the plugin that provides `preview` which file the preview column is about (`None`
+    /// when it shows none), or that the file it already showed changed. Returns whether a plugin
+    /// got it: `false` when none provides `preview`, or the one that does cannot be started, so
+    /// the interface can show the file's name instead of waiting for a document that will not
+    /// come. A plugin whose process has ended is started again first, like for any event.
+    pub fn dispatch_preview(&mut self, path: Option<&Path>) -> bool {
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins.iter_mut().find(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_PREVIEW)
+        }) else {
+            return false;
+        };
+        if !plugin.ready_for_event(logs_tx, state_tx) {
+            return false;
+        }
+        let event = protocol::HostEvent::preview(path.map(Path::to_path_buf));
+        plugin.process.stdin_tx.send(event.to_line()).is_ok()
+    }
+
+    /// Whether a plugin that provides `preview` has a live process right now. A document that was
+    /// being made when that process died will never come, which the interface can tell by this.
+    pub fn previewer_running(&self) -> bool {
+        self.plugins.iter().any(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_PREVIEW)
+                && p.process.life.exit() == Exit::Running
+        })
+    }
+
+    /// Whether a plugin is configured to provide `preview`, running or not.
+    pub fn has_previewer(&self) -> bool {
+        self.plugins.iter().any(|p| {
+            p.provides
+                .iter()
+                .any(|provided| provided == PROVIDES_PREVIEW)
+        })
+    }
+
     /// Tells `plugin` that what is typed into its picker is now `text`. `generation` rises with
     /// every change, and the plugin's `picker_items` carry the one they answer. Nothing is sent to
     /// a plugin whose process has ended; the interface notices that through `is_running`.
@@ -787,6 +835,7 @@ async fn read_loop(
             Ok(Incoming::PickerItems(update)) => ui.items(&plugin, update),
             Ok(Incoming::PickerClose(close)) => ui.close(&plugin, close.picker),
             Ok(Incoming::SetView(set)) => ui.set_view(&plugin, set),
+            Ok(Incoming::SetPreview(set)) => ui.set_preview(&plugin, set),
             Ok(Incoming::WalkCancel(cancel)) => walks.cancel(cancel.walk),
             Ok(Incoming::UnknownNotification) => {}
             Ok(Incoming::Request { id, request }) => {
@@ -810,6 +859,16 @@ async fn read_loop(
                         walks
                             .start(&handle, Arc::clone(&vfs), request, stdin_tx.clone())
                             .map(|()| json!({ "walk": number }))
+                    }
+                    PluginRequest::ReadFile(read) => {
+                        let vfs = Arc::clone(&vfs);
+                        match handle
+                            .spawn_blocking(move || read_chunk(vfs.as_ref(), &read))
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => Err(format!("request task panicked: {e}")),
+                        }
                     }
                     request => match handle.spawn_blocking(move || execute(request)).await {
                         Ok(result) => result,
@@ -944,7 +1003,8 @@ fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
         | PluginRequest::RunAction { .. }
         | PluginRequest::ListActions
         | PluginRequest::ShowPicker(_)
-        | PluginRequest::Walk(_) => Err("answered by the host's reader, not here".to_string()),
+        | PluginRequest::Walk(_)
+        | PluginRequest::ReadFile(_) => Err("answered by the host's reader, not here".to_string()),
         PluginRequest::ReadDir { path } => vfs
             .list_dir(&path)
             .map(|entries| json!(entries.iter().map(WireEntry::from).collect::<Vec<_>>()))
@@ -977,6 +1037,35 @@ fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
     }
 }
 
+/// Answers a `read_file`: what is at the path, and the bytes asked for when it is a regular file.
+/// Anything else is described but never opened, since opening a pipe with no writer blocks
+/// forever and a device has no meaningful first bytes.
+fn read_chunk(vfs: &dyn Vfs, request: &ReadFile) -> Result<serde_json::Value, String> {
+    let meta = vfs.metadata(&request.path).map_err(|e| e.to_string())?;
+    let kind = match meta.kind {
+        FileKind::File => ChunkKind::File,
+        FileKind::Dir => ChunkKind::Dir,
+        FileKind::Symlink | FileKind::Other => ChunkKind::Other,
+    };
+    let wanted = request.len.min(MAX_READ_BYTES);
+    let mut data = Vec::new();
+    if kind == ChunkKind::File && wanted > 0 {
+        let mut file = vfs.open_read(&request.path).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(request.offset))
+            .map_err(|e| e.to_string())?;
+        file.take(wanted)
+            .read_to_end(&mut data)
+            .map_err(|e| e.to_string())?;
+    }
+    serde_json::to_value(FileChunk {
+        kind,
+        size: meta.len,
+        local_path: vfs.local_path(&request.path),
+        data,
+    })
+    .map_err(|e| e.to_string())
+}
+
 fn state_json(state: &StateSnapshot) -> serde_json::Value {
     serde_json::to_value(state).expect("a snapshot of plain strings and paths always serializes")
 }
@@ -1004,6 +1093,68 @@ mod tests {
         assert!(manager.names().is_empty());
         assert!(manager.is_empty());
         assert!(manager.take_action().is_none());
+    }
+
+    fn chunk(vfs: &dyn Vfs, path: &str, offset: u64, len: u64) -> Result<FileChunk, String> {
+        let request = ReadFile {
+            path: PathBuf::from(path),
+            offset,
+            len,
+        };
+        read_chunk(vfs, &request)
+            .map(|value| serde_json::from_value(value).expect("the reply is a FileChunk"))
+    }
+
+    #[test]
+    fn read_file_returns_the_range_asked_for_and_the_whole_length() {
+        let vfs = shared::MemVfs::new();
+        vfs.add_file("/f.txt", b"0123456789".to_vec());
+
+        let middle = chunk(&vfs, "/f.txt", 3, 4).expect("readable");
+        assert_eq!(middle.kind, ChunkKind::File);
+        assert_eq!((middle.size, middle.data.as_slice()), (10, &b"3456"[..]));
+
+        let past_the_end = chunk(&vfs, "/f.txt", 8, 100).expect("readable");
+        assert_eq!(past_the_end.data, b"89");
+        let beyond = chunk(&vfs, "/f.txt", 50, 5).expect("readable");
+        assert!(beyond.data.is_empty());
+    }
+
+    #[test]
+    fn read_file_with_no_length_only_describes_the_path() {
+        let vfs = shared::MemVfs::new();
+        vfs.add_dir("/d");
+        vfs.add_file("/d/f", b"abc".to_vec());
+
+        let file = chunk(&vfs, "/d/f", 0, 0).expect("described");
+        assert_eq!(
+            (file.kind, file.size, file.data.len()),
+            (ChunkKind::File, 3, 0)
+        );
+        let dir = chunk(&vfs, "/d", 0, 4096).expect("described");
+        assert_eq!(dir.kind, ChunkKind::Dir);
+        assert!(dir.data.is_empty(), "a folder is never read");
+        assert!(chunk(&vfs, "/nowhere", 0, 1).is_err());
+    }
+
+    #[test]
+    fn read_file_never_returns_more_than_the_cap_in_one_reply() {
+        let vfs = shared::MemVfs::new();
+        vfs.add_file("/big", vec![7u8; (MAX_READ_BYTES + 10) as usize]);
+        let reply = chunk(&vfs, "/big", 0, u64::MAX).expect("readable");
+        assert_eq!(reply.data.len() as u64, MAX_READ_BYTES);
+        assert_eq!(reply.size, MAX_READ_BYTES + 10);
+    }
+
+    #[test]
+    fn a_previewer_is_only_found_when_one_provides_preview() {
+        let mut manager = PluginManager::new();
+        assert!(!manager.has_previewer());
+        assert!(!manager.previewer_running());
+        assert!(
+            !manager.dispatch_preview(Some(Path::new("/a"))),
+            "with nobody to tell, the interface has to know"
+        );
     }
 
     #[test]

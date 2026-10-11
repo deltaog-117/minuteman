@@ -12,25 +12,12 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use flate2::read::GzDecoder;
+use plugin_api::{
+    ArchiveEntry as Entry, ArchiveKind as Kind, ArchiveListing as Listing, Hidden,
+    MAX_ARCHIVE_ENTRIES,
+};
 use shared::Vfs;
-
-/// The archive formats that can be listed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Zip,
-    Tar,
-    TarGz,
-}
-
-impl Kind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Kind::Zip => "zip",
-            Kind::Tar => "tar",
-            Kind::TarGz => "tar.gz",
-        }
-    }
-}
+use shared::names::clean_name;
 
 /// Which format `path` is, going by its name alone (`.zip`, `.jar`, `.tar`, `.tar.gz`, `.tgz`).
 /// Like `is_image` and `is_text`, this does not sniff content: a mislabelled file just fails to
@@ -55,7 +42,7 @@ pub fn is_archive(path: &Path) -> bool {
 /// How much work listing one archive may do.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    /// Entries kept; the rest are reported in [`Listing::hidden`].
+    /// Entries kept; the rest are reported in the listing's `hidden`.
     pub max_entries: usize,
     /// Bytes a `.tar.gz` is inflated for before the listing stops where it got to.
     pub max_inflated: u64,
@@ -64,7 +51,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_entries: 5_000,
+            max_entries: MAX_ARCHIVE_ENTRIES,
             max_inflated: 256 << 20,
         }
     }
@@ -74,71 +61,6 @@ impl Default for Limits {
 /// whole directory into memory when it opens a file, so this bounds what a hostile zip can make
 /// it allocate.
 const MAX_ZIP_DIRECTORY: u32 = 8 << 20;
-
-/// The longest name kept, in characters. A tar can carry a name of any length in its extended
-/// headers.
-const MAX_NAME_CHARS: usize = 1024;
-
-/// One thing in an archive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Entry {
-    /// Cleaned by [`clean_name`], so safe to draw.
-    pub name: String,
-    /// Unpacked size in bytes; zero for a directory.
-    pub size: u64,
-    pub is_dir: bool,
-}
-
-/// What was not listed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hidden {
-    /// Everything was listed.
-    Nothing,
-    /// This many more entries exist (a zip knows its own count).
-    Count(usize),
-    /// There are more, but how many is not known (a tar has no index, so counting means reading
-    /// it all, or reading was cut short by an error or a limit).
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Listing {
-    pub kind: Kind,
-    pub entries: Vec<Entry>,
-    pub hidden: Hidden,
-}
-
-impl Listing {
-    /// What the listed files add up to unpacked.
-    pub fn unpacked_bytes(&self) -> u64 {
-        self.entries
-            .iter()
-            .fold(0u64, |sum, entry| sum.saturating_add(entry.size))
-    }
-}
-
-/// A name made safe to put on a terminal: control characters (an escape sequence in a file name
-/// could otherwise repaint or retitle the screen) and the invisible characters that reorder text
-/// (a right-to-left override, U+202E, makes `evil` + U+202E + `txt.exe` display as `evilexe.txt`)
-/// become `?`, and an absurdly long name is cut with `…`.
-pub fn clean_name(raw: &str) -> String {
-    let mut chars = raw.chars();
-    let mut name: String = chars
-        .by_ref()
-        .take(MAX_NAME_CHARS)
-        .map(|c| if is_unsafe(c) { '?' } else { c })
-        .collect();
-    if chars.next().is_some() {
-        name.push('…');
-    }
-    name
-}
-
-fn is_unsafe(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
-}
 
 /// Lists `path` within the default [`Limits`]. `None` if it is not an archive of a known kind,
 /// or is damaged from its very first entry.
@@ -646,25 +568,6 @@ mod tests {
                 prop_assert_eq!(directory_is_small(&tail), plausible);
             }
         }
-
-        /// Whatever an archive calls a file, what reaches the screen has no control or
-        /// direction-changing character in it and is bounded in length.
-        #[test]
-        fn cleaned_names_are_safe_and_bounded(raw in any::<String>()) {
-            let name = clean_name(&raw);
-            prop_assert!(name.chars().all(|c| !is_unsafe(c)));
-            prop_assert!(name.chars().count() <= MAX_NAME_CHARS + 1);
-        }
-    }
-
-    #[test]
-    fn escape_sequences_and_direction_overrides_in_names_are_defused() {
-        assert_eq!(clean_name("\x1b]0;pwned\x07.txt"), "?]0;pwned?.txt");
-        assert_eq!(clean_name("evil\u{202e}txt.exe"), "evil?txt.exe");
-        assert_eq!(clean_name("plain-name.rs"), "plain-name.rs");
-        assert_eq!(clean_name("naïve/日本語.txt"), "naïve/日本語.txt");
-        let long = "a".repeat(MAX_NAME_CHARS + 50);
-        assert!(clean_name(&long).ends_with('…'));
     }
 
     #[test]

@@ -17,6 +17,9 @@ shell_overlay = { path = "../shell_overlay" }
 preview = { path = "../preview" }
 theming = { path = "../theming" }
 plugin_host = { path = "../plugin_host" }
+plugin_api = { path = "../plugin_api" }
+# The `--text-hook` argument the bundled preview plugin is started with is a JSON document.
+serde_json = "1.0"
 vfs_ssh = { path = "../vfs_ssh" }
 vfs_archive = { path = "../vfs_archive" }
 trash = { path = "../trash" }

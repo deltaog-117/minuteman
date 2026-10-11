@@ -214,7 +214,7 @@ impl fmt::Display for ViewError {
 impl std::error::Error for ViewError {}
 
 /// Whether `c` can change what the terminal does or the order text reads in, rather than be text.
-fn is_unsafe(c: char) -> bool {
+pub(crate) fn is_unsafe(c: char) -> bool {
     c.is_control()
         || matches!(
             c,

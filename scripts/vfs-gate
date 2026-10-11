@@ -28,6 +28,7 @@ declare -A allowed=(
   [crates/tui/src/mime_type.rs]="the shared MIME database, and sniffing a local file to pick a desktop program for it"
   [crates/tui/src/associations.rs]="the desktop's application and MIME-association files"
   [crates/tui/src/preview_hook.rs]="external preview programs read and write local scratch files"
+  [plugins/preview/src/hook.rs]="a text-extracting hook is handed a file on this machine's disk and writes its output to a scratch file here"
   [crates/tui/src/inspect.rs]="this machine's passwd and group, only consulted for a path on the local disk"
 )
 

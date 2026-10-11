@@ -8,3 +8,7 @@ the program through `plugin_api` only; nothing under `crates/` may depend on any
 A plugin is added to the workspace `members` in the root `Cargo.toml` when its crate is created.
 Installed, they live in `<prefix>/share/minuteman/plugins/<name>/`; a user plugin of the same name
 in `~/.config/minuteman/plugins/<name>/` takes its place.
+
+A plugin's package name can differ from its folder: `plugins/preview` is the package `previewer`,
+because `preview` is already the image-decoding crate in `crates/`. The program it installs is
+still `mman-preview`.

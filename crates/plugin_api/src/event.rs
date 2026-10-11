@@ -22,8 +22,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    API_VERSION, Change, EVENT_ACTION, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_WALK_BATCH,
-    EVENT_WALK_DONE, Job, JobOutcome, PickerEvent, TreeEntry, WalkEnd, WalkEvent,
+    API_VERSION, Change, EVENT_ACTION, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_PREVIEW,
+    EVENT_WALK_BATCH, EVENT_WALK_DONE, Job, JobOutcome, PickerEvent, PreviewTarget, TreeEntry,
+    WalkEnd, WalkEvent,
 };
 
 /// A host -> plugin line: always a notification, never expects a reply.
@@ -63,6 +64,9 @@ pub struct EventParams {
     /// On the walk events (`walk_batch`, `walk_done`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub walk: Option<WalkEvent>,
+    /// On a `preview` event: the file the preview column is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<PreviewTarget>,
     /// Present on `dir_changed` and `selection_changed`; its `from` and `to` sit beside the
     /// other params. (A reader of a `job_finished` may see an empty one: go by `name`.)
     #[serde(default, flatten)]
@@ -89,6 +93,7 @@ impl HostEvent {
                 show_hidden: None,
                 picker: None,
                 walk: None,
+                preview: None,
                 change: None,
                 job: None,
             },
@@ -177,6 +182,14 @@ impl HostEvent {
             entries: Vec::new(),
             end: Some(end),
         });
+        event
+    }
+
+    /// A `preview` event: the preview column is now about `path` (`None` when it shows no file),
+    /// or the file it already showed changed and wants reading again.
+    pub fn preview(path: Option<PathBuf>) -> Self {
+        let mut event = Self::new(EVENT_PREVIEW, PathBuf::new(), Vec::new());
+        event.params.preview = Some(PreviewTarget { path });
         event
     }
 

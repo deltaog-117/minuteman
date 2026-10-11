@@ -39,4 +39,6 @@ pub use error::PluginError;
 pub use host::{ActionDispatch, LogMessage, PluginManager, Restart, Triggers};
 pub use life::{PluginInfo, PluginState};
 pub use picker::{PickerRequest, UiRequest};
-pub use protocol::{API_VERSION, EventKind, JobOutcome, LogLevel, SetView, Slot, StateSnapshot};
+pub use protocol::{
+    API_VERSION, EventKind, JobOutcome, LogLevel, SetPreview, SetView, Slot, StateSnapshot,
+};

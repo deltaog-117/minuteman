@@ -43,6 +43,7 @@ mod filmstrip_view;
 mod glyphs;
 mod gradient;
 mod grid_view;
+mod hex_dump;
 mod hud;
 mod image_preview;
 mod inspect;
@@ -132,7 +133,7 @@ use ratatui_image::{FilterType, Resize, StatefulImage};
 use settings_popup::{Outcome as SettingsOutcome, Row as SettingsRow, SettingsPopup, SettingsView};
 use shared::{DirEntryInfo, LocalVfs, Vfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
-use text_preview::{PreviewStatus as TextPreviewStatus, TextPreview};
+use text_preview::{PreviewAsk, PreviewStatus as TextPreviewStatus, TextPreview};
 use theming::{
     Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, PreviewHook, RawFont,
     RawLocal, RawPanels, RawStyles, RawTheme, RawUi, Styles, Theme, Ui,
@@ -700,7 +701,7 @@ impl Previews {
         let thumbs = Thumbnails::new(image.picker(), handle.clone(), Arc::clone(&vfs));
         Self {
             image,
-            text: TextPreview::new(handle).with_vfs(vfs),
+            text: TextPreview::new(),
             thumbs,
         }
     }
@@ -713,21 +714,47 @@ impl Previews {
 
     /// `selected` is the entry under the cursor. A real image, or one an `Image`-kind
     /// `[[preview_hook]]` covers, goes to the image pipeline; any other file (text, an archive, a
-    /// binary, or one a `Text`-kind hook covers) to the one that reads it for the scrolling pane;
-    /// a folder to neither, since the pane lists its children instead.
-    fn update(&mut self, selected: Option<&DirEntryInfo>, hooks: &[PreviewHook]) {
+    /// binary, or one a `Text`-kind hook covers) to the previewing plugin for the scrolling pane;
+    /// a folder to neither, since the pane lists its children instead. `served` is whether a
+    /// plugin is there to preview files. Returns what that plugin must be told, if anything.
+    fn update(
+        &mut self,
+        selected: Option<&DirEntryInfo>,
+        hooks: &[PreviewHook],
+        served: bool,
+    ) -> Option<PreviewAsk> {
         let file = selected.filter(|e| !e.is_dir).map(|e| e.path.as_path());
         self.image.update(file, hooks);
         self.text.update(
             file.filter(|path| !image_preview::is_target(path, hooks)),
-            hooks,
-        );
+            served,
+        )
     }
 
-    /// Re-reads whichever preview is showing the selected file, after it changed on disk.
-    fn reload(&mut self, hooks: &[PreviewHook]) {
+    /// Re-reads whichever preview is showing the selected file, after it changed on disk. Returns
+    /// what the previewing plugin must be told, if anything.
+    fn reload(&mut self, hooks: &[PreviewHook]) -> Option<PreviewAsk> {
         self.image.reload(hooks);
-        self.text.reload(hooks);
+        self.text.reload()
+    }
+
+    /// Tells the previewing plugin what the last `update` or `reload` asked, and stops waiting for
+    /// a document when it cannot be reached.
+    fn ask(&mut self, app: &mut App, ask: Option<PreviewAsk>) {
+        if let Some(ask) = ask
+            && !app.tell_previewer(&ask)
+            && ask.0.is_some()
+        {
+            self.text.give_up();
+        }
+        // A plugin that died with a document half made will never send it; showing "loading…"
+        // until the cursor moves would read as a hang. The next file starts it again.
+        if self.text.status() == TextPreviewStatus::Loading
+            && app.has_previewer()
+            && !app.previewer_running()
+        {
+            self.text.give_up();
+        }
     }
 }
 
@@ -784,6 +811,7 @@ fn main() -> Result<()> {
         .with_vfs(Arc::clone(&vfs))
         .with_git_status(config.git_status)
         .with_system_hud(config.system_hud)
+        .with_preview_hooks(config.preview_hooks.clone())
         .with_interactive_commands(config.interactive_commands.clone())
         .with_open_config(config.open_rules.clone(), config.open_with.clone())
         .with_plugins(config.plugins.clone(), browser.current_dir());
@@ -1418,6 +1446,7 @@ fn run(
                     }
                 }
                 UiRequest::SetView { plugin, set } => app.set_view(&plugin, set),
+                UiRequest::SetPreview { set, .. } => previews.text.accept(set),
                 UiRequest::Close {
                     plugin,
                     picker: number,
@@ -1498,27 +1527,37 @@ fn run(
         // the app that recognised the command doesn't own the terminal.
         if let Some(handover) = app.take_handover() {
             let result = guard.run_foreground(terminal, &handover.cwd, &handover.line)?;
-            previews.reload(&config.preview_hooks);
+            let ask = previews.reload(&config.preview_hooks);
+            previews.ask(app, ask);
             app.finish_handover(browser, vfs, &handover, &result)?;
         }
         // Picks up files made or changed by a mini-shell, a `:` command or another program; a
         // change to the selected file itself needs its preview re-read, since that is otherwise
         // keyed on the path alone.
         if app.poll_disk(browser, Instant::now()) {
-            previews.reload(&config.preview_hooks);
+            let ask = previews.reload(&config.preview_hooks);
+            previews.ask(app, ask);
         }
         app.poll_hud(browser);
         app.poll_plugins(browser, view_mode.label());
         // While the trash browser is open the preview follows its cursor, not the browser's.
-        match (trash_view.as_ref(), picker.as_ref()) {
-            (Some(view), _) => {
-                previews.update(view.preview_subject().as_ref(), &config.preview_hooks)
+        let served = app.has_previewer();
+        let ask = match (trash_view.as_ref(), picker.as_ref()) {
+            (Some(view), _) => previews.update(
+                view.preview_subject().as_ref(),
+                &config.preview_hooks,
+                served,
+            ),
+            (None, Some(popup)) => previews.update(
+                popup.preview_subject().as_ref(),
+                &config.preview_hooks,
+                served,
+            ),
+            (None, None) => {
+                previews.update(browser.selected_entry(), &config.preview_hooks, served)
             }
-            (None, Some(popup)) => {
-                previews.update(popup.preview_subject().as_ref(), &config.preview_hooks)
-            }
-            (None, None) => previews.update(browser.selected_entry(), &config.preview_hooks),
-        }
+        };
+        previews.ask(app, ask);
 
         if let Some(mut panes) = shells.take() {
             let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);

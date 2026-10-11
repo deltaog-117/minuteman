@@ -14,35 +14,33 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Reads the selected file for the preview pane off the render thread, the same
-//! never-block-the-render-loop treatment `image_preview` gives image decoding: a file on a slow
-//! or network-backed filesystem must not stall input handling just because it is being looked at.
+//! The state of the preview column for a file that is not an image or a folder: which file it is
+//! about, what the previewing plugin sent for it, and how far it is scrolled. The reading happens
+//! in the plugin (`mman-preview`), on its own process and threads, so a file on a slow or
+//! network-backed filesystem can never stall input handling just because it is being looked at;
+//! this keeps what comes back and answers the interface's questions about it.
 //!
-//! Despite the name this covers every previewable file that is not an image: text is read whole,
-//! an archive is listed, and anything else is read as its first bytes for the hex view (see
-//! `preview::load` for how that is decided). The pane it fills scrolls, and `Scroll` holds where.
+//! Despite the name this covers every previewable file that is not an image: text is shown wrapped
+//! and colored, an archive as its listing, and anything else as its first bytes for the hex view
+//! (see `plugins/preview` for how that is decided). The pane it fills scrolls, and `Scroll` holds
+//! where. Scrolling is the interface's, not the plugin's: the plugin sends the whole document once
+//! and every key and wheel notch after that is answered here, without a round trip.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
-use preview::Loaded;
-use preview::highlight::HighlightedLine;
-use shared::{LocalVfs, Vfs};
-use theming::{HookKind, PreviewHook};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-
-use crate::preview_hook::{self, HookOutcome};
+use plugin_api::{PreviewContent, SetPreview};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewStatus {
-    /// Nothing selected, or the selection has nothing to show (not a regular file).
+    /// Nothing selected, or the selection has nothing to show (not a regular file, or no plugin
+    /// to preview it).
     Empty,
-    /// The file is being read off-thread.
+    /// The plugin has been asked and has not answered yet.
     Loading,
-    /// Read successfully; `content` holds what to show.
+    /// The plugin answered; `content` holds what to show.
     Ready,
-    /// Read failed, or the file is too big to preview as text.
+    /// The plugin could not read the file, or it is too big to preview as text.
     Failed,
 }
 
@@ -87,20 +85,6 @@ impl Scroll {
     }
 }
 
-struct ReadOutcome {
-    path: PathBuf,
-    generation: u64,
-    loaded: Loaded,
-    /// Tokenized alongside the read, off the render thread — `Some` exactly when `loaded` is
-    /// `Loaded::Text`, since nothing else has source lines to color.
-    highlighted: Option<Vec<HighlightedLine>>,
-    /// Whether this read went through a configured `[[preview_hook]]` rather than
-    /// `preview::load` — a hook's own failure/timeout/missing-program falls back to just the
-    /// file's name (like an unsupported file), not the "preview failed" message a real read
-    /// failure shows.
-    via_hook: bool,
-}
-
 /// How many rows a text takes when wrapped to a width, remembered with that width. Measuring
 /// walks the whole text, which is wasted work on every frame for a file that has not changed.
 #[derive(Debug, Default)]
@@ -125,55 +109,42 @@ impl RowCache {
     }
 }
 
+/// What to tell the previewing plugin after the interface changed which file the column is about:
+/// the new file, or `None` for no file at all (so work in flight for the old one stops).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewAsk(pub Option<PathBuf>);
+
 pub struct TextPreview {
     current: Option<PathBuf>,
     status: PreviewStatus,
-    /// Only ever `Text`, `Bytes` or `Archive`: a failed or unsupported read shows in `status`.
-    content: Option<Loaded>,
-    /// `content`'s tokens, one vec per source line, when `content` is `Loaded::Text` — see
-    /// [`ReadOutcome::highlighted`].
-    highlighted: Option<Vec<HighlightedLine>>,
+    /// Only ever `Text`, `Hex` or `Archive`: a failed or empty answer shows in `status`.
+    content: Option<PreviewContent>,
     scroll: Scroll,
     rows: RowCache,
     /// When the current selection's typewriter reveal started, so `preview_view::draw_text` can
     /// compute how many lines have appeared so far (see `anim::revealed_lines`). Set only when
-    /// the selection changes to a new file — never by `reload`, so a log being appended to while
+    /// the selection changes to a new file — never by a reload, so a log being appended to while
     /// selected doesn't replay the reveal — and read but never advanced here, since reading it
     /// needs no `&mut self`.
     reveal_started: Option<Instant>,
-    /// Counts reads started. Only the latest one's result is kept, so a slow read begun before
-    /// the file changed can't overwrite the newer read of the same path.
-    generation: u64,
-    read_tx: UnboundedSender<ReadOutcome>,
-    read_rx: UnboundedReceiver<ReadOutcome>,
-    handle: tokio::runtime::Handle,
-    /// Where the files being previewed are read from.
-    vfs: Arc<dyn Vfs>,
+}
+
+impl Default for TextPreview {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TextPreview {
-    pub fn new(handle: tokio::runtime::Handle) -> Self {
-        let (read_tx, read_rx) = unbounded_channel();
+    pub fn new() -> Self {
         Self {
             current: None,
             status: PreviewStatus::Empty,
             content: None,
-            highlighted: None,
             scroll: Scroll::default(),
             rows: RowCache::default(),
             reveal_started: None,
-            generation: 0,
-            read_tx,
-            read_rx,
-            handle,
-            vfs: Arc::new(LocalVfs),
         }
-    }
-
-    /// Reads the previewed files through `vfs` instead of the local disk.
-    pub fn with_vfs(mut self, vfs: Arc<dyn Vfs>) -> Self {
-        self.vfs = vfs;
-        self
     }
 
     /// When the current selection's typewriter reveal started, or `None` if it never started
@@ -183,38 +154,25 @@ impl TextPreview {
     }
 
     /// Arms the reveal as of `started`, for a test of `preview_view::draw_text`'s capping without
-    /// waiting on a real background read.
+    /// waiting on a real answer.
     #[cfg(test)]
     pub fn arm_reveal_for_test(&mut self, started: Instant) {
         self.reveal_started = Some(started);
     }
 
-    /// A preview already showing `loaded`, for tests of the code that draws one. A text's tokens
-    /// are computed with no known file name, so it highlights as plain text — use
-    /// [`Self::showing_named`] to test an actual language's colors.
+    /// A preview already showing `content`, for tests of the code that draws one.
     #[cfg(test)]
-    pub fn showing(handle: tokio::runtime::Handle, loaded: Loaded) -> Self {
-        Self::showing_named(handle, loaded, "")
-    }
-
-    /// [`Self::showing`], tokenizing a `Loaded::Text` as `file_name` would be highlighted for
-    /// real, so a test can check specific tokens' colors.
-    #[cfg(test)]
-    pub fn showing_named(handle: tokio::runtime::Handle, loaded: Loaded, file_name: &str) -> Self {
-        let mut preview = Self::new(handle);
-        preview.highlighted = match &loaded {
-            Loaded::Text(text) => Some(preview::highlight::highlight(text, file_name)),
-            _ => None,
-        };
-        preview.content = Some(loaded);
+    pub fn showing(content: PreviewContent) -> Self {
+        let mut preview = Self::new();
+        preview.content = Some(content);
         preview.status = PreviewStatus::Ready;
         preview
     }
 
     /// A preview in `status` with nothing to show, for the same purpose.
     #[cfg(test)]
-    pub fn in_status(handle: tokio::runtime::Handle, status: PreviewStatus) -> Self {
-        let mut preview = Self::new(handle);
+    pub fn in_status(status: PreviewStatus) -> Self {
+        let mut preview = Self::new();
         preview.status = status;
         preview
     }
@@ -224,7 +182,7 @@ impl TextPreview {
     }
 
     #[cfg(test)]
-    pub fn content(&self) -> Option<&Loaded> {
+    pub fn content(&self) -> Option<&PreviewContent> {
         self.content.as_ref()
     }
 
@@ -238,157 +196,84 @@ impl TextPreview {
         self.scroll.by(direction * self.scroll.half_page());
     }
 
-    /// The content, its highlighted tokens (when it is text), the wrapped-row cache and the
-    /// scroll position as separate borrows, so the drawing code can read the content while it
-    /// updates the other two.
-    pub fn parts(
-        &mut self,
-    ) -> (
-        Option<&Loaded>,
-        Option<&[HighlightedLine]>,
-        &mut RowCache,
-        &mut Scroll,
-    ) {
-        (
-            self.content.as_ref(),
-            self.highlighted.as_deref(),
-            &mut self.rows,
-            &mut self.scroll,
-        )
-    }
-
-    /// Re-reads the current file without clearing what is shown, for when it changed on disk
-    /// while staying selected. A no-op when nothing previewable is selected. The scroll position
-    /// is kept, so a log being appended to does not jump back to the top.
-    pub fn reload(&mut self, hooks: &[PreviewHook]) {
-        if let Some(path) = self.current.clone() {
-            let hook = text_hook_for(&path, hooks);
-            self.spawn_read(path, hook);
-        }
+    /// The content, the wrapped-row cache and the scroll position as separate borrows, so the
+    /// drawing code can read the content while it updates the other two.
+    pub fn parts(&mut self) -> (Option<&PreviewContent>, &mut RowCache, &mut Scroll) {
+        (self.content.as_ref(), &mut self.rows, &mut self.scroll)
     }
 
     /// Call once per render tick with the selected file, if it is one that belongs here (not a
-    /// folder, and not a file `image_preview` already claims; the caller decides). Starts
-    /// reading it if it is new, and drains any completed read from the background thread.
-    pub fn update(&mut self, selected: Option<&Path>, hooks: &[PreviewHook]) {
-        let target = selected.map(Path::to_path_buf);
-
-        if target != self.current {
-            self.current = target.clone();
-            self.content = None;
-            self.highlighted = None;
-            self.rows.clear();
-            self.scroll.reset();
-            match target {
-                Some(path) => {
-                    self.status = PreviewStatus::Loading;
-                    self.reveal_started = Some(Instant::now());
-                    let hook = text_hook_for(&path, hooks);
-                    self.spawn_read(path, hook);
-                }
-                None => {
-                    self.status = PreviewStatus::Empty;
-                    self.reveal_started = None;
-                }
-            }
+    /// folder, and not a file `image_preview` already claims; the caller decides). `served` is
+    /// whether a plugin is there to preview files at all; without one the column shows only the
+    /// file's name. Returns what the plugin must be told when the file changed.
+    pub fn update(&mut self, selected: Option<&Path>, served: bool) -> Option<PreviewAsk> {
+        let target = selected.map(Path::to_path_buf).filter(|_| served);
+        if target == self.current {
+            return None;
         }
-
-        while let Ok(ReadOutcome {
-            path,
-            generation,
-            loaded,
-            highlighted,
-            via_hook,
-        }) = self.read_rx.try_recv()
-        {
-            if Some(&path) != self.current.as_ref() || generation != self.generation {
-                continue; // stale — selection moved on, or a newer read superseded this one
+        let was_showing_a_file = self.current.is_some();
+        self.current = target.clone();
+        self.content = None;
+        self.rows.clear();
+        self.scroll.reset();
+        match target {
+            Some(path) => {
+                self.status = PreviewStatus::Loading;
+                self.reveal_started = Some(Instant::now());
+                Some(PreviewAsk(Some(path)))
             }
-            self.rows.clear();
-            match loaded {
-                Loaded::Failed if via_hook => {
-                    self.content = None;
-                    self.highlighted = None;
-                    self.status = PreviewStatus::Empty;
-                }
-                Loaded::Failed => {
-                    self.content = None;
-                    self.highlighted = None;
-                    self.status = PreviewStatus::Failed;
-                }
-                Loaded::Unsupported => {
-                    self.content = None;
-                    self.highlighted = None;
-                    self.status = PreviewStatus::Empty;
-                }
-                shown => {
-                    self.content = Some(shown);
-                    self.highlighted = highlighted;
-                    self.status = PreviewStatus::Ready;
-                }
+            None => {
+                self.status = PreviewStatus::Empty;
+                self.reveal_started = None;
+                // Only worth telling the plugin when it may be working on something.
+                was_showing_a_file.then_some(PreviewAsk(None))
             }
         }
     }
 
-    fn spawn_read(&mut self, path: PathBuf, hook: Option<PreviewHook>) {
-        self.generation += 1;
-        let generation = self.generation;
-        let tx = self.read_tx.clone();
-        let vfs = Arc::clone(&self.vfs);
-        self.handle.spawn_blocking(move || {
-            // A hook hands the file to another program, which needs it on this machine's disk; on
-            // any other backend the file is read directly instead.
-            let hook = hook.zip(vfs.local_path(&path));
-            let (loaded, highlighted, via_hook) = match hook {
-                Some((hook, local)) => match preview_hook::run(&hook, &local) {
-                    HookOutcome::Text(text) => {
-                        let highlighted = tokenize(&text, &path);
-                        (Loaded::Text(text), Some(highlighted), true)
-                    }
-                    _ => (Loaded::Failed, None, true),
-                },
-                // Tokenizing runs syntect's line-oriented parser over the whole file, the same
-                // amount of work as the read just above it — it belongs off the render thread too.
-                None => {
-                    let loaded = preview::load(vfs.as_ref(), &path);
-                    let highlighted = match &loaded {
-                        Loaded::Text(text) => Some(tokenize(text, &path)),
-                        _ => None,
-                    };
-                    (loaded, highlighted, false)
-                }
-            };
-            let _ = tx.send(ReadOutcome {
-                path,
-                generation,
-                loaded,
-                highlighted,
-                via_hook,
-            });
-        });
+    /// Asks for the current file again without clearing what is shown, for when it changed on disk
+    /// while staying selected. A no-op when nothing previewable is selected. The scroll position
+    /// is kept, so a log being appended to does not jump back to the top.
+    pub fn reload(&self) -> Option<PreviewAsk> {
+        self.current.clone().map(|path| PreviewAsk(Some(path)))
     }
-}
 
-/// `path`'s name, tokenized for its syntax (or all `Plain` if none is known — see
-/// `preview::highlight::highlight`).
-fn tokenize(text: &str, path: &Path) -> Vec<HighlightedLine> {
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    preview::highlight::highlight(text, file_name)
-}
+    /// Takes the plugin's document for a file. One for a file the column is no longer about is
+    /// dropped: the cursor moved on while the plugin was reading.
+    pub fn accept(&mut self, set: SetPreview) {
+        if Some(&set.path) != self.current.as_ref() {
+            return;
+        }
+        self.rows.clear();
+        match set.content {
+            PreviewContent::Failed => {
+                self.content = None;
+                self.status = PreviewStatus::Failed;
+            }
+            PreviewContent::Empty => {
+                self.content = None;
+                self.status = PreviewStatus::Empty;
+            }
+            shown => {
+                self.content = Some(shown);
+                self.status = PreviewStatus::Ready;
+            }
+        }
+    }
 
-/// The first configured `Text`-kind hook whose extension matches `path`, if any — the `Image`-
-/// kind ones belong to `image_preview` instead.
-fn text_hook_for(path: &Path, hooks: &[PreviewHook]) -> Option<PreviewHook> {
-    preview_hook::hook_for(hooks, path)
-        .filter(|hook| hook.kind == HookKind::Text)
-        .cloned()
+    /// The plugin could not be told (it is not running and cannot be started): stop waiting for a
+    /// document that will not come and show the file's name.
+    pub fn give_up(&mut self) {
+        self.content = None;
+        self.status = PreviewStatus::Empty;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plugin_api::{HexHead, Token};
     use proptest::prelude::*;
-    use std::time::{Duration, Instant};
 
     proptest! {
         /// However the keys and wheel are used, the offset that gets drawn is a real one: never
@@ -441,139 +326,142 @@ mod tests {
         assert_eq!(scroll.offset(), 0);
     }
 
-    fn scratch(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "minuteman-text-preview-{label}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn settle(preview: &mut TextPreview, path: Option<&Path>) {
-        settle_with_hooks(preview, path, &[]);
-    }
-
-    fn settle_with_hooks(preview: &mut TextPreview, path: Option<&Path>, hooks: &[PreviewHook]) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            preview.update(path, hooks);
-            if preview.status() != PreviewStatus::Loading {
-                return;
-            }
-            assert!(Instant::now() < deadline, "the read never finished");
-            std::thread::sleep(Duration::from_millis(5));
+    fn document(path: &str, content: PreviewContent) -> SetPreview {
+        SetPreview {
+            path: PathBuf::from(path),
+            content,
         }
     }
 
-    fn text_hook(command: &str) -> PreviewHook {
-        PreviewHook {
-            extensions: vec!["pdf".into()],
-            command: command.into(),
-            kind: HookKind::Text,
-            timeout_ms: None,
+    fn text(words: &str) -> PreviewContent {
+        PreviewContent::Text {
+            lines: vec![vec![(Token::Plain, words.to_string())]],
         }
     }
 
     #[test]
-    fn a_hook_covered_file_is_shown_as_the_hooks_output() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let dir = scratch("hook-text");
-        let source = dir.join("report.pdf");
-        std::fs::write(&source, b"%PDF-not-real-content").unwrap();
-        let hooks = vec![text_hook("printf 'extracted text' > {out}")];
-        let mut preview = TextPreview::new(runtime.handle().clone());
+    fn selecting_a_file_asks_the_plugin_and_waits_for_its_answer() {
+        let mut preview = TextPreview::new();
+        let ask = preview.update(Some(Path::new("/a.txt")), true);
+        assert_eq!(ask, Some(PreviewAsk(Some(PathBuf::from("/a.txt")))));
+        assert_eq!(preview.status(), PreviewStatus::Loading);
+        assert!(preview.reveal_started().is_some());
 
-        settle_with_hooks(&mut preview, Some(&source), &hooks);
+        preview.accept(document("/a.txt", text("hello")));
         assert_eq!(preview.status(), PreviewStatus::Ready);
-        assert_eq!(
-            preview.content(),
-            Some(&Loaded::Text("extracted text".into()))
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(preview.content(), Some(&text("hello")));
     }
 
     #[test]
-    fn a_failing_hook_falls_back_to_empty_not_failed() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let dir = scratch("hook-fail");
-        let source = dir.join("report.pdf");
-        std::fs::write(&source, b"%PDF-not-real-content").unwrap();
-        let hooks = vec![text_hook("false")];
-        let mut preview = TextPreview::new(runtime.handle().clone());
-
-        settle_with_hooks(&mut preview, Some(&source), &hooks);
-        assert_eq!(
-            preview.status(),
-            PreviewStatus::Empty,
-            "a hook's own failure should fall back quietly, not show \"preview failed\""
-        );
-        assert!(preview.content().is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
+    fn the_same_file_again_asks_nothing() {
+        let mut preview = TextPreview::new();
+        preview.update(Some(Path::new("/a.txt")), true);
+        assert_eq!(preview.update(Some(Path::new("/a.txt")), true), None);
+        assert_eq!(preview.update(Some(Path::new("/a.txt")), true), None);
     }
 
     #[test]
-    fn text_bytes_and_a_pipe_each_land_in_their_own_state() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let dir = scratch("kinds");
-        std::fs::write(dir.join("a.txt"), "hello").unwrap();
-        std::fs::write(dir.join("b.bin"), [0u8, 1, 2, 3]).unwrap();
-        let fifo = dir.join("pipe");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .is_ok_and(|s| s.success())
+    fn a_document_for_a_file_the_cursor_left_is_dropped() {
+        let mut preview = TextPreview::new();
+        preview.update(Some(Path::new("/a.txt")), true);
+        preview.update(Some(Path::new("/b.txt")), true);
+
+        preview.accept(document("/a.txt", text("late")));
+        assert_eq!(preview.status(), PreviewStatus::Loading);
+        assert!(preview.content().is_none());
+
+        preview.accept(document("/b.txt", text("on time")));
+        assert_eq!(preview.content(), Some(&text("on time")));
+    }
+
+    #[test]
+    fn each_kind_of_answer_lands_in_its_own_state() {
+        let mut preview = TextPreview::new();
+        preview.update(Some(Path::new("/f")), true);
+
+        let hex = PreviewContent::Hex(HexHead {
+            bytes: vec![0, 1],
+            total: 2,
+        });
+        preview.accept(document("/f", hex.clone()));
+        assert_eq!(
+            (preview.status(), preview.content()),
+            (PreviewStatus::Ready, Some(&hex))
         );
-        let mut preview = TextPreview::new(runtime.handle().clone());
 
-        settle(&mut preview, Some(&dir.join("a.txt")));
-        assert_eq!(preview.status(), PreviewStatus::Ready);
-        assert_eq!(preview.content(), Some(&Loaded::Text("hello".into())));
+        preview.accept(document("/f", PreviewContent::Failed));
+        assert_eq!(preview.status(), PreviewStatus::Failed);
+        assert!(preview.content().is_none());
 
-        settle(&mut preview, Some(&dir.join("b.bin")));
-        assert_eq!(preview.status(), PreviewStatus::Ready);
-        assert!(matches!(preview.content(), Some(Loaded::Bytes(_))));
-
-        settle(&mut preview, Some(&fifo));
+        preview.accept(document("/f", PreviewContent::Empty));
         assert_eq!(
             preview.status(),
             PreviewStatus::Empty,
-            "a pipe has nothing to show"
+            "a pipe, or a file the plugin has nothing for, shows its name"
         );
         assert!(preview.content().is_none());
+    }
 
-        settle(&mut preview, None);
+    #[test]
+    fn clearing_the_selection_empties_the_column_and_tells_the_plugin_once() {
+        let mut preview = TextPreview::new();
+        assert_eq!(
+            preview.update(None, true),
+            None,
+            "nothing was shown, so there is nothing to cancel"
+        );
+        preview.update(Some(Path::new("/a")), true);
+        assert_eq!(preview.update(None, true), Some(PreviewAsk(None)));
         assert_eq!(preview.status(), PreviewStatus::Empty);
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(preview.reveal_started().is_none());
+        assert_eq!(preview.update(None, true), None);
+    }
+
+    #[test]
+    fn without_a_plugin_the_column_shows_only_the_name_and_asks_nobody() {
+        let mut preview = TextPreview::new();
+        assert_eq!(preview.update(Some(Path::new("/a.txt")), false), None);
+        assert_eq!(preview.status(), PreviewStatus::Empty);
+    }
+
+    #[test]
+    fn a_plugin_that_cannot_be_reached_stops_the_wait() {
+        let mut preview = TextPreview::new();
+        preview.update(Some(Path::new("/a.txt")), true);
+        preview.give_up();
+        assert_eq!(preview.status(), PreviewStatus::Empty);
     }
 
     #[test]
     fn selecting_another_file_rewinds_the_scroll_but_a_reload_keeps_it() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let dir = scratch("scroll");
-        let long = (0..200).map(|i| format!("line {i}\n")).collect::<String>();
-        std::fs::write(dir.join("a.txt"), &long).unwrap();
-        std::fs::write(dir.join("b.txt"), &long).unwrap();
-        let mut preview = TextPreview::new(runtime.handle().clone());
-
-        settle(&mut preview, Some(&dir.join("a.txt")));
+        let long: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let mut preview = TextPreview::new();
+        preview.update(Some(Path::new("/a.txt")), true);
+        preview.accept(document("/a.txt", text(&long)));
         preview.scroll_rows(40);
-        assert_eq!(preview.parts().3.fit(200, 20), 40);
+        assert_eq!(preview.parts().2.fit(200, 20), 40);
 
-        // The file changed on disk while staying selected: same place.
-        preview.reload(&[]);
-        settle(&mut preview, Some(&dir.join("a.txt")));
-        assert_eq!(preview.parts().3.fit(200, 20), 40);
-
-        settle(&mut preview, Some(&dir.join("b.txt")));
+        // The file changed on disk while staying selected: the plugin is asked again, and the
+        // new document lands in the same place.
         assert_eq!(
-            preview.parts().3.fit(200, 20),
+            preview.reload(),
+            Some(PreviewAsk(Some(PathBuf::from("/a.txt"))))
+        );
+        preview.accept(document("/a.txt", text(&long)));
+        assert_eq!(preview.parts().2.fit(200, 20), 40);
+
+        preview.update(Some(Path::new("/b.txt")), true);
+        preview.accept(document("/b.txt", text(&long)));
+        assert_eq!(
+            preview.parts().2.fit(200, 20),
             0,
             "a new file starts at the top"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_reload_with_nothing_selected_asks_nothing() {
+        assert_eq!(TextPreview::new().reload(), None);
     }
 
     #[test]
@@ -592,35 +480,5 @@ mod tests {
         cache.clear();
         assert_eq!(ask(&mut cache, 50), 100, "new content is measured again");
         assert_eq!(measured, 3);
-    }
-
-    #[test]
-    fn a_file_on_another_backend_is_read_through_it() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mem = shared::MemVfs::new();
-        mem.add_file("/a.txt", "from memory");
-        mem.add_file("/b.bin", vec![0u8, 1, 2, 3]);
-        let mut preview = TextPreview::new(runtime.handle().clone()).with_vfs(Arc::new(mem));
-
-        settle(&mut preview, Some(Path::new("/a.txt")));
-        assert_eq!(preview.content(), Some(&Loaded::Text("from memory".into())));
-
-        settle(&mut preview, Some(Path::new("/b.bin")));
-        assert!(matches!(preview.content(), Some(Loaded::Bytes(_))));
-    }
-
-    #[test]
-    fn a_hook_is_skipped_for_a_file_that_is_not_on_the_local_disk() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mem = shared::MemVfs::new();
-        mem.add_file("/report.pdf", "plain text in a file named like a pdf");
-        // A hook that would fail if run; off the local disk it is never handed the file.
-        let hooks = vec![text_hook("false")];
-        let mut preview = TextPreview::new(runtime.handle().clone()).with_vfs(Arc::new(mem));
-
-        settle_with_hooks(&mut preview, Some(Path::new("/report.pdf")), &hooks);
-
-        assert_eq!(preview.status(), PreviewStatus::Ready);
-        assert!(matches!(preview.content(), Some(Loaded::Text(_))));
     }
 }

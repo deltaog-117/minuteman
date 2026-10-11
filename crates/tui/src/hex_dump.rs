@@ -1,54 +1,23 @@
-//! The hex view: what a binary file shows in the preview pane.
-//!
-//! Only the first [`HEAD_BYTES`] of a file are ever read, so selecting a multi-gigabyte binary
-//! costs the same as selecting a small one. Rows are formatted on demand from those bytes rather
-//! than up front, because how many bytes fit in a row depends on the pane's width, which changes
-//! when the terminal is resized, and only the rows on screen need formatting at all.
+// Minuteman - a fast, Ranger-inspired terminal file manager
+// Copyright (C) 2026  Davi Oliveira Gonçalves
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::io::Read;
-use std::path::Path;
-
-use shared::{FileKind, Vfs};
-
-/// How much of a file the hex view (and the text-or-binary check) reads.
-pub const HEAD_BYTES: usize = 64 * 1024;
-
-/// The start of a file, and how big the whole file is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Head {
-    pub bytes: Vec<u8>,
-    /// The file's length on disk; larger than `bytes.len()` when the file was cut at
-    /// [`HEAD_BYTES`].
-    pub total: u64,
-}
-
-impl Head {
-    /// Whether the file continues past what was read.
-    pub fn is_cut(&self) -> bool {
-        self.total > self.bytes.len() as u64
-    }
-}
-
-/// Reads the first [`HEAD_BYTES`] of the regular file at `path`. `None` for anything that is not
-/// a regular file — opening a named pipe for reading would block forever, and a device or socket
-/// has no meaningful first bytes — or that cannot be read.
-pub fn read_head(vfs: &dyn Vfs, path: &Path) -> Option<Head> {
-    // Checked before opening: `open` on a FIFO with no writer never returns.
-    let meta = vfs
-        .metadata(path)
-        .ok()
-        .filter(|m| m.kind == FileKind::File)?;
-    let mut bytes = Vec::new();
-    vfs.open_read(path)
-        .ok()?
-        .take(HEAD_BYTES as u64)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    Some(Head {
-        bytes,
-        total: meta.len,
-    })
-}
+//! The layout of the hex view: how many bytes fit in a row of a pane of a given width, and what
+//! one row says. The plugin sends the file's first bytes; how they are laid out depends on the
+//! width of the pane, which changes when the terminal is resized and which only the interface
+//! knows, and only the rows on screen need formatting at all, so the layout lives here.
 
 /// Cells taken by the offset column: eight hex digits and two spaces.
 pub const OFFSET_CELLS: usize = 10;
@@ -101,14 +70,6 @@ pub fn format_row(bytes: &[u8], row: usize, per_row: usize) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-
-    fn scratch(label: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("minuteman-hex-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     #[test]
     fn a_row_shows_the_offset_the_bytes_and_their_printable_form() {
@@ -190,46 +151,5 @@ mod tests {
             let per_row = bytes_per_row(width);
             prop_assert!(row_width(per_row) <= width || per_row == 4);
         }
-    }
-
-    #[test]
-    fn a_file_is_read_up_to_the_cap_and_reports_its_full_size() {
-        let dir = scratch("cap");
-        let path = dir.join("big.bin");
-        std::fs::write(&path, vec![7u8; HEAD_BYTES + 500]).unwrap();
-        let head = read_head(&shared::LocalVfs, &path).unwrap();
-        assert_eq!(head.bytes.len(), HEAD_BYTES);
-        assert_eq!(head.total, (HEAD_BYTES + 500) as u64);
-        assert!(head.is_cut());
-
-        std::fs::write(dir.join("small.bin"), b"abc").unwrap();
-        let small = read_head(&shared::LocalVfs, &dir.join("small.bin")).unwrap();
-        assert_eq!(
-            (small.bytes.as_slice(), small.total, small.is_cut()),
-            (&b"abc"[..], 3, false)
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_directory_or_a_missing_path_has_no_head() {
-        let dir = scratch("nothead");
-        assert!(read_head(&shared::LocalVfs, &dir).is_none());
-        assert!(read_head(&shared::LocalVfs, &dir.join("nope")).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_named_pipe_is_refused_instead_of_blocking_forever() {
-        let dir = scratch("fifo");
-        let fifo = dir.join("pipe");
-        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
-        assert!(
-            made.is_ok_and(|s| s.success()),
-            "mkfifo is needed for this test"
-        );
-        // With no writer, opening it for reading would hang the test rather than fail it.
-        assert!(read_head(&shared::LocalVfs, &fifo).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

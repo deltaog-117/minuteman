@@ -248,7 +248,7 @@ fn kind_of(meta: &Metadata) -> Kind {
 }
 
 fn row_name(path: &Path) -> String {
-    preview::archive::clean_name(&path.file_name().map_or_else(
+    shared::clean_name(&path.file_name().map_or_else(
         || path.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     ))

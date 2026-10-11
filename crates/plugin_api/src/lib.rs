@@ -31,6 +31,7 @@ use shared::DirEntryInfo;
 pub mod client;
 mod event;
 mod picker;
+mod preview;
 mod view;
 
 pub use event::{EventParams, HostEvent};
@@ -38,6 +39,12 @@ pub use picker::{
     METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_SHOW_PICKER, METHOD_WALK, METHOD_WALK_CANCEL,
     PickerClose, PickerEvent, PickerIndexing, PickerSpec, PickerUpdate, TreeEntry, WalkCancel,
     WalkEnd, WalkEvent, WalkOutcome, WalkRequest,
+};
+pub use preview::{
+    ArchiveEntry, ArchiveKind, ArchiveListing, ChunkKind, EVENT_PREVIEW, FileChunk, HexHead,
+    Hidden, MAX_ARCHIVE_ENTRIES, MAX_HEX_BYTES, MAX_READ_BYTES, MAX_TEXT_CHARS, METHOD_READ_FILE,
+    METHOD_SET_PREVIEW, PROVIDES_PREVIEW, Piece, PreviewContent, PreviewError, PreviewLine,
+    PreviewTarget, ReadFile, SetPreview, Token, hex_string,
 };
 pub use view::{
     Glyph, Line, MAX_BADGE_CHARS, MAX_BADGES, MAX_CHARS, MAX_KEY_CHARS, MAX_SPANS, METHOD_SET_VIEW,

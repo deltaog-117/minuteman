@@ -23,10 +23,7 @@
 //! wires them to ratatui. Only the rows on screen are ever formatted: a 64 KiB hex dump is 4,096
 //! rows and an archive can list 5,000 entries, and neither should be rebuilt in full each frame.
 
-use preview::Loaded;
-use preview::archive::{Hidden, Listing};
-use preview::hex::{self, Head, OFFSET_CELLS};
-use preview::highlight::{HighlightedLine, TokenKind};
+use plugin_api::{ArchiveListing, HexHead, Hidden, PreviewContent, PreviewLine, Token};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -35,20 +32,21 @@ use ratatui::widgets::{Paragraph, Wrap};
 use theming::Config;
 
 use crate::glyphs;
+use crate::hex_dump::{self, OFFSET_CELLS};
 use crate::hud::{self, format_size};
 use crate::style;
 use crate::text_preview::{PreviewStatus, Scroll, TextPreview};
 
 /// Rows in a hex view of `head` at `per_row` bytes a row: the dump, plus one for the note saying
 /// the file continues when it was cut.
-pub fn hex_total(head: &Head, per_row: usize) -> usize {
-    hex::row_count(head.bytes.len(), per_row) + usize::from(head.is_cut())
+pub fn hex_total(head: &HexHead, per_row: usize) -> usize {
+    hex_dump::row_count(head.bytes.len(), per_row) + usize::from(head.is_cut())
 }
 
 /// Row `row` of the hex view: a dump row, or the note past the last one.
-pub fn hex_row(head: &Head, row: usize, per_row: usize) -> String {
-    if row < hex::row_count(head.bytes.len(), per_row) {
-        hex::format_row(&head.bytes, row, per_row)
+pub fn hex_row(head: &HexHead, row: usize, per_row: usize) -> String {
+    if row < hex_dump::row_count(head.bytes.len(), per_row) {
+        hex_dump::format_row(&head.bytes, row, per_row)
     } else {
         format!(
             "first {} of {} shown",
@@ -74,13 +72,13 @@ pub enum ArchiveRow {
 }
 
 /// Rows in the listing: the summary, every entry, and a note when some were left out.
-pub fn archive_total(listing: &Listing) -> usize {
+pub fn archive_total(listing: &ArchiveListing) -> usize {
     1 + listing.entries.len() + usize::from(listing.hidden != Hidden::Nothing)
 }
 
 /// Row `row` of the listing. `divider` separates the summary's parts (the glyph set's own, so the
 /// ASCII set stays ASCII).
-pub fn archive_row(listing: &Listing, row: usize, divider: &str) -> ArchiveRow {
+pub fn archive_row(listing: &ArchiveListing, row: usize, divider: &str) -> ArchiveRow {
     let entries = listing.entries.len();
     if row == 0 {
         let count = match listing.hidden {
@@ -142,23 +140,22 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, preview: &mut TextPreview, conf
         PreviewStatus::Failed => frame.render_widget(Paragraph::new("preview failed"), inner),
         PreviewStatus::Empty => {}
         PreviewStatus::Ready => {
-            let (content, highlighted, rows, scroll) = preview.parts();
+            let (content, rows, scroll) = preview.parts();
             match content {
-                Some(Loaded::Text(_)) => {
-                    // `text_preview` tokenizes every `Loaded::Text` alongside loading it
-                    // (falling back to one `Plain` span a line for an unrecognized language),
-                    // so `highlighted` is always present here by construction.
-                    let highlighted = highlighted
-                        .expect("a Loaded::Text preview always carries its highlighted lines");
+                // The plugin tokenizes every text before sending it (one `Plain` piece a line
+                // for a language it does not know), so the lines arrive ready to color.
+                Some(PreviewContent::Text { lines }) => {
                     let state = TextState {
                         rows,
                         scroll,
                         reveal_started,
                     };
-                    draw_text(frame, area, inner, highlighted, state, config)
+                    draw_text(frame, area, inner, lines, state, config);
                 }
-                Some(Loaded::Bytes(head)) => draw_hex(frame, area, inner, head, scroll, config),
-                Some(Loaded::Archive(listing)) => {
+                Some(PreviewContent::Hex(head)) => {
+                    draw_hex(frame, area, inner, head, scroll, config);
+                }
+                Some(PreviewContent::Archive(listing)) => {
                     draw_archive(frame, area, inner, listing, scroll, config);
                 }
                 _ => {}
@@ -179,7 +176,7 @@ fn draw_text(
     frame: &mut Frame<'_>,
     area: Rect,
     inner: Rect,
-    highlighted: &[HighlightedLine],
+    highlighted: &[PreviewLine],
     state: TextState<'_>,
     config: &Config,
 ) {
@@ -192,7 +189,7 @@ fn draw_text(
         reveal_started,
     } = state;
     let plain = Style::default().fg(style::color(&config.theme.file_fg));
-    let build = |slice: &[HighlightedLine]| -> Vec<Line<'static>> {
+    let build = |slice: &[PreviewLine]| -> Vec<Line<'static>> {
         slice
             .iter()
             .map(|line| {
@@ -236,16 +233,16 @@ fn draw_text(
 
 /// The theme color for one syntax token kind; `Plain` reuses the preview's own text color rather
 /// than a seventh theme field, since undecorated text needs no color of its own.
-fn token_style(kind: TokenKind, config: &Config, plain: Style) -> Style {
+fn token_style(kind: Token, config: &Config, plain: Style) -> Style {
     let theme = &config.theme;
     match kind {
-        TokenKind::Plain => plain,
-        TokenKind::Keyword => Style::default().fg(style::color(&theme.syntax_keyword_fg)),
-        TokenKind::String => Style::default().fg(style::color(&theme.syntax_string_fg)),
-        TokenKind::Comment => Style::default().fg(style::color(&theme.syntax_comment_fg)),
-        TokenKind::Number => Style::default().fg(style::color(&theme.syntax_number_fg)),
-        TokenKind::Function => Style::default().fg(style::color(&theme.syntax_function_fg)),
-        TokenKind::Type => Style::default().fg(style::color(&theme.syntax_type_fg)),
+        Token::Plain => plain,
+        Token::Keyword => Style::default().fg(style::color(&theme.syntax_keyword_fg)),
+        Token::String => Style::default().fg(style::color(&theme.syntax_string_fg)),
+        Token::Comment => Style::default().fg(style::color(&theme.syntax_comment_fg)),
+        Token::Number => Style::default().fg(style::color(&theme.syntax_number_fg)),
+        Token::Function => Style::default().fg(style::color(&theme.syntax_function_fg)),
+        Token::Type => Style::default().fg(style::color(&theme.syntax_type_fg)),
     }
 }
 
@@ -253,7 +250,7 @@ fn draw_hex(
     frame: &mut Frame<'_>,
     area: Rect,
     inner: Rect,
-    head: &Head,
+    head: &HexHead,
     scroll: &mut Scroll,
     config: &Config,
 ) {
@@ -265,13 +262,13 @@ fn draw_hex(
         Style::default().fg(style::color(&theme.file_fg)),
         Style::default().fg(style::color(&theme.status_fg)),
     );
-    let per_row = hex::bytes_per_row(inner.width as usize);
+    let per_row = hex_dump::bytes_per_row(inner.width as usize);
     let total = hex_total(head, per_row);
     let offset = scroll.fit(total, inner.height as usize);
     let lines: Vec<Line<'static>> = (offset..total.min(offset + inner.height as usize))
         .map(|row| {
             let dump = hex_row(head, row, per_row);
-            if row < hex::row_count(head.bytes.len(), per_row) {
+            if row < hex_dump::row_count(head.bytes.len(), per_row) {
                 // The offset column is dimmed so the bytes stand out; it is all ASCII.
                 let (offset_text, rest) = dump.split_at(OFFSET_CELLS.min(dump.len()));
                 Line::from(vec![
@@ -291,7 +288,7 @@ fn draw_archive(
     frame: &mut Frame<'_>,
     area: Rect,
     inner: Rect,
-    listing: &Listing,
+    listing: &ArchiveListing,
     scroll: &mut Scroll,
     config: &Config,
 ) {
@@ -334,13 +331,27 @@ fn draw_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, offset: usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preview::archive::{Entry, Kind};
+    use plugin_api::{ArchiveEntry as Entry, ArchiveKind as Kind};
     use proptest::prelude::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Runtime::new().unwrap()
+    /// A text document with one `Plain` piece per line, as the plugin sends a file in a language
+    /// it does not know.
+    fn plain(text: impl AsRef<str>) -> PreviewContent {
+        PreviewContent::Text {
+            lines: text
+                .as_ref()
+                .lines()
+                .map(|line| {
+                    if line.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![(Token::Plain, line.to_string())]
+                    }
+                })
+                .collect(),
+        }
     }
 
     fn screen(width: u16, height: u16, preview: &mut TextPreview) -> Vec<String> {
@@ -383,15 +394,15 @@ mod tests {
         (rows, buffer)
     }
 
-    fn head(len: usize, total: u64) -> Head {
-        Head {
+    fn head(len: usize, total: u64) -> HexHead {
+        HexHead {
             bytes: (0..len).map(|i| (i % 251) as u8).collect(),
             total,
         }
     }
 
-    fn listing(count: usize, hidden: Hidden) -> Listing {
-        Listing {
+    fn listing(count: usize, hidden: Hidden) -> ArchiveListing {
+        ArchiveListing {
             kind: Kind::Zip,
             entries: (0..count)
                 .map(|i| Entry {
@@ -511,9 +522,8 @@ mod tests {
 
     #[test]
     fn text_is_wrapped_and_scrolls_a_row_at_a_time() {
-        let rt = runtime();
         let text: String = (0..30).map(|i| format!("line {i}\n")).collect();
-        let mut preview = TextPreview::showing(rt.handle().clone(), Loaded::Text(text));
+        let mut preview = TextPreview::showing(plain(text));
 
         let top = screen(20, 8, &mut preview);
         assert!(top[1].starts_with("│line 0"), "{top:?}");
@@ -526,9 +536,8 @@ mod tests {
 
     #[test]
     fn scrolling_past_the_end_stops_with_the_last_line_at_the_bottom() {
-        let rt = runtime();
         let text: String = (0..30).map(|i| format!("line {i}\n")).collect();
-        let mut preview = TextPreview::showing(rt.handle().clone(), Loaded::Text(text));
+        let mut preview = TextPreview::showing(plain(text));
         preview.scroll_rows(10_000);
         let end = screen(20, 8, &mut preview);
         assert!(
@@ -542,11 +551,7 @@ mod tests {
 
     #[test]
     fn a_long_line_wraps_rather_than_running_off_the_pane() {
-        let rt = runtime();
-        let mut preview = TextPreview::showing(
-            rt.handle().clone(),
-            Loaded::Text("word ".repeat(20).trim_end().to_string()),
-        );
+        let mut preview = TextPreview::showing(plain("word ".repeat(20).trim_end()));
         let out = screen(22, 8, &mut preview);
         assert!(
             out[1].contains("word") && out[2].contains("word"),
@@ -555,13 +560,15 @@ mod tests {
     }
 
     #[test]
-    fn a_recognized_language_colors_its_keyword_differently_from_plain_text() {
-        let rt = runtime();
-        let mut preview = TextPreview::showing_named(
-            rt.handle().clone(),
-            Loaded::Text("fn main() {}".to_string()),
-            "main.rs",
-        );
+    fn a_keyword_piece_is_colored_differently_from_plain_text() {
+        let mut preview = TextPreview::showing(PreviewContent::Text {
+            lines: vec![vec![
+                (Token::Keyword, "fn".to_string()),
+                (Token::Plain, " ".to_string()),
+                (Token::Function, "main".to_string()),
+                (Token::Plain, "() {}".to_string()),
+            ]],
+        });
         let (out, buffer) = rendered(20, 4, &mut preview);
         assert!(out[1].contains("fn main"), "{out:?}");
 
@@ -575,18 +582,18 @@ mod tests {
 
         // `f` of `fn`, the first cell inside the border.
         assert_eq!(buffer.cell((1, 1)).unwrap().fg, keyword_color);
-        // The space between `fn` and `main` is untagged `Plain` text, not a keyword.
+        // The space between `fn` and `main` is `Plain` text, not a keyword.
         assert_eq!(buffer.cell((3, 1)).unwrap().fg, plain_color);
+        // `main` is a function, drawn in the theme's function color.
+        assert_eq!(
+            buffer.cell((4, 1)).unwrap().fg,
+            style::color(&config.theme.syntax_function_fg)
+        );
     }
 
     #[test]
-    fn an_unrecognized_extension_still_renders_as_plain_text() {
-        let rt = runtime();
-        let mut preview = TextPreview::showing_named(
-            rt.handle().clone(),
-            Loaded::Text("fn main() {}".to_string()),
-            "notes.mystery",
-        );
+    fn plain_pieces_render_in_the_files_own_color() {
+        let mut preview = TextPreview::showing(plain("fn main() {}"));
         let (out, buffer) = rendered(20, 4, &mut preview);
         assert!(out[1].contains("fn main"), "{out:?}");
 
@@ -606,12 +613,7 @@ mod tests {
 
     #[test]
     fn typewriter_reveal_caps_a_freshly_selected_file_below_its_full_length() {
-        let rt = runtime();
-        let mut preview = TextPreview::showing_named(
-            rt.handle().clone(),
-            Loaded::Text(numbered_lines(20)),
-            "notes.mystery",
-        );
+        let mut preview = TextPreview::showing(plain(numbered_lines(20)));
         preview.arm_reveal_for_test(std::time::Instant::now());
         let out = screen(20, 22, &mut preview).join("\n");
         assert!(
@@ -622,12 +624,7 @@ mod tests {
 
     #[test]
     fn typewriter_reveal_shows_everything_once_it_has_had_time() {
-        let rt = runtime();
-        let mut preview = TextPreview::showing_named(
-            rt.handle().clone(),
-            Loaded::Text(numbered_lines(20)),
-            "notes.mystery",
-        );
+        let mut preview = TextPreview::showing(plain(numbered_lines(20)));
         preview.arm_reveal_for_test(std::time::Instant::now() - std::time::Duration::from_secs(1));
         let out = screen(20, 22, &mut preview).join("\n");
         assert!(out.contains("line19"), "{out:?}");
@@ -635,12 +632,7 @@ mod tests {
 
     #[test]
     fn typewriter_reveal_is_skipped_when_the_config_turns_it_off() {
-        let rt = runtime();
-        let mut preview = TextPreview::showing_named(
-            rt.handle().clone(),
-            Loaded::Text(numbered_lines(20)),
-            "notes.mystery",
-        );
+        let mut preview = TextPreview::showing(plain(numbered_lines(20)));
         preview.arm_reveal_for_test(std::time::Instant::now());
         let config = Config {
             typewriter_preview: false,
@@ -652,8 +644,7 @@ mod tests {
 
     #[test]
     fn a_hex_dump_shows_offsets_bytes_and_ascii_and_scrolls() {
-        let rt = runtime();
-        let mut preview = TextPreview::showing(rt.handle().clone(), Loaded::Bytes(head(400, 400)));
+        let mut preview = TextPreview::showing(PreviewContent::Hex(head(400, 400)));
         // 60 columns: 58 inside the frame, so 8 bytes to a row (16 needs 74).
         let top = screen(60, 8, &mut preview);
         assert!(
@@ -668,9 +659,7 @@ mod tests {
 
     #[test]
     fn a_wide_pane_gets_sixteen_bytes_a_row_and_a_cut_file_says_so_at_the_end() {
-        let rt = runtime();
-        let mut preview =
-            TextPreview::showing(rt.handle().clone(), Loaded::Bytes(head(64, 9_999_999)));
+        let mut preview = TextPreview::showing(PreviewContent::Hex(head(64, 9_999_999)));
         let wide = screen(90, 8, &mut preview);
         assert!(wide[2].contains("00000010"), "{wide:?}");
         preview.scroll_rows(1000);
@@ -683,11 +672,8 @@ mod tests {
 
     #[test]
     fn an_archive_shows_a_summary_then_sizes_and_names() {
-        let rt = runtime();
-        let mut preview = TextPreview::showing(
-            rt.handle().clone(),
-            Loaded::Archive(listing(12, Hidden::Count(3))),
-        );
+        let mut preview =
+            TextPreview::showing(PreviewContent::Archive(listing(12, Hidden::Count(3))));
         let out = screen(50, 8, &mut preview);
         assert!(
             out[1].contains("zip") && out[1].contains("15 entries"),
@@ -709,12 +695,11 @@ mod tests {
 
     #[test]
     fn loading_failed_and_empty_previews_say_so_or_stay_blank() {
-        let rt = runtime();
-        let mut loading = TextPreview::in_status(rt.handle().clone(), PreviewStatus::Loading);
+        let mut loading = TextPreview::in_status(PreviewStatus::Loading);
         assert!(screen(30, 5, &mut loading)[1].contains("loading preview"));
-        let mut failed = TextPreview::in_status(rt.handle().clone(), PreviewStatus::Failed);
+        let mut failed = TextPreview::in_status(PreviewStatus::Failed);
         assert!(screen(30, 5, &mut failed)[1].contains("preview failed"));
-        let mut empty = TextPreview::in_status(rt.handle().clone(), PreviewStatus::Empty);
+        let mut empty = TextPreview::in_status(PreviewStatus::Empty);
         assert!(
             screen(30, 5, &mut empty)[1]
                 .trim_matches('│')
@@ -725,17 +710,16 @@ mod tests {
 
     #[test]
     fn no_size_of_pane_panics_for_any_kind_of_content() {
-        let rt = runtime();
         let contents = [
-            Loaded::Text("some text\nmore text that is long enough to wrap around\n".into()),
-            Loaded::Text(String::new()),
-            Loaded::Bytes(head(0, 0)),
-            Loaded::Bytes(head(300, 100_000)),
-            Loaded::Archive(listing(0, Hidden::Nothing)),
-            Loaded::Archive(listing(40, Hidden::Unknown)),
+            plain("some text\nmore text that is long enough to wrap around\n"),
+            plain(String::new()),
+            PreviewContent::Hex(head(0, 0)),
+            PreviewContent::Hex(head(300, 100_000)),
+            PreviewContent::Archive(listing(0, Hidden::Nothing)),
+            PreviewContent::Archive(listing(40, Hidden::Unknown)),
         ];
         for content in contents {
-            let mut preview = TextPreview::showing(rt.handle().clone(), content);
+            let mut preview = TextPreview::showing(content);
             for (width, height) in [(1, 1), (2, 2), (3, 3), (5, 4), (10, 3), (30, 2), (80, 24)] {
                 for scroll in [0, 1, 7, 10_000] {
                     preview.scroll_rows(scroll);
@@ -753,10 +737,9 @@ mod tests {
     #[test]
     #[ignore = "a timing check; run in release mode on purpose"]
     fn frame_time_of_a_deeply_scrolled_megabyte_of_text_is_within_the_tick() {
-        let rt = runtime();
         let line = "the quick brown fox jumps over the lazy dog, again and again\n";
         let text = line.repeat((1 << 20) / line.len());
-        let mut preview = TextPreview::showing(rt.handle().clone(), Loaded::Text(text));
+        let mut preview = TextPreview::showing(plain(text));
         preview.scroll_rows(isize::MAX / 2);
         // The first frame also measures the wrapped height; later ones reuse it.
         screen(56, 30, &mut preview);

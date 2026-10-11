@@ -97,9 +97,9 @@ impl Inspection {
             .flatten();
         let local = vfs.local_path(path).is_some();
         let content = (kind == Kind::File).then(|| {
-            if preview::is_image(path) {
+            if shared::is_image(path) {
                 "image"
-            } else if preview::is_text(path) {
+            } else if shared::is_text(path) {
                 "text"
             } else {
                 "binary or unknown"

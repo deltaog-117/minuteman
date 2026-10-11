@@ -15,31 +15,21 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Classifies source text into a small, curated set of syntax-highlighting categories
-//! (`TokenKind`) using `syntect`'s bundled Sublime-syntax definitions. Pure data, no color: `tui`
-//! maps each `TokenKind` onto whichever theme is active, the same way `tui::style::FileKind`
+//! (`Token`) using `syntect`'s bundled Sublime-syntax definitions. Pure data, no color: the
+//! interface maps each `Token` onto whichever theme is active, the same way `tui::style::FileKind`
 //! classifies a file and leaves picking its actual color to `tui`.
 
 use std::path::Path;
 use std::sync::OnceLock;
 
+use plugin_api::{PreviewLine, Token};
 use syntect::easy::ScopeRegionIterator;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenKind {
-    Keyword,
-    String,
-    Comment,
-    Number,
-    Function,
-    Type,
-    Plain,
-}
-
 /// A source line's tokens in order, already classified — concatenating every piece's text
 /// reproduces the original line with its trailing newline removed.
-pub type HighlightedLine = Vec<(TokenKind, String)>;
+pub type HighlightedLine = PreviewLine;
 
 fn syntax_set() -> &'static SyntaxSet {
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
@@ -72,6 +62,17 @@ fn syntax_for(file_name: &str) -> Option<&'static SyntaxReference> {
 /// line when none is known. Runs the whole file through `syntect`'s line-oriented parser, so call
 /// it off the render thread the same way `preview::load_text` is read off it.
 pub fn highlight(text: &str, file_name: &str) -> Vec<HighlightedLine> {
+    highlight_until(text, file_name, || false).expect("a run that is never stopped finishes")
+}
+
+/// [`highlight`], giving up with `None` as soon as `stop` says so. The parser walks the whole file
+/// line by line, which on a large file takes long enough that a cursor already moved on should not
+/// have to wait for it.
+pub fn highlight_until(
+    text: &str,
+    file_name: &str,
+    stop: impl Fn() -> bool,
+) -> Option<Vec<HighlightedLine>> {
     let ss = syntax_set();
     let syntax = syntax_for(file_name).unwrap_or_else(|| ss.find_syntax_plain_text());
     let mut parse_state = ParseState::new(syntax);
@@ -79,8 +80,11 @@ pub fn highlight(text: &str, file_name: &str) -> Vec<HighlightedLine> {
     let mut lines = Vec::new();
 
     for line in LinesWithEndings::from(text) {
+        if stop() {
+            return None;
+        }
         let Ok(ops) = parse_state.parse_line(line, ss) else {
-            lines.push(vec![(TokenKind::Plain, strip_newline(line).to_string())]);
+            lines.push(vec![(Token::Plain, strip_newline(line).to_string())]);
             continue;
         };
 
@@ -106,7 +110,7 @@ pub fn highlight(text: &str, file_name: &str) -> Vec<HighlightedLine> {
         }
         lines.push(spans);
     }
-    lines
+    Some(lines)
 }
 
 fn strip_newline(line: &str) -> &str {
@@ -119,38 +123,38 @@ fn strip_newline(line: &str) -> &str {
 /// `Plain` if none of them are. Deliberately a small, curated set rather than every scope
 /// syntect's bundled grammars can produce, so it stays mappable onto a handful of theme colors
 /// instead of needing one theme field per possible scope.
-fn classify(stack: &ScopeStack) -> TokenKind {
+fn classify(stack: &ScopeStack) -> Token {
     stack
         .scopes
         .iter()
         .rev()
         .find_map(|scope| classify_scope(&scope.to_string()))
-        .unwrap_or(TokenKind::Plain)
+        .unwrap_or(Token::Plain)
 }
 
-fn classify_scope(scope: &str) -> Option<TokenKind> {
+fn classify_scope(scope: &str) -> Option<Token> {
     if scope.starts_with("comment") {
-        Some(TokenKind::Comment)
+        Some(Token::Comment)
     } else if scope.starts_with("string") {
-        Some(TokenKind::String)
+        Some(Token::String)
     } else if scope.starts_with("constant.numeric") || scope.starts_with("constant.character") {
-        Some(TokenKind::Number)
+        Some(Token::Number)
     } else if scope.starts_with("constant.language") {
         // `true`/`false`/`nil`/`self`-style built-ins read like keywords in most editor themes.
-        Some(TokenKind::Keyword)
+        Some(Token::Keyword)
     } else if scope.starts_with("constant") {
-        Some(TokenKind::Number)
+        Some(Token::Number)
     } else if scope.starts_with("keyword") || scope.starts_with("storage") {
-        Some(TokenKind::Keyword)
+        Some(Token::Keyword)
     } else if scope.starts_with("entity.name.function") || scope.starts_with("support.function") {
-        Some(TokenKind::Function)
+        Some(Token::Function)
     } else if scope.starts_with("entity.name.type")
         || scope.starts_with("entity.name.class")
         || scope.starts_with("entity.name.struct")
         || scope.starts_with("support.type")
         || scope.starts_with("support.class")
     {
-        Some(TokenKind::Type)
+        Some(Token::Type)
     } else {
         None
     }
@@ -160,7 +164,7 @@ fn classify_scope(scope: &str) -> Option<TokenKind> {
 mod tests {
     use super::*;
 
-    fn kinds(lines: &[HighlightedLine]) -> Vec<Vec<TokenKind>> {
+    fn kinds(lines: &[HighlightedLine]) -> Vec<Vec<Token>> {
         lines
             .iter()
             .map(|line| line.iter().map(|(kind, _)| *kind).collect())
@@ -178,7 +182,7 @@ mod tests {
     #[test]
     fn an_unknown_extension_is_one_plain_span_per_line() {
         let lines = highlight("hello\nworld", "notes.mystery");
-        assert_eq!(kinds(&lines), vec![vec![TokenKind::Plain]; 2]);
+        assert_eq!(kinds(&lines), vec![vec![Token::Plain]; 2]);
         assert_eq!(text(&lines), "hello\nworld");
     }
 
@@ -190,27 +194,27 @@ mod tests {
         assert!(
             lines[0]
                 .iter()
-                .any(|(k, t)| *k == TokenKind::Comment && t.contains("a comment"))
+                .any(|(k, t)| *k == Token::Comment && t.contains("a comment"))
         );
         assert!(
             lines[1]
                 .iter()
-                .any(|(k, t)| *k == TokenKind::Keyword && t == "fn")
+                .any(|(k, t)| *k == Token::Keyword && t == "fn")
         );
         assert!(
             lines[1]
                 .iter()
-                .any(|(k, t)| *k == TokenKind::Function && t == "main")
+                .any(|(k, t)| *k == Token::Function && t == "main")
         );
         assert!(
             lines[2]
                 .iter()
-                .any(|(k, t)| *k == TokenKind::Number && t == "42")
+                .any(|(k, t)| *k == Token::Number && t == "42")
         );
         assert!(
             lines[3]
                 .iter()
-                .any(|(k, t)| *k == TokenKind::String && t.contains("hi"))
+                .any(|(k, t)| *k == Token::String && t.contains("hi"))
         );
     }
 
@@ -233,5 +237,26 @@ mod tests {
         // into one span per character.
         let lines = highlight("just plain words, nothing special", "notes.mystery");
         assert_eq!(lines[0].len(), 1);
+    }
+
+    /// Benchmark stub for the one costly path: tokenizing the largest text the preview accepts.
+    /// The interface is never blocked by it (this runs in the plugin, on a worker thread, and stops
+    /// when the cursor moves on), but it decides how long the column says "loading" for a file at
+    /// the cap. Run with `cargo test -p previewer --release -- --ignored highlight_time`.
+    #[test]
+    #[ignore = "a timing check; run in release mode on purpose"]
+    fn highlight_time_of_a_megabyte_of_source() {
+        let snippet = "pub fn compute(items: &[u32], limit: usize) -> Option<u64> { // capped sum\n    \
+            let mut total = 0u64; for item in items.iter().take(limit) { total += *item as u64; }\n    \
+            if total > 1_000_000 { None } else { Some(total) }\n}\n";
+        let text = snippet.repeat((1 << 20) / snippet.len());
+        let started = std::time::Instant::now();
+        let lines = highlight(&text, "big.rs");
+        eprintln!(
+            "highlighted {} lines in {:?}",
+            lines.len(),
+            started.elapsed()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 }

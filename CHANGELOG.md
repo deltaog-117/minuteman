@@ -28,7 +28,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mman-git` now also marks changed entries in the list: `+` staged, `~` modified, `?` untracked,
   `!` conflicted (in the user's glyph set), and a folder shows the merged state of what it holds.
 
+- `plugin_api`: what a previewing plugin and the host exchange. The `preview` event tells the
+  plugin which file the preview column is about (or `null` for none, or again when that file
+  changed on disk); the `read_file` request reads up to 4 MiB of a file from an offset through the
+  host's own paths (a folder on another machine or inside an archive previews like the local
+  disk; a path with a zero length is only described, and a folder, pipe or device is never
+  opened); the `set_preview` notification answers with a finished document: colored text (pieces
+  of seven token kinds a line), a binary file's first 64 KiB, or an archive listing. A plugin
+  lists `provides = ["preview"]` to be the one. Every document is cleaned on arrival: control and
+  direction-changing characters are removed from text and replaced in names, and it is limited to
+  1 MiB of text, 64 KiB of bytes and 5,000 archive entries.
+- `plugins/preview` (`mman-preview`), a fifth bundled plugin: the preview column's text, hex dump
+  and archive listing, as before but made by a plugin. It reads the file through the host with
+  `read_file`, colors source with `syntect`, lists zip, tar and tar.gz with every read bounded as
+  before, and runs `[[preview_hook]]` tables of kind `text` (passed to it as `--text-hook`). Each
+  file is loaded on a thread of its own and dropped if the cursor moves on, so a slow disk or host
+  never holds up the next file. Install it with `cargo install --path plugins/preview`.
+- `shared::names`: `is_image`, `is_text` and `clean_name`, the file-name rules the interface and
+  the preview plugin both use.
+- A startup notice, "the preview column is a plugin and mman-preview was not found", when the
+  plugin is not installed and the user has not configured one of their own.
+
 ### Changed
+- The preview column's text, hex dump and archive listing moved out of `tui` and `preview` into
+  `plugins/preview`. Scrolling (`J`/`K`, the wheel), wrapping, the scrollbar, the colors and the
+  typewriter reveal stay in `tui`, which draws the document the plugin sends, so moving through a
+  file never waits on the plugin. `preview` now only decodes images; the hex layout (`hex_dump`)
+  stays in `tui` because it depends on the pane's width. Without `mman-preview` the column shows
+  only the file's name. The trash browser's and the finder's previews go through the plugin too,
+  since the interface names the file, not the browser's cursor. A plugin that dies with a
+  document half made ends the "loading preview…" instead of leaving it up, and starts again for
+  the next file.
+- A `[[preview_hook]]` of kind `text` now runs in the preview plugin, and where an extension is
+  named by several hooks the first one still decides it, whatever its kind. Hooks of kind `image`
+  stay with the interface.
+- `scripts/vfs-gate` allows `plugins/preview/src/hook.rs`, whose hook is handed a file on this
+  machine's disk.
 - The system figures moved out of `tui` (`system_hud.rs`) into `plugins/hud`. `system_hud = true`
   in `config.toml` still turns them on, now by starting the plugin; without `mman-hud` the header
   has no such pill.
