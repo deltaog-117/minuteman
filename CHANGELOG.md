@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugin_api`: an `image` document for `set_preview`, so a previewing plugin can say a file is a
+  picture without sending pixels: its source is `original` (the file itself, read by the interface
+  through the browsed paths) or `handoff` (a scratch PNG the plugin made, which must be a file
+  named `minuteman-preview-image-*` directly in the temporary folder, and which the interface
+  decodes and deletes). A handoff naming any other file is refused.
+- `mman-preview` takes `--image-hook <json>` beside `--text-hook`: it runs a `[[preview_hook]]` of
+  kind `image` and hands over the picture the hook wrote. A hook that fails, times out, writes
+  nothing, writes more than 64 MiB or leaves a link falls back to the file's name.
 - `plugin_api`: `set_view`, a notification with which a plugin fills a named slot of the interface
   with styled lines (text, a tone, a glyph by name) and the interface draws it. The first two
   slots are `status_entry` and `status_right` on the status bar. Every view is cleaned on arrival:
@@ -50,6 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin is not installed and the user has not configured one of their own.
 
 ### Changed
+- Which files are pictures, and running `[[preview_hook]]` tables of kind `image`, moved out of
+  `tui` into `plugins/preview` (`tui::preview_hook` is removed). The interface still decodes,
+  fits and draws the picture. Without `mman-preview` a picture shows only its file name, as text
+  files already did; the grid, tile and filmstrip views still draw their thumbnails themselves.
 - The preview column's text, hex dump and archive listing moved out of `tui` and `preview` into
   `plugins/preview`. Scrolling (`J`/`K`, the wheel), wrapping, the scrollbar, the colors and the
   typewriter reveal stay in `tui`, which draws the document the plugin sends, so moving through a

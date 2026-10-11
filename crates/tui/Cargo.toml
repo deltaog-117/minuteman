@@ -37,11 +37,11 @@ libc = "0.2"
 # Local time for the modified/accessed/created times. Already built for the trash crate; `clock`
 # is what reads the machine's time zone.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-# Only for the `DynamicImage` type name in `preview_hook.rs` — decoding a hook's output reuses
+# Only for the `DynamicImage` type name in `image_preview.rs` — decoding a picture reuses
 # `preview::load_image`, so no format-decoder features are needed here.
 image = { version = "0.25.10", default-features = false }
 
 [dev-dependencies]
 proptest = "1.11"
-# `png` so preview_hook's tests can write a real decodable image for a fake hook to "produce".
+# `png` so image_preview's tests can write a real decodable picture for a plugin to "hand over".
 image = { version = "0.25.10", features = ["png"] }

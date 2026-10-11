@@ -15,7 +15,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Renders the selected file as an inline image (Kitty/iTerm2/Sixel, falling back to Unicode
-//! halfblocks) via `ratatui-image`, without ever blocking the render loop.
+//! halfblocks) via `ratatui-image`, without ever blocking the render loop. Which files are
+//! pictures is the previewing plugin's call: it answers a `preview` event with an image document
+//! (see `plugin_api::ImageSource`), and this module decodes, fits and draws what that names.
 //!
 //! `ratatui-image`'s own docs are explicit that its adaptive `StatefulImage` widget "will block
 //! the UI thread" unless paired with `ThreadProtocol` — its request/response channel design for
@@ -27,57 +29,26 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use plugin_api::{ImageSource, is_handoff_path};
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Capability, Picker};
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
-use shared::{LocalVfs, Vfs};
-use theming::{HookKind, PreviewHook};
+use shared::{FileKind, LocalVfs, Vfs};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-
-use crate::preview_hook::{self, HookOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewStatus {
-    /// Nothing selected, or the selection is neither an image nor covered by an `Image`-kind
-    /// preview hook — or one was, but the hook failed/timed out/is missing, which falls back to
-    /// showing just the file's name quietly rather than an error here.
+    /// Nothing selected, or the plugin has not said the selection is a picture — or it said so
+    /// for a picture its hook made and that could not be read, which falls back to showing just
+    /// the file's name quietly rather than an error here.
     Empty,
-    /// The file is being decoded off-thread (directly, or via a hook).
+    /// The picture is being decoded off-thread.
     Loading,
     /// Decoded; `protocol_mut` renders the image (possibly still resizing for the first time).
     Ready,
     /// A real image file failed to decode — not a valid/supported image despite the extension.
     Failed,
-}
-
-/// Where a target's image comes from: decoded directly (a real image file), or produced by
-/// running a configured `[[preview_hook]]` first (anything else the hook list covers, e.g. a
-/// PDF).
-#[derive(Clone)]
-enum Source {
-    Direct,
-    Hook(PreviewHook),
-}
-
-/// What `path` should be shown as: a real image file decodes directly; otherwise the first
-/// configured `Image`-kind hook whose extension matches it takes over. `None` means neither
-/// applies, so `ImagePreview` has nothing to do with this path.
-fn source_for(path: &Path, hooks: &[PreviewHook]) -> Option<Source> {
-    if preview::is_image(path) {
-        return Some(Source::Direct);
-    }
-    preview_hook::hook_for(hooks, path)
-        .filter(|hook| hook.kind == HookKind::Image)
-        .cloned()
-        .map(Source::Hook)
-}
-
-/// Whether `ImagePreview` claims `path` at all — a real image, or one an `Image`-kind hook
-/// covers — so a caller routing a *different* file to the text pipeline knows to leave this one
-/// out of it.
-pub fn is_target(path: &Path, hooks: &[PreviewHook]) -> bool {
-    source_for(path, hooks).is_some()
 }
 
 enum DecodeOutcome {
@@ -89,9 +60,9 @@ enum DecodeOutcome {
     Failed {
         path: PathBuf,
         generation: u64,
-        /// Whether this attempt went through a hook rather than a direct decode — see
+        /// Whether the picture was one the plugin made rather than the file itself — see
         /// `PreviewStatus::Empty` vs `PreviewStatus::Failed`.
-        via_hook: bool,
+        handed_over: bool,
     },
 }
 
@@ -102,6 +73,7 @@ pub struct ImagePreview {
     /// when the terminal never answered. `theme::auto` (see `main`) is the only reader.
     detected_background: Option<(u8, u8, u8)>,
     protocol: ThreadProtocol,
+    /// The file the preview column is about, whether or not the plugin calls it a picture.
     current: Option<PathBuf>,
     status: PreviewStatus,
     /// Counts decodes started; only the latest one's result is kept (see `TextPreview`).
@@ -178,35 +150,14 @@ impl ImagePreview {
         &mut self.protocol
     }
 
-    /// Decodes the current image again without clearing what is shown, for when it changed on
-    /// disk while staying selected. A no-op when no image (or hook-covered file) is selected.
-    pub fn reload(&mut self, hooks: &[PreviewHook]) {
-        let Some(path) = self.current.clone() else {
-            return;
-        };
-        let Some(source) = source_for(&path, hooks) else {
-            return;
-        };
-        self.spawn_decode(path, source);
-    }
-
-    /// Call once per render tick. Starts decoding `selected` if it's a new image or a file an
-    /// `Image`-kind hook covers, and drains any completed decode/resize work from the background
-    /// threads.
-    pub fn update(&mut self, selected: Option<&Path>, hooks: &[PreviewHook]) {
-        let target = selected
-            .and_then(|path| source_for(path, hooks).map(|source| (path.to_path_buf(), source)));
-
-        if target.as_ref().map(|(path, _)| path) != self.current.as_ref() {
-            self.current = target.as_ref().map(|(path, _)| path.clone());
+    /// Call once per render tick with the file the preview column is about. A different file
+    /// clears what was shown; whether the new one is a picture is up to the plugin's answer
+    /// ([`Self::show`]). Also drains any completed decode/resize work from the background threads.
+    pub fn update(&mut self, selected: Option<&Path>) {
+        if selected != self.current.as_deref() {
+            self.current = selected.map(Path::to_path_buf);
             self.protocol.empty_protocol();
-            match target {
-                Some((path, source)) => {
-                    self.status = PreviewStatus::Loading;
-                    self.spawn_decode(path, source);
-                }
-                None => self.status = PreviewStatus::Empty,
-            }
+            self.status = PreviewStatus::Empty;
         }
 
         while let Ok(outcome) = self.decode_rx.try_recv() {
@@ -226,8 +177,8 @@ impl ImagePreview {
                     self.protocol.replace_protocol(*protocol);
                     self.status = PreviewStatus::Ready;
                 }
-                DecodeOutcome::Failed { via_hook, .. } => {
-                    self.status = if via_hook {
+                DecodeOutcome::Failed { handed_over, .. } => {
+                    self.status = if handed_over {
                         PreviewStatus::Empty
                     } else {
                         PreviewStatus::Failed
@@ -250,26 +201,43 @@ impl ImagePreview {
         }
     }
 
-    fn spawn_decode(&mut self, path: PathBuf, source: Source) {
+    /// The plugin says the file at `path` is a picture, read as `source` says. An answer for a
+    /// file the column has left is dropped (and a handed-over file deleted, since nothing else
+    /// will). The picture already on screen stays until the new decode lands, so a file edited
+    /// in place does not flash "loading preview…".
+    pub fn show(&mut self, path: &Path, source: ImageSource) {
+        if self.current.as_deref() != Some(path) {
+            discard_handoff(&source);
+            return;
+        }
+        if self.status != PreviewStatus::Ready {
+            self.status = PreviewStatus::Loading;
+        }
+        self.spawn_decode(path.to_path_buf(), source);
+    }
+
+    /// The plugin says the file at `path` is not a picture (any more): stop showing one.
+    pub fn forget(&mut self, path: &Path) {
+        if self.current.as_deref() == Some(path) {
+            self.protocol.empty_protocol();
+            self.status = PreviewStatus::Empty;
+        }
+    }
+
+    fn spawn_decode(&mut self, path: PathBuf, source: ImageSource) {
         self.generation += 1;
         let generation = self.generation;
         let tx = self.decode_tx.clone();
         let picker = self.picker.clone();
         let vfs = Arc::clone(&self.vfs);
         self.handle.spawn_blocking(move || {
-            let via_hook = matches!(source, Source::Hook(_));
-            let image = match source {
-                Source::Direct => preview::load_image(vfs.as_ref(), &path),
-                // A hook hands the file to another program, which needs it on this machine's
-                // disk; off it the hook counts as failed, like a missing program would.
-                Source::Hook(hook) => match vfs.local_path(&path) {
-                    Some(local) => match preview_hook::run(&hook, &local) {
-                        HookOutcome::Image(image) => Some(image),
-                        _ => None,
-                    },
-                    None => None,
-                },
+            let handed_over = matches!(source, ImageSource::Handoff { .. });
+            let image = match &source {
+                ImageSource::Original => preview::load_image(vfs.as_ref(), &path),
+                ImageSource::Handoff { file } => load_handoff(file),
             };
+            // Whatever came of it, the scratch file is ours to delete now.
+            discard_handoff(&source);
             let outcome = match image {
                 Some(image) => DecodeOutcome::Decoded {
                     protocol: Box::new(picker.new_resize_protocol(image)),
@@ -279,10 +247,89 @@ impl ImagePreview {
                 None => DecodeOutcome::Failed {
                     path,
                     generation,
-                    via_hook,
+                    handed_over,
                 },
             };
             let _ = tx.send(outcome);
         });
+    }
+}
+
+/// Decodes a picture a plugin handed over. The plugin is not trusted to name an arbitrary file,
+/// since the interface deletes it afterwards: it must be a plain file (not a link) under the
+/// scratch name `plugin_api` defines, however the document reached here.
+fn load_handoff(file: &Path) -> Option<image::DynamicImage> {
+    if !is_handoff_path(file) || LocalVfs.symlink_metadata(file).ok()?.kind != FileKind::File {
+        return None;
+    }
+    preview::load_image(&LocalVfs, file)
+}
+
+/// Deletes the scratch file `source` names, if it names one that a plugin may hand over. Never
+/// follows a link: `remove_file` removes the link itself.
+fn discard_handoff(source: &ImageSource) {
+    if let ImageSource::Handoff { file } = source
+        && is_handoff_path(file)
+    {
+        let _ = LocalVfs.remove_file(file);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plugin_api::handoff_path;
+
+    fn write_png(path: &Path) {
+        image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]))
+            .save_with_format(path, image::ImageFormat::Png)
+            .expect("the scratch folder is writable");
+    }
+
+    #[test]
+    fn a_handed_over_picture_is_decoded_and_then_deleted() {
+        let file = handoff_path(u64::MAX - 1);
+        write_png(&file);
+        let source = ImageSource::Handoff { file: file.clone() };
+        assert!(load_handoff(&file).is_some());
+        discard_handoff(&source);
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_scratch_picture_is_neither_read_nor_deleted() {
+        let dir = std::env::temp_dir().join(format!("minuteman-image-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let precious = dir.join("holiday.png");
+        write_png(&precious);
+
+        assert!(load_handoff(&precious).is_none());
+        discard_handoff(&ImageSource::Handoff {
+            file: precious.clone(),
+        });
+        assert!(
+            precious.exists(),
+            "a name outside the scratch pattern is never deleted"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_link_under_the_scratch_name_is_refused_and_only_the_link_goes() {
+        let dir = std::env::temp_dir().join(format!("minuteman-image-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let precious = dir.join("holiday.png");
+        write_png(&precious);
+        let link = handoff_path(u64::MAX - 2);
+        std::os::unix::fs::symlink(&precious, &link).unwrap();
+
+        assert!(load_handoff(&link).is_none(), "a link is not followed");
+        discard_handoff(&ImageSource::Handoff { file: link.clone() });
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "the link is gone"
+        );
+        assert!(precious.exists(), "what it pointed at is not");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

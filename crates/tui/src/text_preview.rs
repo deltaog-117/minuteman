@@ -203,7 +203,7 @@ impl TextPreview {
     }
 
     /// Call once per render tick with the selected file, if it is one that belongs here (not a
-    /// folder, and not a file `image_preview` already claims; the caller decides). `served` is
+    /// folder; the caller decides). `served` is
     /// whether a plugin is there to preview files at all; without one the column shows only the
     /// file's name. Returns what the plugin must be told when the file changed.
     pub fn update(&mut self, selected: Option<&Path>, served: bool) -> Option<PreviewAsk> {
@@ -250,7 +250,9 @@ impl TextPreview {
                 self.content = None;
                 self.status = PreviewStatus::Failed;
             }
-            PreviewContent::Empty => {
+            // A picture is drawn by the image pipeline, which `Previews::accept` has told; this
+            // pane has nothing of its own to show for it.
+            PreviewContent::Empty | PreviewContent::Image { .. } => {
                 self.content = None;
                 self.status = PreviewStatus::Empty;
             }

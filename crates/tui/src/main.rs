@@ -60,7 +60,6 @@ mod picker_view;
 mod plugin_action;
 mod plugin_views;
 mod popup_shell;
-mod preview_hook;
 mod preview_view;
 mod search_job;
 mod settings_popup;
@@ -122,6 +121,7 @@ use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect::InspectView;
 use picker_popup::{Outcome as PickerOutcome, PickerPopup};
 use plugin_action::Browse;
+use plugin_api::{PreviewContent, SetPreview};
 use plugin_host::UiRequest;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -135,8 +135,8 @@ use shared::{DirEntryInfo, LocalVfs, Vfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewAsk, PreviewStatus as TextPreviewStatus, TextPreview};
 use theming::{
-    Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, PreviewHook, RawFont,
-    RawLocal, RawPanels, RawStyles, RawTheme, RawUi, Styles, Theme, Ui,
+    Action, ColumnLayout, Config, CustomTheme, GlyphSet, PanelsConfig, RawFont, RawLocal,
+    RawPanels, RawStyles, RawTheme, RawUi, Styles, Theme, Ui,
 };
 use thumbnails::Thumbnails;
 use trash_view::TrashView;
@@ -712,30 +712,34 @@ impl Previews {
         self.image.detected_background()
     }
 
-    /// `selected` is the entry under the cursor. A real image, or one an `Image`-kind
-    /// `[[preview_hook]]` covers, goes to the image pipeline; any other file (text, an archive, a
-    /// binary, or one a `Text`-kind hook covers) to the previewing plugin for the scrolling pane;
-    /// a folder to neither, since the pane lists its children instead. `served` is whether a
-    /// plugin is there to preview files. Returns what that plugin must be told, if anything.
-    fn update(
-        &mut self,
-        selected: Option<&DirEntryInfo>,
-        hooks: &[PreviewHook],
-        served: bool,
-    ) -> Option<PreviewAsk> {
-        let file = selected.filter(|e| !e.is_dir).map(|e| e.path.as_path());
-        self.image.update(file, hooks);
-        self.text.update(
-            file.filter(|path| !image_preview::is_target(path, hooks)),
-            served,
-        )
+    /// `selected` is the entry under the cursor. Any file goes to the previewing plugin, which
+    /// answers with text, a hex dump, an archive's listing or a picture (the picture is then
+    /// decoded by the image pipeline); a folder to neither, since the pane lists its children
+    /// instead. `served` is whether a plugin is there to preview files. Returns what that plugin
+    /// must be told, if anything.
+    fn update(&mut self, selected: Option<&DirEntryInfo>, served: bool) -> Option<PreviewAsk> {
+        let file = selected
+            .filter(|e| !e.is_dir)
+            .map(|e| e.path.as_path())
+            .filter(|_| served);
+        self.image.update(file);
+        self.text.update(file, served)
     }
 
-    /// Re-reads whichever preview is showing the selected file, after it changed on disk. Returns
-    /// what the previewing plugin must be told, if anything.
-    fn reload(&mut self, hooks: &[PreviewHook]) -> Option<PreviewAsk> {
-        self.image.reload(hooks);
+    /// Re-asks the previewing plugin about the selected file, after it changed on disk. Returns
+    /// what the plugin must be told, if anything.
+    fn reload(&mut self) -> Option<PreviewAsk> {
         self.text.reload()
+    }
+
+    /// Takes the plugin's document: a picture goes to the image pipeline, anything else to the
+    /// scrolling pane (which also hears of a picture, to stop waiting for text).
+    fn accept(&mut self, set: SetPreview) {
+        match &set.content {
+            PreviewContent::Image { source } => self.image.show(&set.path, source.clone()),
+            _ => self.image.forget(&set.path),
+        }
+        self.text.accept(set);
     }
 
     /// Tells the previewing plugin what the last `update` or `reload` asked, and stops waiting for
@@ -1446,7 +1450,7 @@ fn run(
                     }
                 }
                 UiRequest::SetView { plugin, set } => app.set_view(&plugin, set),
-                UiRequest::SetPreview { set, .. } => previews.text.accept(set),
+                UiRequest::SetPreview { set, .. } => previews.accept(set),
                 UiRequest::Close {
                     plugin,
                     picker: number,
@@ -1527,7 +1531,7 @@ fn run(
         // the app that recognised the command doesn't own the terminal.
         if let Some(handover) = app.take_handover() {
             let result = guard.run_foreground(terminal, &handover.cwd, &handover.line)?;
-            let ask = previews.reload(&config.preview_hooks);
+            let ask = previews.reload();
             previews.ask(app, ask);
             app.finish_handover(browser, vfs, &handover, &result)?;
         }
@@ -1535,7 +1539,7 @@ fn run(
         // change to the selected file itself needs its preview re-read, since that is otherwise
         // keyed on the path alone.
         if app.poll_disk(browser, Instant::now()) {
-            let ask = previews.reload(&config.preview_hooks);
+            let ask = previews.reload();
             previews.ask(app, ask);
         }
         app.poll_hud(browser);
@@ -1543,19 +1547,9 @@ fn run(
         // While the trash browser is open the preview follows its cursor, not the browser's.
         let served = app.has_previewer();
         let ask = match (trash_view.as_ref(), picker.as_ref()) {
-            (Some(view), _) => previews.update(
-                view.preview_subject().as_ref(),
-                &config.preview_hooks,
-                served,
-            ),
-            (None, Some(popup)) => previews.update(
-                popup.preview_subject().as_ref(),
-                &config.preview_hooks,
-                served,
-            ),
-            (None, None) => {
-                previews.update(browser.selected_entry(), &config.preview_hooks, served)
-            }
+            (Some(view), _) => previews.update(view.preview_subject().as_ref(), served),
+            (None, Some(popup)) => previews.update(popup.preview_subject().as_ref(), served),
+            (None, None) => previews.update(browser.selected_entry(), served),
         };
         previews.ask(app, ask);
 

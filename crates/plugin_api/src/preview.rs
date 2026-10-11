@@ -18,7 +18,9 @@
 //! preview column is about (the `preview` event); the plugin reads the file through the host
 //! (`read_file`, so a browsed ssh folder or an archive previews like the local disk does) and
 //! answers with a finished document (`set_preview`): colored text, the first bytes of a binary
-//! file, or an archive's listing. The plugin never draws. The interface keeps the scrolling,
+//! file, an archive's listing, or a picture to draw. A picture is not sent as pixels: it is either
+//! the file itself, which the interface decodes through the same paths, or a scratch file the
+//! plugin made (a thumbnail a program extracted) and handed over. The plugin never draws. The interface keeps the scrolling,
 //! the wrapping, the scrollbar and the colors, so moving through a long file stays instant and
 //! does not wait on the plugin.
 //!
@@ -53,6 +55,9 @@ pub const MAX_TEXT_CHARS: usize = 1 << 20;
 pub const MAX_HEX_BYTES: usize = 64 * 1024;
 /// Most entries of an archive a document lists.
 pub const MAX_ARCHIVE_ENTRIES: usize = 5_000;
+/// How a handed-over picture's file name starts, so the interface can tell one from any other file
+/// a plugin might name.
+pub const HANDOFF_PREFIX: &str = "minuteman-preview-image-";
 
 /// The file the preview column is about, in a `preview` event: `null` when it shows no file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +158,35 @@ impl ArchiveListing {
     }
 }
 
+/// Where the picture a document shows comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "snake_case")]
+pub enum ImageSource {
+    /// The previewed file is itself a picture; the interface reads it through whatever serves the
+    /// browsed paths.
+    Original,
+    /// The plugin made a picture for the file (a program rendered a PDF's first page) and wrote it
+    /// to `file`, which must be one [`handoff_path`] names. The interface decodes it once and
+    /// deletes it, so the plugin does not keep it.
+    Handoff { file: PathBuf },
+}
+
+/// The path of a scratch picture a plugin may hand over: a file directly in the temporary folder,
+/// named by [`HANDOFF_PREFIX`], this process and `tag` (which keeps two pictures apart).
+pub fn handoff_path(tag: u64) -> PathBuf {
+    std::env::temp_dir().join(format!("{HANDOFF_PREFIX}{}-{tag}", std::process::id()))
+}
+
+/// Whether `file` is a path a plugin may hand over. The interface decodes, then deletes, what it
+/// is given, so a plugin must not be able to name a file that is not its own scratch output.
+pub fn is_handoff_path(file: &std::path::Path) -> bool {
+    file.parent() == Some(std::env::temp_dir().as_path())
+        && file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(HANDOFF_PREFIX))
+}
+
 /// What the preview column shows for one file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 // Tagged `type`, not `kind`: an archive listing has a `kind` of its own (zip, tar) that would
@@ -169,6 +203,10 @@ pub enum PreviewContent {
     },
     Hex(HexHead),
     Archive(ArchiveListing),
+    /// A picture the interface draws, decoded and fitted to the column on its side.
+    Image {
+        source: ImageSource,
+    },
 }
 
 /// The parameters of `set_preview`: the document for the file at `path`. The interface keeps it
@@ -186,6 +224,8 @@ pub enum PreviewError {
     TooMuchText,
     TooManyBytes,
     TooManyEntries,
+    /// A handed-over picture named a file that is not a plugin's scratch output.
+    NotAHandoff,
 }
 
 impl fmt::Display for PreviewError {
@@ -196,6 +236,10 @@ impl fmt::Display for PreviewError {
             Self::TooManyEntries => {
                 write!(f, "a preview lists at most {MAX_ARCHIVE_ENTRIES} entries")
             }
+            Self::NotAHandoff => write!(
+                f,
+                "a handed-over picture must be a file named {HANDOFF_PREFIX}* in the temporary folder"
+            ),
         }
     }
 }
@@ -210,7 +254,8 @@ impl SetPreview {
     ///
     /// A text of more than [`MAX_TEXT_CHARS`] characters (or that many lines or pieces, which
     /// cannot be fewer than its characters), more than [`MAX_HEX_BYTES`] bytes of a file, or more
-    /// than [`MAX_ARCHIVE_ENTRIES`] archive entries.
+    /// than [`MAX_ARCHIVE_ENTRIES`] archive entries, or a handed-over picture whose file is not one
+    /// [`is_handoff_path`] accepts.
     pub fn checked(mut self) -> Result<Self, PreviewError> {
         match &mut self.content {
             PreviewContent::Empty | PreviewContent::Failed => {}
@@ -246,6 +291,16 @@ impl SetPreview {
                     // `clean_name` replaces rather than removes, so a name stays recognisable.
                     entry.name = clean_name(&entry.name);
                     debug_assert!(entry.name.chars().all(|c| !is_unsafe_in_name(c)));
+                }
+            }
+            PreviewContent::Image {
+                source: ImageSource::Original,
+            } => {}
+            PreviewContent::Image {
+                source: ImageSource::Handoff { file },
+            } => {
+                if !is_handoff_path(file) {
+                    return Err(PreviewError::NotAHandoff);
                 }
             }
         }
@@ -505,6 +560,78 @@ mod tests {
             }),
         };
         assert_eq!(archive.checked().unwrap_err(), PreviewError::TooManyEntries);
+    }
+
+    #[test]
+    fn a_picture_document_has_the_documented_wire_shape() {
+        let original = SetPreview {
+            path: PathBuf::from("/a.png"),
+            content: PreviewContent::Image {
+                source: ImageSource::Original,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&original).expect("plain data serializes"),
+            r#"{"path":"/a.png","content":{"type":"image","source":{"from":"original"}}}"#
+        );
+        let handoff = SetPreview {
+            path: PathBuf::from("/a.pdf"),
+            content: PreviewContent::Image {
+                source: ImageSource::Handoff {
+                    file: handoff_path(3),
+                },
+            },
+        };
+        let json = serde_json::to_string(&handoff).expect("plain data serializes");
+        assert_eq!(serde_json::from_str::<SetPreview>(&json).unwrap(), handoff);
+    }
+
+    #[test]
+    fn only_a_plugins_own_scratch_file_can_be_handed_over() {
+        let picture = |file: PathBuf| SetPreview {
+            path: PathBuf::from("/a.pdf"),
+            content: PreviewContent::Image {
+                source: ImageSource::Handoff { file },
+            },
+        };
+        assert!(picture(handoff_path(1)).checked().is_ok());
+        let tmp = std::env::temp_dir();
+        for refused in [
+            PathBuf::from("/etc/passwd"),
+            tmp.join("notes.png"),
+            tmp.join("sub").join(format!("{HANDOFF_PREFIX}1")),
+            tmp.join(format!("{HANDOFF_PREFIX}1/../../etc/passwd")),
+            PathBuf::from(format!("{HANDOFF_PREFIX}1")),
+        ] {
+            assert_eq!(
+                picture(refused.clone()).checked().unwrap_err(),
+                PreviewError::NotAHandoff,
+                "{}",
+                refused.display()
+            );
+        }
+    }
+
+    proptest! {
+        /// Whatever a plugin names, a handed-over picture is accepted only when its file sits
+        /// directly in the temporary folder under the scratch prefix.
+        #[test]
+        fn a_handoff_is_accepted_only_for_a_scratch_name(name in any::<String>(), nested in any::<bool>()) {
+            let dir = if nested { std::env::temp_dir().join("x") } else { std::env::temp_dir() };
+            let file = dir.join(&name);
+            let set = SetPreview {
+                path: PathBuf::from("/a.pdf"),
+                content: PreviewContent::Image { source: ImageSource::Handoff { file: file.clone() } },
+            };
+            let accepted = set.checked().is_ok();
+            let expected = !nested
+                && file.parent() == Some(std::env::temp_dir().as_path())
+                && file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(HANDOFF_PREFIX));
+            prop_assert_eq!(accepted, expected);
+        }
     }
 
     #[test]

@@ -79,7 +79,7 @@ pub struct OpenRule {
 
 /// One `[[preview_hook]]` table: an external command that produces a thumbnail image or
 /// extracts text for a file extension the built-in previews can't otherwise show (a PDF, a
-/// video, ...) — see `tui::preview_hook`. `command` runs under `sh -c`; `{in}` stands for the
+/// video, ...) — run by the bundled preview plugin (`plugins/preview`). `command` runs under `sh -c`; `{in}` stands for the
 /// source file's quoted path and `{out}` for a scratch path the command must write its result
 /// to. A missing program, a non-zero exit, a timeout, or output `kind` can't make sense of all
 /// fall back to showing just the file's name, quietly — never a hard error.
@@ -363,7 +363,7 @@ pub struct Config {
     /// The `[[open_rule]]` tables, in priority order: which program opens which files.
     pub open_rules: Vec<OpenRule>,
     /// The `[[preview_hook]]` tables — external commands that thumbnail or extract text for a
-    /// file extension the built-in previews can't otherwise show. See `tui::preview_hook`.
+    /// file extension the built-in previews can't otherwise show. Run by the preview plugin.
     pub preview_hooks: Vec<PreviewHook>,
     /// The `[[plugin]]` tables, in the order they were spawned — see `plugin_host::PluginManager`.
     pub plugins: Vec<PluginSpec>,

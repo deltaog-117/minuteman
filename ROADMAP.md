@@ -1923,9 +1923,34 @@ draws.
     could; the trash browser's preview goes through the same code but was not tried in the PTY; a
     plugin of the user's own that provides `preview` replaces this one, and its contract is only
     what `plugin_api` says.
-  - [ ] Images, thumbnails and inspect, which need a way to hand a picture to the interface and a
-    scrollable multi-line view for the Inspect panel. The image pipeline (`image_preview`,
-    `thumbnails`) and `[[preview_hook]]` tables of kind `image` stay in the core until then.
+  - [x] The picture in the preview column, with `[[preview_hook]]` tables of kind `image`.
+    `set_preview` gained an `image` document that carries no pixels: its source is either
+    `original` (the previewed file is itself a picture, which the interface reads through the same
+    paths as before, so a browsed ssh folder still previews) or `handoff` (the plugin ran an image
+    hook, which left a PNG in the temporary folder under a name `plugin_api::handoff_path` defines,
+    and the interface decodes it once and deletes it). `plugins/preview` now decides which files
+    are pictures and runs the image hooks (`--image-hook <json>` beside `--text-hook`), so
+    `tui::preview_hook` is gone; the interface keeps decoding, fitting to the column and drawing
+    (`image_preview`, on `ratatui-image`, since it owns the terminal's graphics capabilities).
+    Chosen as COA B (hand over a file) over pixels on the wire (A) and leaving the whole image
+    path in the core (C). A plugin is not trusted to name a file the interface then deletes: the
+    host refuses a handoff that is not directly in the temporary folder under the scratch prefix,
+    the decoder checks it again and refuses a link, and a handoff for a file the cursor has left is
+    deleted by whichever side drops it. Without `mman-preview` a picture shows only its name, as
+    text already did. Property-tested: a handoff is accepted exactly when its name is a scratch
+    name directly under the temporary folder, whatever string a plugin sends. Verified against the
+    real `mman` over a PTY read through `pyte`: a PNG drew its color, a `.xyz` file turned into a
+    different color by an image hook drew that one, a hook that fails drew only the name, a text
+    file beside them still drew text, moving back to the first picture redrew it, no scratch file
+    was left in the temporary folder, and an `mman` copied alone showed names and the notice.
+    Follow-ups: a hook's picture is made again each time the file is asked for (no cache); a
+    picture is still decoded by the interface, so a very large image costs the interface that
+    decode on a blocking thread, as before; the filmstrip, grid and tile views keep their own
+    thumbnail cache in the core (they are alternate views, M7); not tried in a real kitty.
+  - [ ] Inspect (the modal panel and the folder tally behind it), which needs a scrollable
+    multi-line view and the owner, on-disk size and link count that only a local path has (`Vfs`
+    carries them, `read_file` does not). The thumbnail cache (`thumbnails`) goes with the
+    alternate views in M7.
 - [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave
   `file_ops`; trash management (the trash view, restore, empty) becomes a plugin while moving a
   file to the trash stays in the core.
@@ -2233,7 +2258,8 @@ draws.
    which `f` now needs next to it; from a checkout `cargo build -p finder` once does it), and
    `cargo install --path plugins/git` (`mman-git`, which the status bar's git segment now needs;
    from a checkout `cargo build -p git`), and `cargo install --path plugins/preview`
-   (`mman-preview`, which the preview column's text, hex dump and archive listing now need; from
+   (`mman-preview`, which the preview column's text, hex dump, archive listing and pictures now
+   need; from
    a checkout `cargo build -p previewer`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
 1. `cargo run -p tui` — the newest: `mman --chooser-file /tmp/pick --pick save --pick-name x.txt`, press `Q`, `Enter`,

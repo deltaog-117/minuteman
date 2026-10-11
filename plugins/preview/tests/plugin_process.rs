@@ -10,7 +10,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread;
 use std::time::Duration;
 
-use plugin_api::{API_VERSION, ChunkKind, FileChunk, PreviewContent, ReadFile, SetPreview, Token};
+use plugin_api::{
+    API_VERSION, ChunkKind, FileChunk, ImageSource, PreviewContent, ReadFile, SetPreview, Token,
+    is_handoff_path,
+};
 use serde_json::{Value, json};
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -213,18 +216,62 @@ fn a_binary_file_comes_back_as_its_first_bytes_and_a_zip_as_a_listing() {
 }
 
 #[test]
-fn a_folder_a_missing_file_and_a_picture_have_nothing_to_show() {
+fn a_folder_and_a_missing_file_have_nothing_to_show() {
     let dir = scratch("nothing");
-    let picture = dir.join("pic.png");
-    std::fs::write(&picture, b"not really a png").unwrap();
 
     let mut plugin = Plugin::start(&[]);
-    for path in [dir.clone(), dir.join("missing"), picture] {
+    for path in [dir.clone(), dir.join("missing")] {
         plugin.preview(Some(&path));
         let set = plugin.document();
         assert_eq!(set.path, path);
         assert_eq!(set.content, PreviewContent::Empty, "{path:?}");
     }
+    plugin.finish();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_picture_is_named_for_the_interface_to_read_itself() {
+    let dir = scratch("picture");
+    let picture = dir.join("pic.png");
+    std::fs::write(&picture, b"not really a png").unwrap();
+
+    let mut plugin = Plugin::start(&[]);
+    plugin.preview(Some(&picture));
+    let set = plugin.document();
+    assert_eq!(set.path, picture);
+    assert_eq!(
+        set.content,
+        PreviewContent::Image {
+            source: ImageSource::Original
+        }
+    );
+    plugin.finish();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_picture_hook_given_on_the_command_line_hands_over_the_file_it_made() {
+    let dir = scratch("image-hook");
+    let path = dir.join("clip.mp4");
+    std::fs::write(&path, b"\0 not really a video").unwrap();
+    let hook = json!({
+        "extensions": ["mp4"],
+        "command": "printf FRAME > {out}",
+    })
+    .to_string();
+
+    let mut plugin = Plugin::start(&["--image-hook", &hook]);
+    plugin.preview(Some(&path));
+    let PreviewContent::Image {
+        source: ImageSource::Handoff { file },
+    } = plugin.document().content
+    else {
+        panic!("expected a handed-over picture");
+    };
+    assert!(is_handoff_path(&file), "{file:?}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"FRAME");
+    std::fs::remove_file(&file).unwrap();
     plugin.finish();
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -7100,6 +7100,60 @@ construction), a remote host, and a real kitty.
 
 ---
 
+## 2026-10-11 — Pictures in the preview column come from the plugin (M4b, fourth part)
+
+**Context.** After the text preview moved, the interface still decided which files were pictures
+(`image_preview::source_for`), ran the `[[preview_hook]]` programs that make a picture
+(`tui::preview_hook`) and drew the result. The open question was what crosses the process boundary
+for a picture, since a document of a megabyte of text was already the largest message.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | The plugin decodes and sends a downscaled RGBA buffer in the document | Rejected: 4 MB a 1000x1000 picture as hex on a JSON line, a size cap to invent, and the grid would multiply it |
+| B | The plugin sends no pixels: the file itself, or a scratch file it made, and the interface decodes | Chosen |
+| C | Only Inspect moves; pictures and thumbnails stay in the core | Rejected: half of M4b's last item, and nothing for the hook runner to leave |
+
+**Decision.** `PreviewContent::Image { source }`, with `ImageSource::Original` (the previewed file,
+read by the interface through the same `Vfs`, so ssh and archive paths keep working) or
+`ImageSource::Handoff { file }`. The plugin decides what is a picture (`is_image`, then a hook
+covering the extension) and runs image hooks, which needed `kind` on its `Hook` and a second flag,
+`--image-hook`. `ImagePreview` stopped deciding anything: `update` only tracks which file the
+column is about and clears on a change, and `show`/`forget` apply the plugin's answer. The text
+pipeline now takes every file and `Previews::accept` routes the answer to whichever pipeline it is
+for, so the "is this an image" test is made once, by the plugin.
+
+**Departures from the plan.** (1) I said Inspect would go first inside this option. Reading it
+showed it needs the owner, on-disk size and link count, which the wire does not carry (they are
+local-only), plus a multi-line view; it is a cycle of its own and is left unchecked in the roadmap
+rather than half-moved. (2) The deleting. A handoff is a file the interface deletes after decoding,
+so a hostile plugin that could name any path could make the interface delete it. The host refuses a
+handoff that is not directly in the temporary folder under the scratch prefix, the decoder checks
+again and refuses a link (`symlink_metadata`), and `remove_file` on a link removes only the link.
+A test with a link pointing at a real picture shows the picture surviving. (3) Two sides can drop
+an answer, so both delete: the plugin when a newer file arrived, the interface when the file is no
+longer the column's.
+
+**Trade-offs.** Without `mman-preview` a picture shows only its name, like text; the filmstrip,
+grid and tile views still decode in the core, which is correct for now (M7 decides the alternate
+views). A hook's picture is rebuilt each time the file is asked for, since there is no cache. The
+scratch name is predictable (pid and a counter), so another local user could race to create it in
+a shared temporary folder; the symlink check and the regular-file check narrow that, and a
+private runtime directory would close it, left as a follow-up.
+
+**Verification.** `scripts/check` passes. New tests: the wire shape of both sources and a property
+test that a handoff is accepted exactly for a scratch name directly under the temporary folder;
+the hook runner (a picture left in place, nothing left behind on failure, empty output, 70 MB
+output, a link, a timeout); `load::content` for a direct picture and a hooked file; the real
+`mman-preview` process answering `original` and `handoff`; and the interface's decode (a handed
+picture decoded then deleted, a non-scratch file neither read nor deleted, a link refused with its
+target intact). The real `mman` was driven over a PTY read through `pyte`: a PNG drew its red, an
+image hook turned a `.xyz` file into a green picture, a failing hook and a text file beside them
+drew the name and the text, moving back redrew the first picture, nothing was left in the
+temporary folder, and an `mman` copied alone showed names and the notice. Not run: a real kitty,
+a remote host, and Inspect (not moved).
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

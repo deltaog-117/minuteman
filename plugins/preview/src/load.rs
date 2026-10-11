@@ -11,13 +11,13 @@
 use std::io::Read;
 use std::path::Path;
 
-use plugin_api::{ArchiveListing, HexHead, MAX_TEXT_CHARS, PreviewContent};
+use plugin_api::{ArchiveListing, HexHead, ImageSource, MAX_TEXT_CHARS, PreviewContent};
 use shared::{FileKind, Vfs, is_image, is_text};
 
 use crate::archive;
 use crate::head::read_head;
 use crate::highlight;
-use crate::hook::{self, Hook};
+use crate::hook::{self, Hook, Kind};
 
 /// Caps how much of a file [`load_text`] will read into memory for a preview — large enough for
 /// any normal source/config file, small enough that a huge log or data file can't stall the
@@ -97,8 +97,9 @@ pub fn load(vfs: &dyn Vfs, path: &Path) -> Loaded {
 }
 
 /// The document for the file at `path`, or `None` when `stop` said the answer is no longer wanted.
-/// `hooks` are the configured text-extracting commands; one that covers `path` is used when the
-/// file is on this machine's disk, since it hands the file to another program.
+/// `hooks` are the configured commands; one that covers `path` is used when the file is on this
+/// machine's disk, since it hands the file to another program. A picture, or a file a picture hook
+/// covers, becomes an image document: the interface decodes and fits it.
 pub fn content(
     vfs: &dyn Vfs,
     path: &Path,
@@ -106,10 +107,21 @@ pub fn content(
     stop: &dyn Fn() -> bool,
 ) -> Option<PreviewContent> {
     if is_image(path) {
-        return Some(PreviewContent::Empty);
+        return Some(PreviewContent::Image {
+            source: ImageSource::Original,
+        });
     }
     let covered = hook::hook_for(hooks, path).zip(vfs.local_path(path));
     let loaded = match covered {
+        Some((hook, local)) if hook.kind == Kind::Image => {
+            return match hook::run_image(hook, &local) {
+                Some(file) => Some(PreviewContent::Image {
+                    source: ImageSource::Handoff { file },
+                }),
+                // A hook that fails, times out or is missing falls back to just the file's name.
+                None => Some(PreviewContent::Empty),
+            };
+        }
         Some((hook, local)) => match hook::run(hook, &local) {
             Some(text) => Loaded::Text(text),
             // A hook that fails, times out or is missing falls back to just the file's name, like
@@ -342,8 +354,10 @@ mod tests {
         ));
         assert_eq!(
             content(&mem, Path::new("/pic.png"), &[], &never),
-            Some(PreviewContent::Empty),
-            "pictures are the interface's own business"
+            Some(PreviewContent::Image {
+                source: ImageSource::Original
+            }),
+            "a picture is drawn by the interface, which reads the file itself"
         );
         assert_eq!(
             content(&mem, Path::new("/d"), &[], &never),
@@ -379,6 +393,7 @@ mod tests {
             extensions: vec!["pdf".into()],
             command: "printf 'extracted text' > {out}".into(),
             timeout_ms: None,
+            kind: Kind::Text,
         }];
 
         let shown = content(&shared::LocalVfs, &source, &hooks, &never).unwrap();
@@ -404,6 +419,50 @@ mod tests {
         assert!(matches!(
             content(&mem, Path::new("/report.pdf"), &hooks, &never),
             Some(PreviewContent::Text { .. })
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_a_picture_hook_covers_is_handed_over_as_the_picture_it_made() {
+        let dir = scratch_dir("image-hook");
+        let source = dir.join("clip.mp4");
+        std::fs::write(&source, b"not really a video").unwrap();
+        let hooks = vec![Hook {
+            extensions: vec!["mp4".into()],
+            command: "printf FRAME > {out}".into(),
+            timeout_ms: None,
+            kind: Kind::Image,
+        }];
+
+        let Some(PreviewContent::Image {
+            source: ImageSource::Handoff { file },
+        }) = content(&shared::LocalVfs, &source, &hooks, &never)
+        else {
+            panic!("expected a handed-over picture");
+        };
+        assert!(plugin_api::is_handoff_path(&file));
+        assert_eq!(std::fs::read(&file).unwrap(), b"FRAME");
+        hook::discard(&PreviewContent::Image {
+            source: ImageSource::Handoff { file: file.clone() },
+        });
+        assert!(!file.exists(), "a discarded picture is deleted");
+
+        // A hook that fails leaves just the name.
+        let failing = vec![Hook {
+            command: "false".into(),
+            ..hooks[0].clone()
+        }];
+        assert_eq!(
+            content(&shared::LocalVfs, &source, &failing, &never),
+            Some(PreviewContent::Empty)
+        );
+        // Off the local disk there is no file to hand the program, so it is read directly.
+        let mem = MemVfs::new();
+        mem.add_file("/clip.mp4", vec![1u8, 0, 2]);
+        assert!(matches!(
+            content(&mem, Path::new("/clip.mp4"), &hooks, &never),
+            Some(PreviewContent::Hex(_))
         ));
         std::fs::remove_dir_all(&dir).unwrap();
     }

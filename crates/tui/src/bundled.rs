@@ -101,12 +101,12 @@ pub fn specs(
     configured: &[PluginSpec],
     git_status: bool,
     system_hud: bool,
-    text_hooks: &[PreviewHook],
+    hooks: &[PreviewHook],
 ) -> Vec<PluginSpec> {
     let mut found = specs_found(
         configured,
         |binary| beside_mman(binary).or_else(|| program_exists(binary).then(|| binary.to_string())),
-        text_hooks,
+        hooks,
     );
     if !git_status {
         found.retain(|spec| spec.name != "git");
@@ -121,7 +121,7 @@ pub fn specs(
 fn specs_found(
     configured: &[PluginSpec],
     locate: impl Fn(&str) -> Option<String>,
-    text_hooks: &[PreviewHook],
+    hooks: &[PreviewHook],
 ) -> Vec<PluginSpec> {
     BUNDLED
         .iter()
@@ -131,7 +131,7 @@ fn specs_found(
                 name: bundled.name.to_string(),
                 command: locate(bundled.binary)?,
                 args: if bundled.name == "preview" {
-                    text_hook_args(text_hooks)
+                    hook_args(hooks)
                 } else {
                     Vec::new()
                 },
@@ -148,14 +148,14 @@ fn specs_found(
         .collect()
 }
 
-/// The command-line arguments that hand the preview plugin the `[[preview_hook]]` tables that
-/// extract text, one `--text-hook <json>` each. Hooks that make an image stay with the interface,
-/// which draws pictures.
+/// The command-line arguments that hand the preview plugin the `[[preview_hook]]` tables, one
+/// `--text-hook <json>` for each that extracts text and one `--image-hook <json>` for each that
+/// renders a picture.
 ///
 /// The first hook that names an extension decides it, whatever its kind, so an image hook for
 /// `pdf` ahead of a text hook for `pdf` leaves the text hook nothing: the extension is taken out
 /// of every later hook before it is passed on, and a hook left with no extension is dropped.
-fn text_hook_args(hooks: &[PreviewHook]) -> Vec<String> {
+fn hook_args(hooks: &[PreviewHook]) -> Vec<String> {
     let mut claimed: Vec<String> = Vec::new();
     let mut args = Vec::new();
     for hook in hooks {
@@ -165,10 +165,16 @@ fn text_hook_args(hooks: &[PreviewHook]) -> Vec<String> {
             .filter(|ext| !claimed.iter().any(|taken| taken.eq_ignore_ascii_case(ext)))
             .collect();
         claimed.extend(hook.extensions.iter().cloned());
-        if hook.kind != HookKind::Text || free.is_empty() {
+        if free.is_empty() {
             continue;
         }
-        args.push("--text-hook".to_string());
+        args.push(
+            match hook.kind {
+                HookKind::Text => "--text-hook",
+                HookKind::Image => "--image-hook",
+            }
+            .to_string(),
+        );
         args.push(
             serde_json::json!({
                 "extensions": free,
@@ -374,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn a_text_hook_reaches_the_preview_plugin_as_json_and_an_image_hook_does_not() {
+    fn a_hook_reaches_the_preview_plugin_as_json_under_the_flag_of_its_kind() {
         let hooks = [
             hook(&["pdf"], HookKind::Text),
             hook(&["mp4"], HookKind::Image),
@@ -385,12 +391,15 @@ mod tests {
             .find(|spec| spec.name == "preview")
             .expect("bundled")
             .args;
-        assert_eq!(args.len(), 2, "{args:?}");
+        assert_eq!(args.len(), 4, "{args:?}");
         assert_eq!(args[0], "--text-hook");
         let json: serde_json::Value = serde_json::from_str(&args[1]).expect("JSON");
         assert_eq!(json["extensions"], serde_json::json!(["pdf"]));
         assert_eq!(json["timeout_ms"], 2000);
         assert!(json["command"].as_str().is_some_and(|c| c.contains("{in}")));
+        assert_eq!(args[2], "--image-hook");
+        let json: serde_json::Value = serde_json::from_str(&args[3]).expect("JSON");
+        assert_eq!(json["extensions"], serde_json::json!(["mp4"]));
         // No other bundled plugin is handed anything.
         assert!(
             started
@@ -402,19 +411,24 @@ mod tests {
 
     #[test]
     fn the_first_hook_to_name_an_extension_decides_it_whatever_its_kind() {
-        // An image hook for pdf comes first, so a later text hook for pdf never ran before and
-        // must not now; its other extension is still its own.
+        // An image hook for pdf comes first, so a later text hook for pdf never ran and must not
+        // now; its other extension is still its own.
         let hooks = [
             hook(&["pdf"], HookKind::Image),
             hook(&["PDF", "doc"], HookKind::Text),
             hook(&["doc"], HookKind::Text),
         ];
-        let args = text_hook_args(&hooks);
-        assert_eq!(args.len(), 2, "{args:?}");
+        let args = hook_args(&hooks);
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(
+            (args[0].as_str(), args[2].as_str()),
+            ("--image-hook", "--text-hook")
+        );
         let json: serde_json::Value = serde_json::from_str(&args[1]).expect("JSON");
+        assert_eq!(json["extensions"], serde_json::json!(["pdf"]));
+        let json: serde_json::Value = serde_json::from_str(&args[3]).expect("JSON");
         assert_eq!(json["extensions"], serde_json::json!(["doc"]));
-        assert!(text_hook_args(&[hook(&["pdf"], HookKind::Image)]).is_empty());
-        assert!(text_hook_args(&[]).is_empty());
+        assert!(hook_args(&[]).is_empty());
     }
 
     #[test]

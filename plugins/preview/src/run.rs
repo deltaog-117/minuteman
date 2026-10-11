@@ -22,7 +22,7 @@ use plugin_api::{
 };
 use serde_json::{Value, json};
 
-use crate::hook::Hook;
+use crate::hook::{self, Hook, Kind};
 use crate::load;
 use crate::remote::{Remote, RemoteVfs};
 
@@ -41,22 +41,25 @@ pub struct Config {
 }
 
 impl Config {
-    /// Reads `--text-hook <json>` (any number of times) from the arguments; anything else is a
-    /// problem to report, not a reason to refuse to start.
+    /// Reads `--text-hook <json>` and `--image-hook <json>` (any number of times) from the
+    /// arguments; anything else is a problem to report, not a reason to refuse to start.
     pub fn from_args(args: impl IntoIterator<Item = String>) -> Self {
         let mut config = Self::default();
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
-            if arg != "--text-hook" {
-                config.problems.push(format!("ignored argument '{arg}'"));
-                continue;
-            }
+            let (flag, kind) = match arg.as_str() {
+                "--text-hook" => ("--text-hook", Kind::Text),
+                "--image-hook" => ("--image-hook", Kind::Image),
+                _ => {
+                    config.problems.push(format!("ignored argument '{arg}'"));
+                    continue;
+                }
+            };
             match args.next().map(|json| serde_json::from_str::<Hook>(&json)) {
-                Some(Ok(hook)) => config.hooks.push(hook),
-                Some(Err(e)) => config.problems.push(format!("ignored a --text-hook: {e}")),
-                None => config
-                    .problems
-                    .push("--text-hook needs a value".to_string()),
+                // The flag decides the kind, whatever the json says.
+                Some(Ok(hook)) => config.hooks.push(Hook { kind, ..hook }),
+                Some(Err(e)) => config.problems.push(format!("ignored a {flag}: {e}")),
+                None => config.problems.push(format!("{flag} needs a value")),
             }
         }
         config
@@ -225,6 +228,8 @@ pub fn run(
                     let set = SetPreview { path, content };
                     output.write_all(notification_line(METHOD_SET_PREVIEW, &set).as_bytes())?;
                     output.flush()?;
+                } else {
+                    hook::discard(&content);
                 }
             }
             Message::Gone => return Ok(()),
@@ -261,6 +266,8 @@ fn start_worker(path: PathBuf, current: &Current, hooks: &Arc<Vec<Hook>>, remote
                 path,
                 content,
             });
+        } else {
+            hook::discard(&content);
         }
     });
 }
@@ -318,6 +325,18 @@ mod tests {
         assert_eq!(config.hooks[0].extensions, ["pdf"]);
         assert_eq!(config.hooks[0].timeout_ms, Some(5000));
         assert_eq!(config.problems.len(), 3, "{:?}", config.problems);
+    }
+
+    #[test]
+    fn an_image_hook_argument_makes_a_picture_hook_whatever_its_json_says() {
+        let config = Config::from_args(args(&[
+            "--image-hook",
+            r#"{"extensions":["mp4"],"command":"thumb {in} {out}","kind":"text"}"#,
+            "--image-hook",
+        ]));
+        assert_eq!(config.hooks.len(), 1);
+        assert_eq!(config.hooks[0].kind, Kind::Image);
+        assert_eq!(config.problems, ["--image-hook needs a value"]);
     }
 
     #[test]
