@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `plugin_api`: `set_view`, a notification with which a plugin fills a named slot of the interface
+  with styled lines (text, a tone, a glyph by name) and the interface draws it. The first two
+  slots are `status_entry` and `status_right` on the status bar. Every view is cleaned on arrival:
+  control and direction-changing characters are removed and its size is limited. `client::Incoming::Reply`
+  now carries the reply's `result`.
+- `plugins/git` (`mman-git`), a third bundled plugin: the status bar's git branch, distance from
+  upstream, counts, and the state of the selected entry, as before but asked from a plugin. It follows
+  `dir_changed` and `selection_changed`, and runs `git status` on a thread of its own.
+
 ### Changed
+- The git status moved out of `tui` (`git_status.rs`) into `plugins/git`. Without `mman-git` the
+  status bar has no git segment; `git_status = false` in `config.toml` still turns it off, now by
+  not starting the plugin. A plugin that stops no longer leaves its text on screen.
 - The fuzzy matcher (`Query`) moved from `browser` to `shared`, and the finder's walk now runs in
   the plugin host, through the same paths the browser reads. `tui`'s finder popup and view are
   now a general picker's, titled by the plugin. A plugin that dies while its picker is open

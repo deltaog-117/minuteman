@@ -68,10 +68,12 @@ pub fn notification_line(method: &str, params: &impl Serialize) -> String {
 #[derive(Debug, Clone)]
 pub enum Incoming {
     Event(Box<EventParams>),
-    /// The answer to a request the plugin sent: `error` holds the reason when it failed.
+    /// The answer to a request the plugin sent: `error` holds the reason when it failed, and
+    /// `result` what it returned when it did not.
     Reply {
         id: Value,
         error: Option<String>,
+        result: Option<Value>,
     },
 }
 
@@ -96,6 +98,7 @@ pub fn parse_incoming(text: &str) -> Result<Incoming, String> {
                 .and_then(|error| error.get("message"))
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            result: value.get("result").cloned(),
         }),
         None => Err("neither an event nor a reply".to_string()),
     }

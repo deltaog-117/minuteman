@@ -6870,6 +6870,72 @@ pseudo-terminal.
 
 ---
 
+## 2026-10-11 — Slots a plugin fills: `set_view`, and git status on it (M4a)
+
+**Context.** M4 asks for features that decorate the interface (preview, git status, the system
+HUD, marked size, inspect) to be plugin-provided. M2 and M3 only gave a plugin a picker, which is
+a modal list. Nothing let a plugin put text in the status bar or the header. The git status was
+chosen first because it is the smallest of them: a pure parser, one background job, and two
+segments of the status bar.
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | `set_segment` only: styled text for named status and header slots | Rejected: it is B without the pane half, so the preview would need a second mechanism later |
+| B | One `set_view` primitive: a document of styled lines bound to a slot | Chosen |
+| C | Move the whole preview pipeline first, through `set_pane` | Rejected as a first step: the preview is scrolled, streamed, hooked and has images, so "behavior unchanged" would be hard to show |
+
+**Decision.** `plugin_api` gained `set_view { slot, view }`. A view is lines of spans; a span has
+text, a tone and an optional glyph named rather than spelled (`branch`, `ahead`, `staged`, ...).
+The plugin cannot send a color or a symbol: the user's glyph set (`unicode`, `nerd`, `ascii`)
+decides what a glyph looks like, and where the set has none nothing is drawn, which is how the
+ASCII set loses the branch symbol as it did before. The interface keeps one owner per slot; the
+last plugin to fill it owns it, only the owner can empty it, and a slot whose plugin stopped is
+emptied on the next tick, because a segment nothing can update is wrong rather than merely stale.
+
+The text of a view comes from a separate program and ends up in the user's terminal, so
+`SetView::checked` runs on every one the host reads: control characters (an escape in a name
+would reach the terminal) and direction-changing ones are removed first, then the limits are
+applied to what would be drawn. A property test covers that the cleaned text never holds either
+kind, that cleaning twice changes nothing, and that the limits hold.
+
+`plugins/git` is `tui::git_status` moved over: the same parser (its property tests came with it),
+the same `git status --porcelain=v2 --branch -z` with no optional locks, the same 10 s kill, 3 s
+refresh and cancel on leaving the repository. What changed is who drives it. The old code was polled
+by the render loop with the browser in hand; the plugin is told about the folder and the cursor by
+events and has to ask once for the cursor at start, so `client::Incoming::Reply` now carries the
+reply's `result`. All the rules about when to run and what to send live in a `Session` that is given
+the time and returns effects, so they are tested without running git: a repeat answer sends nothing,
+leaving the repository empties both slots before any run answers, a run for a folder left behind is
+cancelled and its late answer ignored, and a failed run keeps the last good answer.
+
+**Two things that were wrong on the way.** The first draft of the bundled table's `replaced` rule
+treated a configured plugin as standing in for a bundled one when it provided every action the
+bundled one does. The git plugin provides none, and "every one of none" is true, so any configured
+plugin would have switched git off. It now compares by name alone when there is nothing provided to
+compare. Separately, my first PTY check killed its own shell: `pkill -f mman-git` matches the
+command line of the shell that was running the check, which contained that text. It uses `-x` now.
+
+**Trade-offs.** The state word of the selected entry trails the cursor by one round trip to the
+plugin (a few milliseconds locally) where the old code answered in the same frame. A status block
+is one color, so only the first span's tone shows; per-span tones will matter for panes. A missing
+`mman-git` is silent, unlike the finder and search, which say how to get them when their key is
+pressed, since nothing is pressed here. `git_status = false` still works, now by not starting the
+plugin.
+
+**Verification.** `scripts/check` passes. New tests: 29 in `git` (the moved parser and its
+properties, the views for a repository and an entry, the session's rules above, the driver on
+in-memory pipes), the wire shape and limits of `set_view` in `plugin_api` (four of them
+properties), its parsing in the host, slot ownership and the glyph sets in `tui`, and the
+bundled table with a third plugin. The real `mman` was driven through a pseudo-terminal in a
+scratch repository: the right segment showed `main ~1 ?1`; a clean file had no state word and a
+modified and an untracked one said so; `:cd` out of the repository removed both and `:cd` back
+restored them; killing `mman-git` removed its text; with `git_status = false` no `mman-git`
+process existed; and an `mman` copied alone with no plugin beside it browsed normally. Not run: a
+remote backend (the plugin runs `git` on the local disk, as the old code did), and a terminal
+other than the pseudo-terminal.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

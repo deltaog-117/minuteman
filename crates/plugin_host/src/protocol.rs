@@ -32,7 +32,8 @@
 //!   serves the browsed paths)
 //!   gets exactly one reply line carrying that same `id`; a `log` notification (no `id`) is
 //!   fire-and-forget and surfaces as the status bar message, and so are `picker_items` (what the
-//!   picker lists), `picker_close` and `walk_cancel`.
+//!   picker lists), `picker_close`, `walk_cancel` and `set_view` (what fills a slot of the
+//!   interface, such as a status bar segment).
 //! - host -> plugin events for these are `action` (the user triggered an action the plugin
 //!   provides), `picker_query` and `picker_closed` (what is typed into its picker, and its end)
 //!   and `walk_batch` and `walk_done` (what a walk found, and its end). The shapes are in
@@ -53,12 +54,14 @@ use serde_json::Value;
 pub use plugin_api::{
     API_VERSION, Change, EVENT_ACTION, EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT,
     EVENT_JOB_FINISHED, EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
-    EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH, EVENT_WALK_DONE, EventKind, HostEvent, Job,
-    JobOutcome, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, StateSnapshot,
-    TreeEntry, WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
+    EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH, EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job,
+    JobOutcome, Line, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, SetView,
+    Slot, Span, StateSnapshot, Tone, TreeEntry, View, WalkCancel, WalkEnd, WalkOutcome,
+    WalkRequest, WireEntry,
 };
 use plugin_api::{
-    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_SHOW_PICKER, METHOD_WALK, METHOD_WALK_CANCEL,
+    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_SET_VIEW, METHOD_SHOW_PICKER, METHOD_WALK,
+    METHOD_WALK_CANCEL,
 };
 
 /// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
@@ -295,6 +298,9 @@ pub enum Incoming {
     PickerClose(PickerClose),
     /// The plugin stopped a walk.
     WalkCancel(WalkCancel),
+    /// The plugin filled or emptied a slot of the interface; already cleaned by
+    /// `SetView::checked`.
+    SetView(SetView),
     /// A well-formed notification (no `id`) whose method isn't one of the above — ignored rather than
     /// treated as an error, so a plugin can send something a future host version understands
     /// without breaking against this one.
@@ -357,6 +363,16 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                 return serde_json::from_value(raw.params)
                     .map(Incoming::WalkCancel)
                     .map_err(bad);
+            }
+            METHOD_SET_VIEW => {
+                return serde_json::from_value::<SetView>(raw.params)
+                    .map_err(bad)?
+                    .checked()
+                    .map(Incoming::SetView)
+                    .map_err(|e| LineError {
+                        id: None,
+                        message: format!("refused '{}': {e}", raw.method),
+                    });
             }
             _ => {}
         }
@@ -844,6 +860,42 @@ mod tests {
                 .unwrap_err();
         assert_eq!(error.id, None);
         assert!(error.message.contains("picker_items"), "{}", error.message);
+    }
+
+    #[test]
+    fn set_view_is_a_notification_cleaned_before_the_host_sees_it() {
+        let line = r#"{"jsonrpc":"2.0","method":"set_view","params":{"slot":"status_right","view":{"lines":[{"spans":[{"text":"a\u001b[2Jb","tone":"accent"}]}]}}}"#;
+        match parse_line(line).unwrap() {
+            Incoming::SetView(set) => {
+                assert_eq!(set.slot, Slot::StatusRight);
+                let text = &set.view.unwrap().lines[0].spans[0].text;
+                assert_eq!(text, "a[2Jb");
+            }
+            other => panic!("expected set_view, got {other:?}"),
+        }
+        assert!(matches!(
+            parse_line(r#"{"jsonrpc":"2.0","method":"set_view","params":{"slot":"status_entry"}}"#)
+                .unwrap(),
+            Incoming::SetView(SetView { view: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_set_view_that_cannot_be_shown_is_an_error_not_a_crash() {
+        let unknown =
+            parse_line(r#"{"jsonrpc":"2.0","method":"set_view","params":{"slot":"nowhere"}}"#)
+                .unwrap_err();
+        assert!(unknown.message.contains("set_view"), "{}", unknown.message);
+        let two_lines = parse_line(
+            r#"{"jsonrpc":"2.0","method":"set_view","params":{"slot":"status_entry","view":{"lines":[{"spans":[]},{"spans":[]}]}}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(two_lines.id, None);
+        assert!(
+            two_lines.message.contains("at most 1"),
+            "{}",
+            two_lines.message
+        );
     }
 
     #[test]

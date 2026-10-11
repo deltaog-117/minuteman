@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! A plugin's picker, as the render thread sees it. Like an action, a picker belongs to state only
+//! A plugin's picker and the views it fills, as the render thread sees them. Like an action, a picker belongs to state only
 //! the render thread holds (the popup, the keys), so the reader that gets a plugin's `show_picker`
 //! hands it over as a `PickerRequest` and waits for the answer, and the plugin's `picker_items`
 //! and `picker_close` notifications are queued behind it in order. The render thread takes them
@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::protocol::{PickerSpec, PickerUpdate};
+use crate::protocol::{PickerSpec, PickerUpdate, SetView};
 
 type Reply = Result<Value, String>;
 
@@ -77,6 +77,11 @@ pub enum UiRequest {
         plugin: String,
         picker: u64,
     },
+    /// The plugin filled or emptied a slot of the interface.
+    SetView {
+        plugin: String,
+        set: SetView,
+    },
 }
 
 /// How a plugin's reader reaches the render thread for pickers, shared by every plugin.
@@ -110,6 +115,13 @@ impl UiLink {
         let _ = self.tx.send(UiRequest::Items {
             plugin: plugin.to_string(),
             update,
+        });
+    }
+
+    pub(crate) fn set_view(&self, plugin: &str, set: SetView) {
+        let _ = self.tx.send(UiRequest::SetView {
+            plugin: plugin.to_string(),
+            set,
         });
     }
 

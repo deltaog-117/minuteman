@@ -230,10 +230,19 @@ fn indexing_progress_is_spelled_in_lowercase() {
 #[test]
 fn a_reply_is_read_with_its_id_and_the_reason_when_it_failed() {
     let ok = parse_incoming(r#"{"jsonrpc":"2.0","id":3,"result":{"walk":1}}"#).unwrap();
-    assert!(matches!(ok, Incoming::Reply { error: None, .. }));
+    match ok {
+        Incoming::Reply {
+            error: None,
+            result: Some(result),
+            ..
+        } => {
+            assert_eq!(result, json!({"walk": 1}));
+        }
+        other => panic!("expected a reply carrying its result, got {other:?}"),
+    }
     let failed = parse_incoming(r#"{"jsonrpc":"2.0","id":4,"error":{"message":"no"}}"#).unwrap();
     match failed {
-        Incoming::Reply { id, error } => {
+        Incoming::Reply { id, error, .. } => {
             assert_eq!(id, json!(4));
             assert_eq!(error.as_deref(), Some("no"));
         }

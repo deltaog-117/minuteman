@@ -31,12 +31,16 @@ use shared::DirEntryInfo;
 pub mod client;
 mod event;
 mod picker;
+mod view;
 
 pub use event::{EventParams, HostEvent};
 pub use picker::{
     METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_SHOW_PICKER, METHOD_WALK, METHOD_WALK_CANCEL,
     PickerClose, PickerEvent, PickerIndexing, PickerSpec, PickerUpdate, TreeEntry, WalkCancel,
     WalkEnd, WalkEvent, WalkOutcome, WalkRequest,
+};
+pub use view::{
+    Glyph, Line, MAX_CHARS, MAX_SPANS, METHOD_SET_VIEW, SetView, Slot, Span, Tone, View, ViewError,
 };
 
 /// Bumped only for a breaking change to the shapes below and in `plugin_host::protocol`; sent

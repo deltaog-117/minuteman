@@ -1846,8 +1846,37 @@ draws.
   there is no smart-case switch for it; sorting is nearest level first only; the driver loop
   (`run.rs`) is a copy of the finder's and should move into `plugin_api` once a third plugin needs
   it; and a plugin cannot yet say what choosing a result does.
-- [ ] **M4 – pane and decoration slots (`SetPane`):** preview (text, hex, images, thumbnails),
-  git status, the system HUD, marked size, inspect.
+- [x] **M4a – the `set_view` primitive, and git status on it.** A plugin fills a named slot of the
+  interface with `set_view`: a document of lines of spans, each with a tone (`normal`, `accent`,
+  `danger`, `dim`) and an optional glyph by name, which the interface draws in the user's glyph set
+  and palette and drops when the bar is too narrow. The plugin never sends a color or a symbol. The
+  first two slots are `status_entry` (a word about the selected entry) and `status_right` (a line
+  about the folder). A slot has one owner, the plugin that filled it last, and only its owner can
+  empty it; a plugin that stops loses its slots at once. The host cleans every view as it reads it
+  (control and direction-changing characters removed, at most one line per status slot, 64 spans,
+  512 characters), since the text reaches the terminal. `tui::git_status` is now `plugins/git`
+  (`mman-git`), which follows `dir_changed` and `selection_changed`, asks `get_state` once at start
+  for the cursor (so `client::Incoming::Reply` now carries `result`), runs the same `git status`
+  with the same safeguards (no optional locks, killed after 10 s, cancelled on leaving the
+  repository, re-run 3 s after the last run ended) on a thread per run, and sends a view only when
+  it differs from the last. Chosen as COA B (one view type for segments and panes) over a
+  status-segment-only message (A) and moving the preview first (C). The state word on the left now
+  trails the cursor by one round trip to the plugin, which is a few milliseconds; the old code asked
+  git's answer in the same frame. Without `mman-git` the status bar has no git segment and
+  everything else runs; `git_status = false` keeps it from starting. A bundled plugin that provides
+  no action is replaced only by one of the same name. Verified against the real `mman` over a PTY
+  read through `pyte`, in a scratch repository: the branch and `~1 ?1` showed, a clean file had no
+  state word, a modified file said `modified`, an untracked one `untracked`; `:cd` out of the
+  repository dropped both segments and `:cd` back restored them; killing `mman-git` removed its
+  segment; with `git_status = false` no `mman-git` process existed; and an `mman` copied alone
+  still browsed.
+  Follow-ups: a status block takes one tone (the first span's), so per-span tones show only once
+  a slot is a pane; an unfound `mman-git` is silent (the finder and search say how to get theirs,
+  but nothing is pressed here to say it on); slots are not yet reachable by a user plugin's
+  config.
+- [ ] **M4b – more slots, then the pane:** `header_pill` (marked size, the system HUD) and
+  `entry_badge` (a mark in the list for git), then `preview_pane` (text, hex, images, thumbnails)
+  and inspect, which need a scrollable multi-line view and a way to hand an image to the interface.
 - [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave
   `file_ops`; trash management (the trash view, restore, empty) becomes a plugin while moving a
   file to the trash stays in the core.
@@ -2152,7 +2181,9 @@ draws.
 
 0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`) and `cargo install --path plugins/finder` (the fuzzy finder, `mman-finder`,
-   which `f` now needs next to it; from a checkout `cargo build -p finder` once does it). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
+   which `f` now needs next to it; from a checkout `cargo build -p finder` once does it), and
+   `cargo install --path plugins/git` (`mman-git`, which the status bar's git segment now needs;
+   from a checkout `cargo build -p git`). Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
 1. `cargo run -p tui` — the newest: `mman --chooser-file /tmp/pick --pick save --pick-name x.txt`, press `Q`, `Enter`,
    and `cat /tmp/pick` (the saved path; `--pick files` with `v` marks and `Q` picks several; `q` leaves it empty).

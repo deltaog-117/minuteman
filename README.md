@@ -91,6 +91,7 @@ The command is `mman`. Install it with Cargo, then run it, optionally starting i
 cargo install --path crates/tui       # installs one executable: mman
 cargo install --path plugins/finder   # installs mman-finder, the fuzzy finder (`f`), next to it
 cargo install --path plugins/search   # installs mman-search, the structured search (`L`), next to it
+cargo install --path plugins/git      # installs mman-git, the git branch and file state in the status bar
 mman
 mman /path/to/dir
 ```
@@ -99,12 +100,14 @@ The fuzzy finder is a plugin that ships with Minuteman and starts by itself when
 next to `mman` (or on your `PATH`). Without it everything else works, and `f` says how to get it.
 A `[[plugin]]` of your own that lists `provides = ["find"]` takes its place (see
 `config.example.toml`). The structured search (`L`) works the same way with `mman-search` and
-`provides = ["locate"]`.
+`provides = ["locate"]`. The git branch and the state of the selected file in the status bar are a
+plugin too, `mman-git`: without it the status bar simply has no git segment, and `git_status =
+false` in `config.toml` keeps it from starting.
 
 From a checkout, without installing:
 
 ```bash
-cargo build -p finder -p search   # once, so the plugins are built next to mman
+cargo build -p finder -p search -p git   # once, so the plugins are built next to mman
 cargo run -p tui
 # or, starting in a specific directory:
 cargo run -p tui -- /path/to/dir
@@ -506,7 +509,8 @@ crates/
 
 plugins/
 ├── finder/             # `mman-finder`: the fuzzy finder, bundled as a plugin (`f`)
-└── search/             # `mman-search`: the structured search, bundled as a plugin (`L`)
+├── search/             # `mman-search`: the structured search, bundled as a plugin (`L`)
+└── git/                # `mman-git`: the status bar's git branch and file state, bundled as a plugin
 ```
 
 ---

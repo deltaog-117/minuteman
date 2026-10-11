@@ -34,15 +34,18 @@ struct Bundled {
     /// The program, found beside `mman` or on `PATH`.
     binary: &'static str,
     provides: &'static [&'static str],
+    /// The events it follows without being addressed (\`events = [...]\` of a \`[[plugin]]\`).
+    events: &'static [&'static str],
     /// What to tell the user when the program cannot be found.
     how_to_get: &'static str,
 }
 
-const BUNDLED: [Bundled; 2] = [
+const BUNDLED: [Bundled; 3] = [
     Bundled {
         name: "finder",
         binary: "mman-finder",
         provides: &["find"],
+        events: &[],
         how_to_get: "the fuzzy finder is a plugin and mman-finder was not found; \
             install it with `cargo install --path plugins/finder` (next to mman, or on PATH)",
     },
@@ -50,8 +53,18 @@ const BUNDLED: [Bundled; 2] = [
         name: "search",
         binary: "mman-search",
         provides: &["locate"],
+        events: &[],
         how_to_get: "the structured search is a plugin and mman-search was not found; \
             install it with `cargo install --path plugins/search` (next to mman, or on PATH)",
+    },
+    // Provides no action: it fills the status bar's git slots and follows the browser to do so.
+    Bundled {
+        name: "git",
+        binary: "mman-git",
+        provides: &[],
+        events: &["dir_changed", "selection_changed"],
+        how_to_get: "the git status is a plugin and mman-git was not found; \
+            install it with `cargo install --path plugins/git` (next to mman, or on PATH)",
     },
 ];
 
@@ -63,10 +76,15 @@ fn beside_mman(binary: &str) -> Option<String> {
 }
 
 /// The bundled plugins to start besides `configured`, with the command that runs each.
-pub fn specs(configured: &[PluginSpec]) -> Vec<PluginSpec> {
-    specs_found(configured, |binary| {
+/// `git_status = false` in the config leaves the git plugin out.
+pub fn specs(configured: &[PluginSpec], git_status: bool) -> Vec<PluginSpec> {
+    let mut found = specs_found(configured, |binary| {
         beside_mman(binary).or_else(|| program_exists(binary).then(|| binary.to_string()))
-    })
+    });
+    if !git_status {
+        found.retain(|spec| spec.name != "git");
+    }
+    found
 }
 
 /// `specs`, with `locate` standing in for the search for a program, which says where it is.
@@ -84,7 +102,7 @@ fn specs_found(
                 args: Vec::new(),
                 on_keys: Vec::new(),
                 commands: Vec::new(),
-                events: Vec::new(),
+                events: bundled.events.iter().map(|name| name.to_string()).collect(),
                 provides: bundled
                     .provides
                     .iter()
@@ -99,10 +117,12 @@ fn specs_found(
 fn replaced(bundled: &Bundled, configured: &[PluginSpec]) -> bool {
     configured.iter().any(|spec| {
         spec.name == bundled.name
-            || bundled
-                .provides
-                .iter()
-                .all(|action| spec.provides.iter().any(|provided| provided == action))
+            // A bundled plugin that provides no action can only be replaced by name.
+            || (!bundled.provides.is_empty()
+                && bundled
+                    .provides
+                    .iter()
+                    .all(|action| spec.provides.iter().any(|provided| provided == action)))
     })
 }
 
@@ -140,13 +160,38 @@ mod tests {
     #[test]
     fn a_fresh_install_starts_each_bundled_plugin_providing_its_action() {
         let started = specs_found(&[], found);
-        assert_eq!(started.len(), 2);
+        assert_eq!(started.len(), 3);
         assert_eq!(started[0].name, "finder");
         assert_eq!(started[0].command, "/opt/bin/mman-finder");
         assert_eq!(started[0].provides, ["find"]);
         assert_eq!(started[1].name, "search");
         assert_eq!(started[1].command, "/opt/bin/mman-search");
         assert_eq!(started[1].provides, ["locate"]);
+    }
+
+    #[test]
+    fn the_git_plugin_follows_the_browser_and_provides_no_action() {
+        let started = specs_found(&[], found);
+        let git = started
+            .iter()
+            .find(|spec| spec.name == "git")
+            .expect("bundled");
+        assert_eq!(git.command, "/opt/bin/mman-git");
+        assert!(git.provides.is_empty());
+        assert_eq!(git.events, ["dir_changed", "selection_changed"]);
+    }
+
+    #[test]
+    fn switching_git_status_off_leaves_only_the_git_plugin_out() {
+        let names = |on: bool| -> Vec<String> {
+            let mut found = specs_found(&[], found);
+            if !on {
+                found.retain(|spec| spec.name != "git");
+            }
+            found.into_iter().map(|spec| spec.name).collect()
+        };
+        assert_eq!(names(true), ["finder", "search", "git"]);
+        assert_eq!(names(false), ["finder", "search"]);
     }
 
     #[test]
@@ -167,17 +212,29 @@ mod tests {
                 .map(|spec| spec.name)
                 .collect()
         };
-        assert_eq!(names(&[configured("finder", &[])]), ["search"]);
-        assert_eq!(names(&[configured("fzf-picker", &["find"])]), ["search"]);
-        assert_eq!(names(&[configured("search", &[])]), ["finder"]);
-        assert_eq!(names(&[configured("grep-ui", &["locate"])]), ["finder"]);
+        assert_eq!(names(&[configured("finder", &[])]), ["search", "git"]);
+        assert_eq!(
+            names(&[configured("fzf-picker", &["find"])]),
+            ["search", "git"]
+        );
+        assert_eq!(names(&[configured("search", &[])]), ["finder", "git"]);
+        assert_eq!(
+            names(&[configured("grep-ui", &["locate"])]),
+            ["finder", "git"]
+        );
+        assert_eq!(names(&[configured("git", &[])]), ["finder", "search"]);
+        // A plugin providing nothing must not count as standing in for the git plugin.
+        assert_eq!(
+            names(&[configured("blame", &[])]),
+            ["finder", "search", "git"]
+        );
     }
 
     #[test]
     fn an_unrelated_plugin_leaves_the_bundled_ones_alone() {
         assert_eq!(
             specs_found(&[configured("blame", &["blame"])], found).len(),
-            2
+            3
         );
     }
 

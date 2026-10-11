@@ -55,7 +55,6 @@ use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
 use crate::disk_usage::DiskUsageView;
 use crate::extract_popup::{self, ExtractPopup};
-use crate::git_status::{GitStatus, Repo};
 use crate::inspect::InspectView;
 use crate::line_edit::LineEdit;
 use crate::live_refresh::LiveRefresh;
@@ -63,6 +62,7 @@ use crate::marked_size::{MarkedSize, Total};
 use crate::nav_job::{NavJob, NavPoll};
 use crate::open;
 use crate::picker_popup::PickerPopup;
+use crate::plugin_views::Slots;
 use crate::search_job::{SearchJob, SearchState};
 use crate::system_hud::SystemHud;
 use crate::wiring::WiringState;
@@ -506,8 +506,10 @@ pub struct App {
     /// What the yanked or cut clipboard adds up to, for the deck's fit check. The marks are spent
     /// by a yank, so the two are never the load at once, and the marks' own total is reused.
     clipboard_size: MarkedSize,
-    /// The browsed directory's repository, for the status bar (see `git_status`).
-    git: GitStatus,
+    /// What plugins have put in the interface's slots (see `plugin_views`).
+    slots: Slots,
+    /// Whether the bundled git plugin is started (`git_status` in `config.toml`).
+    git_status: bool,
     /// The header's system segment (see `system_hud`), when `[config] system_hud` turns it on.
     system: Option<SystemHud>,
     handle: tokio::runtime::Handle,
@@ -565,7 +567,8 @@ impl App {
             live: LiveRefresh::new(handle.clone(), Arc::clone(&vfs)),
             marked_size: MarkedSize::new(handle.clone(), Arc::clone(&vfs)),
             clipboard_size: MarkedSize::new(handle.clone(), Arc::clone(&vfs)),
-            git: GitStatus::new(handle.clone(), true),
+            slots: Slots::default(),
+            git_status: true,
             system: None,
             handle,
             interactive: Vec::new(),
@@ -696,7 +699,6 @@ impl App {
         self.plugins.is_running(popup.plugin())
     }
 
-    /// Turns the status bar's git segment on or off (`git_status` in `config.toml`).
     /// Browses `vfs` instead of the local disk: the background jobs, previews and scans started by
     /// this app all read through it.
     pub fn with_vfs(mut self, vfs: Arc<dyn Vfs>) -> Self {
@@ -708,8 +710,10 @@ impl App {
         self
     }
 
+    /// Turns the status bar's git segment on or off (`git_status` in `config.toml`): off means the
+    /// bundled git plugin is not started. Call before `with_plugins`.
     pub fn with_git_status(mut self, enabled: bool) -> Self {
-        self.git = GitStatus::new(self.handle.clone(), enabled);
+        self.git_status = enabled;
         self
     }
 
@@ -739,7 +743,7 @@ impl App {
     /// than treated as fatal — the same "one bad entry must never take the whole session down"
     /// rule `theming::Config::load` already follows for a malformed config file.
     pub fn with_plugins(mut self, specs: Vec<PluginSpec>, cwd: &Path) -> Self {
-        let bundled = crate::bundled::specs(&specs);
+        let bundled = crate::bundled::specs(&specs, self.git_status);
         for spec in specs.into_iter().chain(bundled) {
             if let Err(e) = self.plugins.spawn(
                 &self.handle,
@@ -931,8 +935,8 @@ impl App {
     }
 
     /// Keeps the figures the HUD shows about the browsed directory and the marks up to date: the
-    /// marked entries' total size and the repository's git status. Both run their work on the
-    /// blocking pool (see `marked_size` and `git_status`); call once per render tick.
+    /// marked entries' total size. It runs its work on the blocking
+    /// pool (see `marked_size`); call once per render tick.
     pub fn poll_hud(&mut self, browser: &BrowserState, now: Instant) {
         self.marked_size.poll(&browser.marked_paths());
         let clipped: Vec<PathBuf> = self
@@ -941,7 +945,6 @@ impl App {
             .map(|clip| clip.paths.clone())
             .unwrap_or_default();
         self.clipboard_size.poll(&clipped);
-        self.git.poll(browser.current_dir(), now);
         if let Some(system) = self.system.as_mut() {
             system.tick(now);
         }
@@ -1028,9 +1031,21 @@ impl App {
         })
     }
 
-    /// The repository the browsed directory is in, when git answered.
-    pub fn git_repo(&self) -> Option<&Repo> {
-        self.git.repo()
+    /// Applies a plugin's `set_view` to the slot it names.
+    pub fn set_view(&mut self, plugin: &str, set: plugin_host::SetView) {
+        self.slots.apply(plugin, set);
+    }
+
+    /// What fills `slot`, if a plugin has filled it.
+    pub fn slot_view(&self, slot: plugin_host::Slot) -> Option<&plugin_host::protocol::View> {
+        self.slots.view(slot)
+    }
+
+    /// Drops what plugins that have stopped had put in the slots, so a dead plugin's text never
+    /// lingers. Call once per render tick.
+    pub fn prune_views(&mut self) {
+        let plugins = &self.plugins;
+        self.slots.retain_running(|name| plugins.is_running(name));
     }
 
     /// The header's system segment text, when `[config] system_hud` is on.

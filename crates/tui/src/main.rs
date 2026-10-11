@@ -40,7 +40,6 @@ mod disk_usage;
 mod disk_usage_view;
 mod extract_popup;
 mod filmstrip_view;
-mod git_status;
 mod glyphs;
 mod gradient;
 mod grid_view;
@@ -58,6 +57,7 @@ mod overlay_view;
 mod picker_popup;
 mod picker_view;
 mod plugin_action;
+mod plugin_views;
 mod popup_shell;
 mod preview_hook;
 mod preview_view;
@@ -1418,6 +1418,7 @@ fn run(
                         popup.apply(update);
                     }
                 }
+                UiRequest::SetView { plugin, set } => app.set_view(&plugin, set),
                 UiRequest::Close {
                     plugin,
                     picker: number,
@@ -1431,6 +1432,7 @@ fn run(
                 }
             }
         }
+        app.prune_views();
         if let Some(popup) = picker.as_mut() {
             // A picker whose plugin has stopped can no longer answer: close it, and say so.
             if app.picker_alive(popup) {
@@ -4109,11 +4111,8 @@ fn draw(
                     browser.current_entries().len(),
                 ),
                 message: &message,
-                git: app.git_repo(),
-                git_entry: app
-                    .git_repo()
-                    .zip(browser.selected_entry())
-                    .and_then(|(repo, entry)| repo.state_of(&entry.path)),
+                entry_view: app.slot_view(plugin_host::Slot::StatusEntry),
+                right_view: app.slot_view(plugin_host::Slot::StatusRight),
             },
             config,
         );

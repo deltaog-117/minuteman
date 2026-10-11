@@ -786,6 +786,7 @@ async fn read_loop(
             }
             Ok(Incoming::PickerItems(update)) => ui.items(&plugin, update),
             Ok(Incoming::PickerClose(close)) => ui.close(&plugin, close.picker),
+            Ok(Incoming::SetView(set)) => ui.set_view(&plugin, set),
             Ok(Incoming::WalkCancel(cancel)) => walks.cancel(cancel.walk),
             Ok(Incoming::UnknownNotification) => {}
             Ok(Incoming::Request { id, request }) => {

@@ -83,7 +83,7 @@ fn read_lines(input: impl BufRead, commands: &Sender<Command>) {
         }
         let command = match parse_incoming(&line) {
             Ok(Incoming::Event(params)) => command_of(*params),
-            Ok(Incoming::Reply { id, error }) => {
+            Ok(Incoming::Reply { id, error, .. }) => {
                 id.as_u64().map(|id| Command::Replied { id, error })
             }
             // A line this plugin cannot read is not worth stopping for.

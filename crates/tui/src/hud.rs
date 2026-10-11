@@ -33,10 +33,11 @@ use shared::DirEntryInfo;
 use theming::{Action, Config};
 
 use crate::app::{ClipboardMode, Progress};
-use crate::git_status::{FileState, Head, Repo};
 use crate::glyphs::{self, Glyphs};
 use crate::marked_size::Total;
+use crate::plugin_views;
 use crate::style;
+use plugin_host::protocol::{Tone, View};
 
 // ---------------------------------------------------------------------------------------------
 // Text measuring and formatting
@@ -666,40 +667,10 @@ pub struct StatusView<'a> {
     /// `(1-based position of the selection, entries in the directory)`.
     pub position: (usize, usize),
     pub message: &'a str,
-    /// The repository the browsed directory is in, when git answered.
-    pub git: Option<&'a Repo>,
-    /// The selected entry's state in that repository; `None` for a clean one.
-    pub git_entry: Option<FileState>,
-}
-
-/// The git segment's text: `⎇ main ↑2 ↓1 +3 ~2 ?1`. Counts that are zero are left out, so a clean
-/// branch is just its name.
-pub fn git_summary(repo: &Repo, g: &Glyphs) -> String {
-    let head = match &repo.head {
-        Head::Branch(name) => name.clone(),
-        Head::Detached(id) => format!("@{id}"),
-    };
-    let mut parts = vec![g.pill(g.branch, &head)];
-    if let Some((ahead, behind)) = repo.ahead_behind {
-        if ahead > 0 {
-            parts.push(format!("{}{ahead}", g.ahead));
-        }
-        if behind > 0 {
-            parts.push(format!("{}{behind}", g.behind));
-        }
-    }
-    let counts = repo.counts;
-    for (symbol, count) in [
-        (g.staged, counts.staged),
-        (g.modified, counts.modified),
-        (g.untracked, counts.untracked),
-        (g.conflicted, counts.conflicted),
-    ] {
-        if count > 0 {
-            parts.push(format!("{symbol}{count}"));
-        }
-    }
-    parts.join(" ")
+    /// What a plugin put in the `StatusEntry` slot: one word about the selected entry.
+    pub entry_view: Option<&'a View>,
+    /// What a plugin put in the `StatusRight` slot: one line about the browsed folder.
+    pub right_view: Option<&'a View>,
 }
 
 pub fn key_label(code: KeyCode) -> String {
@@ -971,43 +942,38 @@ pub fn render_status_bar(
             style: seg_style,
         };
 
-        // The git segments are the first thing to go on a narrow bar: they are added only if they
-        // fit beside everything that is always shown, so they never crowd out the file details.
+        // What plugins put in the status slots is the first thing to go on a narrow bar: it is
+        // added only if it fits beside everything that is always shown, so it never crowds out the
+        // file details.
         let mut used: usize = left
             .iter()
             .chain(std::iter::once(&position))
             .map(segment_cost)
             .sum();
-        if let (Some(state), Some(_)) = (view.git_entry, view.git) {
-            let color = match state {
-                FileState::Conflicted => &theme.danger_fg,
-                _ => &theme.accent_fg,
-            };
-            let text = state.label().to_string();
-            if used + text_width(&text) + SEGMENT_PADDING <= width {
-                used += text_width(&text) + SEGMENT_PADDING;
-                left.push(Segment {
+        let plugin_segment = |view: Option<&View>, used: usize| {
+            let (text, tone) = plugin_views::line_text(view?, g)?;
+            (used + text_width(&text) + SEGMENT_PADDING <= width).then(|| {
+                let color = match tone {
+                    Tone::Danger => &theme.danger_fg,
+                    Tone::Dim => &theme.border_fg,
+                    Tone::Normal => &theme.file_fg,
+                    Tone::Accent => &theme.accent_fg,
+                };
+                Segment {
                     text,
                     style: style::styled(
                         Style::default().fg(style::color(color)).bg(bar_bg),
                         styles.status,
                     ),
-                });
-            }
+                }
+            })
+        };
+        if let Some(segment) = plugin_segment(view.entry_view, used) {
+            used += segment_cost(&segment);
+            left.push(segment);
         }
-        if let Some(repo) = view.git {
-            let text = git_summary(repo, g);
-            if used + text_width(&text) + SEGMENT_PADDING <= width {
-                right.push(Segment {
-                    text,
-                    style: style::styled(
-                        Style::default()
-                            .fg(style::color(&theme.accent_fg))
-                            .bg(bar_bg),
-                        styles.status,
-                    ),
-                });
-            }
+        if let Some(segment) = plugin_segment(view.right_view, used) {
+            right.push(segment);
         }
         right.push(position);
     }
@@ -1505,8 +1471,8 @@ mod tests {
             dir_items: Some(3),
             position: (2, 9),
             message,
-            git: None,
-            git_entry: None,
+            entry_view: None,
+            right_view: None,
         }
     }
 
@@ -1642,10 +1608,10 @@ mod tests {
     fn the_ascii_set_draws_the_header_and_status_bar_in_ascii_only() {
         let config = config_with(theming::GlyphSet::Ascii);
         let file = entry("main.rs", false);
-        let repo = sample_repo();
+        let (right, state) = (sample_right(), state_word("modified"));
         let mut with_git = view(Mode::Normal, Some(&file), "msg");
-        with_git.git = Some(&repo);
-        with_git.git_entry = Some(FileState::Modified);
+        with_git.right_view = Some(&right);
+        with_git.entry_view = Some(&state);
         let status = render_to_text(140, |f, a| render_status_bar(f, a, &with_git, &config));
         assert!(
             status.contains("modified"),
@@ -1789,10 +1755,10 @@ mod tests {
                         &config,
                     )
                 });
-                let repo = sample_repo();
+                let (right, state) = (sample_right(), state_word("staged+modified"));
                 let mut with_git = view(Mode::Normal, Some(&file), "a message that is long");
-                with_git.git = Some(&repo);
-                with_git.git_entry = Some(FileState::StagedModified);
+                with_git.right_view = Some(&right);
+                with_git.entry_view = Some(&state);
                 render_to_text(width, |f, a| render_status_bar(f, a, &with_git, &config));
                 for mode in [
                     Mode::Normal,
@@ -1817,55 +1783,56 @@ mod tests {
             }
         }
     }
-    fn sample_repo() -> Repo {
-        use crate::git_status::{Counts, Parsed};
-        Repo::new(
-            PathBuf::from("/repo"),
-            Parsed {
-                head: Head::Branch("main".into()),
-                ahead_behind: Some((2, 1)),
-                counts: Counts {
-                    staged: 3,
-                    modified: 2,
-                    untracked: 1,
-                    conflicted: 0,
-                },
-                entries: Vec::new(),
-            },
-        )
+    /// What the git plugin puts in the right slot for a branch with a bit of everything.
+    fn sample_right() -> View {
+        use plugin_host::protocol::{Glyph, Span};
+        let count = |glyph, n: &str| Span::with_glyph(glyph, false, n, Tone::Accent);
+        View::line(vec![
+            Span::with_glyph(Glyph::Branch, true, "main", Tone::Accent),
+            count(Glyph::Ahead, "2"),
+            count(Glyph::Behind, "1"),
+            count(Glyph::Staged, "3"),
+            count(Glyph::Modified, "2"),
+            count(Glyph::Untracked, "1"),
+        ])
+    }
+
+    fn state_word(word: &str) -> View {
+        View::line(vec![plugin_host::protocol::Span::text(word, Tone::Accent)])
     }
 
     #[test]
-    fn the_git_summary_lists_the_branch_then_only_the_nonzero_counts() {
-        let g = Glyphs::for_set(theming::GlyphSet::Unicode);
-        assert_eq!(git_summary(&sample_repo(), g), "⎇ main ↑2 ↓1 +3 ~2 ?1");
-
-        let mut clean = sample_repo();
-        clean.ahead_behind = Some((0, 0));
-        clean.counts = Default::default();
-        assert_eq!(git_summary(&clean, g), "⎇ main");
-
-        let mut detached = sample_repo();
-        detached.head = Head::Detached("0123456".into());
-        detached.ahead_behind = None;
-        detached.counts = Default::default();
-        assert_eq!(git_summary(&detached, g), "⎇ @0123456");
-    }
-
-    #[test]
-    fn the_ascii_git_summary_has_no_branch_symbol_and_plain_arrows() {
-        let g = Glyphs::for_set(theming::GlyphSet::Ascii);
-        assert_eq!(git_summary(&sample_repo(), g), "main ^2 v1 +3 ~2 ?1");
+    fn a_danger_tone_is_drawn_in_the_danger_color() {
+        let config = test_config();
+        let file = entry("main.rs", false);
+        let state = View::line(vec![plugin_host::protocol::Span::text(
+            "conflict",
+            Tone::Danger,
+        )]);
+        let mut v = view(Mode::Normal, Some(&file), "");
+        v.entry_view = Some(&state);
+        let danger = style::color(&config.theme.danger_fg);
+        let backend = ratatui::backend::TestBackend::new(140, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("a test terminal");
+        terminal
+            .draw(|f| render_status_bar(f, f.area(), &v, &config))
+            .expect("draws");
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..140)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        let x = row.find("conflict").expect("the word is drawn") as u16;
+        assert_eq!(buffer[(x, 0)].fg, danger);
     }
 
     #[test]
     fn the_status_bar_shows_the_branch_and_the_selected_files_state() {
         let config = test_config();
         let file = entry("main.rs", false);
-        let repo = sample_repo();
+        let (right, state) = (sample_right(), state_word("modified"));
         let mut v = view(Mode::Normal, Some(&file), "");
-        v.git = Some(&repo);
-        v.git_entry = Some(FileState::Modified);
+        v.right_view = Some(&right);
+        v.entry_view = Some(&state);
         let text = render_to_text(140, |f, a| render_status_bar(f, a, &v, &config));
         assert!(text.contains("modified"), "{text:?}");
         assert!(text.contains("⎇ main ↑2 ↓1 +3 ~2 ?1"), "{text:?}");
@@ -1876,9 +1843,9 @@ mod tests {
     fn a_clean_selection_shows_the_branch_but_no_state() {
         let config = test_config();
         let file = entry("main.rs", false);
-        let repo = sample_repo();
+        let right = sample_right();
         let mut v = view(Mode::Normal, Some(&file), "");
-        v.git = Some(&repo);
+        v.right_view = Some(&right);
         let text = render_to_text(140, |f, a| render_status_bar(f, a, &v, &config));
         assert!(text.contains("⎇ main"), "{text:?}");
         assert!(
@@ -1888,13 +1855,13 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_bar_drops_the_git_segments_before_the_file_details() {
+    fn a_narrow_bar_drops_the_plugin_segments_before_the_file_details() {
         let config = test_config();
         let file = entry("main.rs", false);
-        let repo = sample_repo();
+        let (right, state) = (sample_right(), state_word("modified"));
         let mut v = view(Mode::Normal, Some(&file), "");
-        v.git = Some(&repo);
-        v.git_entry = Some(FileState::Modified);
+        v.right_view = Some(&right);
+        v.entry_view = Some(&state);
 
         let text = render_to_text(60, |f, a| render_status_bar(f, a, &v, &config));
         assert!(
@@ -1909,12 +1876,12 @@ mod tests {
     }
 
     #[test]
-    fn git_is_not_shown_in_modes_that_have_their_own_status() {
+    fn plugin_segments_are_not_shown_in_modes_that_have_their_own_status() {
         let config = test_config();
         let file = entry("main.rs", false);
-        let repo = sample_repo();
+        let right = sample_right();
         let mut v = view(Mode::Leader, Some(&file), "");
-        v.git = Some(&repo);
+        v.right_view = Some(&right);
         let text = render_to_text(140, |f, a| render_status_bar(f, a, &v, &config));
         assert!(!text.contains("⎇"), "{text:?}");
     }

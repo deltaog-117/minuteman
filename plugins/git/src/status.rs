@@ -14,24 +14,23 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The status bar's git segment: which branch the browsed directory is on, how far it is from its
-//! upstream, how many files are staged, modified or untracked, and the state of each path (so the
-//! selected file, or a folder holding changes, can say so).
+//! Asking git: which branch a folder's repository is on, how far it is from its upstream, how many
+//! files are staged, modified or untracked, and the state of each path (so a selected file, or a
+//! folder holding changes, can say so).
 //!
-//! The answer comes from the `git` binary — `git status --porcelain=v2 --branch -z` — run on the
-//! blocking pool, one job at a time, the way `live_refresh` re-lists a directory. Three choices
+//! The answer comes from the `git` binary: `git status --porcelain=v2 --branch -z`. Three choices
 //! keep that safe to leave running while the user works in the same repository:
 //!
 //! - `--no-optional-locks` stops a status refresh from taking git's index lock, which would make
 //!   a `git commit` typed in a mini-shell at the wrong instant fail with "index.lock exists";
-//! - a job is cancelled when the browsed directory leaves the repository, and killed after
+//! - a run is cancelled when the browsed directory leaves the repository, and killed after
 //!   `TIMEOUT` so a huge repository on a slow disk cannot pile up processes;
 //! - whether a directory is in a repository at all is decided in-process by looking for `.git`,
 //!   so browsing outside one never starts a process.
 //!
-//! A missing `git`, an unreadable repository or a timeout simply means no segment (or the last
-//! good one, if there was one): the bar is decoration and must never get in the way. The parser
-//! is a pure function over bytes so it can be tested without running git.
+//! A missing `git`, an unreadable repository or a timeout simply means no answer (the session
+//! keeps the last good one): the status bar is decoration and must never get in the way. The
+//! parser is a pure function over bytes so it can be tested without running git.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -39,22 +38,13 @@ use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
-
-/// Time between the end of one status run and the start of the next. Git's own work is the cost,
-/// so this is counted from when a run finishes: a slow repository gets a proportionally lazier
-/// refresh instead of back-to-back runs.
-const REFRESH_AFTER: Duration = Duration::from_secs(3);
 
 /// A status run still going after this is killed and reported as failed.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How often a running job checks whether git finished or it was cancelled.
+/// How often a running run checks whether git finished or it was cancelled.
 const POLL_EVERY: Duration = Duration::from_millis(15);
 
 /// Output beyond this is never read, so git blocks on a full pipe and the run times out rather
@@ -287,7 +277,7 @@ fn find_root(dir: &Path) -> Option<PathBuf> {
 
 /// Runs `git status` in `root`, returning its output, or `None` if git is missing, failed, timed
 /// out, or `cancel` was set.
-fn run_status(root: &Path, cancel: &AtomicBool) -> Option<Vec<u8>> {
+pub fn run_status(root: &Path, cancel: &AtomicBool) -> Option<Vec<u8>> {
     let mut child = Command::new("git")
         .arg("--no-optional-locks")
         .arg("-C")
@@ -342,115 +332,21 @@ fn run_status(root: &Path, cancel: &AtomicBool) -> Option<Vec<u8>> {
     status.filter(ExitStatus::success).map(|_| output)
 }
 
-/// What one background job found.
-enum Answer {
+/// What one run found.
+pub enum Answer {
     NotARepo,
     /// Git could not answer this time; keep showing the last good result.
     Failed,
     Repo(Box<Repo>),
 }
 
-fn read_repo(dir: &Path, cancel: &AtomicBool) -> Answer {
+pub fn read_repo(dir: &Path, cancel: &AtomicBool) -> Answer {
     let Some(root) = find_root(dir) else {
         return Answer::NotARepo;
     };
     match run_status(&root, cancel) {
         Some(output) => Answer::Repo(Box::new(Repo::new(root, parse(&output)))),
         None => Answer::Failed,
-    }
-}
-
-struct Job {
-    cancel: Arc<AtomicBool>,
-    rx: UnboundedReceiver<Answer>,
-}
-
-impl Drop for Job {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
-}
-
-pub struct GitStatus {
-    handle: tokio::runtime::Handle,
-    /// `[git_status]` in `config.toml`; off means no process is ever started.
-    enabled: bool,
-    /// The directory the current state and job are about.
-    dir: Option<PathBuf>,
-    repo: Option<Repo>,
-    job: Option<Job>,
-    /// Earliest moment the next job may start; `None` means at once.
-    next_at: Option<Instant>,
-}
-
-impl GitStatus {
-    pub fn new(handle: tokio::runtime::Handle, enabled: bool) -> Self {
-        Self {
-            handle,
-            enabled,
-            dir: None,
-            repo: None,
-            job: None,
-            next_at: None,
-        }
-    }
-
-    /// Call once per render tick with the browsed directory. Picks up a finished job, and starts
-    /// the next when the directory changed or `REFRESH_AFTER` has passed since the last one.
-    pub fn poll(&mut self, dir: &Path, now: Instant) {
-        if !self.enabled {
-            return;
-        }
-        if self.dir.as_deref() != Some(dir) {
-            self.dir = Some(dir.to_path_buf());
-            // A status describes the whole repository, so moving within it keeps what is on
-            // screen; leaving it drops the branch straight away rather than after the next job.
-            if self
-                .repo
-                .as_ref()
-                .is_some_and(|r| !dir.starts_with(&r.root))
-            {
-                self.repo = None;
-            }
-            // The job in flight was for the old directory; dropping it cancels it.
-            self.job = None;
-            self.next_at = None;
-        }
-        if let Some(job) = self.job.as_mut() {
-            match job.rx.try_recv() {
-                Ok(answer) => self.apply(answer),
-                Err(TryRecvError::Empty) => return,
-                Err(TryRecvError::Disconnected) => {}
-            }
-            self.job = None;
-            self.next_at = Some(now + REFRESH_AFTER);
-        }
-        if self.next_at.is_none_or(|at| now >= at) {
-            self.job = Some(self.start(dir.to_path_buf()));
-        }
-    }
-
-    /// The repository the browsed directory is in, if it is in one and git answered.
-    pub fn repo(&self) -> Option<&Repo> {
-        self.repo.as_ref()
-    }
-
-    fn apply(&mut self, answer: Answer) {
-        match answer {
-            Answer::NotARepo => self.repo = None,
-            Answer::Failed => {}
-            Answer::Repo(repo) => self.repo = Some(*repo),
-        }
-    }
-
-    fn start(&self, dir: PathBuf) -> Job {
-        let (tx, rx) = unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_bg = Arc::clone(&cancel);
-        self.handle.spawn_blocking(move || {
-            let _ = tx.send(read_repo(&dir, &cancel_bg));
-        });
-        Job { cancel, rx }
     }
 }
 
@@ -728,23 +624,15 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
-    fn wait_for_repo(status: &mut GitStatus, dir: &Path, start: Instant) -> Option<Repo> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut now = start;
-        loop {
-            status.poll(dir, now);
-            if status.job.is_none() {
-                return status.repo().cloned();
-            }
-            assert!(Instant::now() < deadline, "git status never finished");
-            std::thread::sleep(Duration::from_millis(10));
-            now = Instant::now();
+    fn repo_of(dir: &Path) -> Option<Repo> {
+        match read_repo(dir, &AtomicBool::new(false)) {
+            Answer::Repo(repo) => Some(*repo),
+            Answer::NotARepo | Answer::Failed => None,
         }
     }
 
     #[test]
     fn the_real_git_reports_branch_and_the_state_of_each_path() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let dir = scratch("real");
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("tracked.txt"), "one").unwrap();
@@ -755,8 +643,7 @@ mod tests {
         std::fs::write(dir.join("sub/deep.txt"), "two").unwrap();
         std::fs::write(dir.join("new file.txt"), "x").unwrap();
 
-        let mut status = GitStatus::new(runtime.handle().clone(), true);
-        let repo = wait_for_repo(&mut status, &dir, Instant::now()).expect("a repository");
+        let repo = repo_of(&dir).expect("a repository");
         assert_eq!(repo.head, Head::Branch("main".into()));
         assert_eq!(repo.ahead_behind, None);
         assert_eq!(
@@ -782,7 +669,6 @@ mod tests {
 
     #[test]
     fn a_status_run_does_not_touch_the_index() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let dir = scratch("lock");
         git(&dir, &["init", "-q"]);
         std::fs::write(dir.join("a"), "1").unwrap();
@@ -795,8 +681,7 @@ mod tests {
         let index = dir.join(".git/index");
         let before = std::fs::metadata(&index).unwrap().modified().unwrap();
 
-        let mut status = GitStatus::new(runtime.handle().clone(), true);
-        let repo = wait_for_repo(&mut status, &dir, Instant::now()).expect("a repository");
+        let repo = repo_of(&dir).expect("a repository");
         assert_eq!(
             repo.state_of(&dir.join("a")),
             None,
@@ -818,48 +703,22 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_outside_any_repository_has_no_repo_and_leaving_one_clears_it() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let repo_dir = scratch("in");
-        git(&repo_dir, &["init", "-q"]);
+    fn a_directory_outside_any_repository_is_not_one_and_starts_no_process() {
         let outside = scratch("out");
-
-        let mut status = GitStatus::new(runtime.handle().clone(), true);
-        assert!(wait_for_repo(&mut status, &repo_dir, Instant::now()).is_some());
-        // The move itself must drop the branch, before any job has answered.
-        status.poll(&outside, Instant::now());
-        assert!(status.repo().is_none());
-        assert!(wait_for_repo(&mut status, &outside, Instant::now()).is_none());
-        std::fs::remove_dir_all(&repo_dir).unwrap();
+        assert!(matches!(
+            read_repo(&outside, &AtomicBool::new(false)),
+            Answer::NotARepo
+        ));
         std::fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]
-    fn moving_within_a_repository_keeps_what_is_shown() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+    fn a_subfolder_belongs_to_the_repository_above_it() {
         let dir = scratch("within");
         git(&dir, &["init", "-q"]);
         std::fs::create_dir(dir.join("sub")).unwrap();
-
-        let mut status = GitStatus::new(runtime.handle().clone(), true);
-        assert!(wait_for_repo(&mut status, &dir, Instant::now()).is_some());
-        status.poll(&dir.join("sub"), Instant::now());
-        assert!(
-            status.repo().is_some(),
-            "same repository, no reason to blank the bar"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn switched_off_it_never_starts_anything() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let dir = scratch("off");
-        git(&dir, &["init", "-q"]);
-        let mut status = GitStatus::new(runtime.handle().clone(), false);
-        status.poll(&dir, Instant::now());
-        assert!(status.job.is_none());
-        assert!(status.repo().is_none());
+        let repo = repo_of(&dir.join("sub")).expect("the repository above");
+        assert_eq!(repo.root, dir);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

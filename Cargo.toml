@@ -17,6 +17,7 @@ members = [
     "crates/tui",
     "plugins/finder",
     "plugins/search",
+    "plugins/git",
 ]
 
 [workspace.package]
