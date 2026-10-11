@@ -42,6 +42,13 @@ pub struct TreeEntry {
     /// The path below the folder the walk began at, with `/` separators: what is matched and shown.
     pub rel: String,
     pub is_dir: bool,
+    /// Size in bytes, sent only when the walk asked for `metadata` and the entry is a file whose
+    /// backend knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Modification time as seconds since the Unix epoch, sent under the same conditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<u64>,
 }
 
 impl TreeEntry {
@@ -112,6 +119,10 @@ pub struct WalkRequest {
     pub root: PathBuf,
     /// Whether dot-files are listed and entered; the host's own limits on depth and count apply.
     pub show_hidden: bool,
+    /// Whether each entry carries its `size` and `modified`. Off unless asked for, so a plugin that
+    /// only matches names (the fuzzy finder) pays nothing for what it does not read.
+    #[serde(default)]
+    pub metadata: bool,
 }
 
 /// The parameters of `walk_cancel`.

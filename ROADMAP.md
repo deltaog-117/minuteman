@@ -1827,7 +1827,25 @@ draws.
   to turn a bundled plugin off without writing a replacement, `preview = false` pickers have only
   been laid out and not tried by a plugin, and a chosen result always means "show it in the
   browser" (a plugin cannot yet say what choosing does).
-- [ ] **M3 – recursive search** on the same picker slot.
+- [x] **M3 – structured search (`L`) on the same picker slot.** `/` (the nearest-level fuzzy
+  search) and the `f` finder are unchanged: `/` is a fundamental part of the core and `f` is the
+  one bundled plugin. M3 adds a second bundled plugin, `plugins/search` (`mman-search`, providing
+  the new `locate` action, bound to `L`), for what neither does: every entry below the folder that
+  satisfies all the words typed. A word is a plain piece of the path (case ignored unless it has a
+  capital), a glob (`*.rs`, `src/**.rs`), `re:` and a regular expression, `size:>1M` or
+  `size:1k..2M`, `mtime:<7d` (changed less than that long ago) or `mtime:>1w`, and `type:f` or
+  `type:d`. Results come nearest level first with the same preview as `f`, and a word that cannot
+  be read is set aside and named in the status bar while the rest still applies. The wire grew
+  two optional fields, `TreeEntry::size` and `modified`, and `WalkRequest::metadata` (off unless
+  asked for, so the finder's lines are byte-identical), fed from the listing the walk already
+  reads. Timed on 200,000 entries in a release build: 1 to 15 ms in all, the longest slice of
+  2,048 entries under 0.2 ms. Content search (grep) was left for its own milestone, since it needs
+  a way for a plugin to read file bodies through the host.
+  Follow-ups: the status bar flashes `ignoring size:` while a filter is still being typed; no
+  highlight of what matched; words cannot contain spaces (no quoting); `re:` is case sensitive and
+  there is no smart-case switch for it; sorting is nearest level first only; the driver loop
+  (`run.rs`) is a copy of the finder's and should move into `plugin_api` once a third plugin needs
+  it; and a plugin cannot yet say what choosing a result does.
 - [ ] **M4 – pane and decoration slots (`SetPane`):** preview (text, hex, images, thumbnails),
   git status, the system HUD, marked size, inspect.
 - [ ] **M5 – event-driven features:** archives (compress, extract) and undo history leave

@@ -91,6 +91,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-10 | Browser File Chooser | A native portal backend, `mman-portal`, opening `mman --chooser-file` in a terminal (COA B); `xdg-desktop-portal-termfilechooser` with a wrapper script (A) and only a default folder handler (C) not taken | ✅ Confirmed |
 | 2026-10-11 | Core and Bundled Plugins | Move features out one at a time into bundled plugins, starting with a scaffold that changes no behavior (COA C: in-process traits and the plugin protocol); in-process traits alone (A) and everything over the protocol (B) not taken | ✅ Confirmed |
 | 2026-10-11 | Fuzzy Finder as a Plugin | The interface walks the tree and draws the list, the plugin ranks (COA B); a plugin that walks the tree itself through `read_dir` (A) and keeping the finder in-process behind a trait (C) not taken | ✅ Confirmed |
+| 2026-10-11 | Structured Search Plugin | A second bundled plugin on the picker slot, filters over the walk (COA C, delivered as B first); `/` and `f` kept as they are; content search (A) deferred | ✅ Confirmed |
 
 ---
 
@@ -6807,6 +6808,65 @@ entries in 300 folders, release builds, three runs each (index complete after `f
 ranked after its last letter): 0.68 s / 0.08 s before, 0.66 s / 0.04 s after. Not run: a remote
 backend or an archive through the plugin (the walk uses the same `Vfs` the browser does, and the
 walk's tests use an in-memory one), and a terminal other than the pseudo-terminal.
+
+---
+
+## 2026-10-11 — Structured search as a bundled plugin (M3)
+
+**Context.** The roadmap's M3 said only "recursive search on the same picker slot". The first
+reading, moving `/` onto the plugin, was rejected: `/` is part of what Minuteman is and stays in
+the core, and the `f` finder stays the one plugin on that key. So M3 had to add something
+neither does. `/` is a nearest-level fuzzy match on names, `f` is a fuzzy match on names and
+paths; what is missing is matching by pattern and by what a file is (size, age, kind).
+
+| COA | Approach | Verdict |
+|---|---|---|
+| A | A content-search plugin (`grep`) streaming matching lines | Not taken now: `walk` lists but cannot read, so it needs a host call to read file bodies, and over ssh and archives it is slow |
+| B | A name-and-metadata search plugin: glob, regex, `size:`, `mtime:`, `type:` | Delivered first |
+| C | B with a query grammar that leaves room for a content mode | Chosen: C, shipped as B |
+
+**Decision.** `plugins/search` is a second bundled plugin, `mman-search`, providing a new action
+`locate` bound to `L`. (`F` was the first choice; the keymap test uses `F` as the probe for "a key
+no default binds", and the test was right, so the default moved instead.) The tree below the
+folder comes from the same host `walk` the finder uses, now asked for with `metadata: true`:
+`TreeEntry` gained optional `size` and `modified` and `WalkRequest` an optional `metadata`, filled
+from the `size` and `modified` the listing already returns and `browser::finder::Candidate` used to
+drop. A folder never carries a size, and a time before the epoch is dropped. With the switch off
+the lines are byte-for-byte what they were.
+
+The plugin is `query` (the grammar: every word is a typed term, `Span` is an inclusive pair that
+cannot be empty, a glob is translated to an anchored regular expression and a literal is escaped,
+all compiled once per query), `scan` (checks the growing index a slice at a time and keeps the
+first 200 matches in index order, which is nearest level first, so nothing is sorted), `session`
+(the finder's state machine with the scan in place of the ranking) and `run` (a copy of the
+finder's driver loop). A word that cannot be read never fails the query: `Search::parse` returns
+it in `ignored`, and the session reports a given set once rather than on every later letter.
+Matching rules chosen: lower-case words ignore case, a capital makes them exact (a rule for
+literals and globs only, since `\D` in a regular expression would trip it, so `re:` is case
+sensitive and `(?i)` turns that off); an entry missing the data a filter needs does not match it;
+`mtime:<7d` means changed less than seven days ago.
+
+In the core: `Action::Locate` and its key, `begin_locate` sharing `begin_picker_action` with
+`begin_find`, and a second row in the bundled table. Nothing in `crates/` names the plugin.
+
+**Trade-offs.** `run.rs` is a copy of the finder's loop, not a shared one; extracting it waits
+for the third plugin, as it would otherwise move the finder in a change about something else.
+Words cannot contain spaces. The status bar says `ignoring size:` while a filter is still being
+typed, which is accurate but noisy. Content search is not here and needs its own design for
+reading a file through the host.
+
+**Verification.** `scripts/check` passes. New tests: 33 in `search` (the grammar word by word,
+the property that an added word never adds a match, that parsing never loses a word, that a path
+typed as a word finds itself, that slicing the scan never changes the answer, the session's
+opening, filtering, one-time reporting, refusals and stale numbers), 4 with the real
+`mman-search` binary on pipes, the host's metadata mapping, the wire's optional fields, and the
+bundled table with two plugins. Measured on 200,000 entries in a release build: a query takes 1
+to 15 ms in all, the longest slice of 2,048 entries under 0.2 ms. The real `mman` was driven
+through a pseudo-terminal in a folder of four entries: `L` opened a `locate` panel, typing
+`size:>1k *.rs` narrowed it to the one file over a kilobyte (`1/4`) with its hex preview, and the
+status bar named the half-typed `size:`. Not run: a remote backend or an archive through the
+plugin (the sizes there depend on what those listings return), and a terminal other than the
+pseudo-terminal.
 
 ---
 

@@ -26,6 +26,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::SystemTime;
 
 use shared::Vfs;
 
@@ -39,6 +40,9 @@ pub struct Candidate {
     /// The path below the root the walk began at, with `/` separators: what is matched and shown.
     pub rel: String,
     pub is_dir: bool,
+    /// Size in bytes, as the listing gave it (meaningless for a directory).
+    pub size: u64,
+    pub modified: Option<SystemTime>,
 }
 
 impl Candidate {
@@ -114,6 +118,8 @@ pub fn walk(
                 path: entry.path,
                 rel,
                 is_dir: entry.is_dir,
+                size: entry.size,
+                modified: entry.modified,
             });
         }
         if !batch.is_empty() {
@@ -133,6 +139,8 @@ mod tests {
             path: PathBuf::from("/root").join(rel),
             rel: rel.to_string(),
             is_dir: false,
+            size: 0,
+            modified: None,
         }
     }
 

@@ -61,6 +61,8 @@ fn index() -> Vec<TreeEntry> {
                 path: PathBuf::from("/root").join(&rel),
                 rel,
                 is_dir: false,
+                size: None,
+                modified: None,
             }
         })
         .collect()

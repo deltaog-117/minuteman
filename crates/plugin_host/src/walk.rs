@@ -23,8 +23,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use browser::finder::{Walked, walk};
+use browser::finder::{Candidate, Walked, walk};
 use browser::search::Limits;
 use shared::Vfs;
 use tokio::runtime::Handle;
@@ -71,6 +72,7 @@ impl Walks {
                 walk: number,
                 root,
                 show_hidden,
+                metadata,
             } = request;
             let ended = walk(
                 vfs.as_ref(),
@@ -81,11 +83,7 @@ impl Walks {
                 |batch| {
                     let entries: Vec<TreeEntry> = batch
                         .into_iter()
-                        .map(|candidate| TreeEntry {
-                            path: candidate.path,
-                            rel: candidate.rel,
-                            is_dir: candidate.is_dir,
-                        })
+                        .map(|candidate| entry_of(candidate, metadata))
                         .collect();
                     for chunk in entries.chunks(BATCH) {
                         let event = HostEvent::walk_batch(number, chunk.to_vec());
@@ -127,6 +125,32 @@ impl Walks {
     }
 }
 
+/// The wire form of `candidate`; its size and time only when the plugin asked for them, and a
+/// directory never has a size worth sending.
+fn entry_of(candidate: Candidate, metadata: bool) -> TreeEntry {
+    let (size, modified) = match metadata {
+        true => (
+            (!candidate.is_dir).then_some(candidate.size),
+            candidate.modified.and_then(epoch_seconds),
+        ),
+        false => (None, None),
+    };
+    TreeEntry {
+        path: candidate.path,
+        rel: candidate.rel,
+        is_dir: candidate.is_dir,
+        size,
+        modified,
+    }
+}
+
+/// Whole seconds since the Unix epoch, or `None` for a time before it.
+fn epoch_seconds(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +172,7 @@ mod tests {
             walk,
             root: PathBuf::from("/root"),
             show_hidden,
+            metadata: false,
         }
     }
 
@@ -174,6 +199,34 @@ mod tests {
                 return all;
             }
         }
+    }
+
+    fn candidate(is_dir: bool, size: u64, modified: Option<SystemTime>) -> Candidate {
+        Candidate {
+            path: "/root/x".into(),
+            rel: "x".to_string(),
+            is_dir,
+            size,
+            modified,
+        }
+    }
+
+    #[test]
+    fn size_and_time_go_out_only_when_asked_for() {
+        let at = UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let asked = entry_of(candidate(false, 5, Some(at)), true);
+        assert_eq!((asked.size, asked.modified), (Some(5), Some(100)));
+        let not_asked = entry_of(candidate(false, 5, Some(at)), false);
+        assert_eq!((not_asked.size, not_asked.modified), (None, None));
+    }
+
+    #[test]
+    fn a_folder_has_no_size_and_a_time_before_the_epoch_is_none() {
+        let before = UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let folder = entry_of(candidate(true, 4096, Some(before)), true);
+        assert_eq!((folder.size, folder.modified), (None, None));
+        let unknown = entry_of(candidate(false, 0, None), true);
+        assert_eq!((unknown.size, unknown.modified), (Some(0), None));
     }
 
     #[test]

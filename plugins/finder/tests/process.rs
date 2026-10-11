@@ -112,6 +112,8 @@ fn entry(rel: &str, is_dir: bool) -> TreeEntry {
         path: PathBuf::from("/root").join(rel),
         rel: rel.to_string(),
         is_dir,
+        size: None,
+        modified: None,
     }
 }
 

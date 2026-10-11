@@ -151,6 +151,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/preview/proptest-regressions/`.
 
 ### Added
+- Structured search (`L`), a second bundled plugin: the program `mman-search`
+  (`cargo install --path plugins/search`), started by itself when it is next to `mman` or on
+  `PATH`. It lists every entry below the browsed folder that satisfies every word typed: a piece of
+  the path, a glob (`*.rs`), `re:` and a regular expression, `size:>1M`, `size:1k..2M`,
+  `mtime:<7d`, `mtime:>1w`, `type:f` or `type:d`. A word it cannot read is left out and named in
+  the status bar. `/` and `f` are unchanged. New action `locate` and key `locate = ["L"]`; a
+  `[[plugin]]` of your own with `provides = ["locate"]` takes its place.
+- Plugin protocol: `walk` takes `metadata`, and each entry then carries `size` (files only) and
+  `modified` (seconds since the epoch) when the listing has them. Both are optional on the wire.
 - The fuzzy finder (`f`) is now a plugin that ships with Minuteman: the program `mman-finder`
   (`cargo install --path plugins/finder`), started by itself when it is next to `mman` or on
   `PATH`. It ranks and the interface draws, so how it looks and behaves is as before; without it

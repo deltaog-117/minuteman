@@ -1,0 +1,19 @@
+[package]
+name = "search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The structured search Minuteman ships as a plugin: it matches what the host walks by glob, regular expression and filters, and the host draws the list."
+
+[[bin]]
+name = "mman-search"
+path = "src/main.rs"
+
+[dependencies]
+plugin_api = { path = "../../crates/plugin_api" }
+serde_json = "1.0"
+regex = "1"
+
+[dev-dependencies]
+proptest = "1.11"

@@ -152,6 +152,8 @@ fn walk_events_carry_the_entries_or_the_end() {
         path: PathBuf::from("/r/a/b"),
         rel: "a/b".to_string(),
         is_dir: false,
+        size: None,
+        modified: None,
     };
     let batch = event_of(&HostEvent::walk_batch(4, vec![entry.clone()]));
     let walk = batch.walk.unwrap();
@@ -169,17 +171,47 @@ fn walk_events_carry_the_entries_or_the_end() {
 }
 
 #[test]
+fn metadata_is_optional_on_the_wire_so_older_plugins_and_hosts_still_agree() {
+    let request: WalkRequest =
+        serde_json::from_value(json!({"walk": 1, "root": "/r", "show_hidden": false})).unwrap();
+    assert!(
+        !request.metadata,
+        "a plugin that never heard of it gets none"
+    );
+
+    let entry: TreeEntry =
+        serde_json::from_value(json!({"path": "/r/a", "rel": "a", "is_dir": false})).unwrap();
+    assert_eq!((entry.size, entry.modified), (None, None));
+
+    let bare = serde_json::to_value(&entry).unwrap();
+    assert!(bare.get("size").is_none() && bare.get("modified").is_none());
+
+    let full = TreeEntry {
+        size: Some(7),
+        modified: Some(9),
+        ..entry
+    };
+    let value = serde_json::to_value(&full).unwrap();
+    assert_eq!((&value["size"], &value["modified"]), (&json!(7), &json!(9)));
+    assert_eq!(serde_json::from_value::<TreeEntry>(value).unwrap(), full);
+}
+
+#[test]
 fn an_entry_knows_its_name_and_its_folder() {
     let nested = TreeEntry {
         path: PathBuf::from("/r/src/ui/main.rs"),
         rel: "src/ui/main.rs".to_string(),
         is_dir: false,
+        size: None,
+        modified: None,
     };
     assert_eq!((nested.name(), nested.parent_rel()), ("main.rs", "src/ui"));
     let top = TreeEntry {
         path: PathBuf::from("/r/main.rs"),
         rel: "main.rs".to_string(),
         is_dir: false,
+        size: None,
+        modified: None,
     };
     assert_eq!((top.name(), top.parent_rel()), ("main.rs", ""));
 }
@@ -217,6 +249,7 @@ fn request_and_notification_lines_have_the_shape_the_host_reads() {
         walk: 2,
         root: PathBuf::from("/r"),
         show_hidden: false,
+        metadata: false,
     };
     let line = request_line(7, METHOD_WALK, &request);
     assert!(line.ends_with('\n'));

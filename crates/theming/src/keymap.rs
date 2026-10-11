@@ -61,6 +61,9 @@ pub enum Action {
     /// Opens the fuzzy finder (`f`): every entry below the browsed directory, ranked as you type,
     /// with a preview of the one under the cursor.
     Find,
+    /// Opens the structured search (`L`): every entry below the browsed directory that matches a
+    /// glob, a regular expression or a piece of its path, narrowed by size, age and kind.
+    Locate,
     /// Opens the `:`-command prompt.
     Command,
     /// Cancels everything pending in one press, wherever the cursor is: the yanked or cut
@@ -116,7 +119,7 @@ impl Action {
     /// Every action, in the order `[keys]` lists them. A new variant goes here too: `name` will
     /// not compile without it, but this list would silently leave it out of `from_name` and of
     /// what a plugin's `list_actions` offers.
-    pub const ALL: [Action; 35] = [
+    pub const ALL: [Action; 36] = [
         Action::MoveDown,
         Action::MoveUp,
         Action::Enter,
@@ -137,6 +140,7 @@ impl Action {
         Action::Shell,
         Action::Search,
         Action::Find,
+        Action::Locate,
         Action::Command,
         Action::Cancel,
         Action::Select,
@@ -179,6 +183,7 @@ impl Action {
             Action::Shell => "shell",
             Action::Search => "search",
             Action::Find => "find",
+            Action::Locate => "locate",
             Action::Command => "command",
             Action::Cancel => "cancel",
             Action::Select => "select",
@@ -235,6 +240,7 @@ pub struct RawKeyMap {
     pub shell: Vec<String>,
     pub search: Vec<String>,
     pub find: Vec<String>,
+    pub locate: Vec<String>,
     pub command: Vec<String>,
     pub cancel: Vec<String>,
     pub select: Vec<String>,
@@ -275,6 +281,7 @@ impl Default for RawKeyMap {
             shell: vec![],
             search: vec!["/".into()],
             find: vec!["f".into()],
+            locate: vec!["L".into()],
             command: vec![":".into()],
             cancel: vec!["c".into()],
             select: vec!["v".into()],
@@ -349,6 +356,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.shell, Action::Shell);
         bind_all(&raw.search, Action::Search);
         bind_all(&raw.find, Action::Find);
+        bind_all(&raw.locate, Action::Locate);
         bind_all(&raw.command, Action::Command);
         bind_all(&raw.cancel, Action::Cancel);
         bind_all(&raw.select, Action::Select);
@@ -430,6 +438,7 @@ mod tests {
         assert_eq!(keymap.resolve(KeyCode::Char('s')), None);
         assert_eq!(keymap.resolve(KeyCode::Char('/')), Some(Action::Search));
         assert_eq!(keymap.resolve(KeyCode::Char('f')), Some(Action::Find));
+        assert_eq!(keymap.resolve(KeyCode::Char('L')), Some(Action::Locate));
         assert_eq!(keymap.resolve(KeyCode::Char(':')), Some(Action::Command));
         assert_eq!(keymap.resolve(KeyCode::Char('c')), Some(Action::Cancel));
         assert_eq!(keymap.resolve(KeyCode::Char('v')), Some(Action::Select));

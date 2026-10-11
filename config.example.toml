@@ -157,7 +157,8 @@ interactive_commands = [
 # `action` event instead of doing what it does. The first plugin to list a name gets it. The fuzzy
 # finder is such a plugin: `mman-finder`, started by itself when it sits next to `mman` or on
 # `PATH`, providing `find`. Listing a plugin of your own with `name = "finder"`, or with
-# `provides = ["find"]`, stops the bundled one from starting. Such a plugin shows its list by
+# `provides = ["find"]`, stops the bundled one from starting. The structured search is a second
+# bundled plugin, `mman-search`, providing `locate`, and replaced the same way. Such a plugin shows its list by
 # asking for a picker (`show_picker`), has the tree below a folder listed for it through the
 # host's own paths (`walk`) and sends the results back (`picker_items`); `plugin_api` has the
 # shapes, and `plugins/finder` is a worked example in Rust.
@@ -254,6 +255,12 @@ search = ["/"]
 # entry in the browser, Esc closes it. Every other key is typed into the query, so j and k are
 # letters here. Entries are indexed in the background, so it opens at once on a big tree.
 find = ["f"]
+# Structured search: the same panel as the finder, listing the entries below this directory that
+# satisfy every word typed: a piece of the path (`src/main`), a glob (`*.rs`, `src/**.rs`), `re:`
+# and a regular expression, `size:>1M` or `size:1k..2M`, `mtime:<7d` (changed less than a week
+# ago) or `mtime:>1w`, `type:f` or `type:d`. A word it cannot read is left out and named in the
+# status bar. Provided by the bundled `mman-search` plugin.
+locate = ["L"]
 # Opens the :-command prompt. ":q"/":q!"/":qa"/":qa!"/":quit" all exit (there's no unsaved-buffer
 # or multi-window state for the vim-style "!"/"a" spellings to mean anything different),
 # ":cd <path>" jumps to a directory,

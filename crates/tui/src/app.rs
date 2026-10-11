@@ -627,17 +627,30 @@ impl App {
     /// browser is showing them, and opens its picker when it has something to show (see
     /// `take_ui_request`). With no such plugin the status bar says how to get one.
     pub fn begin_find(&mut self, browser: &BrowserState) {
+        self.begin_picker_action(theming::Action::Find, "the finder", browser);
+    }
+
+    /// Hands the `locate` action to the plugin that provides it (the structured search, which
+    /// ships bundled): the same walk and picker as `find`, matched by glob, regular expression and
+    /// filters instead of by fuzzy score.
+    pub fn begin_locate(&mut self, browser: &BrowserState) {
+        self.begin_picker_action(theming::Action::Locate, "the search", browser);
+    }
+
+    /// Sends `action` to its provider and waits for the picker it will open, which `what` names in
+    /// the status bar meanwhile.
+    fn begin_picker_action(&mut self, action: theming::Action, what: &str, browser: &BrowserState) {
         // Asked a moment ago and not open yet: a second press must not open a second one.
         if self.awaiting_picker() {
             return;
         }
-        let name = theming::Action::Find.name();
+        let name = action.name();
         match self
             .plugins
             .dispatch_action(name, browser.current_dir(), &[])
         {
             ActionDispatch::Sent => {
-                self.status = Some("opening the finder…".to_string());
+                self.status = Some(format!("opening {what}…"));
                 self.finding_since = Some(Instant::now());
             }
             ActionDispatch::NoProvider => self.status = Some(crate::bundled::missing(name)),

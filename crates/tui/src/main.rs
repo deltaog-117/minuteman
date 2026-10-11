@@ -3352,6 +3352,7 @@ fn run(
             Some(Action::Create) => app.begin_create(),
             Some(Action::Search) => app.begin_search(browser),
             Some(Action::Find) => app.begin_find(browser),
+            Some(Action::Locate) => app.begin_locate(browser),
             Some(Action::Command) => app.begin_command(),
             Some(Action::Cancel) => app.cancel_all(browser),
             Some(Action::Select) => browser.toggle_mark(),

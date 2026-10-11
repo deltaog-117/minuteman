@@ -118,6 +118,7 @@ impl Session {
                     walk,
                     root,
                     show_hidden,
+                    metadata: false,
                 };
                 let id = self.request(Pending::Walk(walk));
                 out.push(request_line(id, METHOD_WALK, &request));
@@ -258,6 +259,8 @@ mod tests {
             path: PathBuf::from("/root").join(rel),
             rel: rel.to_string(),
             is_dir: false,
+            size: None,
+            modified: None,
         }
     }
 

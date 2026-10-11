@@ -38,13 +38,22 @@ struct Bundled {
     how_to_get: &'static str,
 }
 
-const BUNDLED: [Bundled; 1] = [Bundled {
-    name: "finder",
-    binary: "mman-finder",
-    provides: &["find"],
-    how_to_get: "the fuzzy finder is a plugin and mman-finder was not found; \
-        install it with `cargo install --path plugins/finder` (next to mman, or on PATH)",
-}];
+const BUNDLED: [Bundled; 2] = [
+    Bundled {
+        name: "finder",
+        binary: "mman-finder",
+        provides: &["find"],
+        how_to_get: "the fuzzy finder is a plugin and mman-finder was not found; \
+            install it with `cargo install --path plugins/finder` (next to mman, or on PATH)",
+    },
+    Bundled {
+        name: "search",
+        binary: "mman-search",
+        provides: &["locate"],
+        how_to_get: "the structured search is a plugin and mman-search was not found; \
+            install it with `cargo install --path plugins/search` (next to mman, or on PATH)",
+    },
+];
 
 /// The place a bundled program is looked for first: next to the running `mman`.
 fn beside_mman(binary: &str) -> Option<String> {
@@ -129,36 +138,53 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_install_starts_the_finder_providing_find() {
+    fn a_fresh_install_starts_each_bundled_plugin_providing_its_action() {
         let started = specs_found(&[], found);
-        assert_eq!(started.len(), 1);
+        assert_eq!(started.len(), 2);
         assert_eq!(started[0].name, "finder");
         assert_eq!(started[0].command, "/opt/bin/mman-finder");
         assert_eq!(started[0].provides, ["find"]);
+        assert_eq!(started[1].name, "search");
+        assert_eq!(started[1].command, "/opt/bin/mman-search");
+        assert_eq!(started[1].provides, ["locate"]);
     }
 
     #[test]
     fn a_missing_program_is_not_started() {
         assert!(specs_found(&[], |_| None).is_empty());
+        let only_search = specs_found(&[], |binary| {
+            (binary == "mman-search").then(|| binary.to_string())
+        });
+        assert_eq!(only_search.len(), 1);
+        assert_eq!(only_search[0].name, "search");
     }
 
     #[test]
-    fn a_plugin_of_the_same_name_or_providing_find_takes_its_place() {
-        assert!(specs_found(&[configured("finder", &[])], found).is_empty());
-        assert!(specs_found(&[configured("fzf-picker", &["find"])], found).is_empty());
+    fn a_plugin_of_the_same_name_or_providing_the_action_takes_its_place() {
+        let names = |configured: &[PluginSpec]| -> Vec<String> {
+            specs_found(configured, found)
+                .into_iter()
+                .map(|spec| spec.name)
+                .collect()
+        };
+        assert_eq!(names(&[configured("finder", &[])]), ["search"]);
+        assert_eq!(names(&[configured("fzf-picker", &["find"])]), ["search"]);
+        assert_eq!(names(&[configured("search", &[])]), ["finder"]);
+        assert_eq!(names(&[configured("grep-ui", &["locate"])]), ["finder"]);
     }
 
     #[test]
-    fn an_unrelated_plugin_leaves_the_finder_alone() {
+    fn an_unrelated_plugin_leaves_the_bundled_ones_alone() {
         assert_eq!(
             specs_found(&[configured("blame", &["blame"])], found).len(),
-            1
+            2
         );
     }
 
     #[test]
     fn what_is_missing_says_how_to_get_it() {
         assert!(missing("find").contains("cargo install --path plugins/finder"));
+        assert!(missing("locate").contains("cargo install --path plugins/search"));
         assert_eq!(missing("sort"), "no plugin provides 'sort'");
     }
 }

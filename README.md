@@ -90,6 +90,7 @@ The command is `mman`. Install it with Cargo, then run it, optionally starting i
 ```bash
 cargo install --path crates/tui       # installs one executable: mman
 cargo install --path plugins/finder   # installs mman-finder, the fuzzy finder (`f`), next to it
+cargo install --path plugins/search   # installs mman-search, the structured search (`L`), next to it
 mman
 mman /path/to/dir
 ```
@@ -97,12 +98,13 @@ mman /path/to/dir
 The fuzzy finder is a plugin that ships with Minuteman and starts by itself when `mman-finder` is
 next to `mman` (or on your `PATH`). Without it everything else works, and `f` says how to get it.
 A `[[plugin]]` of your own that lists `provides = ["find"]` takes its place (see
-`config.example.toml`).
+`config.example.toml`). The structured search (`L`) works the same way with `mman-search` and
+`provides = ["locate"]`.
 
 From a checkout, without installing:
 
 ```bash
-cargo build -p finder   # once, so the finder is built next to mman
+cargo build -p finder -p search   # once, so the plugins are built next to mman
 cargo run -p tui
 # or, starting in a specific directory:
 cargo run -p tui -- /path/to/dir
@@ -184,6 +186,7 @@ command ends. `MINUTEMAN_PORTAL_MMAN` names the `mman` to run when it is not on 
 | `n`         | create — trailing `/` makes a directory       |
 | `/`         | search — fuzzy search — jump to the best entry whose name holds the letters you type in order (`aernd` finds `aerend`), in this directory or the nearest folder below it that has one; `↓`/`Ctrl-N` and `↑`/`Ctrl-P` step through the best matches while it is open (`Enter` stays, `Esc` goes back) |
 | `f`         | find — a fuzzy finder over every entry below this directory, ranked as you type, with a preview of the highlighted one: letters in order (`rdme` finds `README.md`) or part of a path (`src/main`), a match on the name itself above one spread over the folders; `↓`/`Ctrl-N` and `↑`/`Ctrl-P` move through the results, `Ctrl-D`/`Ctrl-U` scroll the preview, `Enter` closes it with the cursor on the entry in the browser, `Esc` closes it; it indexes in the background, so a large tree opens at once; it is the bundled `finder` plugin (`mman-finder`), see Usage |
+| `L`         | locate — a structured search over every entry below this directory, nearest first, with the same preview as `f`; words, all of which must hold: a piece of the path (`src/main`), a glob (`*.rs`), `re:` and a regular expression, `size:>1M` or `size:1k..2M`, `mtime:<7d` (changed less than 7 days ago) or `mtime:>1w`, `type:f` or `type:d`; a word it cannot read is left out and named in the status bar; the keys are `f`'s; it is the bundled `search` plugin (`mman-search`), see Usage |
 | `:`         | command — `:q`/`:quit` to exit, `:cd <path>` to jump to a directory (`:cd ssh://[user@]host[:port][/path]` for one on another machine, over your own `ssh` setup; connect once with `ssh host` first so the host key is trusted), `:mkdir [-p] <name>...`, `:touch <name>...`, `:extract` (marked or selected `.zip`/`.tar`/`.tar.gz` into a directory named after each), `:compress [-p] <name.zip|.tar|.tar.gz>` (marked or selected entries into one archive, `-p` asks for a password for a zip, and an existing archive asks overwrite / skip / abort; or right-click an entry and choose *Compress…* for a form with name, save-in folder, format, level, an optional password (zip only, AES-256; file names stay visible) and options; right-click an archive and choose *Extract…* for a form with the destination folder (an encrypted zip asks for its password first), what to do with existing files and whether to delete the archive); an editor or other full-screen program (`:nvim ROADMAP.md`, or any command after a `!`, as in `:!python3`) gets the whole terminal until it exits; anything else runs in `sh` in the current directory (`Esc` cancels) |
 | `V`         | switch view — list, grid, details, filmstrip, then the **deck**: the usual columns beside a rail of devices at the left, as in a file manager's places panel. Disks, USB sticks and network shares are grouped under Internal, Removable and Network, each with its name over a gauge of how full it is (a small sparkline appears beside the name while it reads or writes); a `▌` marks the one holding your folder. `Tab` takes the keys to the rail (`↑`/`↓` choose, `Enter` opens it, mounting first if needed, `m` mounts or unmounts, `e` ejects, `p` sends the files you are carrying, `Tab` or `Esc` gives the keys back), or click a device; `h`, `j`, `k` and `l` keep browsing the files throughout. The rail is left out of a window under 70 columns wide. After the deck comes the **wiring diagram**: the whole window shows how your storage is wired, left to right (the bus, the disk, its partitions, any LVM or encrypted layer, the filesystem and where it is mounted), with a mark moving along the line into any disk that is busy; the arrows move through it and `Enter`, `m`, `e` and `p` act as on the deck, but `e` ejects the whole removable disk with every volume on it. The diagram goes on past the mount point: a filesystem, and then any folder, unfolds into its subfolders as more boxes to the right (`→` or a click unfolds, `←` or a click folds, `Enter` opens it in the browser, and `p` on a folder sends the carried files into it), and opening the view unfolds the way down to the folder you are in. The whole diagram always fits the window: a crowded folder shows fewer siblings when the window is short (the rest are a "+N more" box, and the folders on the way to where you are are kept), boxes are squeezed or stretched to the width, and when the columns cannot fit at all it is the same thing as an indented tree. While files are yanked, cut or marked, each card says whether they fit (`✓ fits · 22G left`, `✗ needs 4.0G more`, `✗ a file is over 4.0G` on a FAT32 stick) and one that cannot take them is dimmed and refuses `p` with the reason. Needs `udisksctl` to mount, unmount or eject; Linux only. The last view is the **atlas**, a zoomable map of your storage: one block per volume with an area that follows its capacity, filled from the bottom by how full it is (red when nearly full, dim when not mounted) and a `◆` on the one holding your folder. `Enter` or a second click zooms into the chosen block, first to the volume's biggest folders and then into a folder, where a block is sized by what is inside it; `Backspace` or `Esc` zooms out, the arrows move to the nearest block, `Tab` walks through them biggest first, `o` opens the chosen block's folder in the browser, `a` switches between size on disk and apparent size, and `r` looks again. Entries too small for a block of their own are folded into one `+N smaller` block |
 | `c`         | cancel everything pending — the yank/cut clipboard, every mark, and a running copy/move/command — from any directory |
@@ -362,6 +365,7 @@ create = ["n"]
 shell = []
 search = ["/"]
 find = ["f"]
+locate = ["L"]
 command = [":"]
 cancel = ["c"]
 select = ["v"]
@@ -501,7 +505,8 @@ crates/
 └── portal_backend/     # `mman-portal`: the desktop portal's file chooser, answered by `mman`
 
 plugins/
-└── finder/             # `mman-finder`: the fuzzy finder, bundled as a plugin (`f`)
+├── finder/             # `mman-finder`: the fuzzy finder, bundled as a plugin (`f`)
+└── search/             # `mman-search`: the structured search, bundled as a plugin (`L`)
 ```
 
 ---

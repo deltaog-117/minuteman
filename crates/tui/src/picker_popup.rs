@@ -360,6 +360,8 @@ mod tests {
             path: PathBuf::from("/root").join(rel),
             rel: rel.to_string(),
             is_dir,
+            size: None,
+            modified: None,
         }
     }
 
