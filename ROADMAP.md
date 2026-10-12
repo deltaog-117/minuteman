@@ -1110,6 +1110,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   recorded, and the status line says so after an overwrite. Property-tested: any sequence of
   creates and moves, undone entirely, leaves the folder as it began, and redone entirely leaves it
   as it ended.
+- ✅ **Undo and redo in the background (COA A: a `Batch` run on a worker)** – `z` and `Z` no longer
+  stall the interface on a large move. `History` hands the newest entry out as a `Batch`
+  (`begin_undo`/`begin_redo`), the batch runs on tokio's blocking pool, and `finish` puts what it
+  did back on the stacks, so a failure or a cancel keeps the rule above: what was done can be
+  reversed and the rest stays where it was. Progress shows as "undoing… name", `Esc` cancels
+  between steps, and other operations wait while it runs. Chosen over a mutex around the whole
+  history (B, which only moves the stall to the next record) and running the cheap cases inline
+  (C, two paths to test). Verified by `scripts/check` and a pty run of the installed `mman`: a
+  300-file folder moved from `/tmp` to the home disk, `z` put all 300 back and `Z` moved them
+  again. Follow-ups: the "undoing…" line was not seen in the pty (the move took 0.4 s); a worker
+  that panics leaves the operation busy, as the trash does.
 
 ---
 
@@ -2196,9 +2207,7 @@ draws.
   is asked for again after a wrong one but there is no limit on tries; legacy ZipCrypto archives
   can be opened (they are common) but are never written; and encrypted archives cannot be
   previewed beyond their listing.
-- **Undo history, follow-ups** – undo runs on the render thread, so taking back a large
-  cross-device move stalls the interface until it finishes (a background job with progress and
-  cancel would fix it); there is no history popup listing the stack to pick from; a compress that
+- **Undo history, follow-ups** – there is no history popup listing the stack to pick from; a compress that
   trashed its originals, an extract, a permanent delete and an overwrite are not recorded (holding
   deleted and overwritten data in an app-owned area would make them undoable, at the cost of
   `X` no longer being immediate); a cancelled paste that had already finished its current item
@@ -2623,5 +2632,5 @@ draws.
 4. Next cycle: M7 is done (M7a archives, M7b ssh, M7c the atlas and the wiring diagram as
    plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
    follow-ups to remote browsing and the other features listed there. Folder moves no longer block, so the next biggest gaps are the other things that
-   read on the render thread (undo of a large move, a large archive's index) and a prompt for a
-   password or a new host key.
+   read on the render thread (a large archive's index) and a prompt for a password or a new host
+   key. Undo and redo of a large move now run in the background (see DIARY.md, 2026-10-12).

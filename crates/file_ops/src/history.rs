@@ -25,12 +25,13 @@
 //! Not recorded, because they cannot be put back: a permanent delete, an overwrite, and anything
 //! a shell command does.
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use shared::Vfs;
 use trash::Trashed;
 
-use crate::{ConflictPolicy, FileOpsError};
+use crate::{ConflictPolicy, FileOpsError, ProgressFn};
 
 /// How many entries are kept before the oldest is forgotten.
 pub const DEFAULT_CAPACITY: usize = 100;
@@ -219,6 +220,8 @@ pub enum Report {
     /// A step failed. The steps before it were taken back and stay undone; the failed step and
     /// the rest remain on the stack so the user can fix the cause and try again.
     Failed { label: String, error: UndoError },
+    /// The user stopped it between two steps. The steps before it stay as they are.
+    Cancelled { label: String },
 }
 
 /// The undo and redo stacks.
@@ -276,54 +279,170 @@ impl History {
         !self.redo.is_empty()
     }
 
-    /// Takes back the newest entry.
-    pub fn undo(&mut self, vfs: &dyn Vfs) -> Report {
+    /// Takes the newest entry off the undo stack to be run elsewhere (`Batch::run`, on a worker
+    /// thread), or `None` when there is nothing to take back. Until `finish` hands the result
+    /// back, the entry is on neither stack.
+    pub fn begin_undo(&mut self) -> Option<Batch> {
         self.commit();
-        let Some(entry) = self.undo.pop() else {
-            return Report::Empty;
-        };
-        let label = label(&entry.changes);
-        for index in (0..entry.changes.len()).rev() {
-            if let Err(error) = entry.changes[index].revert(vfs) {
-                let mut changes = entry.changes;
-                let taken_back = changes.split_off(index + 1);
-                if !taken_back.is_empty() {
-                    self.redo.push(Entry {
-                        changes: taken_back,
-                    });
-                }
-                self.undo.push(Entry { changes });
-                return Report::Failed { label, error };
-            }
-        }
-        self.redo.push(entry);
-        Report::Done { label }
+        self.undo.pop().map(|entry| Batch {
+            direction: Direction::Undo,
+            changes: entry.changes,
+        })
     }
 
-    /// Does again the newest entry that was undone.
-    pub fn redo(&mut self, vfs: &dyn Vfs) -> Report {
-        let Some(entry) = self.redo.pop() else {
-            return Report::Empty;
-        };
-        let label = label(&entry.changes);
-        let mut applied = Vec::with_capacity(entry.changes.len());
-        for (index, change) in entry.changes.iter().enumerate() {
-            match change.apply(vfs) {
-                Ok(done) => applied.push(done),
-                Err(error) => {
-                    if !applied.is_empty() {
-                        self.undo.push(Entry { changes: applied });
-                    }
-                    self.redo.push(Entry {
-                        changes: entry.changes[index..].to_vec(),
-                    });
-                    return Report::Failed { label, error };
-                }
-            }
-        }
-        self.undo.push(Entry { changes: applied });
-        Report::Done { label }
+    /// Takes the newest entry that was undone off the redo stack, like `begin_undo`.
+    pub fn begin_redo(&mut self) -> Option<Batch> {
+        self.redo.pop().map(|entry| Batch {
+            direction: Direction::Redo,
+            changes: entry.changes,
+        })
     }
+
+    /// Puts what a `Batch` did back on the stacks: the steps carried out go on the opposite stack
+    /// (an undone step can be redone), the steps left stay on the stack they came from, so no
+    /// change is lost or duplicated.
+    pub fn finish(&mut self, finished: Finished) -> Report {
+        let Finished {
+            direction,
+            label,
+            done,
+            left,
+            stop,
+        } = finished;
+        let (carried_out, remaining) = match direction {
+            Direction::Undo => (&mut self.redo, &mut self.undo),
+            Direction::Redo => (&mut self.undo, &mut self.redo),
+        };
+        if !done.is_empty() {
+            carried_out.push(Entry { changes: done });
+        }
+        if !left.is_empty() {
+            remaining.push(Entry { changes: left });
+        }
+        match stop {
+            None => Report::Done { label },
+            Some(Stop::Failed(error)) => Report::Failed { label, error },
+            Some(Stop::Cancelled) => Report::Cancelled { label },
+        }
+    }
+
+    /// Takes back the newest entry, waiting for it. The interface runs the same three calls
+    /// (`begin_undo`, `Batch::run`, `finish`) with the middle one off the render thread.
+    pub fn undo(&mut self, vfs: &dyn Vfs) -> Report {
+        match self.begin_undo() {
+            Some(batch) => {
+                let finished = batch.run(vfs, &mut |_| ControlFlow::Continue(()));
+                self.finish(finished)
+            }
+            None => Report::Empty,
+        }
+    }
+
+    /// Does again the newest entry that was undone, waiting for it.
+    pub fn redo(&mut self, vfs: &dyn Vfs) -> Report {
+        match self.begin_redo() {
+            Some(batch) => {
+                let finished = batch.run(vfs, &mut |_| ControlFlow::Continue(()));
+                self.finish(finished)
+            }
+            None => Report::Empty,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Undo,
+    Redo,
+}
+
+/// An entry taken off a stack to be taken back or done again away from the `History`.
+///
+/// Model: every `Change` is in exactly one place, the undo stack, the redo stack or one `Batch`.
+/// `begin_*` moves an entry from a stack into a `Batch`; `run` splits its changes into those
+/// carried out and those left; `finish` puts each part on its stack. Nothing else touches them in
+/// between, so a batch cut short by a failure or a cancel keeps the same rule as before: what was
+/// carried out can be reversed, and the rest stays where it was.
+#[derive(Debug)]
+pub struct Batch {
+    direction: Direction,
+    changes: Vec<Change>,
+}
+
+impl Batch {
+    /// Carries out every step in turn: an undo reverts from the newest step to the oldest, a
+    /// redo applies from the oldest to the newest. `step` is told which path is about to be
+    /// touched and may stop the batch before it by returning `Break`.
+    pub fn run(self, vfs: &dyn Vfs, step: &mut ProgressFn<'_>) -> Finished {
+        let Batch { direction, changes } = self;
+        let label = label(&changes);
+        let mut stop = None;
+        let (done, left) = match direction {
+            Direction::Undo => {
+                let mut reverted = 0;
+                for change in changes.iter().rev() {
+                    let ended = Self::before(step, change)
+                        .or_else(|| change.revert(vfs).err().map(Stop::Failed));
+                    if ended.is_some() {
+                        stop = ended;
+                        break;
+                    }
+                    reverted += 1;
+                }
+                let mut left = changes;
+                let done = left.split_off(left.len() - reverted);
+                (done, left)
+            }
+            Direction::Redo => {
+                let mut done = Vec::with_capacity(changes.len());
+                for change in &changes {
+                    if let Some(cancelled) = Self::before(step, change) {
+                        stop = Some(cancelled);
+                        break;
+                    }
+                    match change.apply(vfs) {
+                        Ok(applied) => done.push(applied),
+                        Err(error) => {
+                            stop = Some(Stop::Failed(error));
+                            break;
+                        }
+                    }
+                }
+                let left = changes.into_iter().skip(done.len()).collect();
+                (done, left)
+            }
+        };
+        Finished {
+            direction,
+            label,
+            done,
+            left,
+            stop,
+        }
+    }
+
+    fn before(step: &mut ProgressFn<'_>, change: &Change) -> Option<Stop> {
+        step(change.subject()).is_break().then_some(Stop::Cancelled)
+    }
+}
+
+/// Why a batch ended before its last step.
+#[derive(Debug)]
+enum Stop {
+    Cancelled,
+    Failed(UndoError),
+}
+
+/// What a `Batch` did, to be handed to `History::finish`.
+#[derive(Debug)]
+pub struct Finished {
+    direction: Direction,
+    label: String,
+    /// The steps carried out, in the state they now stand in (a redone trash has a new handle).
+    done: Vec<Change>,
+    /// The steps not carried out, in their original order, the one that failed first.
+    left: Vec<Change>,
+    stop: Option<Stop>,
 }
 
 #[cfg(test)]
@@ -605,6 +724,100 @@ mod tests {
             history.undo[0].changes[0].subject(),
             Path::new("/nowhere/3")
         );
+    }
+
+    #[test]
+    fn a_cancelled_undo_keeps_the_steps_it_did_and_leaves_the_rest_undoable() {
+        let dir = scratch("cancel-undo");
+        let mut history = History::default();
+        for name in ["a", "b", "c"] {
+            std::fs::write(dir.join(name), b"").unwrap();
+            history.record(Change::Created {
+                path: dir.join(name),
+                is_dir: false,
+            });
+        }
+        history.commit();
+        let mut steps = 0;
+
+        let batch = history.begin_undo().unwrap();
+        assert!(!history.can_undo(), "the entry is out while it runs");
+        let finished = batch.run(&LocalVfs, &mut |_| {
+            steps += 1;
+            if steps > 2 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        let report = history.finish(finished);
+
+        assert!(matches!(report, Report::Cancelled { .. }));
+        assert_eq!(listing(&dir), ["a"], "the newest two were taken back");
+        assert!(history.can_undo() && history.can_redo());
+        assert!(matches!(history.undo(&LocalVfs), Report::Done { .. }));
+        assert!(listing(&dir).is_empty());
+        assert!(matches!(history.redo(&LocalVfs), Report::Done { .. }));
+        assert_eq!(listing(&dir), ["a"]);
+        assert!(matches!(history.redo(&LocalVfs), Report::Done { .. }));
+        assert_eq!(listing(&dir), ["a", "b", "c"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_redo_keeps_the_steps_it_did_and_leaves_the_rest_redoable() {
+        let dir = scratch("cancel-redo");
+        let mut history = History::default();
+        for name in ["a", "b"] {
+            std::fs::write(dir.join(name), b"").unwrap();
+            history.record(Change::Created {
+                path: dir.join(name),
+                is_dir: false,
+            });
+        }
+        history.commit();
+        history.undo(&LocalVfs);
+        let mut steps = 0;
+
+        let batch = history.begin_redo().unwrap();
+        let finished = batch.run(&LocalVfs, &mut |_| {
+            steps += 1;
+            if steps > 1 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        let report = history.finish(finished);
+
+        assert!(matches!(report, Report::Cancelled { .. }));
+        assert_eq!(listing(&dir), ["a"]);
+        assert!(history.can_undo() && history.can_redo());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_step_callback_names_each_path_before_it_is_touched() {
+        let dir = scratch("callback");
+        let mut history = History::default();
+        std::fs::write(dir.join("a"), b"").unwrap();
+        entry(
+            &mut history,
+            Change::Created {
+                path: dir.join("a"),
+                is_dir: false,
+            },
+        );
+        let mut seen = Vec::new();
+
+        let finished = history.begin_undo().unwrap().run(&LocalVfs, &mut |path| {
+            seen.push((path.to_path_buf(), path.exists()));
+            ControlFlow::Continue(())
+        });
+        history.finish(finished);
+
+        assert_eq!(seen, [(dir.join("a"), true)]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

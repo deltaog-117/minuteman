@@ -173,6 +173,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- Undo (`z`) and redo (`Z`) run in the background. Taking back a large move no longer freezes the
+  interface: the status line shows "undoing… name", `Esc` stops it between two steps, and other
+  operations wait until it ends. A cancelled undo or redo keeps the steps it did and leaves the
+  rest on the stack. `file_ops::history` gained `Batch`, `Finished`, `begin_undo`, `begin_redo`
+  and `finish`, and `Report::Cancelled`; `History::undo` and `redo` still wait for the result.
+  Author: deltaog-117.
 - The wiring view needs `mman-wiring` installed. Without it the view shows a frame that says how
   to get it, and the rest of `mman` runs. Its look is the same except that it draws only ASCII
   symbols (`+` and `-` for folded and unfolded folders, `[]` and `<>` icons, `|` before the row you

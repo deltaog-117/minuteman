@@ -34,7 +34,7 @@ use anyhow::Result;
 use browser::search::{KEPT, Outcome as SearchOutcome, Query, rank_entries};
 use browser::{BrowserState, MovePlan};
 use crossterm::event::{KeyCode, KeyEvent};
-use file_ops::history::{Change, History, Report, TrashTracker};
+use file_ops::history::{Batch, Change, Finished, History, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use plugin_api::{
     ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, CompressJob, Conflict,
@@ -362,6 +362,9 @@ enum BulkKind {
     Extract,
     /// Packing into one archive.
     Compress,
+    /// Taking back the newest recorded change, or doing it again.
+    Undo,
+    Redo,
     /// A `:` command line running under `sh -c`, from `started`.
     Shell {
         command: String,
@@ -380,6 +383,8 @@ impl BulkKind {
             BulkKind::Trash { .. } => "trashing",
             BulkKind::Extract => "extracting",
             BulkKind::Compress => "compressing",
+            BulkKind::Undo => "undoing",
+            BulkKind::Redo => "redoing",
             BulkKind::Shell { .. } => "running",
         }
     }
@@ -394,6 +399,8 @@ impl BulkKind {
             BulkKind::Trash { .. } => "trash",
             BulkKind::Extract => "extract",
             BulkKind::Compress => "compress",
+            BulkKind::Undo => "undo",
+            BulkKind::Redo => "redo",
             BulkKind::Shell { .. } => "command",
         }
     }
@@ -474,6 +481,8 @@ enum BulkMsg {
         untracked: usize,
     },
     Done(Result<Outcome, FileOpsError>),
+    /// An undo or redo has ended; `History::finish` takes its result back.
+    History(Finished),
     ShellDone(std::io::Result<CommandOutcome>),
 }
 
@@ -909,11 +918,13 @@ impl App {
                         batch_label(targets)
                     )
                 }
-                BulkKind::Extract | BulkKind::Compress => format!(
-                    "{}… {} — Esc to cancel",
-                    bulk.kind.progressing_label(),
-                    bulk.current
-                ),
+                BulkKind::Extract | BulkKind::Compress | BulkKind::Undo | BulkKind::Redo => {
+                    format!(
+                        "{}… {} — Esc to cancel",
+                        bulk.kind.progressing_label(),
+                        bulk.current
+                    )
+                }
                 BulkKind::Shell { command, .. } => {
                     format!(
                         "{}… {command} — Esc to cancel",
@@ -1195,6 +1206,7 @@ impl App {
 
         let mut done = None;
         let mut shell_done = None;
+        let mut history_done = None;
         let mut trashed = Vec::new();
         while let Ok(msg) = bulk.rx.try_recv() {
             match msg {
@@ -1212,6 +1224,7 @@ impl App {
                 }
                 BulkMsg::Done(result) => done = Some(result),
                 BulkMsg::ShellDone(result) => shell_done = Some(result),
+                BulkMsg::History(finished) => history_done = Some(finished),
             }
         }
 
@@ -1240,6 +1253,24 @@ impl App {
                 });
             }
             return Ok(());
+        }
+
+        if let Some(finished) = history_done {
+            let bulk = self.bulk.take().expect("checked Some above");
+            let (verb, past) = match bulk.kind {
+                BulkKind::Redo => ("redo", "redid"),
+                _ => ("undo", "undid"),
+            };
+            let report = self.history.finish(finished);
+            self.plugins.notify_job_finished(
+                verb,
+                match report {
+                    Report::Failed { .. } => JobOutcome::Failed,
+                    Report::Cancelled { .. } => JobOutcome::Cancelled,
+                    Report::Done { .. } | Report::Empty => JobOutcome::Completed,
+                },
+            );
+            return self.report_history(browser, vfs, verb, past, report);
         }
 
         let Some(result) = done else {
@@ -1372,7 +1403,11 @@ impl App {
                         existing.display()
                     ));
                 }
-                BulkKind::Delete { .. } | BulkKind::Trash { .. } | BulkKind::Shell { .. } => {
+                BulkKind::Delete { .. }
+                | BulkKind::Trash { .. }
+                | BulkKind::Shell { .. }
+                | BulkKind::Undo
+                | BulkKind::Redo => {
                     self.plugins
                         .notify_job_finished(past_label, JobOutcome::Failed);
                     self.status = Some(format!("{past_label} failed: unexpected conflict"));
@@ -3296,24 +3331,64 @@ impl App {
         });
     }
 
-    /// Takes back the newest file operation, or says why it cannot.
+    /// Takes back the newest file operation, or says why it cannot. The steps run on a worker
+    /// thread (a move between devices copies, then deletes), so progress and the result arrive
+    /// later through `poll_bulk`.
     pub fn undo(&mut self, browser: &mut BrowserState, vfs: &dyn Vfs) -> Result<()> {
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
             return Ok(());
         }
-        let report = self.history.undo(vfs);
-        self.report_history(browser, vfs, "undo", "undid", report)
+        match self.history.begin_undo() {
+            Some(batch) => self.spawn_history(BulkKind::Undo, batch),
+            None => self.report_history(browser, vfs, "undo", "undid", Report::Empty)?,
+        }
+        Ok(())
     }
 
-    /// Does again what `undo` took back.
+    /// Does again what `undo` took back, the same way.
     pub fn redo(&mut self, browser: &mut BrowserState, vfs: &dyn Vfs) -> Result<()> {
         if self.is_busy() {
             self.status = Some("an operation is already in progress".into());
             return Ok(());
         }
-        let report = self.history.redo(vfs);
-        self.report_history(browser, vfs, "redo", "redid", report)
+        match self.history.begin_redo() {
+            Some(batch) => self.spawn_history(BulkKind::Redo, batch),
+            None => self.report_history(browser, vfs, "redo", "redid", Report::Empty)?,
+        }
+        Ok(())
+    }
+
+    /// Runs `batch` on tokio's blocking pool. Cancel is checked before each step, so the step in
+    /// flight finishes and the rest stay recorded.
+    fn spawn_history(&mut self, kind: BulkKind, batch: Batch) {
+        let (tx, rx) = unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_bg = Arc::clone(&cancel);
+        let vfs = Arc::clone(&self.vfs);
+
+        self.handle.spawn_blocking(move || {
+            let progress_tx = tx.clone();
+            let finished = batch.run(vfs.as_ref(), &mut |path: &Path| {
+                let _ = progress_tx.send(BulkMsg::Progress {
+                    path: display_name(path),
+                });
+                if cancel_bg.load(Ordering::Relaxed) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+            let _ = tx.send(BulkMsg::History(finished));
+        });
+
+        self.bulk = Some(BulkOp {
+            kind,
+            items_done: 0,
+            current: String::new(),
+            cancel: Some(cancel),
+            rx,
+        });
     }
 
     fn report_history(
@@ -3328,6 +3403,7 @@ impl App {
             Report::Empty => format!("nothing to {verb}"),
             Report::Done { label } => format!("{past} {label}"),
             Report::Failed { label, error } => format!("{verb} {label} failed: {error}"),
+            Report::Cancelled { label } => format!("{verb} {label} cancelled"),
         });
         browser.reload(vfs)?;
         browser.prune_marks(vfs);
@@ -5835,10 +5911,52 @@ mod tests {
 
         f.app.undo(&mut f.browser, &LocalVfs).unwrap();
 
+        f.wait_for_idle();
+
         assert!(f.listed().is_empty());
         assert_eq!(f.app.status.as_deref(), Some("undid create 2 items"));
         f.app.redo(&mut f.browser, &LocalVfs).unwrap();
+        f.wait_for_idle();
         assert_eq!(f.listed(), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn undo_runs_in_the_background_and_holds_other_operations_until_it_ends() {
+        let mut f = Fixture::new("undo-busy");
+        f.run("mkdir one");
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+
+        assert!(f.app.is_busy(), "the undo is a background operation");
+        assert!(f.app.status_line().starts_with("undoing…"));
+        f.wait_for_idle();
+        assert!(!f.app.is_busy());
+        assert!(f.listed().is_empty());
+        assert_eq!(f.app.status.as_deref(), Some("undid create one"));
+    }
+
+    #[test]
+    fn a_cancelled_undo_leaves_the_change_recorded_to_undo_again() {
+        let mut f = Fixture::new("undo-cancel");
+        f.run("mkdir one");
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+        f.app.cancel_bulk();
+        f.wait_for_idle();
+
+        // The worker may have reached its first step before the flag was set, so either end is
+        // right; what matters is that nothing is lost: one undo or one redo is still possible.
+        let undone = f.listed().is_empty();
+        let status = f.app.status.clone().unwrap_or_default();
+        if undone {
+            assert!(status.starts_with("undid"), "{status}");
+            f.app.redo(&mut f.browser, &LocalVfs).unwrap();
+        } else {
+            assert!(status.contains("cancelled"), "{status}");
+            f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+        }
+        f.wait_for_idle();
+        assert_eq!(f.listed().is_empty(), !undone);
     }
 
     #[test]
@@ -5855,6 +5973,8 @@ mod tests {
         assert!(f.root.join("new.txt").exists());
 
         f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+
+        f.wait_for_idle();
 
         assert!(f.root.join("old.txt").exists());
         assert!(!f.root.join("new.txt").exists());
@@ -5878,6 +5998,8 @@ mod tests {
 
         f.app.undo(&mut f.browser, &LocalVfs).unwrap();
 
+        f.wait_for_idle();
+
         assert!(f.root.join("a.txt").exists() && f.root.join("b.txt").exists());
         assert!(!f.root.join("dest/a.txt").exists());
     }
@@ -5895,6 +6017,8 @@ mod tests {
 
         f.app.undo(&mut f.browser, &LocalVfs).unwrap();
 
+        f.wait_for_idle();
+
         assert_eq!(std::fs::read(f.root.join("a.txt")).unwrap(), b"a.txt");
         assert_eq!(std::fs::read(f.root.join("b.txt")).unwrap(), b"b.txt");
     }
@@ -5907,6 +6031,8 @@ mod tests {
         f.wait_for_idle();
 
         f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+
+        f.wait_for_idle();
 
         assert_eq!(f.app.status.as_deref(), Some("nothing to undo"));
     }
@@ -6116,6 +6242,8 @@ mod tests {
         m.wait_for_idle();
 
         m.app.undo(&mut m.browser, m.mem.as_ref()).unwrap();
+
+        m.wait_for_idle();
 
         assert!(m.mem.exists(Path::new("/w/a.txt")));
         assert!(!m.mem.exists(Path::new("/w/dest/a.txt")));

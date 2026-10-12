@@ -7732,6 +7732,37 @@ browsed.
 
 ---
 
+## 2026-10-12 — Undo and redo off the render thread
+
+**Decision.** Undo ran each step on the render thread, so taking back a large cross-device move
+(a copy, then a delete) froze the interface. Three courses were weighed: hand the entry out as a
+value that runs on a worker and is handed back (A); keep the history behind a mutex and run the
+whole call in the worker (B); or run cheap undos inline and send only slow ones to the worker (C).
+Chosen: A. B holds a lock across a file copy, so the stall only moves to the next `record`; C
+keeps the blocking path and needs a guess about which undos are slow.
+
+**What changed.** `History::begin_undo`/`begin_redo` take the entry off its stack as a `Batch`;
+`Batch::run` carries out the steps and tells a callback which path is next, which may stop it;
+`History::finish` puts the done steps on the opposite stack and the rest back where they came
+from. The model is one rule: every change is in exactly one of the undo stack, the redo stack or
+one batch. `History::undo` and `redo` are the same three calls run in a row, so the existing
+round-trip property test and the partial-failure test cover the new path. The interface adds
+`BulkKind::Undo`/`Redo` and a `BulkMsg::History`, so the busy gate, the status line and `Esc` work
+as for a paste.
+
+**Verification.** `scripts/check` passes. New: three tests in `file_ops` (a cancelled undo, a
+cancelled redo, the callback seeing each path first) and two in the interface (undo is a
+background operation that holds others, and a cancel loses nothing). Existing undo tests now wait
+for the worker. Installed with `cargo install --path crates/tui` and driven through a pty: 300
+files of 1 MiB moved from `/tmp` to the home disk, `z` put all 300 back, `Z` moved them again.
+
+**Left open.** The "undoing…" line was not seen in the pty: the move took 0.4 s and the harness
+read the wrong screen row. A worker that panics leaves the operation busy and the batch lost, as
+the trash does. A keypress that records a new change while an undo runs is held back by the busy
+gate; if one ever got through, a stale redo entry could appear.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines
