@@ -28,8 +28,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::protocol::{
-    ArchiveDone, ArchiveProgress, DevicesNote, PickerSpec, PickerUpdate, SetDevices, SetInspect,
-    SetPreview, SetView,
+    ArchiveDone, ArchiveProgress, CanvasNote, DevicesNote, PickerSpec, PickerUpdate, SetCanvas,
+    SetDevices, SetInspect, SetPreview, SetView,
 };
 
 type Reply = Result<Value, String>;
@@ -104,6 +104,16 @@ pub enum UiRequest {
     DevicesNote {
         plugin: String,
         note: DevicesNote,
+    },
+    /// The plugin gave a view it draws its canvas.
+    SetCanvas {
+        plugin: String,
+        set: SetCanvas,
+    },
+    /// The plugin said what a view it draws asks of the browser.
+    CanvasNote {
+        plugin: String,
+        note: CanvasNote,
     },
     /// The plugin reached another entry of an archive request.
     ArchiveProgress {
@@ -181,6 +191,20 @@ impl UiLink {
 
     pub(crate) fn devices_note(&self, plugin: &str, note: DevicesNote) {
         let _ = self.tx.send(UiRequest::DevicesNote {
+            plugin: plugin.to_string(),
+            note,
+        });
+    }
+
+    pub(crate) fn set_canvas(&self, plugin: &str, set: SetCanvas) {
+        let _ = self.tx.send(UiRequest::SetCanvas {
+            plugin: plugin.to_string(),
+            set,
+        });
+    }
+
+    pub(crate) fn canvas_note(&self, plugin: &str, note: CanvasNote) {
+        let _ = self.tx.send(UiRequest::CanvasNote {
             plugin: plugin.to_string(),
             note,
         });

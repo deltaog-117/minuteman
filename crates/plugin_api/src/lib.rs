@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use shared::DirEntryInfo;
 
 mod archive;
+mod canvas;
 pub mod client;
 mod devices;
 mod event;
@@ -44,6 +45,12 @@ pub use archive::{
     ArchiveWork, CompressJob, Conflict, EVENT_ARCHIVE, EVENT_ARCHIVE_CANCEL, ExtractJob, Format,
     Level, MAX_ARCHIVE_JOBS, MAX_ARCHIVE_TEXT_CHARS, MAX_PASSWORD_CHARS, METHOD_ARCHIVE_DONE,
     METHOD_ARCHIVE_PROGRESS, PROVIDES_ARCHIVE, Password,
+};
+pub use canvas::{
+    Button, Canvas, CanvasError, CanvasEvent, CanvasInput, CanvasNote, Cells, EVENT_CANVAS, HUES,
+    Item, MAX_CANVAS_CHARS, MAX_CANVAS_ITEMS, MAX_CANVAS_SIDE, MAX_CANVAS_TEXT_CHARS, MAX_CLAIMS,
+    MAX_PATH_POINTS, METHOD_CANVAS_NOTE, METHOD_SET_CANVAS, Mark, Mods, PROVIDES_CANVAS_ATLAS,
+    PROVIDES_CANVAS_WIRING, Paint, SetCanvas, Surface,
 };
 pub use devices::{
     DeviceKind, DevicesCommand, DevicesNote, EVENT_DEVICES, MAX_DEVICE_TEXT_CHARS, MAX_DEVICES,

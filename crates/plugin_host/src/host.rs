@@ -35,8 +35,9 @@ use tokio::runtime::Handle;
 
 use crossterm::event::KeyCode;
 use plugin_api::{
-    ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_ARCHIVE, PROVIDES_DEVICES, PROVIDES_INSPECT,
-    PROVIDES_PREVIEW, PROVIDES_VFS_ARCHIVE, PROVIDES_VFS_SSH, ReadFile, Stat, StatKind, StatReply,
+    CanvasInput, ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_ARCHIVE, PROVIDES_DEVICES,
+    PROVIDES_INSPECT, PROVIDES_PREVIEW, PROVIDES_VFS_ARCHIVE, PROVIDES_VFS_SSH, ReadFile, Stat,
+    StatKind, StatReply, Surface,
 };
 use serde_json::json;
 use shared::{FileKind, LocalVfs, Vfs};
@@ -659,6 +660,51 @@ impl PluginManager {
         })
     }
 
+    /// Tells the plugin that draws `surface` what happened in its view. Returns whether a plugin
+    /// got it: `false` when none provides the view, or the one that does cannot be started, so
+    /// the interface can say where to get it instead of waiting for a canvas that will not come.
+    /// A plugin whose process has ended is started again first, except to be told the view
+    /// closed: that never starts a process just to tell it so.
+    pub fn dispatch_canvas(&mut self, surface: Surface, input: CanvasInput) -> bool {
+        let Self {
+            plugins,
+            logs_tx,
+            state_tx,
+            ..
+        } = self;
+        let Some(plugin) = plugins
+            .iter_mut()
+            .find(|p| p.provides.iter().any(|word| word == surface.provides()))
+        else {
+            return false;
+        };
+        if input == CanvasInput::Close && plugin.process.life.exit() != Exit::Running {
+            return true;
+        }
+        if !plugin.ready_for_event(logs_tx, state_tx) {
+            return false;
+        }
+        let event = protocol::HostEvent::canvas(surface, input);
+        plugin.process.stdin_tx.send(event.to_line()).is_ok()
+    }
+
+    /// Whether a plugin is configured to draw `surface`, running or not.
+    pub fn has_canvas(&self, surface: Surface) -> bool {
+        self.plugins
+            .iter()
+            .any(|p| p.provides.iter().any(|word| word == surface.provides()))
+    }
+
+    /// Whether a plugin that draws `surface` has a live process right now. A canvas that was
+    /// being kept current when that process died will never be updated, which the interface can
+    /// tell by this.
+    pub fn canvas_running(&self, surface: Surface) -> bool {
+        self.plugins.iter().any(|p| {
+            p.provides.iter().any(|word| word == surface.provides())
+                && p.process.life.exit() == Exit::Running
+        })
+    }
+
     /// Hands `command` to the plugin that provides `devices`. Returns whether a plugin got it:
     /// `false` when none provides `devices`, or the one that does cannot be started, so the
     /// interface can say where to get it instead of waiting for a list that will not come. A
@@ -1047,6 +1093,8 @@ async fn read_loop(
             Ok(Incoming::SetView(set)) => ui.set_view(&plugin, set),
             Ok(Incoming::SetPreview(set)) => ui.set_preview(&plugin, set),
             Ok(Incoming::SetInspect(set)) => ui.set_inspect(&plugin, set),
+            Ok(Incoming::SetCanvas(set)) => ui.set_canvas(&plugin, set),
+            Ok(Incoming::CanvasNote(note)) => ui.canvas_note(&plugin, note),
             Ok(Incoming::SetDevices(set)) => ui.set_devices(&plugin, set),
             Ok(Incoming::DevicesNote(note)) => ui.devices_note(&plugin, note),
             Ok(Incoming::ArchiveProgress(progress)) => ui.archive_progress(&plugin, progress),
@@ -1376,6 +1424,9 @@ mod tests {
         assert!(!manager.dispatch_named("x", Vec::new(), Path::new("/"), &[]));
         assert!(!manager.dispatch_inspect(Some(Path::new("/a"))));
         assert!(!manager.inspector_running());
+        assert!(!manager.has_canvas(Surface::Atlas));
+        assert!(!manager.canvas_running(Surface::Wiring));
+        assert!(!manager.dispatch_canvas(Surface::Atlas, CanvasInput::Close));
         assert!(manager.names().is_empty());
         assert!(manager.is_empty());
         assert!(manager.take_action().is_none());

@@ -26,6 +26,8 @@ mod boot_splash;
 mod browser_drag;
 mod browser_mouse;
 mod bundled;
+mod canvas_pane;
+mod canvas_view;
 mod cargo_fit;
 mod chooser;
 mod cli;
@@ -97,6 +99,7 @@ use boot_splash::BootSplash;
 use browser::BrowserState;
 use browser::sort::Sort;
 use browser_mouse::{Click, ClickTracker, Hit, Listing, Pane, Select, Wheel};
+use canvas_pane::CanvasPane;
 use compress_popup::CompressPopup;
 use context_menu::{
     Context as MenuContext, ContextMenu, MenuCommand, Nav, Outcome as MenuOutcome,
@@ -121,7 +124,7 @@ use inspect_panel::InspectPanel;
 use picker_popup::{Outcome as PickerOutcome, PickerPopup};
 use plugin_action::Browse;
 use plugin_api::Format;
-use plugin_api::{PreviewContent, SetPreview};
+use plugin_api::{CanvasNote, PreviewContent, SetPreview, Surface};
 use plugin_host::UiRequest;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -422,6 +425,8 @@ struct Overlay<'a> {
     wiring: Option<&'a WiringState>,
     /// The zoomable map of the storage, in the atlas view.
     atlas: Option<&'a AtlasState>,
+    /// A view a plugin draws in place of one the core would (the atlas, today).
+    canvas: Option<&'a CanvasPane>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
     /// `effective_panels`/`effective_styles`.
@@ -1422,6 +1427,9 @@ fn run(
     let mut wiring: Option<WiringState> = None;
     // The atlas, likewise only while its view is showing.
     let mut atlas: Option<AtlasState> = None;
+    // A view served by a plugin that provides it (`canvas-atlas`); the core's own atlas above
+    // draws only when no plugin does.
+    let mut canvas: Option<CanvasPane> = None;
     // `local.toml`'s three tables, seeded from what `Config::load` already parsed from it (so a
     // save this session correctly carries forward whatever an earlier session saved) and mutated
     // live by the two popups; `effective_theme`/`effective_ui`/`effective_panels` layer each onto
@@ -1485,6 +1493,12 @@ fn run(
                 }
                 UiRequest::SetView { plugin, set } => app.set_view(&plugin, set),
                 UiRequest::SetPreview { set, .. } => previews.accept(set),
+                UiRequest::SetCanvas { set, .. } => {
+                    if let Some(hint) = canvas.as_mut().and_then(|pane| pane.accept(set)) {
+                        app.status = Some(hint);
+                    }
+                }
+                UiRequest::CanvasNote { note, .. } => apply_canvas_note(note, app, browser),
                 UiRequest::SetInspect { set, .. } => {
                     if let Some(panel) = inspect.as_mut() {
                         panel.accept(set);
@@ -1586,11 +1600,29 @@ fn run(
         } else {
             wiring = None;
         }
-        if view_mode == ViewMode::Atlas {
+        let plugin_atlas = app.has_canvas(Surface::Atlas);
+        if view_mode == ViewMode::Atlas && !plugin_atlas {
             let map = atlas.get_or_insert_with(|| app.begin_atlas());
             map.poll(Instant::now(), browser.current_dir());
         } else {
             atlas = None;
+        }
+        if view_mode == ViewMode::Atlas && plugin_atlas {
+            let panels = effective_panels(config, &local_panels);
+            let body = browser_layout(
+                terminal.size()?.into(),
+                panels.columns,
+                panels.show_hud,
+                view_mode,
+                effective_theme(config, &local_theme).shape,
+            )
+            .current;
+            match canvas.as_mut() {
+                Some(pane) => pane.follow(app, body),
+                None => canvas = CanvasPane::open(app, Surface::Atlas, body, Instant::now()),
+            }
+        } else if let Some(pane) = canvas.take() {
+            pane.close(app);
         }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
         // browser steps aside until it exits. Checked here, once per turn of the loop, because
@@ -1748,6 +1780,7 @@ fn run(
                     deck: deck.as_ref(),
                     wiring: wiring.as_ref(),
                     atlas: atlas.as_ref(),
+                    canvas: canvas.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
                     local_panels: &local_panels,
@@ -2286,6 +2319,12 @@ fn run(
                             }
                             continue;
                         }
+                    }
+                    // A view a plugin draws gets every click and wheel turn in its body.
+                    if let Some(pane) = canvas.as_ref()
+                        && pane.pointer(app, layout.current, &mouse)
+                    {
+                        continue;
                     }
                     // In the atlas view the whole body is the map: a click chooses a block (and
                     // zooms into it if it was chosen already). The wheel does nothing there, and
@@ -3265,6 +3304,13 @@ fn run(
                     }
                 }
 
+                // A view a plugin draws gets the keys its canvas claims; any other is the browser's.
+                if let Some(pane) = canvas.as_ref()
+                    && pane.key(app, &key)
+                {
+                    continue;
+                }
+
                 // In the atlas view the arrows move between blocks, `Enter` zooms in, `Backspace`
                 // out and `o` opens in the browser. Anything else is the browser's.
                 if let Some(map) = atlas.as_mut() {
@@ -3787,6 +3833,27 @@ struct PreviewSubject<'a> {
     label: &'a str,
 }
 
+/// Does what a view a plugin draws asked of the browser: go to a folder, copy what is carried
+/// into one, or say something.
+fn apply_canvas_note(note: CanvasNote, app: &mut App, browser: &mut BrowserState) {
+    match note {
+        CanvasNote::Status { text } => app.status = Some(text),
+        CanvasNote::Goto { path, text } => {
+            let plan = browser.plan_goto(&path);
+            let message = (!text.is_empty()).then_some(text).or(Some("opened".into()));
+            app.begin_move(browser, plan, message, "folder");
+        }
+        CanvasNote::Send { into } => {
+            if app.clipboard.is_none() {
+                app.yank(browser);
+            }
+            if app.clipboard.is_some() {
+                app.begin_paste_into(into);
+            }
+        }
+    }
+}
+
 /// Does what the atlas asked for: go to a folder, or say something. `Pass` and `Handled` ask for
 /// nothing.
 fn apply_atlas(outcome: AtlasKey, app: &mut App, browser: &mut BrowserState) {
@@ -3893,6 +3960,7 @@ fn draw(
         deck,
         wiring,
         atlas,
+        canvas,
         local_theme,
         local_ui,
         local_panels,
@@ -3978,6 +4046,11 @@ fn draw(
             config,
             Instant::now(),
         );
+    }
+
+    // A view a plugin draws, over the whole body.
+    if let Some(pane) = canvas {
+        pane.draw(frame, layout.current, config, Instant::now());
     }
 
     // The atlas, over the whole body.

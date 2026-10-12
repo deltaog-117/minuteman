@@ -1530,3 +1530,104 @@ fn a_plugin_that_dies_in_the_middle_of_a_request_ends_the_call_and_comes_back() 
     };
     assert_eq!(link.call(&read, Some(first.epoch)), Err(PeerError::Stale));
 }
+
+fn provides_canvas() -> Triggers {
+    Triggers {
+        actions: vec![plugin_api::Surface::Atlas.provides().to_string()],
+        ..Triggers::default()
+    }
+}
+
+#[test]
+fn a_view_with_no_plugin_is_nobodys_and_reaches_nobody() {
+    let mut manager = PluginManager::new();
+    assert!(!manager.has_canvas(plugin_api::Surface::Atlas));
+    assert!(!manager.dispatch_canvas(
+        plugin_api::Surface::Atlas,
+        plugin_api::CanvasInput::Open {
+            width: 10,
+            height: 4
+        }
+    ));
+}
+
+#[test]
+fn a_plugin_that_draws_a_view_hears_it_open_and_answers_with_a_canvas_and_a_note() {
+    use plugin_api::{CanvasInput, CanvasNote, Item, Mods, Surface};
+
+    let dir = scratch_dir("canvas");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--canvas-on-open"],
+        provides_canvas(),
+    );
+    assert!(manager.has_canvas(Surface::Atlas));
+    assert!(
+        !manager.has_canvas(Surface::Wiring),
+        "it draws only the atlas"
+    );
+    assert!(
+        !manager.dispatch_canvas(
+            Surface::Wiring,
+            CanvasInput::Open {
+                width: 1,
+                height: 1
+            }
+        ),
+        "the wiring is not this plugin's"
+    );
+
+    assert!(manager.dispatch_canvas(
+        Surface::Atlas,
+        CanvasInput::Open {
+            width: 40,
+            height: 12
+        }
+    ));
+    wait_for_log(&mut manager, "canvas: atlas open 40x12");
+    let mut seen = Vec::new();
+    while seen.len() < 2 {
+        seen.push(wait_for_ui(&mut manager));
+    }
+    let canvas = seen
+        .iter()
+        .find_map(|request| match request {
+            UiRequest::SetCanvas { set, .. } => Some(set.clone()),
+            _ => None,
+        })
+        .expect("the canvas arrived");
+    assert_eq!(canvas.surface, Surface::Atlas);
+    let canvas = canvas.canvas.expect("it is not empty");
+    assert_eq!((canvas.width, canvas.height), (40, 12));
+    assert_eq!(canvas.claims, ["j"]);
+    assert!(matches!(&canvas.items[1], Item::Text { text, .. } if text == "ok"));
+    assert!(seen.iter().any(|request| matches!(
+        request,
+        UiRequest::CanvasNote { note: CanvasNote::Status { text }, .. } if text == "from the plugin"
+    )));
+
+    assert!(manager.dispatch_canvas(
+        Surface::Atlas,
+        CanvasInput::Key {
+            key: "j".into(),
+            mods: Mods::default()
+        }
+    ));
+    wait_for_log(&mut manager, "canvas: atlas key j");
+    assert!(manager.dispatch_canvas(
+        Surface::Atlas,
+        CanvasInput::Resize {
+            width: 30,
+            height: 9
+        }
+    ));
+    wait_for_log(&mut manager, "canvas: atlas resize 30x9");
+    assert!(manager.canvas_running(Surface::Atlas));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -97,6 +97,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-12 | Ssh Served by a Plugin (M7b) | `mman-ssh` serves reads and writes on the archive plugin's wire, staged in three steps so remote writes never regress (COA A); keeping `vfs_ssh` in the core behind a feature (C) not taken | 🟡 Step 1 of 3 |
 | 2026-10-12 | Ssh Plugin Built, Not Wired (M7b step 2) | The `vfs_ssh` engine copied into `plugins/ssh` behind a `Server`, a host-side `SshVfs` in a new core crate, hex-over-JSON windows kept and measured (COA A); binary frames (B) and a rewrite on a lighter ssh stack (C) not taken | ✅ Confirmed |
 | 2026-10-12 | Ssh Cut-Over (M7b step 3) | One cut-over: `SshVfs` wired in, `vfs_ssh` deleted, the install line shown when `mman-ssh` is absent (COA A) | ✅ Confirmed |
+| 2026-10-12 | Canvas Primitive for Whole-Body Views (M7c step 1) | A plugin draws atlas and wiring through a `canvas` of semantic parts and claimed keys; grid, tiles, details and filmstrip stay in the core (COA C); the core atlas stays as the fallback until the plugin exists | ✅ Confirmed |
 
 ---
 
@@ -7553,6 +7554,57 @@ faster than the stand-in.
 and that only the absent-plugin error is taken for one. Driven through a pty against the compiled
 `mman`: with no `mman-ssh` beside it the status line says how to get it; with it, a refused
 connection is reported by the plugin.
+
+---
+
+## 2026-10-12 — A canvas for views a plugin draws, step 1 of 3 (M7c)
+
+**Decision.** Three courses were weighed for the alternate views: all of them stay in the core
+behind a cargo feature (A), all of them move out through a new pane vocabulary (B), or split by
+what each view reads (C). Chosen: C. Grid, tiles, details and filmstrip are layouts of the browsed
+folder; they share its cursor, marks, thumbnails and hit-testing, and a plugin drawing them would
+have to mirror all of that. The atlas and the wiring diagram scan the machine on their own and keep
+their own state, which is the shape of the devices and inspect plugins that already moved. They are
+about 5,000 of the 7,600 lines. If the vocabulary proves too costly, C degrades to A for those two
+views only.
+
+**Staging.** Step 1 (this entry) is the primitive, with the core atlas still drawing when no plugin
+provides it. Step 2 is `plugins/atlas` and the deletion of the core atlas; step 3 is the wiring the
+same way. Step 1 is wired in rather than only built, because an unused module fails the
+project's clippy gate, and because "a plugin provides it, else the core draws" is the behavior the
+last two steps need anyway.
+
+**The vocabulary.** A canvas is a grid of cells with four kinds of part: a filled block (with an
+optional level, filled from the bottom, for a volume's gauge), a frame with a title, a line of
+text, and an orthogonal path that can ask for a travelling mark. Every part is painted by meaning:
+a tone, one of 16 hue numbers, a mark (chosen, here). The interface owns the colors: the 16 hues are
+16 of the theme's own fields in a fixed order, a frame takes the theme's border style, and text
+written over a filled block turns black or white by the block's brightness, so a plugin never
+names a color and a view that moves out of the core cannot drift from the theme.
+
+**Keys.** A plugin cannot be offered a key and hand it back, because the answer arrives a frame
+late. Each canvas names the keys it claims, and the interface forwards those and keeps the rest for
+the browser. The atlas passes `Esc` only at its top level; that becomes a claim list without `esc`
+at that level. Clicks and the wheel inside the body all go to the plugin, in cells of the canvas.
+
+**Checking.** A plugin may be hostile and its text reaches the terminal, so `Canvas::checked`
+cleans control and direction-changing characters, and refuses (rather than clamps) a part with no
+area or outside the canvas, a slanted path, a hue or level that does not exist, and more parts,
+text or claims than the limits. That is what lets the renderer index a buffer without arithmetic of
+its own; a property test paints random canvases into random areas and compares every cell outside
+the area before and after.
+
+**Left open.** `double` on a click is on the wire and always false for now: the atlas does not need
+it, and the browser's double-click clock lives in `browser_mouse`. The wiring may. A view cannot yet
+ask for the focus to leave it, nor draw an image.
+
+**Verification.** `scripts/check` passes. New tests: the wire shapes and every refusal, a
+property test over `checked`, the parser cleaning and refusing in `plugin_host`, an integration
+test against the fixture plugin (open, canvas and note back, key, resize), 18 for the renderer, and
+the pane's claim, hint and ownership rules. Driven through a pty against the compiled `mman`, with
+the fixture standing in as the atlas plugin: its text appeared on a hue background in black or
+white, its note reached the status line, a claimed key, a resize and a click reached it, and `q`,
+which it did not claim, quit the browser. With no plugin configured, the core atlas drew as before.
 
 ---
 

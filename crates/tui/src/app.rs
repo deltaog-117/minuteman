@@ -1680,6 +1680,28 @@ impl App {
         self.plugins.inspector_running()
     }
 
+    /// Whether a plugin is configured to draw `surface`. When none is, the view (if the core still
+    /// has one) draws itself.
+    pub fn has_canvas(&self, surface: plugin_api::Surface) -> bool {
+        self.plugins.has_canvas(surface)
+    }
+
+    /// Tells the plugin that draws `surface` what happened in its view; `false` when none can be
+    /// reached.
+    pub fn dispatch_canvas(
+        &mut self,
+        surface: plugin_api::Surface,
+        input: plugin_api::CanvasInput,
+    ) -> bool {
+        self.plugins.dispatch_canvas(surface, input)
+    }
+
+    /// Whether the plugin that draws `surface` has a live process right now: when it has not, a
+    /// canvas that was being kept current never changes again.
+    pub fn canvas_running(&self, surface: plugin_api::Surface) -> bool {
+        self.plugins.canvas_running(surface)
+    }
+
     fn associations(&self) -> &Associations {
         self.associations.get_or_init(Associations::from_env)
     }

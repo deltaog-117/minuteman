@@ -2116,7 +2116,26 @@ draws.
        the status line says how to get it, and with it a refused connection is reported by the
        plugin. `mman ssh://host/dir` opens the working folder and then moves to the remote one,
        because the plugin is not running when the browser is first built.
-  - [ ] **M7c – the alternate views** (decided after M7b, with the cargo-feature fallback open).
+  - [ ] **M7c – the alternate views.** Chosen as COA C: the atlas and the wiring diagram move to
+    plugins; grid, tiles, details and filmstrip stay in the core, being layouts of the browsed
+    folder that share its cursor, marks, thumbnails and hit-testing. A plugin draws through a
+    `canvas` (blocks, frames, text and orthogonal paths painted by meaning, never by color) and
+    names the keys it claims; the interface keeps the palette. If the vocabulary proves too
+    costly, those two views stay in the core behind a cargo feature.
+    1. [x] the canvas primitive. `plugin_api::Canvas` and `SetCanvas::checked`, the `canvas` event
+       and `canvas_note`, `PluginManager::dispatch_canvas`, the interface's renderer
+       (`canvas_view`) and pane state (`canvas_pane`). The atlas is a plugin's when one provides
+       `canvas-atlas`, else the core draws it as before. No bundled plugin yet. Verified against
+       the real `mman` with the test fixture as the atlas plugin: its canvas drew from the theme,
+       a claimed key, a resize and a click reached it, an unclaimed key was the browser's; with no
+       plugin the core atlas drew.
+    2. [ ] `plugins/atlas` (`mman-atlas`), and delete the core atlas. It needs the volume list
+       (`shared::devices`) and a folder scanner that sums sizes by level; the scanner now in
+       `tui::disk_usage` serves the `u` view as well, so it moves to `shared` first (or the
+       plugin sums a host `walk`, which has no on-disk size). Decide that first.
+    3. [ ] `plugins/wiring`, the same way: also needs the topology and activity from `shared` (they
+       already are), the folder unfolding (`wiring_folders`), and `Send`, which `canvas_note`
+       already carries. Needs a click's `double` if the diagram uses it.
 
 ---
 
@@ -2423,11 +2442,11 @@ draws.
    from a checkout `cargo build -p archiver`).
    Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. Nothing new to try by hand this cycle: `mman-ssh` is built but not wired in, and `mman` still
-   browses `ssh://` machines in-process. Its tests are the check: `cargo test -p remoter -p
-   vfs_remote` (they start a real `sshd` on a loopback port and skip themselves without one), and
-   `cargo test -p vfs_remote --release --test throughput -- --ignored --nocapture` for the timing
-   (upload is now about twice the in-process rate).
+1. Nothing new to try by hand this cycle: no bundled plugin draws a canvas yet, so the atlas is
+   still the core's. The check is the test with the fixture plugin (`cargo test -p plugin_host
+   --test host_integration canvas`). `mman-ssh` is wired in since the last cycle: install it
+   (`cargo install --path plugins/ssh`) and `mman ssh://host/dir` browses a machine;
+   `cargo test -p vfs_remote --release --test throughput -- --ignored --nocapture` times it.
    Before that: `cargo run -p tui` — mark a folder with `v` and `:compress x.tar.gz` (the header
    shows the gauge; `Esc` stops it), then mark the archive and `:extract`; `:compress -p s.zip` asks
    twice for a password and `:extract` of that zip asks once and says `wrong password` for a bad
@@ -2551,8 +2570,8 @@ draws.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: M7c, the alternate views (grid, tiles, filmstrip, atlas, wiring), which need
-   `SetPane` to describe more than text spans; M7b is done. Medium Priority holds the follow-ups to remote browsing and the other features
+4. Next cycle: M7c step 2, `plugins/atlas` (decide where the folder scanner lives first); M7c
+   step 1, the canvas, is done, and so is M7b. Medium Priority holds the follow-ups to remote browsing and the other features
    listed there. Folder moves no longer block, so the next biggest gaps are the other things that
    read on the render thread (undo of a large move, a large archive's index) and a prompt for a
    password or a new host key.

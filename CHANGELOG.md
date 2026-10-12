@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugin_api`: a `canvas` a plugin can draw a whole-body view with (`set_canvas`): blocks with an
+  optional fill level, frames, text and orthogonal paths on a grid of cells, painted by tone, hue
+  number and mark and never by color, together with the keys it claims and a status hint. The host
+  checks it (control characters removed, a part outside the canvas, a slanted path or an unknown
+  hue refused) and tells the plugin when the view opens, resizes and closes and what the user keys,
+  clicks and scrolls in it (`canvas` event), and takes back what the view asks of the browser
+  (`canvas_note`: a message, a folder to show, files to send). Author: deltaog-117.
+- `tui`: draws such a canvas in the body of the atlas view from the user's theme (`canvas_view`) and
+  keeps its state (`canvas_pane`). When a plugin provides `canvas-atlas`, the atlas is that plugin's
+  and only the keys its canvas claims reach it; with none, the atlas draws itself as before. No
+  bundled plugin provides it yet. Author: deltaog-117.
 - `plugin_api`: `Peer::submit` sends a request and returns a `Reply` to wait on later, so a caller
   can have several in flight; the default answers at once through `call`, and `ServeLink` writes
   the request immediately. `vfs_remote`'s writer sends up to four windows ahead of their replies

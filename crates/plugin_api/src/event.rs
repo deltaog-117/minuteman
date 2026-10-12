@@ -22,11 +22,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    API_VERSION, ArchiveCancel, ArchiveRequest, ArchiveWork, Change, DevicesCommand, EVENT_ACTION,
-    EVENT_ARCHIVE, EVENT_ARCHIVE_CANCEL, EVENT_DEVICES, EVENT_INSPECT, EVENT_PICKER_CLOSED,
-    EVENT_PICKER_QUERY, EVENT_PREVIEW, EVENT_TALLY_DONE, EVENT_WALK_BATCH, EVENT_WALK_DONE,
-    InspectTarget, Job, JobOutcome, PickerEvent, PreviewTarget, TallyDone, TreeEntry, WalkEnd,
-    WalkEvent,
+    API_VERSION, ArchiveCancel, ArchiveRequest, ArchiveWork, CanvasEvent, CanvasInput, Change,
+    DevicesCommand, EVENT_ACTION, EVENT_ARCHIVE, EVENT_ARCHIVE_CANCEL, EVENT_CANVAS, EVENT_DEVICES,
+    EVENT_INSPECT, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_PREVIEW, EVENT_TALLY_DONE,
+    EVENT_WALK_BATCH, EVENT_WALK_DONE, InspectTarget, Job, JobOutcome, PickerEvent, PreviewTarget,
+    Surface, TallyDone, TreeEntry, WalkEnd, WalkEvent,
 };
 
 /// A host -> plugin line: always a notification, never expects a reply.
@@ -84,6 +84,9 @@ pub struct EventParams {
     /// On a `devices` event: what the interface asks of the plugin that fills the rail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devices: Option<DevicesCommand>,
+    /// On a `canvas` event: what happened in a view a plugin draws.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<CanvasEvent>,
     /// Present on `dir_changed` and `selection_changed`; its `from` and `to` sit beside the
     /// other params. (A reader of a `job_finished` may see an empty one: go by `name`.)
     #[serde(default, flatten)]
@@ -116,6 +119,7 @@ impl HostEvent {
                 archive: None,
                 archive_cancel: None,
                 devices: None,
+                canvas: None,
                 change: None,
                 job: None,
             },
@@ -247,6 +251,13 @@ impl HostEvent {
     pub fn devices(command: DevicesCommand) -> Self {
         let mut event = Self::new(EVENT_DEVICES, PathBuf::new(), Vec::new());
         event.params.devices = Some(command);
+        event
+    }
+
+    /// A `canvas` event: `input` happened in the view `surface`.
+    pub fn canvas(surface: Surface, input: CanvasInput) -> Self {
+        let mut event = Self::new(EVENT_CANVAS, PathBuf::new(), Vec::new());
+        event.params.canvas = Some(CanvasEvent { surface, input });
         event
     }
 

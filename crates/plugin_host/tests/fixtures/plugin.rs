@@ -44,6 +44,10 @@
 //! COUNT`, each `walk_done` as `walk_done: WALK OUTCOME truncated=BOOL`, and on `picker_closed`
 //! logs `picker_closed: PICKER` and cancels its walk.
 //!
+//! A `canvas` event is logged as `canvas: SURFACE INPUT DETAIL`; with `--canvas-on-open` the plugin
+//! answers an `open` with a small `set_canvas` (claiming `j`) and a `canvas_note` status, the
+//! status 400 ms late with `--canvas-late-note`.
+//!
 //! Three flags make it end on purpose, so the tests can play a one-shot plugin and a plugin in a
 //! crash loop: `--exit-on-init=N`, `--exit-after-key=N` and `--exit-after-event=N` exit with
 //! status N right at `init`, after finishing a `key`, or after logging a change or job event.
@@ -304,6 +308,55 @@ fn main() {
                     );
                     let outcome = walked.map_or_else(|e| e, |_| "ok".to_string());
                     send_log(&mut stdout, "info", &format!("walk: {outcome}"));
+                }
+            }
+            "canvas" => {
+                let canvas = &event["params"]["canvas"];
+                let input = canvas["input"].as_str().unwrap_or("?");
+                let detail = match input {
+                    "open" | "resize" => format!("{}x{}", canvas["width"], canvas["height"]),
+                    "key" => canvas["key"].as_str().unwrap_or("?").to_string(),
+                    "click" | "wheel" => format!("{},{}", canvas["x"], canvas["y"]),
+                    _ => String::new(),
+                };
+                send_log(
+                    &mut stdout,
+                    "info",
+                    &format!(
+                        "canvas: {} {input} {detail}",
+                        canvas["surface"].as_str().unwrap_or("?")
+                    ),
+                );
+                if input == "open" && std::env::args().any(|arg| arg == "--canvas-on-open") {
+                    let (width, height) = (canvas["width"].clone(), canvas["height"].clone());
+                    send_notification(
+                        &mut stdout,
+                        "set_canvas",
+                        serde_json::json!({
+                            "surface": canvas["surface"],
+                            "canvas": {
+                                "width": width,
+                                "height": height,
+                                "items": [
+                                    { "part": "block", "at": { "x": 0, "y": 0, "w": 2, "h": 1 },
+                                      "paint": { "hue": 3 } },
+                                    { "part": "text", "x": 0, "y": 0, "width": 2, "text": "ok",
+                                      "paint": {} }
+                                ],
+                                "claims": ["j"],
+                                "hint": "j moves"
+                            }
+                        }),
+                    );
+                    if std::env::args().any(|arg| arg == "--canvas-late-note") {
+                        // After the host's next turn, so a plugin log line cannot replace it.
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    }
+                    send_notification(
+                        &mut stdout,
+                        "canvas_note",
+                        serde_json::json!({ "kind": "status", "text": "from the plugin" }),
+                    );
                 }
             }
             "picker_query" => {

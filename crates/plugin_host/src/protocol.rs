@@ -55,19 +55,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use plugin_api::{
-    API_VERSION, ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, Change, DevicesCommand,
-    DevicesNote, EVENT_ACTION, EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT, EVENT_JOB_FINISHED,
-    EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH,
-    EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job, JobOutcome, Line, LogLevel, PickerClose,
-    PickerIndexing, PickerSpec, PickerUpdate, ReadFile, SetDevices, SetInspect, SetPreview,
-    SetView, Slot, Span, Stat, StateSnapshot, TallyCancel, TallyDone, TallyEnding, TallyRequest,
-    Tone, TreeEntry, VfsFault, View, WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
+    API_VERSION, ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, CanvasInput, CanvasNote,
+    Change, DevicesCommand, DevicesNote, EVENT_ACTION, EVENT_COMMAND, EVENT_DIR_CHANGED,
+    EVENT_INIT, EVENT_JOB_FINISHED, EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
+    EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH, EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job,
+    JobOutcome, Line, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, ReadFile,
+    SetCanvas, SetDevices, SetInspect, SetPreview, SetView, Slot, Span, Stat, StateSnapshot,
+    Surface, TallyCancel, TallyDone, TallyEnding, TallyRequest, Tone, TreeEntry, VfsFault, View,
+    WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
 };
 use plugin_api::{
-    METHOD_ARCHIVE_DONE, METHOD_ARCHIVE_PROGRESS, METHOD_DEVICES_NOTE, METHOD_PICKER_CLOSE,
-    METHOD_PICKER_ITEMS, METHOD_READ_FILE, METHOD_SET_DEVICES, METHOD_SET_INSPECT,
-    METHOD_SET_PREVIEW, METHOD_SET_VIEW, METHOD_SHOW_PICKER, METHOD_STAT, METHOD_TALLY,
-    METHOD_TALLY_CANCEL, METHOD_WALK, METHOD_WALK_CANCEL,
+    METHOD_ARCHIVE_DONE, METHOD_ARCHIVE_PROGRESS, METHOD_CANVAS_NOTE, METHOD_DEVICES_NOTE,
+    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_READ_FILE, METHOD_SET_CANVAS,
+    METHOD_SET_DEVICES, METHOD_SET_INSPECT, METHOD_SET_PREVIEW, METHOD_SET_VIEW,
+    METHOD_SHOW_PICKER, METHOD_STAT, METHOD_TALLY, METHOD_TALLY_CANCEL, METHOD_WALK,
+    METHOD_WALK_CANCEL,
 };
 
 /// Spells `code` the way a config file does, so a plugin bound to several keys can tell which one
@@ -335,6 +337,11 @@ pub enum Incoming {
     /// The plugin said what an action on a device came to; already cleaned by
     /// `DevicesNote::checked`. A note that cannot be shown safely is ignored.
     DevicesNote(DevicesNote),
+    /// The plugin gave a view it draws its canvas; already checked by `SetCanvas::checked`.
+    SetCanvas(SetCanvas),
+    /// The plugin said what a view it draws asks of the browser; already cleaned by
+    /// `CanvasNote::checked`. A note that cannot be shown safely is ignored.
+    CanvasNote(CanvasNote),
     /// The plugin answered a request the host made of it (see `plugin_api::VfsRequest`): the
     /// `id` it was sent under and what came of it.
     Response {
@@ -486,6 +493,24 @@ pub fn parse_line(line: &str) -> Result<Incoming, LineError> {
                     .map(|note| {
                         note.checked()
                             .map_or(Incoming::UnknownNotification, Incoming::DevicesNote)
+                    })
+                    .map_err(bad);
+            }
+            METHOD_SET_CANVAS => {
+                return serde_json::from_value::<SetCanvas>(raw.params)
+                    .map_err(bad)?
+                    .checked()
+                    .map(Incoming::SetCanvas)
+                    .map_err(|e| LineError {
+                        id: None,
+                        message: format!("refused '{}': {e}", method),
+                    });
+            }
+            METHOD_CANVAS_NOTE => {
+                return serde_json::from_value::<CanvasNote>(raw.params)
+                    .map(|note| {
+                        note.checked()
+                            .map_or(Incoming::UnknownNotification, Incoming::CanvasNote)
                     })
                     .map_err(bad);
             }
@@ -1131,6 +1156,51 @@ mod tests {
         );
         let refused = parse_line(&many).unwrap_err();
         assert!(refused.message.contains("refused"), "{}", refused.message);
+    }
+
+    #[test]
+    fn set_canvas_is_checked_before_the_host_sees_it() {
+        let line = r#"{"jsonrpc":"2.0","method":"set_canvas","params":{"surface":"atlas","canvas":{"width":8,"height":2,"items":[{"part":"text","x":0,"y":0,"width":8,"text":"a\u001bb","paint":{}}]}}}"#;
+        match parse_line(line).unwrap() {
+            Incoming::SetCanvas(set) => {
+                assert_eq!(set.surface, Surface::Atlas);
+                let canvas = set.canvas.expect("a canvas was sent");
+                assert!(
+                    matches!(&canvas.items[0], plugin_api::Item::Text { text, .. } if text == "ab")
+                );
+            }
+            other => panic!("expected set_canvas, got {other:?}"),
+        }
+        let outside = r#"{"jsonrpc":"2.0","method":"set_canvas","params":{"surface":"wiring","canvas":{"width":4,"height":2,"items":[{"part":"block","at":{"x":3,"y":0,"w":2,"h":1},"paint":{}}]}}}"#;
+        let refused = parse_line(outside).unwrap_err();
+        assert!(refused.message.contains("refused"), "{}", refused.message);
+    }
+
+    #[test]
+    fn a_canvas_note_is_cleaned_and_an_unsafe_folder_is_ignored() {
+        let status = r#"{"jsonrpc":"2.0","method":"canvas_note","params":{"kind":"status","text":"a\u001bb"}}"#;
+        match parse_line(status).unwrap() {
+            Incoming::CanvasNote(CanvasNote::Status { text }) => assert_eq!(text, "ab"),
+            other => panic!("expected canvas_note, got {other:?}"),
+        }
+        let goto = r#"{"jsonrpc":"2.0","method":"canvas_note","params":{"kind":"goto","path":"/a\u001bb"}}"#;
+        assert_eq!(parse_line(goto).unwrap(), Incoming::UnknownNotification);
+    }
+
+    #[test]
+    fn a_canvas_event_carries_the_view_and_what_happened_in_it() {
+        let event = HostEvent::canvas(
+            Surface::Atlas,
+            CanvasInput::Open {
+                width: 80,
+                height: 24,
+            },
+        );
+        assert_eq!(event_json(&event)["params"]["name"], "canvas");
+        assert_eq!(
+            event_json(&event)["params"]["canvas"],
+            serde_json::json!({"surface": "atlas", "input": "open", "width": 80, "height": 24})
+        );
     }
 
     #[test]
