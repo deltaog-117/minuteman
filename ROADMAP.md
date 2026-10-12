@@ -2059,9 +2059,22 @@ draws.
   off the screen (a unit test covers its words); no kill of the plugin mid-listing was tried on
   the real binary; compress and extract inside an archive stay refused (they write).
 - [ ] **M7 – decide, then do, for what is left:** the `ssh` scheme served by a plugin, and the
-  alternate views (grid, tiles,
-  filmstrip, atlas, wiring), which need `SetPane` to describe more than text spans. If either
-  proves too costly, it stays in the core behind a cargo feature.
+  alternate views (grid, tiles, filmstrip, atlas, wiring), which need `SetPane` to describe more
+  than text spans. If either proves too costly, it stays in the core behind a cargo feature.
+  - [ ] **M7b – `ssh` served by a plugin (`plugins/ssh`, `mman-ssh`).** Chosen over keeping
+    `vfs_ssh` in the core behind a feature: Minuteman is a better Ranger, ranger has no native
+    ssh browsing, and the async stack (`tokio`, `openssh`, `openssh-sftp-client`) is the largest
+    dependency in the core for a minority of sessions. Staged so remote writes never regress:
+    1. [x] move the address parsing (`ssh_path`) into `shared`, so the interface tells a remote
+       path apart without the SSH stack; add the `vfs-ssh` word, the write requests on the wire
+       and a second `ServeLink`. Behaviour unchanged.
+    2. [ ] build `mman-ssh` serving reads and writes, and a host-side `SshVfs` that routes
+       `ssh://` paths to it; run the same conformance scenarios and the loopback `sshd` tests.
+       Behaviour unchanged (the plugin is built but not wired in). Measure a large copy over the
+       wire (JSON lines, hex bytes, 256 KiB windows) against the in-process path first.
+    3. [ ] switch `main.rs` from `RoutedVfs` to `SshVfs`, delete `vfs_ssh` and its dependencies
+       from the core, add the missing-plugin message. From here ssh needs `mman-ssh` installed.
+  - [ ] **M7c – the alternate views** (decided after M7b, with the cargo-feature fallback open).
 
 ---
 

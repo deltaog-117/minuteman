@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugin_api`: the `vfs-ssh` word and the requests a plugin that serves remote machines is sent
+  beyond the reads (`home`, `create`, `write`, `flush`, `create_dir`, `create_file`, `touch`,
+  `set_mode`, `symlink`, `rename`, `replace`, `copy_file`, `remove_file`, `remove_dir_all`), and
+  `plugin_host` reaches that plugin through its own link. Nothing uses them yet. Author: deltaog-117.
 - `plugin_api`: an `image` document for `set_preview`, so a previewing plugin can say a file is a
   picture without sending pixels: its source is `original` (the file itself, read by the interface
   through the browsed paths) or `handoff` (a scratch PNG the plugin made, which must be a file
@@ -119,6 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- `shared`: the parsing of `ssh://` addresses moved here from `vfs_ssh` (`shared::ssh_path`), so the
+  interface can tell a remote path apart without the SSH stack. No change in behavior.
 - The deck's rail of devices no longer scans the machine itself: `mman-devices` sends the list
   and does the mounting. The rail, its keys, the selection, the slide-in of a new device and the
   check of whether carried files fit are unchanged. Without the plugin the rail says

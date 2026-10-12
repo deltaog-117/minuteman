@@ -1448,6 +1448,38 @@ fn a_plugin_that_does_not_provide_the_archive_paths_is_not_asked_for_them() {
 }
 
 #[test]
+fn a_plugin_that_provides_the_remote_paths_is_reached_by_its_own_link_and_not_the_archive_one() {
+    use plugin_api::{Peer, PeerError};
+
+    let dir = scratch_dir("serve-ssh");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    let archives = manager.serve_link();
+    let remote = manager.serve_ssh_link();
+    spawn_fixture_with(
+        &runtime,
+        &mut manager,
+        &dir,
+        "--serve-vfs",
+        Triggers {
+            actions: vec![plugin_api::PROVIDES_VFS_SSH.to_string()],
+            ..Triggers::default()
+        },
+    );
+    wait_for_log(&mut manager, "ready pid=");
+    assert!(manager.serves_ssh());
+    assert!(!manager.serves_archives());
+
+    let answer = remote.call(&list_request("ssh://host/dir"), None).unwrap();
+    assert_eq!(answer.value["op"], "list");
+    assert_eq!(
+        archives.call(&list_request("/x/a.zip!"), None),
+        Err(PeerError::Unavailable),
+        "a plugin answers only for the kind of path it provides"
+    );
+}
+
+#[test]
 fn a_plugin_that_dies_in_the_middle_of_a_request_ends_the_call_and_comes_back() {
     use plugin_api::{Epoch, Peer, PeerError, VfsRequest};
 

@@ -29,6 +29,7 @@ pub mod fuzzy;
 pub mod memory;
 pub mod mount;
 pub mod names;
+pub mod ssh_path;
 pub mod tally;
 pub mod vfs;
 
@@ -38,6 +39,7 @@ pub use fuzzy::Query;
 pub use memory::MemVfs;
 pub use mount::{MOUNT_MARK, archive_of_root, mount_root};
 pub use names::{clean_name, is_image, is_text};
+pub use ssh_path::{Host, Location, Remote, Target, TargetError, User, is_remote};
 pub use vfs::{
     DirEntryInfo, FileKind, LocalVfs, Metadata, ReadSeek, ScanEntry, Vfs, WriteSeek, create_dir_all,
 };

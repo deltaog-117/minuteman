@@ -40,6 +40,11 @@ use crate::preview::hex_string;
 /// The `provides` word of a plugin that serves the paths inside archives.
 pub const PROVIDES_VFS_ARCHIVE: &str = "vfs-archive";
 
+/// The `provides` word of a plugin that serves the paths on remote machines (`ssh://host/dir`).
+/// It is sent the same [`METHOD_VFS`] requests, and also the ones that change things (see
+/// [`VfsRequest::Create`] on), which a plugin that serves archives is never sent.
+pub const PROVIDES_VFS_SSH: &str = "vfs-ssh";
+
 /// The method of a host -> plugin request line.
 pub const METHOD_VFS: &str = "vfs";
 
@@ -71,6 +76,43 @@ pub enum VfsRequest {
     Read { handle: u64, offset: u64, len: u64 },
     /// Lets go of a handle. Replies `{}`, also for one that is already gone.
     Close { handle: u64 },
+    /// Turns what was typed after `ssh://` into the folder to open: for an address that names only
+    /// a machine, that login's home. Replies [`Resolved`].
+    Home { path: PathBuf },
+    /// Creates a new file to write and keeps it open. Replies [`Opened`] (the length is 0), and
+    /// is refused if `path` exists. It shares [`MAX_OPEN_HANDLES`] with `open`.
+    Create { path: PathBuf },
+    /// Writes `data` into an open new file at `offset`, which may lie beyond what is written (a
+    /// zip goes back to patch a header). Replies `{}`; at most [`MAX_VFS_READ`] bytes.
+    Write {
+        handle: u64,
+        offset: u64,
+        #[serde(with = "hex_string")]
+        data: Vec<u8>,
+    },
+    /// Makes what was written reach the file, and reports a write that failed after it was
+    /// accepted. Replies `{}`.
+    Flush { handle: u64 },
+    /// Makes a folder. Replies `{}`.
+    CreateDir { path: PathBuf },
+    /// Makes an empty file, refusing one that exists. Replies `{}`.
+    CreateFile { path: PathBuf },
+    /// Sets the modified time to now, making an empty file when there is none. Replies `{}`.
+    Touch { path: PathBuf },
+    /// Sets the permission bits. Replies `{}`.
+    SetMode { path: PathBuf, mode: u32 },
+    /// Makes `link` a symlink pointing at `target`. Replies `{}`.
+    Symlink { target: PathBuf, link: PathBuf },
+    /// Moves within one machine, refusing a `to` that exists. Replies `{}`.
+    Rename { from: PathBuf, to: PathBuf },
+    /// Moves within one machine over a `to` that exists. Replies `{}`.
+    Replace { from: PathBuf, to: PathBuf },
+    /// Copies a file within one machine, so its bytes never travel. Replies `{}`.
+    CopyFile { from: PathBuf, to: PathBuf },
+    /// Removes a file or a symlink. Replies `{}`.
+    RemoveFile { path: PathBuf },
+    /// Removes a folder and everything under it. Replies `{}`.
+    RemoveDirAll { path: PathBuf },
 }
 
 /// What kind of thing an entry is.
@@ -116,6 +158,12 @@ pub struct LinkTarget {
 pub struct Opened {
     pub handle: u64,
     pub len: u64,
+}
+
+/// The reply to `home`: the path to open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resolved {
+    pub path: PathBuf,
 }
 
 /// The reply to `read`.
@@ -353,6 +401,60 @@ mod tests {
         assert_eq!(
             json["params"],
             serde_json::json!({"op": "read", "handle": 3, "offset": 10, "len": 20})
+        );
+    }
+
+    #[test]
+    fn every_request_that_changes_something_survives_the_trip() {
+        let requests = [
+            VfsRequest::Home {
+                path: "ssh://h".into(),
+            },
+            VfsRequest::Create {
+                path: "ssh://h/a".into(),
+            },
+            VfsRequest::Write {
+                handle: 2,
+                offset: 1 << 40,
+                data: vec![0, 255, 16],
+            },
+            VfsRequest::Flush { handle: 2 },
+            VfsRequest::CreateDir {
+                path: "ssh://h/d".into(),
+            },
+            VfsRequest::SetMode {
+                path: "ssh://h/a".into(),
+                mode: 0o644,
+            },
+            VfsRequest::Symlink {
+                target: "a".into(),
+                link: "ssh://h/b".into(),
+            },
+            VfsRequest::CopyFile {
+                from: "ssh://h/a".into(),
+                to: "ssh://h/c".into(),
+            },
+            VfsRequest::RemoveDirAll {
+                path: "ssh://h/d".into(),
+            },
+        ];
+        for request in requests {
+            let line = request_to_line(1, &request);
+            let json: Value = serde_json::from_str(&line).unwrap();
+            let back: VfsRequest = serde_json::from_value(json["params"].clone()).unwrap();
+            assert_eq!(back, request);
+        }
+        let line = request_to_line(
+            1,
+            &VfsRequest::Write {
+                handle: 2,
+                offset: 0,
+                data: vec![0, 255, 16],
+            },
+        );
+        assert!(
+            line.contains(r#""data":"00ff10""#),
+            "bytes go as hex: {line}"
         );
     }
 

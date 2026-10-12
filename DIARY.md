@@ -94,6 +94,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-11 | Structured Search Plugin | A second bundled plugin on the picker slot, filters over the walk (COA C, delivered as B first); `/` and `f` kept as they are; content search (A) deferred | ✅ Confirmed |
 | 2026-10-11 | Inspect as a Plugin | A `stat` request, a `tally` job and a `set_inspect` document, rows worded by the plugin (COA A); a plugin that only formats what the core gathered (B) and a generic multi-line pane view (C) not taken | ✅ Confirmed |
 | 2026-10-11 | Archives Served by the Plugin | The host asks the archive plugin one request per `Vfs` call and the plugin answers; read-only, files read through handles tied to the plugin's process | ✅ Confirmed |
+| 2026-10-12 | Ssh Served by a Plugin (M7b) | `mman-ssh` serves reads and writes on the archive plugin's wire, staged in three steps so remote writes never regress (COA A); keeping `vfs_ssh` in the core behind a feature (C) not taken | 🟡 Step 1 of 3 |
 
 ---
 
@@ -7391,6 +7392,40 @@ and `mman-archive` were driven over a PTY read through `pyte`: a zip opened as a
 folder and file listed, the file's text in the preview column, and `Q` leaving the browser inside
 `t.zip!`. Not run on the real binary: the plugin killed mid-listing, a very large archive, an
 archive on an `ssh://` machine, and reading the missing-plugin message off the screen.
+
+## 2026-10-12 — Ssh served by a plugin, step 1 of 3 (M7b)
+
+Three ways were weighed. A: move `vfs_ssh` into a plugin on the archive plugin's wire. B: the same,
+with writes, streaming copies and the live refresh built into the plugin from the start. C: keep
+the crate in the core behind a cargo feature. A was chosen: Minuteman started as a better Ranger,
+ranger has no native ssh browsing, and the async stack (`tokio`, `openssh`,
+`openssh-sftp-client`) is the largest dependency in the core for a minority of sessions. C moves
+nothing; B is the hardest to verify in one go.
+
+**The staging.** Reads first and writes later as two commits would break remote copy, move and
+delete in between, so the work is: (1) groundwork with no behavior change, (2) the plugin built
+and tested but not wired in, (3) the switch and the deletion of `vfs_ssh` from the core. No
+commit leaves ssh worse than before.
+
+**Step 1.** The address parsing (`target.rs`, 422 lines, only `thiserror`) moved to
+`shared::ssh_path`, as `archive_path` did, because the interface tells a remote path apart in a
+dozen places (`is_remote`) and must keep doing so without the SSH stack; `vfs_ssh::target` is now
+a re-export so nothing else changed. `plugin_api` gained the `vfs-ssh` word and the requests that
+change things: `home`, `create` / `write` / `flush` (a file written by offset, because a zip goes
+back to patch a header), `create_dir`, `create_file`, `touch`, `set_mode`, `symlink`, `rename`,
+`replace`, `copy_file`, `remove_file`, `remove_dir_all`. A file written by `write` shares the
+limit of open handles with one being read. The host has a second `ServeLink` and picks the link
+from the word a plugin provides, so a plugin answers only for its own kind of path. The archive
+plugin refuses the new requests; it is never sent them.
+
+**Open for step 2.** What a large copy costs over JSON lines and hex bytes (the in-process path
+reads 256 KiB windows directly), measured before step 3. A half-written file when the plugin dies
+mid-copy. `rename` between two machines must keep answering `CrossesDevices`, which the move
+fallback and undo rely on.
+
+**Verification.** `scripts/check` passes. New tests: every changing request survives the trip as
+a line (bytes as hex), and a plugin that provides `vfs-ssh` is reached by its own link and not by
+the archive one. Nothing runs differently yet.
 
 ---
 

@@ -29,7 +29,10 @@ mod executor;
 mod link;
 mod routed;
 mod stream;
-pub mod target;
+
+// Parsing an address lives in `shared` so the interface can tell a remote path apart without
+// the SSH stack; the old path stays so the code here and its callers read as before.
+pub use shared::ssh_path as target;
 
 pub use link::{ConnectOptions, HostKeys};
 pub use routed::RoutedVfs;

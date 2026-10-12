@@ -36,7 +36,7 @@ use tokio::runtime::Handle;
 use crossterm::event::KeyCode;
 use plugin_api::{
     ChunkKind, FileChunk, MAX_READ_BYTES, PROVIDES_ARCHIVE, PROVIDES_DEVICES, PROVIDES_INSPECT,
-    PROVIDES_PREVIEW, PROVIDES_VFS_ARCHIVE, ReadFile, Stat, StatKind, StatReply,
+    PROVIDES_PREVIEW, PROVIDES_VFS_ARCHIVE, PROVIDES_VFS_SSH, ReadFile, Stat, StatKind, StatReply,
 };
 use serde_json::json;
 use shared::{FileKind, LocalVfs, Vfs};
@@ -309,6 +309,8 @@ pub struct PluginManager {
     vfs: Arc<dyn Vfs>,
     /// The way to the plugin that answers for the paths inside archives.
     serve: Arc<ServeLink>,
+    /// The way to the plugin that answers for the paths on remote machines.
+    serve_ssh: Arc<ServeLink>,
     /// Whether the interface has published at least once; the first publish is the browser
     /// arriving, not a change, so it fires no event.
     published: AtomicBool,
@@ -331,6 +333,7 @@ impl Default for PluginManager {
             ui_rx,
             vfs: Arc::new(LocalVfs),
             serve: ServeLink::new(),
+            serve_ssh: ServeLink::new(),
             published: AtomicBool::new(false),
         }
     }
@@ -374,11 +377,16 @@ impl PluginManager {
             }
         }
 
+        // The word a plugin provides says which kind of path it answers for, and so which link
+        // its process is attached to.
         let serve = triggers
             .actions
             .iter()
-            .any(|provided| provided == PROVIDES_VFS_ARCHIVE)
-            .then(|| Arc::clone(&self.serve));
+            .find_map(|provided| match provided.as_str() {
+                PROVIDES_VFS_ARCHIVE => Some(Arc::clone(&self.serve)),
+                PROVIDES_VFS_SSH => Some(Arc::clone(&self.serve_ssh)),
+                _ => None,
+            });
         let process = start(
             handle,
             name,
@@ -519,6 +527,22 @@ impl PluginManager {
     /// Whether a plugin that answers for the paths inside archives is running right now.
     pub fn serves_archives(&self) -> bool {
         self.serve.is_running()
+    }
+
+    /// The way to the plugin that answers for the paths on remote machines; see [`Self::serve_link`].
+    pub fn serve_ssh_link(&self) -> Arc<ServeLink> {
+        Arc::clone(&self.serve_ssh)
+    }
+
+    /// Uses `link` as the way to the plugin that answers for the paths on remote machines; see
+    /// [`Self::set_serve_link`].
+    pub fn set_serve_ssh_link(&mut self, link: Arc<ServeLink>) {
+        self.serve_ssh = link;
+    }
+
+    /// Whether a plugin that answers for the paths on remote machines is running right now.
+    pub fn serves_ssh(&self) -> bool {
+        self.serve_ssh.is_running()
     }
 
     /// Hands the action `name` to the plugin that provides it (the first configured with that

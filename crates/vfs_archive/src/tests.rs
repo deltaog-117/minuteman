@@ -230,6 +230,10 @@ impl Stand {
                 self.open.lock().unwrap().remove(handle);
                 Self::reply(&serde_json::json!({}))
             }
+            // The host never sends these to the plugin that serves archives.
+            _ => Err(fault(VfsFault::Unsupported {
+                reason: "an archive is read-only".into(),
+            })),
         }
     }
 }

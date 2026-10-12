@@ -164,6 +164,24 @@ impl Server {
                 self.handles().open.remove(handle);
                 Ok(Value::Object(serde_json::Map::new()))
             }
+            // An archive is read-only and the host never sends these here; they exist for the
+            // plugin that serves remote machines.
+            VfsRequest::Home { .. }
+            | VfsRequest::Create { .. }
+            | VfsRequest::Write { .. }
+            | VfsRequest::Flush { .. }
+            | VfsRequest::CreateDir { .. }
+            | VfsRequest::CreateFile { .. }
+            | VfsRequest::Touch { .. }
+            | VfsRequest::SetMode { .. }
+            | VfsRequest::Symlink { .. }
+            | VfsRequest::Rename { .. }
+            | VfsRequest::Replace { .. }
+            | VfsRequest::CopyFile { .. }
+            | VfsRequest::RemoveFile { .. }
+            | VfsRequest::RemoveDirAll { .. } => Err(VfsFault::Unsupported {
+                reason: "an archive is read-only".to_string(),
+            }),
         }
     }
 
