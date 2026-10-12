@@ -24,9 +24,9 @@
 
 use std::path::PathBuf;
 
-use shared::devices::Device;
+use crate::devices::Device;
 
-use crate::hud::format_size;
+use crate::format::format_size;
 
 /// FAT32 holds a file of at most 4 GiB less one byte.
 const FAT_MAX_FILE: u64 = 4 * 1024 * 1024 * 1024 - 1;
@@ -167,7 +167,7 @@ pub fn refusal(verdict: &Verdict, title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use shared::devices::Kind;
+    use crate::devices::Kind;
 
     use super::*;
 

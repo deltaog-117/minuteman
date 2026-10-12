@@ -25,11 +25,11 @@
 //! inside the body, in cells of the canvas. Until the first canvas arrives, and when the plugin has
 //! stopped, it says so in place of the picture rather than showing nothing.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use plugin_api::{Button, Canvas, CanvasInput, Mods, SetCanvas, Surface};
+use plugin_api::{Button, Canvas, CanvasInput, Carrying, Mods, SetCanvas, Surface};
 use plugin_host::protocol::key_name;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -52,6 +52,15 @@ fn label(surface: Surface) -> &'static str {
     }
 }
 
+/// What the browser is doing around the view, which a view that follows it wants to hear of: the
+/// folder it is in, whether it shows hidden entries and what it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Context {
+    pub here: PathBuf,
+    pub hidden: bool,
+    pub carrying: Option<Carrying>,
+}
+
 /// A view a plugin draws, while it shows.
 #[derive(Debug)]
 pub struct CanvasPane {
@@ -59,6 +68,8 @@ pub struct CanvasPane {
     canvas: Option<Canvas>,
     /// The size the plugin was last told, so it hears of a change once.
     told: (u16, u16),
+    /// The context the plugin was last told, likewise.
+    context: Option<Context>,
     /// The plugin's process ended while the view showed, so no canvas will follow.
     stopped: bool,
     since: Instant,
@@ -88,6 +99,7 @@ impl CanvasPane {
             surface,
             canvas: None,
             told,
+            context: None,
             stopped: false,
             since: now,
         })
@@ -107,8 +119,14 @@ impl CanvasPane {
         (after != before).then_some(after).flatten()
     }
 
-    /// Once per turn: lay out again if the body changed size, and notice a plugin that has ended.
-    pub fn follow(&mut self, app: &mut App, body: Rect) {
+    /// Which view this is.
+    pub fn surface(&self) -> Surface {
+        self.surface
+    }
+
+    /// Once per turn: lay out again if the body changed size, say what the browser is doing if it
+    /// changed, and notice a plugin that has ended.
+    pub fn follow(&mut self, app: &mut App, body: Rect, context: Context) {
         let size = (body.width, body.height);
         if size != self.told {
             self.told = size;
@@ -119,6 +137,17 @@ impl CanvasPane {
                     height: size.1,
                 },
             );
+        }
+        if self.context.as_ref() != Some(&context) {
+            let _ = app.dispatch_canvas(
+                self.surface,
+                CanvasInput::Context {
+                    here: context.here.clone(),
+                    hidden: context.hidden,
+                    carrying: context.carrying.clone(),
+                },
+            );
+            self.context = Some(context);
         }
         if !self.stopped && !app.canvas_running(self.surface) {
             self.stopped = true;
@@ -254,6 +283,7 @@ mod tests {
                 hint: Some("j/k move".into()),
             }),
             told: (4, 2),
+            context: None,
             stopped: false,
             since: Instant::now(),
         }

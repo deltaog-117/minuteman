@@ -2058,7 +2058,7 @@ draws.
   inside `t.zip!`. Follow-ups: the missing-plugin message on `mman` copied alone was not read
   off the screen (a unit test covers its words); no kill of the plugin mid-listing was tried on
   the real binary; compress and extract inside an archive stay refused (they write).
-- [ ] **M7 – decide, then do, for what is left:** the `ssh` scheme served by a plugin, and the
+- [x] **M7 – decide, then do, for what is left:** the `ssh` scheme served by a plugin, and the
   alternate views (grid, tiles, filmstrip, atlas, wiring), which need `SetPane` to describe more
   than text spans. If either proves too costly, it stays in the core behind a cargo feature.
   - [x] **M7b – `ssh` served by a plugin (`plugins/ssh`, `mman-ssh`).** Chosen over keeping
@@ -2116,7 +2116,7 @@ draws.
        the status line says how to get it, and with it a refused connection is reported by the
        plugin. `mman ssh://host/dir` opens the working folder and then moves to the remote one,
        because the plugin is not running when the browser is first built.
-  - [ ] **M7c – the alternate views.** Chosen as COA C: the atlas and the wiring diagram move to
+  - [x] **M7c – the alternate views.** Chosen as COA C: the atlas and the wiring diagram move to
     plugins; grid, tiles, details and filmstrip stay in the core, being layouts of the browsed
     folder that share its cursor, marks, thumbnails and hit-testing. A plugin draws through a
     `canvas` (blocks, frames, text and orthogonal paths painted by meaning, never by color) and
@@ -2150,9 +2150,33 @@ draws.
        Follow-ups: this machine lists one volume, so the multi-volume layout is covered by unit
        tests and not by a pty session; not tried in a real kitty; the status-bar hint arrives with
        the first canvas, a frame after the view switch; the wheel does nothing on the map.
-    3. [ ] `plugins/wiring`, the same way: also needs the topology and activity from `shared` (they
-       already are), the folder unfolding (`wiring_folders`), and `Send`, which `canvas_note`
-       already carries. Needs a click's `double` if the diagram uses it.
+    3. [x] `plugins/wiring` (`mman-wiring`), and the core wiring diagram deleted. Chosen as COA A
+       (the plugin owns the scan, the folders, the layout and the device actions on the local disk,
+       as the atlas does) over keeping the scan and the folders in the core and feeding the plugin
+       snapshots (B, which needs a topology channel and a device note and leaves most of the code
+       where it was) and keeping the diagram in the core behind a cargo feature (C, which leaves
+       `canvas-wiring` with no provider). `cargo_fit` (the verdict on a load) and the deck's
+       `Actions` (mount, unmount, eject, the send check; now on a thread instead of `tokio`) are
+       `shared::cargo_fit` and `shared::devices::actions`, so the deck and the plugin run one
+       implementation; the layout, the folder unfolding and the state moved to the plugin with
+       their tests, with a `Rect` of its own in place of ratatui's. The wire gained `context`,
+       sent after `open` and whenever it changes: the folder the browser is in (the diagram
+       unfolds toward it and lights it), whether hidden entries show, and what is carried
+       (`Carrying`), which the plugin turns into a verdict on each filesystem. The canvas painter
+       now joins paths that meet, so a trunk with branches off it gets its junctions however many
+       paths said it. Without `mman-wiring` the view shows a frame that says how to get it.
+       Differences from the core's diagram: ASCII symbols only (`+`/`-` fold signs, `[]` and `<>`
+       icons, `|` for the row you are in), the gauge a bar of blocks, the chosen box in the
+       selection color, a box cut by the window's edge left out whole (the host drops a frame that
+       is not entirely inside), and the status hint arrives with the first canvas. Verified by 71
+       unit tests (a property test runs the host's own `checked` over any size, zoom and choice),
+       5 against the real process, and checks through a pty on the compiled `mman` read through
+       `pyte`: the diagram of this machine drew with its junctions and gauges, a carried file got
+       its verdict on each filesystem, `Enter` on the root filesystem opened `/`, a click
+       unfolded a box, zoom and fit answered, `V` went on to the atlas, and a copy of `mman` alone
+       showed the install line. Follow-ups: the flowing mark was not seen on a busy disk in a pty
+       (the disk was idle; a unit test covers the path); not tried in a real kitty; the wheel moves
+       three nodes, as the core's did, and nothing else.
 
 ---
 
@@ -2457,13 +2481,19 @@ draws.
    (`mman-inspect`, which the Inspect panel now needs; from a checkout `cargo build -p inspector`),
    and `cargo install --path plugins/archive` (`mman-archive`, which compress and extract now need;
    from a checkout `cargo build -p archiver`), and `cargo install --path plugins/atlas`
-   (`mman-atlas`, which the atlas view now needs; from a checkout `cargo build -p atlas`).
+   (`mman-atlas`, which the atlas view now needs; from a checkout `cargo build -p atlas`), and
+   `cargo install --path plugins/wiring` (`mman-wiring`, which the wiring view now needs; from a
+   checkout `cargo build -p wiring`).
    Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
 1. Press `V` until the title says `atlas` (the last view before the list): the same map as before,
    now drawn by `mman-atlas` — `Enter` zooms in, `Backspace` out, `o` opens in the browser, `a`
    swaps size on disk for apparent size once zoomed (on the map `a` is still the appearance
    popup). Move `mman` alone somewhere without `mman-atlas` and the view says how to get it.
+   Press `V` until the status bar says `wiring:` (the view before the atlas): the diagram of how
+   the storage is wired, now drawn by `mman-wiring` — arrows move, `→` or a click unfolds a
+   folder, `Enter` opens it, `p` sends what you carry (yank a file first and each filesystem says
+   whether it fits), `+`/`-`/`0` zoom. Without `mman-wiring` it says how to get it.
    `mman-ssh` is wired in since an earlier cycle: install it
    (`cargo install --path plugins/ssh`) and `mman ssh://host/dir` browses a machine;
    `cargo test -p vfs_remote --release --test throughput -- --ignored --nocapture` times it.
@@ -2590,8 +2620,8 @@ draws.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: M7c step 3, `plugins/wiring`; M7c steps 1 and 2 (the canvas and the atlas plugin)
-   are done, and so is M7b. Medium Priority holds the follow-ups to remote browsing and the other features
-   listed there. Folder moves no longer block, so the next biggest gaps are the other things that
+4. Next cycle: M7 is done (M7a archives, M7b ssh, M7c the atlas and the wiring diagram as
+   plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
+   follow-ups to remote browsing and the other features listed there. Folder moves no longer block, so the next biggest gaps are the other things that
    read on the render thread (undo of a large move, a large archive's index) and a prompt for a
    password or a new host key.

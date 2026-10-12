@@ -25,7 +25,6 @@ mod browser_mouse;
 mod bundled;
 mod canvas_pane;
 mod canvas_view;
-mod cargo_fit;
 mod chooser;
 mod cli;
 mod command;
@@ -34,7 +33,6 @@ mod context_menu;
 mod deck;
 mod deck_view;
 mod desktop_entry;
-mod device_actions;
 mod disk_usage_view;
 mod extract_popup;
 mod filmstrip_view;
@@ -71,10 +69,6 @@ mod thumbnails;
 mod tile_view;
 mod trash_view;
 mod view_mode;
-mod wiring;
-mod wiring_folders;
-mod wiring_layout;
-mod wiring_view;
 
 use std::collections::BTreeMap;
 use std::io::{self, Stdout};
@@ -144,7 +138,6 @@ use view_mode::{
     FilmstripLayout, GridLayout, Jump, Step, ViewMode, body_of, browser_layout, details_title_row,
     jump_target, page_size,
 };
-use wiring::{Outcome as WiringKey, WiringState};
 
 /// Restores the terminal (raw mode + alternate screen) on drop, so a panic or an early return
 /// from `run` never leaves the user's shell in a broken state.
@@ -416,9 +409,7 @@ struct Overlay<'a> {
     picker: Option<&'a PickerPopup>,
     /// The rail of devices, in the deck view.
     deck: Option<&'a DeckState>,
-    /// The diagram of how the storage is wired, in the wiring view.
-    wiring: Option<&'a WiringState>,
-    /// A view a plugin draws (the atlas, today).
+    /// A view a plugin draws (the atlas and the wiring diagram).
     canvas: Option<&'a CanvasPane>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
@@ -1416,9 +1407,8 @@ fn run(
     // The device cards of the deck view; exists only while that view is showing, so the machine
     // is not looked at for anyone who is not using it.
     let mut deck: Option<DeckState> = None;
-    // The wiring diagram, likewise only while its view is showing.
-    let mut wiring: Option<WiringState> = None;
-    // A view served by a plugin that provides it (`canvas-atlas`), only while its view is showing.
+    // A view served by a plugin that provides it (`canvas-atlas`, `canvas-wiring`), only while its
+    // view is showing.
     let mut canvas: Option<CanvasPane> = None;
     // `local.toml`'s three tables, seeded from what `Config::load` already parsed from it (so a
     // save this session correctly carries forward whatever an earlier session saved) and mutated
@@ -1562,58 +1552,31 @@ fn run(
         } else if deck.take().is_some() {
             app.end_deck();
         }
-        if view_mode == ViewMode::Wiring {
-            let diagram = wiring.get_or_insert_with(|| app.begin_wiring(browser.show_hidden()));
-            // The diagram trims and sizes itself to fit the body, so it must know how big it is
-            // before the first frame and after a resize.
-            let panels = effective_panels(config, &local_panels);
-            let body = browser_layout(
-                terminal.size()?.into(),
-                panels.columns,
-                panels.show_hud,
-                view_mode,
-                effective_theme(config, &local_theme).shape,
-            )
-            .current;
-            diagram.set_size(body.width, body.height);
-            diagram.poll(Instant::now(), browser.current_dir());
-            diagram.set_load(app.load(browser));
-            while let Some(event) = diagram.take_event() {
-                match event {
-                    DeckEvent::Status(text) => app.status = Some(text),
-                    DeckEvent::Goto(path, text) => {
-                        let plan = browser.plan_goto(&path);
-                        app.begin_move(browser, plan, Some(text), "device");
-                    }
-                }
-            }
-        } else {
-            wiring = None;
-        }
-        if view_mode == ViewMode::Atlas && app.has_canvas(Surface::Atlas) {
-            let panels = effective_panels(config, &local_panels);
-            let body = browser_layout(
-                terminal.size()?.into(),
-                panels.columns,
-                panels.show_hud,
-                view_mode,
-                effective_theme(config, &local_theme).shape,
-            )
-            .current;
-            match canvas.as_mut() {
-                Some(pane) => pane.follow(app, body),
-                None => {
-                    canvas = CanvasPane::open(
-                        app,
-                        Surface::Atlas,
-                        body,
-                        browser.current_dir(),
-                        Instant::now(),
-                    )
-                }
-            }
-        } else if let Some(pane) = canvas.take() {
+        let surface = canvas_surface(view_mode).filter(|surface| app.has_canvas(*surface));
+        if canvas
+            .as_ref()
+            .is_some_and(|pane| Some(pane.surface()) != surface)
+            && let Some(pane) = canvas.take()
+        {
             pane.close(app);
+        }
+        if let Some(surface) = surface {
+            let panels = effective_panels(config, &local_panels);
+            let body = browser_layout(
+                terminal.size()?.into(),
+                panels.columns,
+                panels.show_hud,
+                view_mode,
+                effective_theme(config, &local_theme).shape,
+            )
+            .current;
+            if canvas.is_none() {
+                canvas =
+                    CanvasPane::open(app, surface, body, browser.current_dir(), Instant::now());
+            }
+            if let Some(pane) = canvas.as_mut() {
+                pane.follow(app, body, canvas_context(app, browser));
+            }
         }
         // A `:` command that needs the whole terminal (`:nvim notes.md`, `:!python3`): the
         // browser steps aside until it exits. Checked here, once per turn of the loop, because
@@ -1769,7 +1732,6 @@ fn run(
                     appearance: appearance.as_ref(),
                     picker: picker.as_ref(),
                     deck: deck.as_ref(),
-                    wiring: wiring.as_ref(),
                     canvas: canvas.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
@@ -2276,40 +2238,6 @@ fn run(
                         view_mode,
                         effective_theme(config, &local_theme).shape,
                     );
-                    // In the wiring view the whole body is the diagram: a click chooses a node (and
-                    // opens it if it was chosen already) and the wheel moves through them.
-                    if let Some(diagram) = wiring.as_mut() {
-                        let at = Position::new(mouse.column, mouse.row);
-                        if layout.current.contains(at) {
-                            match mouse.kind {
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    match diagram.click(layout.current, at) {
-                                        WiringKey::Goto(path) => {
-                                            let plan = browser.plan_goto(&path);
-                                            app.begin_move(
-                                                browser,
-                                                plan,
-                                                Some("opened".into()),
-                                                "folder",
-                                            );
-                                        }
-                                        WiringKey::Send(_)
-                                        | WiringKey::Pass
-                                        | WiringKey::Handled => {}
-                                    }
-                                }
-                                kind => {
-                                    if let Some(wheel) = Wheel::of(kind) {
-                                        diagram.scroll(
-                                            browser_mouse::wheel_rows(wheel),
-                                            layout.current.width,
-                                        );
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                    }
                     // A view a plugin draws gets every click and wheel turn in its body.
                     if let Some(pane) = canvas.as_ref()
                         && pane.pointer(app, layout.current, &mouse)
@@ -3248,39 +3176,6 @@ fn run(
                     continue;
                 }
 
-                // In the wiring view the arrows move through the diagram and `Enter`, `m`, `e` and
-                // `p` act on the node chosen. Anything else is the browser's.
-                if let Some(diagram) = wiring.as_mut() {
-                    let panels = effective_panels(config, &local_panels);
-                    let width = browser_layout(
-                        terminal.size()?.into(),
-                        panels.columns,
-                        panels.show_hud,
-                        view_mode,
-                        effective_theme(config, &local_theme).shape,
-                    )
-                    .current
-                    .width;
-                    match diagram.key(key, width) {
-                        WiringKey::Pass => {}
-                        WiringKey::Handled => continue,
-                        WiringKey::Goto(path) => {
-                            let plan = browser.plan_goto(&path);
-                            app.begin_move(browser, plan, Some("opened".into()), "folder");
-                            continue;
-                        }
-                        WiringKey::Send(root) => {
-                            if app.clipboard.is_none() {
-                                app.yank(browser);
-                            }
-                            if app.clipboard.is_some() {
-                                app.begin_paste_into(root);
-                            }
-                            continue;
-                        }
-                    }
-                }
-
                 // A view a plugin draws gets the keys its canvas claims; any other is the browser's.
                 if let Some(pane) = canvas.as_ref()
                     && pane.key(app, &key)
@@ -3510,7 +3405,6 @@ fn run(
                 }
                 grid_top = 0;
                 app.status = Some(match Config::save_view(view_mode.label()) {
-                    Ok(()) if view_mode == ViewMode::Wiring => wiring::HINT.to_string(),
                     Ok(()) => format!("view: {}", view_mode.label()),
                     Err(e) => format!("view: {} (not saved: {e})", view_mode.label()),
                 });
@@ -3790,6 +3684,30 @@ struct PreviewSubject<'a> {
     label: &'a str,
 }
 
+/// The view a plugin draws for `mode`, if it is one of those.
+fn canvas_surface(mode: ViewMode) -> Option<Surface> {
+    match mode {
+        ViewMode::Atlas => Some(Surface::Atlas),
+        ViewMode::Wiring => Some(Surface::Wiring),
+        _ => None,
+    }
+}
+
+/// What a view a plugin draws is told of the browser around it.
+fn canvas_context(app: &App, browser: &BrowserState) -> canvas_pane::Context {
+    canvas_pane::Context {
+        here: browser.current_dir().to_path_buf(),
+        hidden: browser.show_hidden(),
+        carrying: app.load(browser).map(|load| plugin_api::Carrying {
+            bytes: load.bytes,
+            exact: load.exact,
+            largest: load.largest,
+            moving: load.carry == shared::cargo_fit::Carry::Move,
+            source: load.source,
+        }),
+    }
+}
+
 /// Does what a view a plugin draws asked of the browser: go to a folder, copy what is carried
 /// into one, or say something.
 fn apply_canvas_note(note: CanvasNote, app: &mut App, browser: &mut BrowserState) {
@@ -3902,7 +3820,6 @@ fn draw(
         appearance,
         picker,
         deck,
-        wiring,
         canvas,
         local_theme,
         local_ui,
@@ -3979,28 +3896,16 @@ fn draw(
         _ => [layout.parent, layout.current, layout.preview],
     };
 
-    // The wiring diagram, over the whole body.
-    if let Some(diagram) = wiring {
-        wiring_view::render(
-            frame,
-            layout.current,
-            diagram,
-            browser.current_dir(),
-            config,
-            Instant::now(),
-        );
-    }
-
     // A view a plugin draws, over the whole body; without the plugin, why there is none.
     if let Some(pane) = canvas {
         pane.draw(frame, layout.current, config, Instant::now());
-    } else if view_mode == ViewMode::Atlas {
+    } else if let Some(surface) = canvas_surface(view_mode) {
         canvas_pane::draw_note(
             frame,
             layout.current,
             config,
-            Surface::Atlas,
-            &bundled::missing(Surface::Atlas.provides()),
+            surface,
+            &bundled::missing(surface.provides()),
         );
     }
 

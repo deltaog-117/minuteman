@@ -36,11 +36,11 @@ use ratatui::widgets::{Paragraph, Wrap};
 use shared::devices::{Device, Kind};
 use theming::Config;
 
-use crate::cargo_fit::{self, Verdict};
 use crate::deck::DeckState;
 use crate::glyphs;
 use crate::hud::{fit_width, format_size, pad_to, text_width};
 use crate::style;
+use shared::cargo_fit::{self, Verdict};
 
 /// The lines a device takes: its name, then how full it is.
 const ROW_HEIGHT: u16 = 2;
@@ -214,13 +214,6 @@ pub fn sparkline(history: &[u64], width: usize, ascii: bool) -> String {
 fn gauge(percent: u8, width: usize, on: &str, off: &str) -> (String, String) {
     let filled = (width * usize::from(percent.min(100)) + 50) / 100;
     (on.repeat(filled), off.repeat(width - filled))
-}
-
-pub(crate) fn rate_text(read: u64, written: u64) -> String {
-    if read == 0 && written == 0 {
-        return "idle".to_string();
-    }
-    format!("r {} w {}", format_size(read), format_size(written))
 }
 
 pub fn render(
@@ -676,7 +669,7 @@ mod tests {
 
     #[test]
     fn while_files_are_carried_each_device_says_whether_they_fit() {
-        use crate::cargo_fit::{Carry, Load};
+        use shared::cargo_fit::{Carry, Load};
         let mut deck = deck(vec![
             device("sda1", "", Some("/"), Kind::Internal, 900),
             device(

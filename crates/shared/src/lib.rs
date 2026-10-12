@@ -20,6 +20,7 @@
 //! dependencies always point inward, toward `shared`.
 
 pub mod archive_path;
+pub mod cargo_fit;
 pub mod chooser;
 pub mod conformance;
 pub mod devices;

@@ -26,10 +26,49 @@
 
 use std::collections::HashMap;
 
-use ratatui::layout::Rect;
 use shared::devices::topology::{NodeKind, Topology};
 
-use crate::wiring_folders::MAX_SHOWN;
+use crate::folders::MAX_SHOWN;
+
+/// A rectangle of canvas cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl Rect {
+    pub const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub fn right(self) -> u16 {
+        self.x.saturating_add(self.width)
+    }
+
+    pub fn bottom(self) -> u16 {
+        self.y.saturating_add(self.height)
+    }
+
+    pub fn contains(self, x: u16, y: u16) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+
+    #[cfg(test)]
+    pub fn intersects(self, other: Self) -> bool {
+        self.x < other.right()
+            && other.x < self.right()
+            && self.y < other.bottom()
+            && other.y < self.bottom()
+    }
+}
 
 /// The width of a node's box, and the room for lines between two columns.
 pub const NODE_W: u16 = 20;
@@ -188,7 +227,7 @@ impl Layout {
             Mode::Wide => self
                 .placed
                 .iter()
-                .find(|p| p.rect.contains(ratatui::layout::Position::new(x, y)))
+                .find(|p| p.rect.contains(x, y))
                 .map(|p| p.node),
             Mode::Narrow => self.rows.get(usize::from(y)).map(|r| r.node),
         }

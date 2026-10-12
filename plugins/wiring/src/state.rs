@@ -14,45 +14,77 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The wiring diagram's state (`V`, the wiring view): how the machine's storage is wired, which
-//! node is selected, how busy each disk is, and what is being done to a device. Like the deck it is
-//! pure: no `Frame`, no terminal. `wiring_view` draws it and `main` applies the few things it
-//! asks for, which are to go to a folder and to copy the carried files somewhere.
+//! The wiring diagram's state: how the machine's storage is wired, which node is selected, how
+//! busy each disk is, and what is being done to a device. It is pure: no terminal and no wire.
+//! `canvas` turns it into the picture the host draws and `run` carries the keys and clicks the host
+//! forwards, and the few things it asks of the browser (go to a folder, copy the carried files
+//! somewhere, say something).
 //!
-//! The machine is looked at once a second on the blocking pool, only while the view is showing, and
-//! a scan still running is not started again, so a share that has gone away cannot stall the
-//! interface. Mounting, unmounting and ejecting are the deck's (`device_actions`).
+//! The machine is looked at once a second on a thread of its own, only while the view is showing,
+//! and a scan still running is not started again, so a share that has gone away cannot stall the
+//! plugin. Mounting, unmounting and ejecting are `shared::devices::actions`, the deck's too.
 //!
 //! The diagram goes on past the mount point: a filesystem, and then any folder, can be unfolded
-//! into its subfolders, drawn as more boxes to the right (`wiring_folders`). The folders are kept
-//! apart from the hardware, which is rebuilt every second, and added to a copy of it (`composed`)
-//! that everything here reads. Opening the view unfolds the way down to the folder being browsed.
+//! into its subfolders, drawn as more boxes to the right (`folders`). The folders are kept apart
+//! from the hardware, which is rebuilt every second, and added to a copy of it (`composed`) that
+//! everything here reads. Opening the view unfolds the way down to the folder being browsed.
 
-use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Position, Rect};
+use plugin_api::Mods;
 use shared::Vfs;
+use shared::cargo_fit::{Load, Verdict, verdict};
 use shared::devices::Device;
+use shared::devices::actions::{Actions, Event};
 use shared::devices::activity::{Activity, Counters, Rates};
 use shared::devices::probe::Sys;
 use shared::devices::topology::{NodeKind, Topology};
 
-use crate::cargo_fit::{Load, Verdict, verdict};
-use crate::device_actions::Actions;
-use crate::wiring_folders::Folders;
-use crate::wiring_layout::{self, LEVELS, Layout, Mode, Zoom};
+use crate::folders::Folders;
+use crate::layout::{self, LEVELS, Layout, Mode, Zoom};
 
 /// How often the machine is looked at again.
 const SCAN_EVERY: Duration = Duration::from_secs(1);
 
-/// Shown on entering the view.
-pub const HINT: &str = "wiring: arrows move  →/click unfold folders  Enter open  p send  m mount  e eject  +/- zoom  0 fit  V next view";
+/// How many nodes the wheel moves through in one turn.
+const WHEEL_NODES: isize = 3;
+
+/// Shown on the status bar while the view shows.
+pub const HINT: &str = "wiring: arrows move  right/click unfold folders  Enter open  p send  m mount  e eject  +/- zoom  0 fit  V next view";
+
+/// What the plugin knows of the machine's storage. A trait so a conversation can be played in a
+/// test without touching the real disks.
+pub trait Machine: Send + Sync + 'static {
+    /// How the storage is wired, and how much each disk has read and written so far.
+    fn scan(&self) -> (Topology, HashMap<String, Counters>);
+}
+
+/// This machine, read from `/proc`, `/sys` and the udev database.
+pub struct RealMachine(Sys);
+
+impl RealMachine {
+    pub fn new() -> Self {
+        Self(Sys::real())
+    }
+}
+
+impl Default for RealMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Machine for RealMachine {
+    fn scan(&self) -> (Topology, HashMap<String, Counters>) {
+        (self.0.topology(), self.0.counters())
+    }
+}
 
 /// What a key or click did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +102,7 @@ pub enum Outcome {
 struct Scan {
     at: Instant,
     topology: Topology,
-    counters: std::collections::HashMap<String, Counters>,
+    counters: HashMap<String, Counters>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +114,7 @@ enum Move {
 }
 
 pub struct WiringState {
-    handle: tokio::runtime::Handle,
+    machine: Arc<dyn Machine>,
     /// The hardware, as the last scan found it.
     base: Topology,
     /// The hardware with every unfolded folder added below its filesystem: what is drawn.
@@ -96,35 +128,34 @@ pub struct WiringState {
     /// The kernel name (or share, or bus label) of the selected node, so the selection stays on it
     /// as the machine changes.
     selected: Option<String>,
-    /// The first canvas row and column drawn, kept by the renderer between frames.
-    top: Cell<u16>,
-    left: Cell<u16>,
-    /// The size of the body, from `set_size` (or, for the height, the renderer), so a zoom that
-    /// fits knows how big to be. Zero until known.
-    width: Cell<u16>,
-    height: Cell<u16>,
+    /// The first row and column of the diagram that the picture shows, kept by `canvas` between
+    /// pictures so a click can be turned back into a place in the diagram.
+    top: u16,
+    left: u16,
+    /// The size of the view, from `set_size`, so a zoom that fits knows how big to be. Zero until
+    /// known.
+    width: u16,
+    height: u16,
     /// The layout chosen to fit that size, with `composed` trimmed to match it; `None` until the
     /// size is known, when the layout is made on demand from everything unfolded.
     fitted: Option<Layout>,
     /// The size of the boxes: fitted to the window, or a level chosen with `+` and `-`.
-    zoom: Cell<Zoom>,
+    zoom: Zoom,
     scans: Receiver<Scan>,
     scan_tx: Sender<Scan>,
     scanning: Arc<AtomicBool>,
     last_scan: Option<Instant>,
     actions: Actions,
     load: Option<Load>,
-    /// The time activity marks are measured from, so they move at a steady pace.
-    epoch: Instant,
 }
 
 impl WiringState {
-    pub fn new(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>, show_hidden: bool) -> Self {
+    pub fn new(vfs: Arc<dyn Vfs>, machine: Arc<dyn Machine>, show_hidden: bool) -> Self {
         let (scan_tx, scans) = channel();
         Self {
-            actions: Actions::new(handle.clone()),
-            folders: Folders::new(handle.clone(), vfs, show_hidden),
-            handle,
+            actions: Actions::new(),
+            folders: Folders::new(vfs, show_hidden),
+            machine,
             base: Topology::default(),
             composed: Topology::default(),
             last_here: None,
@@ -132,32 +163,31 @@ impl WiringState {
             activity_at: None,
             scanned: false,
             selected: None,
-            top: Cell::new(0),
-            left: Cell::new(0),
-            width: Cell::new(0),
-            height: Cell::new(0),
+            top: 0,
+            left: 0,
+            width: 0,
+            height: 0,
             fitted: None,
-            zoom: Cell::new(Zoom::Fit),
+            zoom: Zoom::Fit,
             scans,
             scan_tx,
             scanning: Arc::new(AtomicBool::new(false)),
             last_scan: None,
             load: None,
-            epoch: Instant::now(),
         }
     }
 
     /// A diagram that already holds `topology`, without ever looking at the real machine, over an
     /// empty filesystem.
     #[cfg(test)]
-    pub fn with_topology(handle: tokio::runtime::Handle, topology: Topology) -> Self {
-        Self::with_vfs(handle, topology, Arc::new(shared::MemVfs::new()))
+    pub fn with_topology(topology: Topology) -> Self {
+        Self::with_vfs(topology, Arc::new(shared::MemVfs::new()))
     }
 
     /// Like [`with_topology`](Self::with_topology), with `vfs` to read folders from.
     #[cfg(test)]
-    pub fn with_vfs(handle: tokio::runtime::Handle, topology: Topology, vfs: Arc<dyn Vfs>) -> Self {
-        let mut state = Self::new(handle, vfs, false);
+    pub fn with_vfs(topology: Topology, vfs: Arc<dyn Vfs>) -> Self {
+        let mut state = Self::new(vfs, Arc::new(RealMachine::new()), false);
         // Never look at the real machine: the topology given is the machine.
         state.scanning.store(true, Ordering::Release);
         state.base = topology;
@@ -169,13 +199,8 @@ impl WiringState {
 
     /// Feeds the activity counters as a scan would, for how the drawing shows a busy disk.
     #[cfg(test)]
-    pub fn activity_update(&mut self, counters: &std::collections::HashMap<String, Counters>) {
+    pub fn activity_update(&mut self, counters: &HashMap<String, Counters>) {
         self.activity.update(counters, 1.0);
-    }
-
-    #[cfg(test)]
-    pub fn epoch_for_test(&self) -> Instant {
-        self.epoch
     }
 
     #[cfg(test)]
@@ -184,8 +209,8 @@ impl WiringState {
     }
 
     #[cfg(test)]
-    pub fn zoom_for_test(&self, zoom: Zoom) {
-        self.zoom.set(zoom);
+    pub fn zoom_for_test(&mut self, zoom: Zoom) {
+        self.zoom = zoom;
     }
 
     #[cfg(test)]
@@ -220,11 +245,13 @@ impl WiringState {
             .is_none_or(|at| now.duration_since(at) >= SCAN_EVERY);
         if due && !self.scanning.swap(true, Ordering::AcqRel) {
             self.last_scan = Some(now);
-            let (tx, scanning) = (self.scan_tx.clone(), Arc::clone(&self.scanning));
-            self.handle.spawn_blocking(move || {
-                let sys = Sys::real();
-                let topology = sys.topology();
-                let counters = sys.counters();
+            let (tx, scanning, machine) = (
+                self.scan_tx.clone(),
+                Arc::clone(&self.scanning),
+                Arc::clone(&self.machine),
+            );
+            thread::spawn(move || {
+                let (topology, counters) = machine.scan();
                 let _ = tx.send(Scan {
                     at: Instant::now(),
                     topology,
@@ -239,7 +266,7 @@ impl WiringState {
     /// changed, or the body was resized. Once the size is known the folders are trimmed (fewer
     /// siblings shown, the rest "+N more") and the boxes sized until the whole diagram fits.
     fn rebuild(&mut self) {
-        let (width, height) = (self.width.get(), self.height.get());
+        let (width, height) = (self.width, self.height);
         if width == 0 || height == 0 {
             self.composed = self.folders.compose(&self.base);
             self.fitted = None;
@@ -253,11 +280,11 @@ impl WiringState {
             .filter(|id| id.starts_with('/'))
             .map(PathBuf::from);
         self.folders.set_chosen(chosen);
-        let (composed, layout) = wiring_layout::fit(
+        let (composed, layout) = layout::fit(
             |cap| self.folders.compose_capped(&self.base, cap),
             width,
             height,
-            self.zoom.get(),
+            self.zoom,
         );
         self.composed = composed;
         self.fitted = Some(layout);
@@ -266,9 +293,9 @@ impl WiringState {
     /// Tells the diagram how big the body it is drawn in is, so it can fit all of itself in. Call
     /// it every turn; it does work only when the size changed.
     pub fn set_size(&mut self, width: u16, height: u16) {
-        if (width, height) != (self.width.get(), self.height.get()) {
-            self.width.set(width);
-            self.height.set(height);
+        if (width, height) != (self.width, self.height) {
+            self.width = width;
+            self.height = height;
             self.rebuild();
         }
     }
@@ -330,12 +357,15 @@ impl WiringState {
         self.composed.nodes.iter().position(|n| n.id == id)
     }
 
-    pub fn top(&self) -> &Cell<u16> {
-        &self.top
+    /// The first row and column of the diagram that the last picture showed.
+    pub fn scrolled(&self) -> (u16, u16) {
+        (self.left, self.top)
     }
 
-    pub fn left(&self) -> &Cell<u16> {
-        &self.left
+    /// Remembers where the picture just made starts in the diagram.
+    pub fn set_scrolled(&mut self, left: u16, top: u16) {
+        self.left = left;
+        self.top = top;
     }
 
     /// Whether the node is a folder (or a filesystem) that is unfolded.
@@ -366,8 +396,13 @@ impl WiringState {
     }
 
     /// The next message or folder change from background work, if any.
-    pub fn take_event(&mut self) -> Option<crate::device_actions::Event> {
+    pub fn take_event(&mut self) -> Option<Event> {
         self.actions.take_event()
+    }
+
+    /// Says whether hidden folders are shown when a filesystem is unfolded, from now on.
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.folders.set_hidden(hidden);
     }
 
     /// Tells the diagram what is being carried (or that nothing is), so each filesystem can say
@@ -401,33 +436,21 @@ impl WiringState {
         self.activity.rates(&n.id)
     }
 
-    /// How far along a moving mark is, as a count that rises with time.
-    pub fn phase(&self, now: Instant) -> u64 {
-        u64::try_from(now.saturating_duration_since(self.epoch).as_millis() / 90).unwrap_or(0)
-    }
-
     /// The layout for a body `width` cells wide. When the size is known (`set_size`) this is the
     /// layout that was fitted to it and `width` is not consulted; before that, everything
     /// unfolded is laid out for `width` and the folders may run past the window.
     pub fn layout(&self, width: u16) -> Layout {
         match &self.fitted {
             Some(layout) => layout.clone(),
-            None => {
-                wiring_layout::zoomed(&self.composed, width, self.height.get(), self.zoom.get())
-            }
+            None => layout::zoomed(&self.composed, width, self.height, self.zoom),
         }
-    }
-
-    /// Tells the state how tall the body is, for a zoom that fits.
-    pub fn set_height(&self, height: u16) {
-        self.height.set(height);
     }
 
     /// Steps the zoom one level in (`by` < 0, bigger boxes) or out, from the level now showing.
     fn zoom_by(&mut self, by: isize, width: u16) {
         let now = self.layout(width);
         let level = now.level.saturating_add_signed(by).min(LEVELS.len() - 1);
-        self.zoom.set(Zoom::Level(level));
+        self.zoom = Zoom::Level(level);
         self.rebuild();
         self.say(format!(
             "zoom {} of {}  0 fits the window",
@@ -550,51 +573,48 @@ impl WiringState {
 
     /// The selection moves with the arrows (and `h`/`j`/`k`/`l`), `Enter` opens a filesystem
     /// (mounting it first if need be), `m` mounts or unmounts it, `e` ejects the removable disk the
-    /// node is on, `p` sends the carried files to a filesystem. Every other key is the browser's,
-    /// so `V`, `q`, `/` and `:` work as they always do.
-    pub fn key(&mut self, key: KeyEvent, width: u16) -> Outcome {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            || key.modifiers.contains(KeyModifiers::ALT)
-        {
+    /// node is on, `p` sends the carried files to a filesystem. The host forwards only the keys
+    /// the canvas claims, so every other key is the browser's and `V`, `q`, `/` and `:` work as
+    /// they always do; one held with `Ctrl` or `Alt` is ignored here rather than acted on.
+    pub fn key(&mut self, key: &str, mods: Mods, width: u16) -> Outcome {
+        if mods.ctrl || mods.alt {
             return Outcome::Pass;
         }
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.go(Move::Up, width),
-            KeyCode::Down | KeyCode::Char('j') => self.go(Move::Down, width),
-            KeyCode::Left | KeyCode::Char('h') => self.fold_or_go(Move::Left, width),
-            KeyCode::Right | KeyCode::Char('l') => self.fold_or_go(Move::Right, width),
-            KeyCode::Home => self.scroll(isize::MIN / 2, width),
-            KeyCode::End => self.scroll(isize::MAX / 2, width),
-            KeyCode::PageUp => self.scroll(-8, width),
-            KeyCode::PageDown => self.scroll(8, width),
-            KeyCode::Char('+' | '=') => self.zoom_by(-1, width),
-            KeyCode::Char('-' | '_') => self.zoom_by(1, width),
-            KeyCode::Char('0') => {
-                self.zoom.set(Zoom::Fit);
+        match key {
+            "up" | "k" => self.go(Move::Up, width),
+            "down" | "j" => self.go(Move::Down, width),
+            "left" | "h" => self.fold_or_go(Move::Left, width),
+            "right" | "l" => self.fold_or_go(Move::Right, width),
+            "home" => self.scroll(isize::MIN / 2, width),
+            "end" => self.scroll(isize::MAX / 2, width),
+            "pageup" => self.scroll(-8, width),
+            "pagedown" => self.scroll(8, width),
+            "+" | "=" => self.zoom_by(-1, width),
+            "-" | "_" => self.zoom_by(1, width),
+            "0" => {
+                self.zoom = Zoom::Fit;
                 self.rebuild();
                 self.say("zoom fits the window");
             }
-            KeyCode::Enter => return self.open(),
-            KeyCode::Char('m') => self.toggle(),
-            KeyCode::Char('e') => self.eject(),
-            KeyCode::Char('p') => return self.send(),
+            "enter" => return self.open(),
+            "m" => self.toggle(),
+            "e" => self.eject(),
+            "p" => return self.send(),
             _ => return Outcome::Pass,
         }
         Outcome::Handled
     }
 
-    /// A click on a node in a diagram drawn in `area` selects it, and unfolds it if it is a folded
-    /// folder or folds it if it is an unfolded one. A click on nothing does nothing.
-    pub fn click(&mut self, area: Rect, pointer: Position) -> Outcome {
-        let layout = self.layout(area.width);
-        let x = pointer
-            .x
-            .saturating_sub(area.x)
-            .saturating_add(self.left.get());
-        let y = pointer
-            .y
-            .saturating_sub(area.y)
-            .saturating_add(self.top.get());
+    /// The wheel turned over the diagram: the selection moves to the next or previous node.
+    pub fn wheel(&mut self, down: bool, width: u16) {
+        self.scroll(if down { WHEEL_NODES } else { -WHEEL_NODES }, width);
+    }
+
+    /// A click on a node, at cell `(x, y)` of the picture, selects it, and unfolds it if it is a
+    /// folded folder or folds it if it is an unfolded one. A click on nothing does nothing.
+    pub fn click(&mut self, x: u16, y: u16) -> Outcome {
+        let layout = self.layout(self.width);
+        let (x, y) = (x.saturating_add(self.left), y.saturating_add(self.top));
         let Some(node) = layout.node_at(x, y) else {
             return Outcome::Handled;
         };
@@ -708,11 +728,6 @@ mod tests {
     use shared::devices::topology::{Layer, Node};
 
     use super::*;
-    use crate::device_actions::Event;
-
-    fn press(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
 
     /// bus -> nvme -> {boot (/boot), pv -> lvm -> root (/)}, and bus -> stick -> {a, b}.
     fn machine() -> Topology {
@@ -774,10 +789,8 @@ mod tests {
         t
     }
 
-    fn state() -> (tokio::runtime::Runtime, WiringState) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let state = WiringState::with_topology(runtime.handle().clone(), machine());
-        (runtime, state)
+    fn state() -> WiringState {
+        WiringState::with_topology(machine())
     }
 
     fn at(s: &WiringState) -> String {
@@ -789,97 +802,95 @@ mod tests {
 
     #[test]
     fn the_first_node_in_reading_order_is_selected_to_begin_with() {
-        let (_rt, s) = state();
+        let s = state();
         assert_eq!(at(&s), "PCIe");
     }
 
     #[test]
     fn right_goes_to_what_is_under_a_node_and_left_to_what_it_is_under() {
         for width in [WIDE, NARROW] {
-            let (_rt, mut s) = state();
+            let mut s = state();
             for _ in 0..2 {
-                s.key(press(KeyCode::Right), width);
+                s.key("right", Mods::default(), width);
             }
             assert_eq!(
                 at(&s),
                 "nvme0n1p1",
                 "width {width}: bus, disk, then the first partition"
             );
-            s.key(press(KeyCode::Left), width);
+            s.key("left", Mods::default(), width);
             assert_eq!(at(&s), "nvme0n1");
-            s.key(press(KeyCode::Left), width);
-            s.key(press(KeyCode::Left), width);
+            s.key("left", Mods::default(), width);
+            s.key("left", Mods::default(), width);
             assert_eq!(at(&s), "PCIe", "stays at the top of the stack");
         }
     }
 
     #[test]
     fn up_and_down_move_along_the_page_in_either_layout() {
-        let (_rt, mut s) = state();
+        let mut s = state();
         s.selected = Some("nvme0n1p1".into());
-        s.key(press(KeyCode::Down), WIDE);
+        s.key("down", Mods::default(), WIDE);
         assert_eq!(at(&s), "nvme0n1p2", "in the same column, the box below");
-        s.key(press(KeyCode::Down), WIDE);
+        s.key("down", Mods::default(), WIDE);
         assert_eq!(
             at(&s),
             "sdb1",
             "the next box down that column is the stick's partition"
         );
-        s.key(press(KeyCode::Down), WIDE);
-        s.key(press(KeyCode::Down), WIDE);
+        s.key("down", Mods::default(), WIDE);
+        s.key("down", Mods::default(), WIDE);
         assert_eq!(at(&s), "sdb2", "and nothing below the last one");
         s.selected = Some("nvme0n1p2".into());
-        s.key(press(KeyCode::Char('k')), WIDE);
+        s.key("k", Mods::default(), WIDE);
         assert_eq!(at(&s), "nvme0n1p1");
         s.selected = Some("PCIe".into());
-        s.key(press(KeyCode::Down), NARROW);
+        s.key("down", Mods::default(), NARROW);
         assert_eq!(at(&s), "nvme0n1", "in the tree, the next row");
-        s.key(press(KeyCode::Char('j')), NARROW);
+        s.key("j", Mods::default(), NARROW);
         assert_eq!(at(&s), "nvme0n1p1");
     }
 
     #[test]
     fn home_end_and_the_page_keys_move_through_reading_order_and_stop_at_the_ends() {
-        let (_rt, mut s) = state();
-        s.key(press(KeyCode::End), NARROW);
+        let mut s = state();
+        s.key("end", Mods::default(), NARROW);
         assert_eq!(at(&s), "sdb2");
-        s.key(press(KeyCode::Home), NARROW);
+        s.key("home", Mods::default(), NARROW);
         assert_eq!(at(&s), "PCIe");
-        s.key(press(KeyCode::PageDown), NARROW);
+        s.key("pagedown", Mods::default(), NARROW);
         assert_eq!(at(&s), "sdb1", "eight rows down");
-        s.key(press(KeyCode::PageUp), NARROW);
+        s.key("pageup", Mods::default(), NARROW);
         assert_eq!(at(&s), "PCIe");
     }
 
     #[test]
     fn keys_the_diagram_does_not_use_are_the_browsers() {
-        let (_rt, mut s) = state();
-        for code in [
-            KeyCode::Char('q'),
-            KeyCode::Char('V'),
-            KeyCode::Char('/'),
-            KeyCode::Char(':'),
-            KeyCode::Tab,
-            KeyCode::Esc,
-        ] {
-            assert_eq!(s.key(press(code), WIDE), Outcome::Pass, "{code:?}");
+        let mut s = state();
+        for name in ["q", "V", "/", ":", "tab", "esc"] {
+            assert_eq!(s.key(name, Mods::default(), WIDE), Outcome::Pass, "{name}");
         }
-        assert_eq!(
-            s.key(
-                KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
-                WIDE
-            ),
-            Outcome::Pass
-        );
+        for held in [
+            Mods {
+                ctrl: true,
+                ..Mods::default()
+            },
+            Mods {
+                alt: true,
+                ..Mods::default()
+            },
+        ] {
+            assert_eq!(s.key("m", held, WIDE), Outcome::Pass, "{held:?}");
+        }
     }
 
     #[test]
     fn enter_opens_a_mounted_filesystem_and_says_what_to_do_on_anything_else() {
-        let (_rt, mut s) = state();
-        assert_eq!(s.key(press(KeyCode::Enter), WIDE), Outcome::Handled);
+        let mut s = state();
+        assert_eq!(s.key("enter", Mods::default(), WIDE), Outcome::Handled);
         s.selected = Some("dm-1".into());
         assert_eq!(
-            s.key(press(KeyCode::Enter), WIDE),
+            s.key("enter", Mods::default(), WIDE),
             Outcome::Goto(PathBuf::from("/"))
         );
         s.actions.poll();
@@ -891,10 +902,10 @@ mod tests {
 
     #[test]
     fn m_and_p_refuse_a_node_that_holds_no_filesystem() {
-        let (_rt, mut s) = state();
+        let mut s = state();
         s.selected = Some("dm-0".into());
-        assert_eq!(s.key(press(KeyCode::Char('m')), WIDE), Outcome::Handled);
-        assert_eq!(s.key(press(KeyCode::Char('p')), WIDE), Outcome::Handled);
+        assert_eq!(s.key("m", Mods::default(), WIDE), Outcome::Handled);
+        assert_eq!(s.key("p", Mods::default(), WIDE), Outcome::Handled);
         s.actions.poll();
         let mut said = Vec::new();
         while let Some(Event::Status(t)) = s.take_event() {
@@ -906,27 +917,27 @@ mod tests {
 
     #[test]
     fn p_sends_to_a_filesystem_it_fits_on_and_refuses_one_it_does_not() {
-        let (_rt, mut s) = state();
+        let mut s = state();
         s.set_load(Some(Load {
             bytes: 300,
             exact: true,
             largest: 10,
-            carry: crate::cargo_fit::Carry::Copy,
+            carry: shared::cargo_fit::Carry::Copy,
             source: "/home/me/photos".into(),
         }));
         s.selected = Some("sdb1".into());
         assert_eq!(
-            s.key(press(KeyCode::Char('p')), WIDE),
+            s.key("p", Mods::default(), WIDE),
             Outcome::Send(PathBuf::from("/run/media/me/A"))
         );
         s.set_load(Some(Load {
             bytes: 900,
             exact: true,
             largest: 10,
-            carry: crate::cargo_fit::Carry::Copy,
+            carry: shared::cargo_fit::Carry::Copy,
             source: "/home/me/photos".into(),
         }));
-        assert_eq!(s.key(press(KeyCode::Char('p')), WIDE), Outcome::Handled);
+        assert_eq!(s.key("p", Mods::default(), WIDE), Outcome::Handled);
         s.actions.poll();
         let Some(Event::Status(text)) = s.take_event() else {
             panic!("expected a refusal")
@@ -936,7 +947,7 @@ mod tests {
 
     #[test]
     fn a_verdict_exists_only_for_a_filesystem_and_only_while_something_is_carried() {
-        let (_rt, mut s) = state();
+        let mut s = state();
         let boot = s
             .composed
             .nodes
@@ -954,7 +965,7 @@ mod tests {
             bytes: 1,
             exact: true,
             largest: 1,
-            carry: crate::cargo_fit::Carry::Copy,
+            carry: shared::cargo_fit::Carry::Copy,
             source: "/x".into(),
         }));
         assert!(matches!(
@@ -966,7 +977,7 @@ mod tests {
 
     #[test]
     fn ejecting_names_the_whole_disk_and_every_volume_on_it() {
-        let (_rt, s) = state();
+        let s = state();
         let stick = s.composed.nodes.iter().position(|n| n.id == "sdb").unwrap();
         let mounted: Vec<String> = s.mounted_on(stick).iter().map(|d| d.node.clone()).collect();
         assert_eq!(mounted, ["sdb1", "sdb2"]);
@@ -985,11 +996,11 @@ mod tests {
 
     #[test]
     fn ejecting_a_fixed_disk_or_a_share_is_refused_with_the_reason() {
-        let (_rt, mut s) = state();
+        let mut s = state();
         s.selected = Some("dm-1".into());
-        s.key(press(KeyCode::Char('e')), WIDE);
+        s.key("e", Mods::default(), WIDE);
         s.selected = Some("PCIe".into());
-        s.key(press(KeyCode::Char('e')), WIDE);
+        s.key("e", Mods::default(), WIDE);
         s.actions.poll();
         let mut said = Vec::new();
         while let Some(Event::Status(t)) = s.take_event() {
@@ -1003,33 +1014,29 @@ mod tests {
 
     #[test]
     fn a_click_chooses_a_node_and_does_nothing_on_empty_space() {
-        let (_rt, mut s) = state();
+        let mut s = state();
         let width = 200;
+        s.set_size(width, 40);
         let layout = s.layout(width);
         let find =
             |s: &WiringState, id: &str| s.composed.nodes.iter().position(|n| n.id == id).unwrap();
         let disk = layout.rect_of(find(&s, "nvme0n1")).unwrap();
-        let area = Rect::new(3, 2, width, 40);
-        let inside = Position::new(area.x + disk.x + 2, area.y + disk.y + 2);
+        let inside = (disk.x + 2, disk.y + 2);
         s.selected = Some("PCIe".into());
-        assert_eq!(s.click(area, inside), Outcome::Handled);
+        assert_eq!(s.click(inside.0, inside.1), Outcome::Handled);
         assert_eq!(at(&s), "nvme0n1");
         assert_eq!(
-            s.click(area, inside),
+            s.click(inside.0, inside.1),
             Outcome::Handled,
             "a disk is not a folder: a second click is just a click"
         );
-        assert_eq!(
-            s.click(area, Position::new(area.x, area.y + 39)),
-            Outcome::Handled,
-            "empty space"
-        );
+        assert_eq!(s.click(0, 39), Outcome::Handled, "empty space");
         assert_eq!(at(&s), "nvme0n1");
     }
 
     #[test]
     fn a_bus_adds_up_what_is_attached_to_it_and_other_nodes_use_their_own_counters() {
-        let (_rt, mut s) = state();
+        let mut s = state();
         let mut counters = std::collections::HashMap::new();
         counters.insert(
             "nvme0n1".to_string(),
@@ -1079,15 +1086,6 @@ mod tests {
         assert_eq!(s.rates(find("sdb")), Rates::default());
     }
 
-    #[test]
-    fn marks_advance_with_time_at_a_steady_pace() {
-        let (_rt, s) = state();
-        let t0 = s.epoch;
-        assert_eq!(s.phase(t0), 0);
-        assert_eq!(s.phase(t0 + Duration::from_millis(900)), 10);
-        assert!(s.phase(t0 + Duration::from_secs(5)) > s.phase(t0 + Duration::from_secs(4)));
-    }
-
     // ---- unfolding folders ----
 
     fn dirs() -> Arc<shared::MemVfs> {
@@ -1108,10 +1106,8 @@ mod tests {
     /// A folder no mount holds (it is not absolute), so opening the view follows nowhere.
     const ELSEWHERE: &str = "elsewhere";
 
-    fn folder_state() -> (tokio::runtime::Runtime, WiringState) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let state = WiringState::with_vfs(runtime.handle().clone(), machine(), dirs());
-        (runtime, state)
+    fn folder_state() -> WiringState {
+        WiringState::with_vfs(machine(), dirs())
     }
 
     /// Lets every folder being read arrive, with `here` as the folder being browsed.
@@ -1138,16 +1134,16 @@ mod tests {
 
     fn click_node(s: &mut WiringState, id: &str) {
         let width = 400;
+        s.set_size(width, 100);
         let layout = s.layout(width);
         let at = s.composed.nodes.iter().position(|n| n.id == id).unwrap();
         let rect = layout.rect_of(at).unwrap();
-        let area = Rect::new(0, 0, width, 100);
-        s.click(area, Position::new(rect.x + 2, rect.y + 1));
+        s.click(rect.x + 2, rect.y + 1);
     }
 
     #[test]
     fn a_click_on_a_filesystem_unfolds_its_folders_and_another_click_folds_them() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         click_node(&mut s, "nvme0n1p1");
         assert_eq!(at(&s), "nvme0n1p1");
         assert!(s.is_unfolded(s.index().unwrap()));
@@ -1160,7 +1156,7 @@ mod tests {
 
     #[test]
     fn a_click_on_a_folder_unfolds_it_in_turn() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         click_node(&mut s, "dm-1");
         settle(&mut s, ELSEWHERE);
         assert_eq!(
@@ -1175,24 +1171,24 @@ mod tests {
 
     #[test]
     fn right_unfolds_a_folded_folder_then_goes_into_it_and_left_goes_back_then_folds() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         s.selected = Some("nvme0n1p1".into());
-        assert_eq!(s.key(press(KeyCode::Right), WIDE), Outcome::Handled);
+        assert_eq!(s.key("right", Mods::default(), WIDE), Outcome::Handled);
         assert_eq!(at(&s), "nvme0n1p1", "unfolding does not move the selection");
         settle(&mut s, ELSEWHERE);
-        s.key(press(KeyCode::Right), WIDE);
+        s.key("right", Mods::default(), WIDE);
         assert_eq!(
             at(&s),
             "/boot/efi",
             "a second Right goes into the first folder"
         );
-        s.key(press(KeyCode::Left), WIDE);
+        s.key("left", Mods::default(), WIDE);
         assert_eq!(
             at(&s),
             "nvme0n1p1",
             "Left from an unopened folder goes back to what it is under"
         );
-        s.key(press(KeyCode::Left), WIDE);
+        s.key("left", Mods::default(), WIDE);
         assert!(
             titles(&s, NodeKind::Folder).is_empty(),
             "and Left on an unfolded one folds it"
@@ -1202,7 +1198,7 @@ mod tests {
 
     #[test]
     fn opening_the_view_unfolds_the_way_down_to_the_folder_being_browsed_and_chooses_it() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, "/home/me/projects");
         assert_eq!(at(&s), "/home/me/projects");
         let folders = titles(&s, NodeKind::Folder);
@@ -1227,7 +1223,7 @@ mod tests {
 
     #[test]
     fn following_happens_once_for_each_folder_browsed_and_does_not_undo_a_fold() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, "/home/me/projects");
         click_node(&mut s, "/home");
         assert!(!s.folders.is_expanded(Path::new("/home")));
@@ -1242,18 +1238,17 @@ mod tests {
 
     #[test]
     fn enter_on_a_folder_opens_it_in_the_browser_and_on_a_note_opens_the_folder_it_belongs_to() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, "/home/me/projects");
         s.selected = Some("/home/me".into());
         assert_eq!(
-            s.key(press(KeyCode::Enter), WIDE),
+            s.key("enter", Mods::default(), WIDE),
             Outcome::Goto(PathBuf::from("/home/me"))
         );
         let vfs = shared::MemVfs::new();
         for i in 0..20 {
             vfs.add_dir(format!("/big/d{i:02}"));
         }
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut topology = Topology::default();
         let mut node = shared::devices::topology::Node::new("sdz1", NodeKind::Partition);
         node.mount = Some("/big".into());
@@ -1261,7 +1256,7 @@ mod tests {
         node.total = 100 << 30;
         node.free = 50 << 30;
         topology.add(node);
-        let mut t = WiringState::with_vfs(runtime.handle().clone(), topology, Arc::new(vfs));
+        let mut t = WiringState::with_vfs(topology, Arc::new(vfs));
         click_node(&mut t, "sdz1");
         settle(&mut t, ELSEWHERE);
         let note = t
@@ -1273,31 +1268,31 @@ mod tests {
         assert_eq!(note.title(), "+8 more");
         t.selected = Some(note.id.clone());
         assert_eq!(
-            t.key(press(KeyCode::Enter), WIDE),
+            t.key("enter", Mods::default(), WIDE),
             Outcome::Goto(PathBuf::from("/big"))
         );
     }
 
     #[test]
     fn p_on_a_folder_sends_into_that_folder_if_its_filesystem_has_room_and_refuses_if_not() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, "/boot");
         let carry = |bytes: u64| Load {
             bytes,
             exact: true,
             largest: 10,
-            carry: crate::cargo_fit::Carry::Copy,
+            carry: shared::cargo_fit::Carry::Copy,
             source: "/home/me/photos".into(),
         };
         s.selected = Some("/boot/grub".into());
         s.set_load(Some(carry(100)));
         assert_eq!(
-            s.key(press(KeyCode::Char('p')), WIDE),
+            s.key("p", Mods::default(), WIDE),
             Outcome::Send(PathBuf::from("/boot/grub")),
             "/boot has 400 bytes free and the load is 100"
         );
         s.set_load(Some(carry(900 << 40)));
-        assert_eq!(s.key(press(KeyCode::Char('p')), WIDE), Outcome::Handled);
+        assert_eq!(s.key("p", Mods::default(), WIDE), Outcome::Handled);
         s.actions.poll();
         let Some(Event::Status(text)) = s.take_event() else {
             panic!("expected a refusal")
@@ -1307,7 +1302,7 @@ mod tests {
 
     #[test]
     fn a_selected_folder_that_disappears_leaves_the_selection_on_something_that_exists() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, "/home/me/projects");
         s.folders.collapse(Path::new("/"));
         s.rebuild();
@@ -1318,11 +1313,11 @@ mod tests {
 
     #[test]
     fn m_and_e_on_a_folder_say_what_they_cannot_do() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, "/boot/grub");
         s.selected = Some("/boot/grub".into());
-        s.key(press(KeyCode::Char('m')), WIDE);
-        s.key(press(KeyCode::Char('e')), WIDE);
+        s.key("m", Mods::default(), WIDE);
+        s.key("e", Mods::default(), WIDE);
         s.actions.poll();
         let mut said = Vec::new();
         while let Some(Event::Status(t)) = s.take_event() {
@@ -1339,7 +1334,7 @@ mod tests {
 
     #[test]
     fn once_the_size_is_known_the_layout_is_the_one_fitted_to_it_whatever_width_is_asked() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, "/home/me/projects/minuteman");
         s.set_size(160, 40);
         let layout = s.layout(10);
@@ -1366,7 +1361,7 @@ mod tests {
 
     #[test]
     fn a_size_that_is_zero_is_not_a_size_and_leaves_everything_unfolded() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, "/home/me/projects/minuteman");
         let all = s.topology().nodes.len();
         s.set_size(0, 0);
@@ -1381,13 +1376,13 @@ mod tests {
 
     #[test]
     fn plus_minus_and_zero_refit_the_diagram_to_the_level_chosen_and_back() {
-        let (_rt, mut s) = folder_state();
+        let mut s = folder_state();
         settle(&mut s, ELSEWHERE);
         s.set_size(260, 60);
         let fitted = s.layout(0).level;
-        s.key(press(KeyCode::Char('-')), WIDE);
+        s.key("-", Mods::default(), WIDE);
         assert_eq!(s.layout(0).level, (fitted + 1).min(LEVELS.len() - 1));
-        s.key(press(KeyCode::Char('0')), WIDE);
+        s.key("0", Mods::default(), WIDE);
         assert_eq!(s.layout(0).level, fitted, "0 fits the window again");
     }
 }

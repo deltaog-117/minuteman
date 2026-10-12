@@ -19,8 +19,8 @@
 //! here, outlast every rebuild, and are added to a copy of the topology as more nodes to the right
 //! (`compose`), where the layout treats them like any other.
 //!
-//! Opening a folder reads its subfolders on the blocking pool, so a slow disk or a share never
-//! holds up the interface: until the answer arrives the folder shows a "loading…" note in place of
+//! Opening a folder reads its subfolders on a thread of its own, so a slow disk or a share never
+//! holds up the plugin's loop: until the answer arrives the folder shows a "loading…" note in place of
 //! its children. Only folders are shown (files are what the browser is for), hidden ones only if
 //! the browser is showing them, and a folder with many subfolders shows some of them and a note
 //! saying how many more there are. Which ones: always the one on the way to the folder being
@@ -32,6 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
 
 use shared::Vfs;
 use shared::devices::topology::{Node, NodeKind, Topology};
@@ -51,7 +52,6 @@ enum Listing {
 type Answer = (PathBuf, Result<Vec<String>, String>);
 
 pub struct Folders {
-    handle: tokio::runtime::Handle,
     vfs: Arc<dyn Vfs>,
     show_hidden: bool,
     expanded: HashSet<PathBuf>,
@@ -65,10 +65,9 @@ pub struct Folders {
 }
 
 impl Folders {
-    pub fn new(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>, show_hidden: bool) -> Self {
+    pub fn new(vfs: Arc<dyn Vfs>, show_hidden: bool) -> Self {
         let (tx, rx) = channel();
         Self {
-            handle,
             vfs,
             show_hidden,
             expanded: HashSet::new(),
@@ -108,7 +107,7 @@ impl Folders {
             self.show_hidden,
             path.to_path_buf(),
         );
-        self.handle.spawn_blocking(move || {
+        thread::spawn(move || {
             let answer = vfs
                 .list_dir(&path)
                 .map(|entries| {
@@ -123,6 +122,21 @@ impl Folders {
                 .map_err(|e| e.to_string());
             let _ = tx.send((path, answer));
         });
+    }
+
+    /// Whether hidden folders are shown from now on. A change forgets what was read, since the
+    /// lists differ, and reads every open folder again; `true` when it changed anything.
+    pub fn set_hidden(&mut self, hidden: bool) -> bool {
+        if hidden == self.show_hidden {
+            return false;
+        }
+        self.show_hidden = hidden;
+        self.listings.clear();
+        let open: Vec<PathBuf> = self.expanded.iter().cloned().collect();
+        for path in open {
+            self.expand(&path);
+        }
+        true
     }
 
     /// Closes `path` and everything opened below it. What was read there is forgotten, so opening
@@ -291,10 +305,6 @@ mod tests {
 
     use super::*;
 
-    fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Runtime::new().unwrap()
-    }
-
     /// A machine with one filesystem, mounted at `/data`.
     fn base() -> Topology {
         let mut t = Topology::default();
@@ -335,15 +345,13 @@ mod tests {
 
     #[test]
     fn nothing_is_added_until_something_is_opened() {
-        let rt = runtime();
-        let folders = Folders::new(rt.handle().clone(), vfs(), false);
+        let folders = Folders::new(vfs(), false);
         assert_eq!(folders.compose(&base()), base());
     }
 
     #[test]
     fn opening_a_filesystem_shows_a_note_and_then_its_folders_without_files_or_hidden_ones() {
-        let rt = runtime();
-        let mut folders = Folders::new(rt.handle().clone(), vfs(), false);
+        let mut folders = Folders::new(vfs(), false);
         folders.expand(Path::new("/data"));
         let loading = folders.compose(&base());
         assert!(
@@ -367,8 +375,7 @@ mod tests {
 
     #[test]
     fn hidden_folders_appear_when_the_browser_shows_them() {
-        let rt = runtime();
-        let mut folders = Folders::new(rt.handle().clone(), vfs(), true);
+        let mut folders = Folders::new(vfs(), true);
         folders.expand(Path::new("/data"));
         settle(&mut folders);
         assert!(names(&folders.compose(&base())).contains(&".hidden".to_string()));
@@ -376,8 +383,7 @@ mod tests {
 
     #[test]
     fn a_folder_opened_inside_a_folder_hangs_under_it() {
-        let rt = runtime();
-        let mut folders = Folders::new(rt.handle().clone(), vfs(), false);
+        let mut folders = Folders::new(vfs(), false);
         folders.expand(Path::new("/data"));
         folders.expand(Path::new("/data/alpha"));
         settle(&mut folders);
@@ -391,10 +397,8 @@ mod tests {
 
     #[test]
     fn closing_a_folder_hides_what_was_below_it_and_forgets_it_so_opening_again_reads_afresh() {
-        let rt = runtime();
         let vfs = vfs();
-        let mut folders =
-            Folders::new(rt.handle().clone(), Arc::clone(&vfs) as Arc<dyn Vfs>, false);
+        let mut folders = Folders::new(Arc::clone(&vfs) as Arc<dyn Vfs>, false);
         folders.expand(Path::new("/data"));
         folders.expand(Path::new("/data/alpha"));
         settle(&mut folders);
@@ -417,8 +421,7 @@ mod tests {
 
     #[test]
     fn a_folder_that_cannot_be_read_says_why() {
-        let rt = runtime();
-        let mut folders = Folders::new(rt.handle().clone(), vfs(), false);
+        let mut folders = Folders::new(vfs(), false);
         folders.expand(Path::new("/data/does-not-exist"));
         settle(&mut folders);
         let mut t = Topology::default();
@@ -435,12 +438,11 @@ mod tests {
 
     #[test]
     fn a_crowded_folder_shows_the_first_few_and_how_many_more() {
-        let rt = runtime();
         let vfs = MemVfs::new();
         for i in 0..30 {
             vfs.add_dir(format!("/data/d{i:02}"));
         }
-        let mut folders = Folders::new(rt.handle().clone(), Arc::new(vfs), false);
+        let mut folders = Folders::new(Arc::new(vfs), false);
         folders.expand(Path::new("/data"));
         settle(&mut folders);
         let t = folders.compose(&base());
@@ -462,12 +464,11 @@ mod tests {
 
     #[test]
     fn the_way_down_to_the_folder_being_browsed_is_never_folded_away() {
-        let rt = runtime();
         let vfs = MemVfs::new();
         for i in 0..30 {
             vfs.add_dir(format!("/data/d{i:02}"));
         }
-        let mut folders = Folders::new(rt.handle().clone(), Arc::new(vfs), false);
+        let mut folders = Folders::new(Arc::new(vfs), false);
         folders.set_toward(Some("/data/d27/sub".into()));
         folders.expand(Path::new("/data"));
         settle(&mut folders);
@@ -489,12 +490,11 @@ mod tests {
 
     #[test]
     fn a_smaller_cap_shows_fewer_folders_and_the_note_counts_the_rest() {
-        let rt = runtime();
         let vfs = MemVfs::new();
         for i in 0..30 {
             vfs.add_dir(format!("/data/d{i:02}"));
         }
-        let mut folders = Folders::new(rt.handle().clone(), Arc::new(vfs), false);
+        let mut folders = Folders::new(Arc::new(vfs), false);
         folders.expand(Path::new("/data"));
         settle(&mut folders);
         for cap in [12, 8, 5, 3] {
@@ -512,12 +512,11 @@ mod tests {
 
     #[test]
     fn the_chosen_folder_is_kept_as_well_as_the_way_to_the_browsed_one() {
-        let rt = runtime();
         let vfs = MemVfs::new();
         for i in 0..30 {
             vfs.add_dir(format!("/data/d{i:02}"));
         }
-        let mut folders = Folders::new(rt.handle().clone(), Arc::new(vfs), false);
+        let mut folders = Folders::new(Arc::new(vfs), false);
         folders.set_toward(Some("/data/d02".into()));
         folders.set_chosen(Some("/data/d25".into()));
         folders.expand(Path::new("/data"));
@@ -569,8 +568,7 @@ mod tests {
 
     #[test]
     fn an_answer_for_a_folder_closed_meanwhile_is_dropped() {
-        let rt = runtime();
-        let mut folders = Folders::new(rt.handle().clone(), vfs(), false);
+        let mut folders = Folders::new(vfs(), false);
         folders.expand(Path::new("/data"));
         folders.collapse(Path::new("/data"));
         std::thread::sleep(Duration::from_millis(100));

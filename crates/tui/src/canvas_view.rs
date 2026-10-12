@@ -24,7 +24,10 @@
 //! part is clipped to the area it is drawn in; a frame (which would lose its corners) or a block
 //! that does not fit is simply not drawn until the plugin lays out again. Text takes its color
 //! from what is under it: written over a filled block it turns black or white, whichever reads,
-//! which is why a plugin never names a text color.
+//! which is why a plugin never names a text color. Paths that meet join: a trunk with branches off
+//! it is drawn with its junctions, however many paths it was said in.
+
+use std::collections::HashMap;
 
 use plugin_api::{Canvas, Cells, HUES, Item, Mark, Paint, Tone};
 use ratatui::buffer::Buffer;
@@ -213,65 +216,65 @@ pub fn path_cells(points: &[(u16, u16)]) -> Vec<((u16, u16), Piece)> {
         .collect()
 }
 
-fn piece_glyph(piece: Piece, ascii: bool, rounded: bool) -> &'static str {
-    match (piece, ascii) {
-        (Piece::Horizontal, true) => "-",
-        (Piece::Vertical, true) => "|",
-        (Piece::Corner { .. }, true) => "+",
-        (Piece::Horizontal, false) => "─",
-        (Piece::Vertical, false) => "│",
-        (
-            Piece::Corner {
-                up: true,
-                left: true,
-            },
-            false,
-        ) => {
-            if rounded {
-                "╯"
-            } else {
-                "┘"
+const UP: u8 = 1;
+const RIGHT: u8 = 2;
+const DOWN: u8 = 4;
+const LEFT: u8 = 8;
+
+/// The directions each cell of a path leads on in, as the bits above: towards the cells before and
+/// after it on the path.
+fn path_arms(points: &[(u16, u16)]) -> Vec<((u16, u16), u8)> {
+    let cells: Vec<(u16, u16)> = path_cells(points).into_iter().map(|(at, _)| at).collect();
+    (0..cells.len())
+        .map(|i| {
+            let (x, y) = cells[i];
+            let mut arms = 0;
+            for &(nx, ny) in [i.checked_sub(1), Some(i + 1)]
+                .iter()
+                .flatten()
+                .filter_map(|&j| cells.get(j))
+            {
+                if nx == x && ny < y {
+                    arms |= UP;
+                } else if nx == x && ny > y {
+                    arms |= DOWN;
+                } else if ny == y && nx < x {
+                    arms |= LEFT;
+                } else if ny == y && nx > x {
+                    arms |= RIGHT;
+                }
             }
-        }
-        (
-            Piece::Corner {
-                up: true,
-                left: false,
-            },
-            false,
-        ) => {
-            if rounded {
-                "╰"
-            } else {
-                "└"
-            }
-        }
-        (
-            Piece::Corner {
-                up: false,
-                left: true,
-            },
-            false,
-        ) => {
-            if rounded {
-                "╮"
-            } else {
-                "┐"
-            }
-        }
-        (
-            Piece::Corner {
-                up: false,
-                left: false,
-            },
-            false,
-        ) => {
-            if rounded {
-                "╭"
-            } else {
-                "┌"
-            }
-        }
+            ((x, y), arms)
+        })
+        .collect()
+}
+
+/// What a cell draws as, given every direction any path leaves it in: a line, a corner, or a
+/// junction where paths meet. A cell no path leaves in any direction (a path of one cell) draws
+/// nothing.
+fn joined_glyph(arms: u8, ascii: bool, rounded: bool) -> Option<&'static str> {
+    let corner = |plain: &'static str, round: &'static str| if rounded { round } else { plain };
+    if ascii {
+        return match arms {
+            0 => None,
+            a if a == UP | DOWN || a == UP || a == DOWN => Some("|"),
+            a if a == LEFT | RIGHT || a == LEFT || a == RIGHT => Some("-"),
+            _ => Some("+"),
+        };
+    }
+    match arms {
+        0 => None,
+        a if a == UP | DOWN || a == UP || a == DOWN => Some("│"),
+        a if a == LEFT | RIGHT || a == LEFT || a == RIGHT => Some("─"),
+        a if a == UP | LEFT => Some(corner("┘", "╯")),
+        a if a == UP | RIGHT => Some(corner("└", "╰")),
+        a if a == DOWN | LEFT => Some(corner("┐", "╮")),
+        a if a == DOWN | RIGHT => Some(corner("┌", "╭")),
+        a if a == UP | DOWN | RIGHT => Some("├"),
+        a if a == UP | DOWN | LEFT => Some("┤"),
+        a if a == LEFT | RIGHT | DOWN => Some("┬"),
+        a if a == LEFT | RIGHT | UP => Some("┴"),
+        _ => Some("┼"),
     }
 }
 
@@ -285,6 +288,16 @@ pub fn paint(buf: &mut Buffer, area: Rect, canvas: &Canvas, config: &Config, pha
     let g = glyphs::of(config);
     let ascii = g.ascii_borders;
     let rounded = style::border_type(&theme.border_type) == ratatui::widgets::BorderType::Rounded;
+    // Paths that meet join into one line: a cell is drawn from every direction any path leaves
+    // it in, so a trunk with branches off it gets its junctions.
+    let mut arms: HashMap<(u16, u16), u8> = HashMap::new();
+    for item in &canvas.items {
+        if let Item::Path { points, .. } = item {
+            for (at, here) in path_arms(points) {
+                *arms.entry(at).or_insert(0) |= here;
+            }
+        }
+    }
     for item in &canvas.items {
         match item {
             Item::Block { at, paint, level } => {
@@ -368,12 +381,13 @@ pub fn paint(buf: &mut Buffer, area: Rect, canvas: &Canvas, config: &Config, pha
                 };
                 let line = Style::default().fg(color);
                 let cells = path_cells(points);
-                for &((x, y), piece) in &cells {
+                for &((x, y), _) in &cells {
                     let (px, py) = (area.x.saturating_add(x), area.y.saturating_add(y));
+                    let Some(glyph) = joined_glyph(arms[&(x, y)], ascii, rounded) else {
+                        continue;
+                    };
                     if px < area.right() && py < area.bottom() {
-                        buf[(px, py)]
-                            .set_symbol(piece_glyph(piece, ascii, rounded))
-                            .set_style(line);
+                        buf[(px, py)].set_symbol(glyph).set_style(line);
                     }
                 }
                 if *flow && !cells.is_empty() {
@@ -621,6 +635,73 @@ mod tests {
         );
         assert_eq!(cells.first().map(|c| c.0), Some((0, 0)));
         assert_eq!(cells.last().map(|c| c.0), Some((2, 2)));
+    }
+
+    fn line(points: Vec<(u16, u16)>) -> Item {
+        Item::Path {
+            points,
+            paint: Paint::default(),
+            flow: false,
+        }
+    }
+
+    #[test]
+    fn paths_that_meet_are_drawn_as_one_line_with_junctions() {
+        let area = Rect::new(0, 0, 10, 6);
+        let sign = |buf: &Buffer, x: u16, y: u16| buf[(x, y)].symbol().to_string();
+        // A trunk down column 3 with a branch ending on it from the left and another leaving it
+        // to the right at the same row, and one leaving from its top end.
+        let buf = drawn(
+            area,
+            &canvas(
+                10,
+                6,
+                vec![
+                    line(vec![(3, 0), (3, 4)]),
+                    line(vec![(0, 2), (3, 2)]),
+                    line(vec![(3, 2), (6, 2)]),
+                    line(vec![(3, 0), (6, 0)]),
+                    line(vec![(3, 4), (3, 4)]),
+                ],
+            ),
+        );
+        assert_eq!(sign(&buf, 3, 2), "┼", "paths on all four sides of a cell");
+        assert_eq!(sign(&buf, 3, 1), "│");
+        assert_eq!(sign(&buf, 1, 2), "─");
+        assert!(
+            ["┌", "╭"].contains(&sign(&buf, 3, 0).as_str()),
+            "a corner at the top"
+        );
+        assert_eq!(
+            sign(&buf, 3, 4),
+            "│",
+            "a bare end of the trunk goes on straight"
+        );
+        let buf = drawn(
+            area,
+            &canvas(
+                10,
+                6,
+                vec![line(vec![(3, 0), (3, 4)]), line(vec![(0, 2), (3, 2)])],
+            ),
+        );
+        assert_eq!(sign(&buf, 3, 2), "┤", "a branch ending on the trunk");
+        let buf = drawn(
+            area,
+            &canvas(
+                10,
+                6,
+                vec![line(vec![(3, 0), (3, 4)]), line(vec![(3, 2), (6, 2)])],
+            ),
+        );
+        assert_eq!(sign(&buf, 3, 2), "├", "a branch leaving the trunk");
+    }
+
+    #[test]
+    fn a_path_of_one_cell_draws_nothing_of_its_own() {
+        let area = Rect::new(0, 0, 4, 2);
+        let buf = drawn(area, &canvas(4, 2, vec![line(vec![(1, 1), (1, 1)])]));
+        assert_eq!(buf[(1, 1)].symbol(), " ");
     }
 
     #[test]

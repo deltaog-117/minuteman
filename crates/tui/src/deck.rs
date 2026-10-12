@@ -37,9 +37,9 @@ use shared::devices::activity::Rates;
 use shared::devices::plan::Plan;
 use shared::devices::{Device, holding};
 
-use crate::cargo_fit::{self, Load, Verdict};
 use crate::deck_view;
-use crate::device_actions::send_check;
+use shared::cargo_fit::{self, Load, Verdict};
+use shared::devices::actions::send_check;
 
 /// How long a card takes to slide in when a device is plugged in.
 pub const SLIDE_IN: Duration = Duration::from_millis(260);
@@ -67,7 +67,7 @@ pub enum Outcome {
     Do(DevicesCommand),
 }
 
-pub use crate::device_actions::Event;
+pub use shared::devices::actions::Event;
 
 pub struct DeckState {
     devices: Vec<Device>,

@@ -1,0 +1,19 @@
+[package]
+name = "wiring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The wiring diagram Minuteman ships as a plugin: how the machine's storage is wired, from the bus to the filesystem and on into its folders, sent to the host as a canvas for it to draw."
+
+[[bin]]
+name = "mman-wiring"
+path = "src/main.rs"
+
+[dependencies]
+plugin_api = { path = "../../crates/plugin_api" }
+shared = { path = "../../crates/shared" }
+serde_json = "1.0"
+
+[dev-dependencies]
+proptest = "1.11"

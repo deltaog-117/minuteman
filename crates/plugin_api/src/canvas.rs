@@ -264,6 +264,23 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// What the browser is carrying (the yanked or cut files, else the marked ones), for a view that
+/// says whether it would fit where the user points.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Carrying {
+    /// How many bytes, or at least that many when `exact` is false.
+    pub bytes: u64,
+    /// `false` when measuring stopped at its limit.
+    pub exact: bool,
+    /// The biggest single file in the load.
+    pub largest: u64,
+    /// Moved rather than copied: the originals go once the files are there.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub moving: bool,
+    /// The folder the load comes from, to tell which device it already sits on.
+    pub source: PathBuf,
+}
+
 /// What the interface tells a canvas plugin, in the `canvas` field of a `canvas` event. Positions
 /// are cells of the canvas, counted from its top left.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +299,16 @@ pub enum CanvasInput {
     Resize { width: u16, height: u16 },
     /// The view closed.
     Close,
+    /// What the browser is doing around the view: the folder it is in, whether it shows hidden
+    /// entries and what it is carrying. Sent right after `open` and again whenever one changes,
+    /// so a view that follows the browser (an unfolded path, a verdict on each disk) can.
+    Context {
+        here: PathBuf,
+        #[serde(default, skip_serializing_if = "is_false")]
+        hidden: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        carrying: Option<Carrying>,
+    },
     /// A key the canvas claimed.
     Key {
         key: String,
@@ -578,6 +605,43 @@ mod tests {
             CanvasInput::Key {
                 key: "j".into(),
                 mods: Mods::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_browsers_context_has_its_documented_wire_shape_and_defaults() {
+        let event = CanvasEvent {
+            surface: Surface::Wiring,
+            input: CanvasInput::Context {
+                here: "/home/me".into(),
+                hidden: true,
+                carrying: Some(Carrying {
+                    bytes: 10,
+                    exact: true,
+                    largest: 7,
+                    moving: false,
+                    source: "/home/me/a".into(),
+                }),
+            },
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "surface": "wiring", "input": "context", "here": "/home/me", "hidden": true,
+                "carrying": {"bytes": 10, "exact": true, "largest": 7, "source": "/home/me/a"}
+            })
+        );
+        assert_eq!(serde_json::from_value::<CanvasEvent>(value).unwrap(), event);
+        let bare: CanvasEvent =
+            serde_json::from_str(r#"{"surface":"wiring","input":"context","here":"/"}"#).unwrap();
+        assert_eq!(
+            bare.input,
+            CanvasInput::Context {
+                here: "/".into(),
+                hidden: false,
+                carrying: None
             }
         );
     }

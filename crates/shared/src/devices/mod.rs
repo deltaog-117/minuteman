@@ -23,6 +23,7 @@
 //! Everything is built to be called off the interface thread. A `statvfs` on a network mount that
 //! has gone away can block for a long time, so nothing here may be called from a render loop.
 
+pub mod actions;
 pub mod activity;
 pub mod mountinfo;
 pub mod plan;

@@ -51,7 +51,6 @@ use theming::{OpenRule, OpenWith, PluginSpec, PreviewHook};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::associations::{self, Associations};
-use crate::cargo_fit::{Carry, Load};
 use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
@@ -65,7 +64,7 @@ use crate::open;
 use crate::picker_popup::PickerPopup;
 use crate::plugin_views::Slots;
 use crate::search_job::{SearchJob, SearchState};
-use crate::wiring::WiringState;
+use shared::cargo_fit::{Carry, Load};
 use shared::usage_view::DiskUsageView;
 
 /// How many lines of a shell command's output the status line shows before summarizing the rest.
@@ -671,12 +670,6 @@ impl App {
         if !self.plugins.dispatch_devices(command) {
             self.status = Some(crate::bundled::missing("devices"));
         }
-    }
-
-    /// The wiring diagram of the machine's storage (`V`, the wiring view). It looks at the machine
-    /// only while it exists.
-    pub fn begin_wiring(&self, show_hidden: bool) -> WiringState {
-        WiringState::new(self.handle.clone(), Arc::clone(&self.vfs), show_hidden)
     }
 
     /// Hands the `find` action to the plugin that provides it (the fuzzy finder, which ships

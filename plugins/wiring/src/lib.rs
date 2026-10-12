@@ -1,0 +1,28 @@
+// Minuteman - a fast, Ranger-inspired terminal file manager
+// Copyright (C) 2026  Davi Oliveira Gonçalves
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! `mman-wiring`: the diagram of how the machine's storage is wired, as a plugin. The host tells
+//! it when the wiring view opens and closes, how many cells it has, what the browser is doing
+//! (the folder it is in, what it carries) and what the user did in the view (a key it claimed, a
+//! click, the wheel); it answers with a canvas to draw and, now and then, a note for the browser.
+
+pub mod canvas;
+pub mod folders;
+pub mod layout;
+pub mod run;
+pub mod state;
+
+pub use run::run;

@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugins/wiring` (`mman-wiring`), a bundled plugin that provides `canvas-wiring`: the wiring
+  diagram, how the machine's storage is wired from the bus to the filesystem and on into its
+  folders, now lives in it. It looks at the machine on a thread of its own while the view shows,
+  lays the layers out in columns (or as a tree when the window is narrow), unfolds folders below a
+  filesystem, judges what is carried against each filesystem, mounts, unmounts and ejects, and
+  sends the picture to the host as a canvas (framed boxes, gauges, lines that carry a moving mark
+  where data is flowing, claimed keys). A closed view costs nothing. Install with
+  `cargo install --path plugins/wiring`. Author: deltaog-117.
+- `plugin_api`: a `context` input for a canvas view, sent after `open` and whenever it changes,
+  carrying the folder the browser is in, whether it shows hidden entries and what it carries
+  (`Carrying`: bytes, whether exact, the largest file, copy or move, where from), so a view that
+  follows the browser can. Author: deltaog-117.
+- `shared::cargo_fit` and `shared::devices::actions`: whether a load fits on a device, and what can
+  be done to one (open, mount, unmount, eject, the send check), shared by the deck and the wiring
+  plugin. Author: deltaog-117.
 - `plugins/atlas` (`mman-atlas`), a ninth bundled plugin that provides `canvas-atlas`: the atlas view,
   the zoomable map of the machine's storage, now lives in it. It looks at the volumes on a thread of
   its own while the view shows, lays them out as a treemap, zooms into a volume's folders with the
@@ -158,6 +173,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- The wiring view needs `mman-wiring` installed. Without it the view shows a frame that says how
+  to get it, and the rest of `mman` runs. Its look is the same except that it draws only ASCII
+  symbols (`+` and `-` for folded and unfolded folders, `[]` and `<>` icons, `|` before the row you
+  are in), the filled part of a gauge is a block, the chosen box is in the selection color, and a
+  box cut by the window's edge is left out whole. Author: deltaog-117.
+- The canvas painter joins paths that meet: a cell is drawn from every direction any path leaves
+  it in, so a trunk with branches off it gets its junctions. Author: deltaog-117.
+- `shared::devices::actions::Actions` runs a mount, unmount or eject on a thread of its own instead
+  of `tokio`'s blocking pool; `Actions::new` takes no runtime handle. Author: deltaog-117.
 - `plugin_api`: the `open` input of a canvas view carries `here`, the folder the browser is in, so
   a view can mark where the user is. Absent in an older host, it reads as empty. Author: deltaog-117.
 - `shared::usage_view::DiskUsageView::open` takes no `tokio` runtime handle: it scans on a thread of
@@ -354,6 +378,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to get `mman-archive` and the rest of the file manager is untouched.
 
 ### Removed
+- The core wiring diagram (`wiring`, `wiring_layout`, `wiring_folders`, `wiring_view` in `tui`) and
+  `App::begin_wiring`; the same state, layout and tests live in `plugins/wiring`. `cargo_fit` and
+  `device_actions` moved to `shared`. Author: deltaog-117.
 - The core atlas (`atlas`, `atlas_layout`, `atlas_view` in `tui`) and `App::begin_atlas`; the same
   state, layout and tests live in `plugins/atlas`. Author: deltaog-117.
 - `vfs_ssh`, the in-process SSH/SFTP backend, and with it `tokio`'s companions `openssh` and

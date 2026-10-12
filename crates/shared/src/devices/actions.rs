@@ -16,20 +16,21 @@
 
 //! What can be done to a device from the deck or the wiring diagram: open it (mounting it first if
 //! it is not mounted), mount or unmount it, eject it, and send the carried files to it. The slow
-//! ones run `udisksctl` on the blocking pool, one at a time, and report what came of it as an
+//! ones run `udisksctl` on a thread of their own, one at a time, and report what came of it as an
 //! `Event` the caller picks up on a later turn of the loop; none of them waits.
 //!
-//! Shared by both views, so a device behaves the same wherever it is chosen.
+//! Shared by both views (the deck in the interface, the wiring diagram in its plugin), so a device
+//! behaves the same wherever it is chosen.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
 
-use shared::devices::Device;
-use shared::devices::plan::{Outcome, Plan};
-
+use super::Device;
+use super::plan::{Outcome, Plan};
 use crate::cargo_fit::{self, Verdict};
 
 /// What finished in the background, for the caller to show or do.
@@ -67,7 +68,6 @@ pub fn send_check(device: &Device, verdict: Option<Verdict>) -> Result<PathBuf, 
 }
 
 pub struct Actions {
-    handle: tokio::runtime::Handle,
     tx: Sender<Event>,
     rx: Receiver<Event>,
     /// Whether something is being done right now: one thing at a time.
@@ -75,11 +75,16 @@ pub struct Actions {
     pending: VecDeque<Event>,
 }
 
+impl Default for Actions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Actions {
-    pub fn new(handle: tokio::runtime::Handle) -> Self {
+    pub fn new() -> Self {
         let (tx, rx) = channel();
         Self {
-            handle,
             tx,
             rx,
             working: Arc::new(AtomicBool::new(false)),
@@ -144,7 +149,7 @@ impl Actions {
             .ok()
     }
 
-    /// Runs `plan` on the blocking pool, one thing at a time, and reports what came of it.
+    /// Runs `plan` on a thread of its own, one thing at a time, and reports what came of it.
     fn start(&self, plan: &Plan) {
         if self.working.swap(true, Ordering::AcqRel) {
             self.say("still working on the last one");
@@ -152,7 +157,7 @@ impl Actions {
         }
         self.say(plan.starting());
         let (tx, working, plan) = (self.tx.clone(), Arc::clone(&self.working), plan.clone());
-        self.handle.spawn_blocking(move || {
+        thread::spawn(move || {
             let _ = tx.send(plan.run().into());
             working.store(false, Ordering::Release);
         });
@@ -161,7 +166,7 @@ impl Actions {
 
 #[cfg(test)]
 mod tests {
-    use shared::devices::Kind;
+    use crate::devices::Kind;
 
     use super::*;
 
@@ -187,15 +192,9 @@ mod tests {
         out
     }
 
-    fn actions() -> (tokio::runtime::Runtime, Actions) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let actions = Actions::new(runtime.handle().clone());
-        (runtime, actions)
-    }
-
     #[test]
     fn opening_a_mounted_device_is_going_to_its_folder() {
-        let (_rt, actions) = actions();
+        let actions = Actions::new();
         assert_eq!(
             actions.open(&device(Kind::Removable, Some("/run/media/me/STICK"))),
             Some(PathBuf::from("/run/media/me/STICK"))
@@ -205,7 +204,7 @@ mod tests {
 
     #[test]
     fn a_network_share_cannot_be_mounted_from_here() {
-        let (_rt, mut actions) = actions();
+        let mut actions = Actions::new();
         actions.toggle(&device(Kind::Network, Some("/mnt/nas")));
         let said = said(&mut actions);
         assert_eq!(said.len(), 1, "{said:?}");
@@ -215,7 +214,7 @@ mod tests {
 
     #[test]
     fn sending_is_allowed_where_it_fits_and_refused_with_the_reason_where_it_does_not() {
-        let (_rt, mut actions) = actions();
+        let mut actions = Actions::new();
         let mounted = device(Kind::Removable, Some("/run/media/me/STICK"));
         assert_eq!(
             actions.send_to(&mounted, Some(Verdict::Fits { left: 1 })),

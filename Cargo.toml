@@ -21,6 +21,7 @@ members = [
     "plugins/inspect",
     "plugins/devices",
     "plugins/atlas",
+    "plugins/wiring",
     "plugins/archive",
     "plugins/ssh",
     "plugins/preview",

@@ -193,8 +193,9 @@ fn apply(
                 note(outcome, output)?;
             }
         }
-        // The map has no menu and the wheel does nothing on it.
-        CanvasInput::Click { .. } | CanvasInput::Wheel { .. } => {}
+        // The map has no menu, the wheel does nothing on it, and it marks the folder the browser
+        // was in when it opened and carries nothing.
+        CanvasInput::Click { .. } | CanvasInput::Wheel { .. } | CanvasInput::Context { .. } => {}
     }
     Ok(())
 }

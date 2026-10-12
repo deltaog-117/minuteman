@@ -98,6 +98,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-12 | Ssh Plugin Built, Not Wired (M7b step 2) | The `vfs_ssh` engine copied into `plugins/ssh` behind a `Server`, a host-side `SshVfs` in a new core crate, hex-over-JSON windows kept and measured (COA A); binary frames (B) and a rewrite on a lighter ssh stack (C) not taken | ✅ Confirmed |
 | 2026-10-12 | Ssh Cut-Over (M7b step 3) | One cut-over: `SshVfs` wired in, `vfs_ssh` deleted, the install line shown when `mman-ssh` is absent (COA A) | ✅ Confirmed |
 | 2026-10-12 | Canvas Primitive for Whole-Body Views (M7c step 1) | A plugin draws atlas and wiring through a `canvas` of semantic parts and claimed keys; grid, tiles, details and filmstrip stay in the core (COA C); the core atlas stays as the fallback until the plugin exists | ✅ Confirmed |
+| 2026-10-12 | The Wiring Diagram as a Plugin (M7c step 3) | The plugin owns the scan, the folders, the layout and the device actions on the local disk, with the load and the browsed folder sent as a `context` (COA A); snapshots fed from the core (B) and keeping the diagram in the core (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -7659,6 +7660,75 @@ unit tests and not by a pty session; not tried in a real kitty.
 
 **Left open.** Step 3, `plugins/wiring`. The hint reaches the status bar when the first canvas
 arrives, a frame later than the view switch used to show it.
+
+---
+
+## 2026-10-12 — The wiring diagram as a plugin, step 3 of 3 (M7c)
+
+**Decision.** The diagram needs the machine's topology and activity, a folder tree it unfolds
+below a filesystem, the device actions of the deck, and the answer to "does what I carry fit
+here". Three courses were weighed: let the plugin own all of that on the local disk, as the atlas
+does (A); keep the scan, the folders and the actions in the core and send the plugin a snapshot,
+leaving it the layout and the drawing (B); or keep the diagram in the core behind a cargo feature
+(C). Chosen: A. B needs a host-to-plugin data channel and a device note, and leaves most of the
+code where it was, with the logic split across the wire; C is the fallback the roadmap allowed
+and would have left `canvas-wiring` with no provider. A costs the one thing the core version did
+that a plugin on the local disk cannot: unfolding a folder of a remote machine. Nothing on that
+screen is a remote path (a mount point is local), so the loss is the diagram not following the
+browser into an `ssh://` folder.
+
+**What moved.** `cargo_fit` (pure) and the deck's `Actions` went to `shared`: the deck still needs
+both, and the plugin needs both, so one copy is better than two. `Actions` ran its `udisksctl`
+jobs on `tokio`'s blocking pool; it now uses a thread, as `usage_view` did, and `new` loses its
+runtime-handle argument. The layout, the folder unfolding and the state moved to `plugins/wiring`
+with their tests; ratatui's `Rect` is a small one of the plugin's own, keys are the host's key
+names, and the folders read through a `Vfs` on threads. The scan stands behind a `Machine` trait
+so a conversation can be played without the real disks, as in the atlas.
+
+**The wire.** Two things were missing. The diagram follows the folder the browser is in (it
+unfolds toward it and lights it) and the browser moves while the view shows, since `Enter` on a
+folder goes there; and it judges the carried files against each filesystem, which only the core
+knows. `open` already carried `here` once. Instead of growing `open` or adding two inputs, one
+`context` input says the folder, whether hidden entries show and what is carried, and is sent
+after `open` and whenever any of them changes. The atlas ignores it.
+
+**Painting lines.** The core drew the connectors by adding up which sides of a cell had a line
+and choosing a box-drawing character. A canvas path is a corner-only walk, so a trunk with three
+branches would have drawn each branch's corner over the trunk. Rather than make the plugin draw
+junctions out of single cells, the painter now adds up the directions every path leaves a cell in
+before it chooses the character, which makes a trunk and its branches look as they did and gives
+every future canvas the same. The plugin lets each line run one cell into the box at its ends,
+where the box covers it, so the first and last cell of a line are junctions too.
+
+**What changed in the picture.** ASCII symbols only, as with the atlas: `+` and `-` for folded
+and unfolded folders, `[]` and `<>` for icons, `|` for the row you are in, "..." where a name is
+cut. The gauge is a bar of blocks, the used part bright and the rest the same tone dimmed. The
+chosen box is in the selection color. A box cut by the window's edge is left out whole, because
+the host drops a frame that is not entirely inside the canvas and the core's trick of painting it
+off screen and copying the visible part has no equivalent; the scroll keeps the chosen box whole.
+Lines are cut to the window by the plugin, since a path with a point outside the canvas is
+refused. The flowing mark now moves at the host's pace.
+
+**Limits.** At most 4,000 parts and 64 KiB of text, and unfolding many folders could want more, so
+the builder stops adding boxes when either budget is nearly reached. A property test builds the
+canvas for any size from 1 by 1 up, any zoom and any chosen node and runs the host's own
+`checked` over it; it found a row's right-hand figure running a cell past the window in a narrow
+tree, now fixed.
+
+**Verification.** `scripts/check` passes. New and moved: 61 for the layout, the folders and the
+state, 10 for the canvas builder (including the property test and the line clipping), 5 against
+the real `mman-wiring` process (open, claims, a verdict on a carried load, the folder the browser
+is in unfolded and opened, resize, quiet when closed, exit with its input), 2 for the painter's
+junctions. Driven through a pty against the compiled `mman` and read through `pyte`: from `/boot`
+the diagram drew as framed boxes with junctions and gauges, with a yanked file each filesystem
+said `fits` and how much was left, a click on the root filesystem unfolded it and `Enter` opened
+`/`, `-` and `0` answered, `V` went on to the atlas, and a copy of `mman` alone showed the install
+line. From a deep folder on `/tmp` the same view fell back to the indented tree, as it did before.
+
+**Left open.** The mark flowing along the line into a busy disk was not seen in a pty, because
+the disk was idle; the path that carries it is covered by a unit test. Not tried in a real kitty.
+M7 is done: the grid, tiles, details and filmstrip stay in the core as layouts of the folder being
+browsed.
 
 ---
 
