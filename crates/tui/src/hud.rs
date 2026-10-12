@@ -151,20 +151,21 @@ pub fn crumbs(path: &Path, home: Option<&Path>, max_width: usize) -> Vec<Crumb> 
             })
             .collect()
     };
-    let (root_label, root_dir, rest) =
-        if let Ok(vfs_ssh::Location::Remote(remote)) = vfs_ssh::Remote::locate(path) {
-            // The machine is the root, so a click on a segment stays on it and the host is on screen.
-            (
-                format!("ssh://{}", remote.target()),
-                remote.at(PathBuf::from("/")).to_path_buf(),
-                names(remote.path()),
-            )
-        } else {
-            match home.and_then(|h| path.strip_prefix(h).ok().map(|r| (h, r))) {
-                Some((h, rest)) => ("~".to_string(), h.to_path_buf(), names(rest)),
-                None => ("/".to_string(), PathBuf::from("/"), names(path)),
-            }
-        };
+    let (root_label, root_dir, rest) = if let Ok(shared::ssh_path::Location::Remote(remote)) =
+        shared::ssh_path::Remote::locate(path)
+    {
+        // The machine is the root, so a click on a segment stays on it and the host is on screen.
+        (
+            format!("ssh://{}", remote.target()),
+            remote.at(PathBuf::from("/")).to_path_buf(),
+            names(remote.path()),
+        )
+    } else {
+        match home.and_then(|h| path.strip_prefix(h).ok().map(|r| (h, r))) {
+            Some((h, rest)) => ("~".to_string(), h.to_path_buf(), names(rest)),
+            None => ("/".to_string(), PathBuf::from("/"), names(path)),
+        }
+    };
     let mut dir = root_dir.clone();
     let mut segments = vec![Crumb {
         label: root_label,

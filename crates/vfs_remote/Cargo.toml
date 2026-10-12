@@ -16,6 +16,6 @@ serde_json = "1.0"
 proptest = "1.11"
 file_ops = { path = "../file_ops" }
 browser = { path = "../browser" }
-# The in-process backend the plugin replaces, for the throughput comparison only; it goes when the
-# core stops carrying it.
-vfs_ssh = { path = "../vfs_ssh" }
+# The real link and manager the interface uses, so the throughput test goes through them.
+plugin_host = { path = "../plugin_host" }
+tokio = { version = "1", features = ["rt-multi-thread"] }

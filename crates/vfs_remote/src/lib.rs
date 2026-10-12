@@ -51,6 +51,20 @@ use writer::PluginWriter;
 
 const NOT_THERE: &str = "this is not available on that machine";
 
+/// The text of the error a request gets while no `mman-ssh` is running, so the interface can tell
+/// that case apart and say where to get the plugin instead.
+pub const PLUGIN_ABSENT: &str =
+    "browsing a remote machine needs the mman-ssh plugin, which is not running";
+
+/// Whether `error` is the one a request gets while no `mman-ssh` is running.
+pub fn is_plugin_absent(error: &VfsError) -> bool {
+    matches!(
+        error,
+        VfsError::Io { source, .. }
+            if source.kind() == io::ErrorKind::Unsupported && source.to_string() == PLUGIN_ABSENT
+    )
+}
+
 pub struct SshVfs {
     inner: Arc<dyn Vfs>,
     peer: Arc<dyn Peer>,
@@ -143,10 +157,7 @@ pub(crate) fn error_of(error: PeerError, path: &Path) -> VfsError {
         error @ PeerError::Fault(VfsFault::BadHandle | VfsFault::TooManyOpen) => {
             io(io::ErrorKind::Other, error.to_string())
         }
-        PeerError::Unavailable => io(
-            io::ErrorKind::Unsupported,
-            "browsing a remote machine needs the mman-ssh plugin, which is not running".to_string(),
-        ),
+        PeerError::Unavailable => io(io::ErrorKind::Unsupported, PLUGIN_ABSENT.to_string()),
         error @ (PeerError::Stopped
         | PeerError::TimedOut
         | PeerError::Stale

@@ -20,7 +20,7 @@ plugin_host = { path = "../plugin_host" }
 plugin_api = { path = "../plugin_api" }
 # The `--text-hook` argument the bundled preview plugin is started with is a JSON document.
 serde_json = "1.0"
-vfs_ssh = { path = "../vfs_ssh" }
+vfs_remote = { path = "../vfs_remote" }
 vfs_archive = { path = "../vfs_archive" }
 trash = { path = "../trash" }
 # `unstable-rendered-line-info` gives `Paragraph::line_count`, which the scrollable preview needs

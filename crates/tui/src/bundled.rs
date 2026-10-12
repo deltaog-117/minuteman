@@ -40,7 +40,7 @@ struct Bundled {
     how_to_get: &'static str,
 }
 
-const BUNDLED: [Bundled; 8] = [
+const BUNDLED: [Bundled; 9] = [
     Bundled {
         name: "finder",
         binary: "mman-finder",
@@ -115,6 +115,16 @@ const BUNDLED: [Bundled; 8] = [
         events: &[],
         how_to_get: "the rail of devices is a plugin and mman-devices was not found; \
             install it with `cargo install --path plugins/devices` (next to mman, or on PATH)",
+    },
+    // Provides `vfs-ssh`: the paths under `ssh://` are answered by this plugin, which holds the
+    // connections, so the core carries no SSH stack.
+    Bundled {
+        name: "ssh",
+        binary: "mman-ssh",
+        provides: &["vfs-ssh"],
+        events: &[],
+        how_to_get: "remote machines are a plugin and mman-ssh was not found; \
+            install it with `cargo install --path plugins/ssh` (next to mman, or on PATH)",
     },
 ];
 
@@ -274,7 +284,7 @@ mod tests {
     #[test]
     fn a_fresh_install_starts_each_bundled_plugin_providing_its_action() {
         let started = specs_found(&[], found, &[]);
-        assert_eq!(started.len(), 8);
+        assert_eq!(started.len(), 9);
         assert_eq!(started[0].name, "finder");
         assert_eq!(started[0].command, "/opt/bin/mman-finder");
         assert_eq!(started[0].provides, ["find"]);
@@ -310,19 +320,19 @@ mod tests {
         assert_eq!(
             names(true, true),
             [
-                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices"
+                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
         assert_eq!(
             names(false, true),
             [
-                "finder", "search", "hud", "preview", "inspect", "archive", "devices"
+                "finder", "search", "hud", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
         assert_eq!(
             names(true, false),
             [
-                "finder", "search", "git", "preview", "inspect", "archive", "devices"
+                "finder", "search", "git", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
     }
@@ -362,6 +372,18 @@ mod tests {
     }
 
     #[test]
+    fn the_ssh_plugin_provides_the_remote_paths_and_says_how_to_get_it() {
+        let started = specs_found(&[], found, &[]);
+        let ssh = started
+            .iter()
+            .find(|spec| spec.name == "ssh")
+            .expect("bundled");
+        assert_eq!(ssh.command, "/opt/bin/mman-ssh");
+        assert_eq!(ssh.provides, ["vfs-ssh"]);
+        assert!(missing("vfs-ssh").contains("mman-ssh"));
+    }
+
+    #[test]
     fn a_missing_program_is_not_started() {
         assert!(specs_found(&[], |_| None, &[]).is_empty());
         let only_search = specs_found(
@@ -384,38 +406,38 @@ mod tests {
         assert_eq!(
             names(&[configured("finder", &[])]),
             [
-                "search", "git", "hud", "preview", "inspect", "archive", "devices"
+                "search", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
         assert_eq!(
             names(&[configured("fzf-picker", &["find"])]),
             [
-                "search", "git", "hud", "preview", "inspect", "archive", "devices"
+                "search", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
         assert_eq!(
             names(&[configured("search", &[])]),
             [
-                "finder", "git", "hud", "preview", "inspect", "archive", "devices"
+                "finder", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
         assert_eq!(
             names(&[configured("grep-ui", &["locate"])]),
             [
-                "finder", "git", "hud", "preview", "inspect", "archive", "devices"
+                "finder", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
         assert_eq!(
             names(&[configured("git", &[])]),
             [
-                "finder", "search", "hud", "preview", "inspect", "archive", "devices"
+                "finder", "search", "hud", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
         // A plugin providing nothing must not count as standing in for the git plugin.
         assert_eq!(
             names(&[configured("blame", &[])]),
             [
-                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices"
+                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
             ]
         );
     }
@@ -424,7 +446,7 @@ mod tests {
     fn an_unrelated_plugin_leaves_the_bundled_ones_alone() {
         assert_eq!(
             specs_found(&[configured("blame", &["blame"])], found, &[]).len(),
-            8
+            9
         );
     }
 

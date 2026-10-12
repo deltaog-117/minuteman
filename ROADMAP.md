@@ -9,7 +9,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
 ## ✅ Completed (Milestones Achieved)
 
 - ✅ **v0.1.0 — bare-bones runnable browser.** Cargo workspace scaffold (10 feature-first
-  crates: `shared`, `vfs_ssh`, `browser`, `file_ops`, `preview`, `shell_overlay`, `trash`,
+  crates: `shared`, `vfs_ssh` (since removed), `browser`, `file_ops`, `preview`, `shell_overlay`, `trash`,
   `plugins`, `theming`, `tui`), each with its own `Cargo.toml`/`src`/`tests`.
 - ✅ **Local filesystem browser (miller columns)** – 3-pane Ranger-style navigation (parent |
   current | selection preview) over the local filesystem, backed by a `Vfs` trait + synchronous
@@ -1030,7 +1030,7 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   archives onto the trait (B) and a guardrails-only change (C).
 
 - ✅ **Native remote browsing over SSH/SFTP (COA C: the system `ssh`)** – a path beginning
-  `ssh://[user@]host[:port]/` is a place on another machine, handled by the `vfs_ssh` crate:
+  `ssh://[user@]host[:port]/` is a place on another machine, handled by the `vfs_ssh` crate, since replaced by the `mman-ssh` plugin and `vfs_remote`:
   `Remote::locate` parses it into validated `Host`, `User` and `Target` types (nothing that could
   be read as an `ssh` option gets through), `RoutedVfs` is the `Vfs` the application is built with
   and sends a path to the disk or to that machine's `Link`, and a `Link` runs `ssh -s sftp` through
@@ -2061,7 +2061,7 @@ draws.
 - [ ] **M7 – decide, then do, for what is left:** the `ssh` scheme served by a plugin, and the
   alternate views (grid, tiles, filmstrip, atlas, wiring), which need `SetPane` to describe more
   than text spans. If either proves too costly, it stays in the core behind a cargo feature.
-  - [ ] **M7b – `ssh` served by a plugin (`plugins/ssh`, `mman-ssh`).** Chosen over keeping
+  - [x] **M7b – `ssh` served by a plugin (`plugins/ssh`, `mman-ssh`).** Chosen over keeping
     `vfs_ssh` in the core behind a feature: Minuteman is a better Ranger, ranger has no native
     ssh browsing, and the async stack (`tokio`, `openssh`, `openssh-sftp-client`) is the largest
     dependency in the core for a minority of sessions. Staged so remote writes never regress:
@@ -2103,8 +2103,19 @@ draws.
        through the real `ServeLink`. Tested with a lagging peer (overlap bounded at five, close
        after the last write, a refused write reported by `flush`) and `ServeLink` answering two
        requests in flight to their own callers.
-    3. [ ] switch `main.rs` from `RoutedVfs` to `SshVfs`, delete `vfs_ssh` and its dependencies
+    3. [x] switch `main.rs` from `RoutedVfs` to `SshVfs`, delete `vfs_ssh` and its dependencies
        from the core, add the missing-plugin message. From here ssh needs `mman-ssh` installed.
+       `ssh` is a bundled plugin (`provides: vfs-ssh`) with its own `ServeLink`, handed to the
+       `App` by `with_ssh_link`; the address parsing the interface used from `vfs_ssh` is
+       `shared::ssh_path`; `vfs_ssh` and its stand-in comparison are gone, and the throughput
+       test now drives the real `PluginManager` and `ServeLink`. A request made while no
+       `mman-ssh` runs gets one recognisable error (`vfs_remote::is_plugin_absent`) that the
+       interface turns into the install line. **Measured through the real `ServeLink`** (256 MiB,
+       release, loopback `sshd`): download 22 MiB/s against 16 in-process (0.71x the time),
+       upload 122 against 53 (0.44x). Checked against the compiled `mman`: with no `mman-ssh`
+       the status line says how to get it, and with it a refused connection is reported by the
+       plugin. `mman ssh://host/dir` opens the working folder and then moves to the remote one,
+       because the plugin is not running when the browser is first built.
   - [ ] **M7c – the alternate views** (decided after M7b, with the cargo-feature fallback open).
 
 ---
@@ -2540,8 +2551,8 @@ draws.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: M7b step 3 (switch `main.rs` to `SshVfs`, delete `vfs_ssh`, add the missing-plugin
-   message); the upload figure is settled (pipelined, 109 MiB/s). Medium Priority holds the follow-ups to remote browsing and the other features
+4. Next cycle: M7c, the alternate views (grid, tiles, filmstrip, atlas, wiring), which need
+   `SetPane` to describe more than text spans; M7b is done. Medium Priority holds the follow-ups to remote browsing and the other features
    listed there. Folder moves no longer block, so the next biggest gaps are the other things that
    read on the render thread (undo of a large move, a large archive's index) and a prompt for a
    password or a new host key.

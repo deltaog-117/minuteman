@@ -17,7 +17,7 @@ item (core file operations, async bulk ops with progress, the interactive shell 
 theme system, and inline image preview) is now built. It is **not yet** a daily-driver
 replacement for Ranger or Yazi. See [ROADMAP.md](ROADMAP.md) for what's still ahead (built-in
 trash, and a stable multi-language sandboxed plugin system). Native SSH/SFTP browsing works
-(`:cd ssh://host/path`); see the roadmap for what it does not do yet.
+(`:cd ssh://host/path`) once `mman-ssh` is installed; see the roadmap for what it does not do yet.
 
 ---
 
@@ -97,6 +97,7 @@ cargo install --path plugins/preview  # installs mman-preview, the preview colum
 cargo install --path plugins/inspect  # installs mman-inspect, the Inspect panel's rows
 cargo install --path plugins/archive  # installs mman-archive, which compresses and extracts
 cargo install --path plugins/devices  # installs mman-devices, the devices behind the deck's rail
+cargo install --path plugins/ssh      # installs mman-ssh, which browses and changes remote machines (`ssh://`)
 mman
 mman /path/to/dir
 ```
@@ -529,7 +530,7 @@ crates/
 ├── trash/              # (stub, WIP) trash + undo history
 ├── plugin_host/        # out-of-process, any-language plugin host (JSON-RPC over stdio); WASM tier: WIP
 ├── plugin_api/         # the plain data and line helpers a plugin and the host share
-├── vfs_ssh/            # native SSH/SFTP remote browsing, through the system `ssh`
+├── vfs_remote/         # routes `ssh://` paths to the plugin that serves them
 └── portal_backend/     # `mman-portal`: the desktop portal's file chooser, answered by `mman`
 
 plugins/
@@ -540,7 +541,8 @@ plugins/
 ├── preview/            # `mman-preview` (package `previewer`): the preview column's documents, bundled as a plugin
 ├── inspect/            # `mman-inspect` (package `inspector`): the Inspect panel's rows, bundled as a plugin
 ├── archive/            # `mman-archive` (package `archiver`): compress and extract zip, tar and tar.gz, bundled as a plugin
-└── devices/            # `mman-devices`: the deck's rail of devices and mounting, bundled as a plugin
+├── devices/            # `mman-devices`: the deck's rail of devices and mounting, bundled as a plugin
+└── ssh/                # `mman-ssh` (package `remoter`): browsing and changing remote machines over SFTP, bundled as a plugin
 ```
 
 ---

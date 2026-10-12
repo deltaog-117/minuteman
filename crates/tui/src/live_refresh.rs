@@ -88,7 +88,7 @@ impl LiveRefresh {
             }
         }
 
-        let interval = if vfs_ssh::is_remote(browser.current_dir()) {
+        let interval = if shared::ssh_path::is_remote(browser.current_dir()) {
             REMOTE_INTERVAL
         } else {
             INTERVAL

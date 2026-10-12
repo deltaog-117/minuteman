@@ -141,7 +141,7 @@ use theming::{
 use thumbnails::Thumbnails;
 use trash_view::TrashView;
 use vfs_archive::ArchiveVfs;
-use vfs_ssh::RoutedVfs;
+use vfs_remote::SshVfs;
 use view_mode::{
     FilmstripLayout, GridLayout, Jump, Step, ViewMode, body_of, browser_layout, details_title_row,
     jump_target, page_size,
@@ -543,7 +543,7 @@ fn fresh_shell_box(
     shell_offset: &mut (i32, i32),
     shell_size: &mut (i32, i32),
 ) -> Result<ShellPanes> {
-    if vfs_ssh::is_remote(cwd) || vfs_archive::is_inside(cwd) {
+    if shared::ssh_path::is_remote(cwd) || vfs_archive::is_inside(cwd) {
         anyhow::bail!("{REMOTE_SHELL}");
     }
     *shell_offset = (0, 0);
@@ -656,7 +656,7 @@ fn apply_alt_command(
             } else {
                 SplitDirection::Vertical
             };
-            if vfs_ssh::is_remote(cwd) || vfs_archive::is_inside(cwd) {
+            if shared::ssh_path::is_remote(cwd) || vfs_archive::is_inside(cwd) {
                 *shells = Some(panes);
                 return Ok(Some(REMOTE_SHELL.into()));
             }
@@ -815,12 +815,22 @@ fn main() -> Result<()> {
     // one on a remote machine opens just the same.
     // What is inside an archive is answered by a plugin, reached through this link; the link is
     // handed to the plugins below so the one that serves archives is attached to it as it starts.
+    // The paths on a remote machine are answered the same way, by their own plugin and link.
     let archive_link = plugin_host::ServeLink::new();
+    let ssh_link = plugin_host::ServeLink::new();
     let vfs: Arc<dyn Vfs> = Arc::new(ArchiveVfs::new(
-        Arc::new(RoutedVfs::new(Arc::new(LocalVfs))?),
+        Arc::new(SshVfs::new(Arc::new(LocalVfs), ssh_link.clone())),
         archive_link.clone(),
     ));
-    let mut browser = BrowserState::with_show_hidden(vfs.as_ref(), start_dir, config.show_hidden)?;
+    // A machine is reached through its plugin, which is not running yet: the browser opens on the
+    // working folder and is moved to the remote one once the plugins have started.
+    let remote_start = shared::ssh_path::is_remote(&start_dir).then(|| start_dir.clone());
+    let first_dir = if remote_start.is_some() {
+        std::env::current_dir()?
+    } else {
+        start_dir
+    };
+    let mut browser = BrowserState::with_show_hidden(vfs.as_ref(), first_dir, config.show_hidden)?;
 
     // Backs the blocking thread pool that copy/move/delete run on so a large operation never
     // freezes the render loop. Kept alive for the rest of `main` — dropping it would shut the
@@ -829,12 +839,17 @@ fn main() -> Result<()> {
     let mut app = App::new(runtime.handle().clone())
         .with_vfs(Arc::clone(&vfs))
         .with_archive_link(archive_link)
+        .with_ssh_link(ssh_link)
         .with_git_status(config.git_status)
         .with_system_hud(config.system_hud)
         .with_preview_hooks(config.preview_hooks.clone())
         .with_interactive_commands(config.interactive_commands.clone())
         .with_open_config(config.open_rules.clone(), config.open_with.clone())
         .with_plugins(config.plugins.clone(), browser.current_dir());
+    if let Some(remote) = remote_start {
+        let plan = browser.plan_goto(&remote);
+        app.begin_move(&mut browser, plan, None, "cannot open");
+    }
     if let Some(chooser) = args.chooser {
         app.begin_choosing(chooser);
     }
@@ -3016,7 +3031,7 @@ fn run(
                                     } else {
                                         SplitDirection::Vertical
                                     };
-                                    if vfs_ssh::is_remote(browser.current_dir())
+                                    if shared::ssh_path::is_remote(browser.current_dir())
                                         || vfs_archive::is_inside(browser.current_dir())
                                     {
                                         app.status = Some(REMOTE_SHELL.into());
@@ -3404,7 +3419,7 @@ fn run(
             Some(Action::QuitToCwd) => {
                 // A folder on another machine is not one the shell can `cd` into.
                 if let Some(file) = cwd_file
-                    && !vfs_ssh::is_remote(browser.current_dir())
+                    && !shared::ssh_path::is_remote(browser.current_dir())
                 {
                     cli::write_cwd_file(file, browser.current_dir())?;
                 }

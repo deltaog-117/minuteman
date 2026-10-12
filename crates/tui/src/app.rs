@@ -405,7 +405,7 @@ impl BulkKind {
 /// call one missing).
 /// Sends a file to this machine's trash, or says why it cannot: a remote machine has none.
 fn trash_here(path: &Path) -> Result<(), file_ops::FileOpsError> {
-    if vfs_ssh::is_remote(path) {
+    if shared::ssh_path::is_remote(path) {
         return Err(VfsError::Unsupported("a trash on a remote machine").into());
     }
     if vfs_archive::is_inside(path) {
@@ -788,6 +788,17 @@ impl App {
         self
     }
 
+    /// What to tell the user when a remote folder would not open: where to get the plugin when
+    /// none is running (the error alone starts with a long address and would hide it), the error
+    /// otherwise.
+    pub fn remote_open_failure(&self, error: &shared::VfsError) -> String {
+        if self.plugins.serves_ssh() {
+            format!("cannot open the remote folder: {error}")
+        } else {
+            crate::bundled::missing(plugin_api::PROVIDES_VFS_SSH)
+        }
+    }
+
     /// What to tell the user when an archive would not open: where to get the plugin when none is
     /// running (the error alone starts with a long path and would hide it), the error otherwise.
     pub fn archive_open_failure(&self, error: &shared::VfsError) -> String {
@@ -802,6 +813,13 @@ impl App {
     /// given to `with_vfs` was built with. Call before `with_plugins`.
     pub fn with_archive_link(mut self, link: Arc<plugin_host::ServeLink>) -> Self {
         self.plugins.set_serve_link(link);
+        self
+    }
+
+    /// Uses `link` to reach the plugin that serves the paths on remote machines: the one the `Vfs`
+    /// given to `with_vfs` was built with. Call before `with_plugins`.
+    pub fn with_ssh_link(mut self, link: Arc<plugin_host::ServeLink>) -> Self {
+        self.plugins.set_serve_ssh_link(link);
         self
     }
 
@@ -1006,6 +1024,9 @@ impl App {
             Ok(loaded) => {
                 browser.apply_move(loaded);
                 self.status = job.done_status;
+            }
+            Err(e) if vfs_remote::is_plugin_absent(&e) => {
+                self.status = Some(self.remote_open_failure(&e));
             }
             Err(e) => self.status = Some(format!("{}: {e}", job.error_prefix)),
         }
@@ -1729,7 +1750,7 @@ impl App {
     /// The one place a file is handed to a program. `terminal` forces the terminal handover for a
     /// program that needs it whatever its name (a `Terminal=true` desktop entry).
     fn launch(&mut self, browser: &BrowserState, command: &str, path: &Path, terminal: bool) {
-        if vfs_ssh::is_remote(path) {
+        if shared::ssh_path::is_remote(path) {
             self.status = Some(format!(
                 "cannot open {}: it is on a remote machine, copy it here first",
                 display_name(path)
@@ -2306,7 +2327,7 @@ impl App {
     /// command never freezes the render loop. `Esc` kills it (see `cancel_bulk`).
     fn spawn_shell_command(&mut self, browser: &BrowserState, line: String) {
         // Run here, it would act on this machine's files, not the ones in view.
-        if vfs_ssh::is_remote(browser.current_dir()) {
+        if shared::ssh_path::is_remote(browser.current_dir()) {
             self.status =
                 Some("commands run on this machine; leave the remote folder first".into());
             return;
@@ -2804,7 +2825,7 @@ impl App {
         paths: impl IntoIterator<Item = &'a Path>,
     ) -> Option<String> {
         paths.into_iter().find_map(|path| {
-            let place = if vfs_ssh::is_remote(path) {
+            let place = if shared::ssh_path::is_remote(path) {
                 "a remote machine"
             } else if vfs_archive::is_inside(path) {
                 "inside an archive"
@@ -3193,7 +3214,10 @@ impl App {
     fn spawn_trash(&mut self, targets: Vec<PathBuf>) {
         // Only this machine has a trash; sending the files to it would not find them, and
         // deleting them for good instead is not what a trash key promises.
-        if targets.iter().any(|target| vfs_ssh::is_remote(target)) {
+        if targets
+            .iter()
+            .any(|target| shared::ssh_path::is_remote(target))
+        {
             self.status = Some("a remote machine has no trash; use the permanent delete".into());
             return;
         }

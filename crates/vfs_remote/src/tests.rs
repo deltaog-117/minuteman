@@ -587,6 +587,21 @@ fn every_way_a_request_fails_keeps_its_meaning() {
     }
 }
 
+#[test]
+fn only_the_error_of_an_absent_plugin_is_taken_for_one() {
+    let path = Path::new("ssh://host/x");
+    assert!(is_plugin_absent(&error_of(PeerError::Unavailable, path)));
+    for other in [PeerError::Stopped, PeerError::TimedOut, PeerError::Stale] {
+        assert!(!is_plugin_absent(&error_of(other, path)));
+    }
+    assert!(!is_plugin_absent(&VfsError::NotFound(path.to_path_buf())));
+    // An archive's plugin being absent is the same kind of error with other words.
+    assert!(!is_plugin_absent(&VfsError::Io {
+        path: path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::Unsupported, "something else"),
+    }));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 

@@ -85,7 +85,7 @@ pub fn save_target(dir: &Path, name: &str) -> Result<PathBuf, NameError> {
 /// Whether a program on this machine can be handed `path`: not on another machine, not inside an
 /// archive that exists only as a view in this process.
 fn is_local(path: &Path) -> bool {
-    !vfs_ssh::is_remote(path) && !vfs_archive::is_inside(path)
+    !shared::ssh_path::is_remote(path) && !vfs_archive::is_inside(path)
 }
 
 fn pick(paths: Vec<PathBuf>) -> Verdict {

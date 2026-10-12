@@ -136,6 +136,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- Browsing a remote machine (`ssh://`) is now served by the `mman-ssh` plugin: `mman` builds its
+  file system from `SshVfs` and the plugin manager's own link to the plugin, and `mman-ssh` is a
+  bundled plugin found beside `mman` or on `PATH` like the others. Without it, opening an `ssh://`
+  folder says how to install it (`cargo install --path plugins/ssh`) instead of failing with an
+  error. `mman ssh://host/dir` now opens the working folder first and moves to the remote one once
+  the plugins have started. Through the real link, 256 MiB on a loopback `sshd` downloads at
+  22 MiB/s (was 16 in-process) and uploads at 122 MiB/s (was 53). Author: deltaog-117.
 - `shared`: the parsing of `ssh://` addresses moved here from `vfs_ssh` (`shared::ssh_path`), so the
   interface can tell a remote path apart without the SSH stack. No change in behavior.
 - The deck's rail of devices no longer scans the machine itself: `mman-devices` sends the list
@@ -314,6 +321,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archive reading (`index`, the codecs and the engine) moved into the plugin. `address.rs` became
   `shared::archive_path`. Archives stay read-only. Without the plugin, opening an archive says how
   to get `mman-archive` and the rest of the file manager is untouched.
+
+### Removed
+- `vfs_ssh`, the in-process SSH/SFTP backend, and with it `tokio`'s companions `openssh` and
+  `openssh-sftp-client` from the core's dependencies; the same engine lives on in `plugins/ssh`.
+  Author: deltaog-117.
 
 ### Fixed
 - `tui`: the permanent-delete and trash confirmations now take a capital `Y` as well as `y`.

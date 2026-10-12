@@ -14,10 +14,15 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! How much slower a big copy is through the plugin than through the in-process backend it
-//! replaces. Both talk to the same loopback `sshd`, so the SFTP and encryption cost is the same
-//! and the difference is what the wire between the interface and the plugin adds: JSON lines,
-//! hex-encoded bytes, a window of 256 KiB per round trip.
+//! How fast a big copy runs through the plugin, started and reached the way the interface does it:
+//! by the plugin manager, over the `ServeLink` that `SshVfs` is built with in `main`. The loopback
+//! `sshd` makes the SFTP and encryption cost the same on every run, so what moves the figure is
+//! the wire between the interface and the plugin: JSON lines, hex-encoded bytes, windows of
+//! 256 KiB with four in flight.
+//!
+//! Measured when the engine left the core (256 MiB, release, loopback): download 16 MiB/s
+//! in-process against 22 MiB/s through the plugin, upload 53 against 122. A figure well below
+//! those is a regression in the wire.
 //!
 //! Ignored by default because it moves a few hundred megabytes; run it with
 //! `cargo test -p vfs_remote --release --test throughput -- --ignored --nocapture`.
@@ -30,7 +35,6 @@ use std::time::{Duration, Instant};
 
 use harness::{Sshd, scratch};
 use shared::{LocalVfs, Vfs};
-use vfs_ssh::{ConnectOptions, HostKeys, RoutedVfs};
 
 const SIZE: usize = 256 << 20;
 
@@ -46,64 +50,59 @@ fn rate(elapsed: Duration) -> f64 {
 
 #[test]
 #[ignore = "moves hundreds of megabytes; run on request"]
-fn a_large_copy_through_the_plugin_against_the_in_process_backend() {
+fn a_large_copy_through_the_plugin_over_the_real_link() {
     let Some(server) = Sshd::start("throughput") else {
         return;
     };
     let work = scratch("throughput");
-    // Not all zeros: a compressing link would otherwise flatter whichever side it favours.
+    // Not all zeros: a compressing link would otherwise flatter the figure.
     let body: Vec<u8> = (0..SIZE)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
         .collect();
     fs::write(work.join("big.bin"), &body).unwrap();
 
-    let in_process = RoutedVfs::with_options(
-        Arc::new(LocalVfs),
-        ConnectOptions {
-            host_keys: HostKeys::AcceptNew,
-            known_hosts_file: Some(server.dir.join("known_hosts")),
-            identity: Some(server.dir.join("user_key")),
-            connect_timeout: Duration::from_secs(10),
-        },
-    )
-    .expect("a router");
-    let plugin = server.vfs();
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    let mut manager = plugin_host::PluginManager::new();
+    let link = plugin_host::ServeLink::new();
+    manager.set_serve_ssh_link(Arc::clone(&link));
+    // `env` sets the connection options for the plugin without touching this process's own.
+    let mut args: Vec<String> = server
+        .env(true)
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    args.push(harness::plugin_binary().display().to_string());
+    manager
+        .spawn(
+            runtime.handle(),
+            "ssh",
+            "env",
+            &args,
+            plugin_host::Triggers {
+                actions: vec![plugin_api::PROVIDES_VFS_SSH.to_string()],
+                ..Default::default()
+            },
+            &work,
+        )
+        .expect("the plugin starts");
+    let vfs = vfs_remote::SshVfs::new(Arc::new(LocalVfs), link);
     let remote_src = server.remote(&work.join("big.bin"));
 
-    // Connect both sessions first, so the time measured is the copy and not the handshake.
-    for vfs in [&in_process as &dyn Vfs, &plugin] {
-        vfs.metadata(&remote_src).expect("a first request");
-    }
+    // Connect first, so the time measured is the copy and not the handshake.
+    vfs.metadata(&remote_src).expect("a first request");
 
-    let rows: Vec<(&str, Duration, Duration)> = vec![
-        (
-            "download",
-            copy_time(&in_process, &remote_src, &work.join("down_a.bin")),
-            copy_time(&plugin, &remote_src, &work.join("down_b.bin")),
-        ),
-        (
-            "upload",
-            copy_time(
-                &in_process,
-                &work.join("big.bin"),
-                &server.remote(&work.join("up_a.bin")),
-            ),
-            copy_time(
-                &plugin,
-                &work.join("big.bin"),
-                &server.remote(&work.join("up_b.bin")),
-            ),
-        ),
-    ];
-    for (name, a, b) in &rows {
-        eprintln!(
-            "{name}: in-process {:.0} MiB/s ({a:.2?}), plugin {:.0} MiB/s ({b:.2?}), plugin is {:.2}x the time",
-            rate(*a),
-            rate(*b),
-            b.as_secs_f64() / a.as_secs_f64()
-        );
-    }
-    for file in ["down_a.bin", "down_b.bin", "up_a.bin", "up_b.bin"] {
+    let down = copy_time(&vfs, &remote_src, &work.join("down.bin"));
+    let up = copy_time(
+        &vfs,
+        &work.join("big.bin"),
+        &server.remote(&work.join("up.bin")),
+    );
+    eprintln!(
+        "download {:.0} MiB/s ({down:.2?}), upload {:.0} MiB/s ({up:.2?})",
+        rate(down),
+        rate(up)
+    );
+    for file in ["down.bin", "up.bin"] {
         assert_eq!(
             fs::read(work.join(file)).unwrap(),
             body,

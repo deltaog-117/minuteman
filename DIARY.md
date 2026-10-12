@@ -96,6 +96,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-11 | Archives Served by the Plugin | The host asks the archive plugin one request per `Vfs` call and the plugin answers; read-only, files read through handles tied to the plugin's process | ✅ Confirmed |
 | 2026-10-12 | Ssh Served by a Plugin (M7b) | `mman-ssh` serves reads and writes on the archive plugin's wire, staged in three steps so remote writes never regress (COA A); keeping `vfs_ssh` in the core behind a feature (C) not taken | 🟡 Step 1 of 3 |
 | 2026-10-12 | Ssh Plugin Built, Not Wired (M7b step 2) | The `vfs_ssh` engine copied into `plugins/ssh` behind a `Server`, a host-side `SshVfs` in a new core crate, hex-over-JSON windows kept and measured (COA A); binary frames (B) and a rewrite on a lighter ssh stack (C) not taken | ✅ Confirmed |
+| 2026-10-12 | Ssh Cut-Over (M7b step 3) | One cut-over: `SshVfs` wired in, `vfs_ssh` deleted, the install line shown when `mman-ssh` is absent (COA A) | ✅ Confirmed |
 
 ---
 
@@ -7514,6 +7515,44 @@ reader to guess the next offset, and download already beats in-process.
 its reply is waited for shows windows overlap, never more than five at once, and all arrive; a write
 refused after it was sent is reported by `flush`; the close comes after the last write; and
 `ServeLink` writes a second request before the first is answered and gives each reply to its own.
+
+---
+
+## 2026-10-12 — Ssh served by a plugin, step 3 of 3: the cut-over (M7b)
+
+**Decision.** Three courses were weighed: one cut-over (A), the wiring first and the deletion a
+cycle later (B), or keeping the old backend in the core behind a cargo feature as a fallback (C).
+Chosen: A, the course the roadmap had already recorded. C would have undone that decision and left
+the heaviest dependency in the core; B only postponed the deletion. Within A the order kept the old
+backend alive until the last measurement, then deleted it.
+
+**What changed.** `main.rs` builds `ArchiveVfs` over `SshVfs` over the local disk, with a second
+`ServeLink` for the ssh plugin that `App::with_ssh_link` hands to the plugin manager. `ssh` is a
+bundled plugin providing `vfs-ssh`, so it is found beside `mman` or on `PATH` and its install line
+comes from the same table as the others. The 12 places that used `vfs_ssh` only to parse an address
+now use `shared::ssh_path`. `vfs_ssh` is deleted with its tests (the same scenarios run against
+`SshVfs` in `vfs_remote`), its entry in `scripts/vfs-gate`, and the in-process side of the
+throughput test.
+
+**Missing plugin.** The error a request gets while no `mman-ssh` runs is now recognisable
+(`vfs_remote::is_plugin_absent`, by the exact text it carries), and `poll_nav` replaces it with the
+install line, as archives already do. Matching the text is blunt, but it keeps the interface from
+depending on the plugin API's error type and the constant sits beside the code that makes it.
+
+**A start on a remote address.** `mman ssh://host/dir` used to work because the backend lived in
+the process. The plugin is not running when the browser is first built, so the browser opens the
+working folder and a move to the remote folder is begun once the plugins have started; requests
+are queued on the link's channel and run when the plugin reads them.
+
+**Measured** through the real `PluginManager` and `ServeLink` (256 MiB, release, loopback
+`sshd`): download 22 MiB/s against 16 in-process (0.71x the time), upload 122 against 53 (0.44x).
+Both copies arrived byte for byte. The earlier stand-in host gave 19 and 73, so the real link is
+faster than the stand-in.
+
+**Verification.** `scripts/check` passes. New tests: the bundled `ssh` entry and its install line,
+and that only the absent-plugin error is taken for one. Driven through a pty against the compiled
+`mman`: with no `mman-ssh` beside it the status line says how to get it; with it, a refused
+connection is reported by the plugin.
 
 ---
 
