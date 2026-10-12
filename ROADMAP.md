@@ -2068,10 +2068,33 @@ draws.
     1. [x] move the address parsing (`ssh_path`) into `shared`, so the interface tells a remote
        path apart without the SSH stack; add the `vfs-ssh` word, the write requests on the wire
        and a second `ServeLink`. Behaviour unchanged.
-    2. [ ] build `mman-ssh` serving reads and writes, and a host-side `SshVfs` that routes
-       `ssh://` paths to it; run the same conformance scenarios and the loopback `sshd` tests.
-       Behaviour unchanged (the plugin is built but not wired in). Measure a large copy over the
-       wire (JSON lines, hex bytes, 256 KiB windows) against the in-process path first.
+    2. [x] `mman-ssh` (`plugins/ssh`, package `remoter`) serves reads and writes, and a host-side
+       `SshVfs` (new core crate `vfs_remote`) routes `ssh://` paths to it; built and tested but
+       not wired in, so `main.rs` still uses `RoutedVfs` and behavior is unchanged. The plugin is
+       the `vfs_ssh` engine (session, executor, error mapping, SFTP streams) copied across, with a
+       `Server` that turns each `vfs` request into a call on the session for the machine its path
+       names, and keeps at most 32 files open (read or write, never both) under handles; each
+       request runs on its own thread and the plugin ends once the host closes its input and the
+       running ones have replied. `SshVfs` reads in doubling windows (`PluginReader`, as for
+       archives) and writes in gathered 256 KiB windows (`PluginWriter`: a seek that does not
+       continue the last write, `flush` and drop send what it holds); a copy between this disk and
+       a machine, or two machines, is streamed through it, and a move between them is refused with
+       `CrossesDevices`. `IoKind` gained `NotConnected`, `BrokenPipe`, `TimedOut` and `Unsupported`
+       so a refused host key or a dropped connection keeps its meaning across the wire. The
+       connection options of a plugin started by a test come from `MMAN_SSH_ACCEPT_NEW`,
+       `MMAN_SSH_KNOWN_HOSTS` and `MMAN_SSH_IDENTITY`; a user sets none of them. Verified by the
+       whole `Vfs` conformance suite and the cross-machine scenarios of `vfs_ssh` run through
+       `SshVfs`, the real `mman-ssh` program and a real loopback `sshd` (9 scenarios, plus the
+       plugin's own against the same server and a property test of writes by offset), and by
+       `scripts/check`. **Measured** (256 MiB, release, loopback `sshd`, a stand-in host rather
+       than the real `ServeLink`): download 20 MiB/s through the plugin against 16 MiB/s
+       in-process (0.78x the time), upload 23 MiB/s against 56 MiB/s (2.4x the time). The plugin's
+       engine with no wire does 69 up and 25 down, so the cost is the wire, about 7 ms per window:
+       3 ms of JSON and hex, the rest pipes and a stop-and-wait round trip. Open for step 3:
+       whether that upload figure is acceptable (it is a ceiling near 35 MiB/s, so it matters on a
+       fast link and not on a slow one), then binary frames for `read`/`write` or sending the next
+       window before the reply to the last, measured again through the real host; a half-written
+       file when the plugin dies mid-copy is removed by the copy and not by the plugin.
     3. [ ] switch `main.rs` from `RoutedVfs` to `SshVfs`, delete `vfs_ssh` and its dependencies
        from the core, add the missing-plugin message. From here ssh needs `mman-ssh` installed.
   - [ ] **M7c – the alternate views** (decided after M7b, with the cargo-feature fallback open).
@@ -2381,7 +2404,11 @@ draws.
    from a checkout `cargo build -p archiver`).
    Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. `cargo run -p tui` — the newest: mark a folder with `v` and `:compress x.tar.gz` (the header
+1. Nothing new to try by hand this cycle: `mman-ssh` is built but not wired in, and `mman` still
+   browses `ssh://` machines in-process. Its tests are the check: `cargo test -p remoter -p
+   vfs_remote` (they start a real `sshd` on a loopback port and skip themselves without one), and
+   `cargo test -p vfs_remote --release --test throughput -- --ignored --nocapture` for the timing.
+   Before that: `cargo run -p tui` — mark a folder with `v` and `:compress x.tar.gz` (the header
    shows the gauge; `Esc` stops it), then mark the archive and `:extract`; `:compress -p s.zip` asks
    twice for a password and `:extract` of that zip asks once and says `wrong password` for a bad
    one; with `mman-archive` missing each says where to get it, and on an `ssh://` folder each is
@@ -2504,7 +2531,8 @@ draws.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: Medium Priority holds the follow-ups to remote browsing and the other features
+4. Next cycle: M7b step 3 (switch `main.rs` to `SshVfs`, delete `vfs_ssh`, add the missing-plugin
+   message), after deciding what the upload figure above asks for. Medium Priority holds the follow-ups to remote browsing and the other features
    listed there. Folder moves no longer block, so the next biggest gaps are the other things that
    read on the render thread (undo of a large move, a large archive's index) and a prompt for a
    password or a new host key.

@@ -11,4 +11,4 @@ in `~/.config/minuteman/plugins/<name>/` takes its place.
 
 A plugin's package name can differ from its folder: `plugins/preview` is the package `previewer`,
 because `preview` is already the image-decoding crate in `crates/`. The program it installs is
-still `mman-preview`.
+still `mman-preview`. Likewise `plugins/ssh` is the package `remoter` (program `mman-ssh`).

@@ -1,0 +1,21 @@
+[package]
+name = "vfs_remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Browses and changes remote machines (ssh://host/dir) by asking the plugin that serves them; the core keeps only the routing and the reading and writing of what comes back."
+
+[dependencies]
+shared = { path = "../shared" }
+plugin_api = { path = "../plugin_api" }
+serde = "1.0.229"
+serde_json = "1.0"
+
+[dev-dependencies]
+proptest = "1.11"
+file_ops = { path = "../file_ops" }
+browser = { path = "../browser" }
+# The in-process backend the plugin replaces, for the throughput comparison only; it goes when the
+# core stops carrying it.
+vfs_ssh = { path = "../vfs_ssh" }

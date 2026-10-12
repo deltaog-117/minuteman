@@ -186,6 +186,12 @@ pub enum IoKind {
     FileTooLarge,
     IsADirectory,
     UnexpectedEof,
+    /// A remote machine that could not be reached.
+    NotConnected,
+    /// A connection that went away mid-request.
+    BrokenPipe,
+    TimedOut,
+    Unsupported,
     Other,
 }
 
@@ -199,6 +205,10 @@ impl From<io::ErrorKind> for IoKind {
             io::ErrorKind::FileTooLarge => Self::FileTooLarge,
             io::ErrorKind::IsADirectory => Self::IsADirectory,
             io::ErrorKind::UnexpectedEof => Self::UnexpectedEof,
+            io::ErrorKind::NotConnected => Self::NotConnected,
+            io::ErrorKind::BrokenPipe => Self::BrokenPipe,
+            io::ErrorKind::TimedOut => Self::TimedOut,
+            io::ErrorKind::Unsupported => Self::Unsupported,
             _ => Self::Other,
         }
     }
@@ -214,6 +224,10 @@ impl From<IoKind> for io::ErrorKind {
             IoKind::FileTooLarge => Self::FileTooLarge,
             IoKind::IsADirectory => Self::IsADirectory,
             IoKind::UnexpectedEof => Self::UnexpectedEof,
+            IoKind::NotConnected => Self::NotConnected,
+            IoKind::BrokenPipe => Self::BrokenPipe,
+            IoKind::TimedOut => Self::TimedOut,
+            IoKind::Unsupported => Self::Unsupported,
             IoKind::Other => Self::Other,
         }
     }
@@ -489,10 +503,14 @@ mod tests {
             io::ErrorKind::FileTooLarge,
             io::ErrorKind::IsADirectory,
             io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::Unsupported,
         ] {
             assert_eq!(io::ErrorKind::from(IoKind::from(kind)), kind);
         }
-        assert_eq!(IoKind::from(io::ErrorKind::TimedOut), IoKind::Other);
+        assert_eq!(IoKind::from(io::ErrorKind::Interrupted), IoKind::Other);
     }
 
     proptest! {

@@ -95,6 +95,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-11 | Inspect as a Plugin | A `stat` request, a `tally` job and a `set_inspect` document, rows worded by the plugin (COA A); a plugin that only formats what the core gathered (B) and a generic multi-line pane view (C) not taken | ✅ Confirmed |
 | 2026-10-11 | Archives Served by the Plugin | The host asks the archive plugin one request per `Vfs` call and the plugin answers; read-only, files read through handles tied to the plugin's process | ✅ Confirmed |
 | 2026-10-12 | Ssh Served by a Plugin (M7b) | `mman-ssh` serves reads and writes on the archive plugin's wire, staged in three steps so remote writes never regress (COA A); keeping `vfs_ssh` in the core behind a feature (C) not taken | 🟡 Step 1 of 3 |
+| 2026-10-12 | Ssh Plugin Built, Not Wired (M7b step 2) | The `vfs_ssh` engine copied into `plugins/ssh` behind a `Server`, a host-side `SshVfs` in a new core crate, hex-over-JSON windows kept and measured (COA A); binary frames (B) and a rewrite on a lighter ssh stack (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -7426,6 +7427,63 @@ fallback and undo rely on.
 **Verification.** `scripts/check` passes. New tests: every changing request survives the trip as
 a line (bytes as hex), and a plugin that provides `vfs-ssh` is reached by its own link and not by
 the archive one. Nothing runs differently yet.
+
+---
+
+## 2026-10-12 — Ssh served by a plugin, step 2 of 3 (M7b)
+
+Three ways to build it were weighed. A: copy the `vfs_ssh` engine into `plugins/ssh` behind a
+`Server` and keep the planned wire (JSON lines, hex bytes, 256 KiB windows). B: the same engine
+with binary frames for reads and writes. C: rewrite on a lighter stack (the `ssh` and `sftp`
+programs, or a pure-Rust ssh crate). A was chosen and the wire measured before anything else was
+decided; C was the worst fit because the present stack exists to leave host keys, `~/.ssh/config`
+and `ProxyJump` to OpenSSH.
+
+**Shape.** The plugin (`plugins/ssh`, package `remoter`) holds the engine with three changes: its
+import of the address types now comes from `shared::ssh_path`, `ConnectOptions::from_env` reads the
+test variables, and a stream's `seek` to where the cursor already is does nothing. The last one is
+there because the host names an offset on every window, and a real seek on the SFTP client's file
+first waits for the writes in flight. It moved the plugin's upload from 20 to 23 MiB/s, which is
+less than hoped: the larger part of the gap is the wire, below. The host side is a new core crate, `vfs_remote`, not a module of
+`vfs_archive`: the two share an idea but not a purpose, and one is read-only. `PluginReader` was
+copied from `vfs_archive` with the message changed, which is duplication to remove when the next
+backend needs a third copy (it belongs in `plugin_api`, taking the error mapping as an argument).
+`PluginWriter` is new: `io::copy` hands over 8 KiB at a time, so a writer gathers up to a window
+and sends it when full, on a seek that does not continue, on `flush` and on drop.
+
+**Where the tests live.** A core crate may not depend on a plugin, nor a plugin on a core crate
+(`dependency_direction` reads dev-dependencies too), so the whole chain is tested without either
+naming the other: `vfs_remote`'s tests build `mman-ssh` with `cargo build` when it is not next to
+the test binary, start it as a child, and speak the protocol to it from a small stand-in for
+`ServeLink`. The `sshd` helper is shared with the plugin's tests by a `#[path]` include.
+
+**Measured.** 256 MiB through a loopback `sshd`, release builds, stand-in host:
+
+| | in-process | plugin | plugin / in-process (time) |
+|---|---|---|---|
+| download | 16 MiB/s | 20 MiB/s | 0.78 |
+| upload | 56 MiB/s | 23 MiB/s | 2.4 |
+
+The plugin's engine with no wire does 69 up and 25 down, so the wire costs about 7 ms a window:
+encoding and decoding 256 KiB of hex take about 3 ms, and the rest is two pipes and the host
+waiting for each reply. That makes a ceiling near 35 MiB/s when each window waits for the last.
+Whether it matters is a question about links: it is invisible on anything slower than about
+30 MiB/s and a real loss on a fast LAN. Not decided here. The two cheap answers are binary frames
+(removes most of the 3 ms) and sending the next window before the reply to the last (hides the
+rest, needs a post-without-waiting call on `Peer`). Both should be measured again through the real
+`ServeLink` in step 3, since the stand-in is not it.
+
+**Not done, deliberately.** `main.rs` still uses `RoutedVfs`, so a user sees no change and needs no
+new binary yet. The plugin is not in the bundled list. The `MMAN_SSH_*` variables exist so a test
+can point the plugin at its own server and key; they are not configuration.
+
+**Verification.** `scripts/check` passes. The `Vfs` conformance suite, plus the copy, move, drop,
+browse, home and strict-host-key scenarios that `vfs_ssh` has, run through `SshVfs`, the real
+program and a real `sshd` (nine, all passing). The plugin's own tests: every changing request
+against the real disk, the handle limit, a read handle that cannot write and the reverse, the
+refusal of a move between machines, a property test of writes at random offsets, and the line
+protocol of the real binary. `SshVfs` has unit tests with an in-memory plugin, including a
+property test that a file written in any pieces and seeks equals the same writes made locally.
 
 ---
 

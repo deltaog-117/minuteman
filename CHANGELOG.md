@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugins/ssh` (`mman-ssh`), a plugin that serves `ssh://` paths: reads, writes by offset, make,
+  touch, move, copy, remove and permissions over an SFTP session with each machine, using the
+  system `ssh` as before. Built and tested but not yet used by `mman`, which still browses remote
+  machines in-process. Author: deltaog-117.
+- `vfs_remote`, a core crate with `SshVfs`, a `Vfs` that sends `ssh://` paths to that plugin and
+  everything else to the local disk, reading and writing a file in windows and streaming a copy
+  between this machine and a remote one. Not yet wired in.
+- `plugin_api`: `IoKind` also carries `NotConnected`, `BrokenPipe`, `TimedOut` and `Unsupported`.
 - `plugin_api`: the `vfs-ssh` word and the requests a plugin that serves remote machines is sent
   beyond the reads (`home`, `create`, `write`, `flush`, `create_dir`, `create_file`, `touch`,
   `set_mode`, `symlink`, `rename`, `replace`, `copy_file`, `remove_file`, `remove_dir_all`), and

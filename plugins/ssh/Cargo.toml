@@ -1,0 +1,27 @@
+[package]
+name = "remoter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Serves the paths on remote machines (ssh://host/dir) to Minuteman as a plugin: the interface asks about a path and the plugin answers over an SFTP session it keeps with each machine."
+
+[[bin]]
+name = "mman-ssh"
+path = "src/main.rs"
+
+[dependencies]
+plugin_api = { path = "../../crates/plugin_api" }
+shared = { path = "../../crates/shared" }
+serde = "1.0.229"
+serde_json = "1.0"
+thiserror = "2.0.20"
+futures-core = "0.3"
+# Both crates drive the system `ssh` program, which keeps host-key checking, `~/.ssh/config`,
+# agents and `ProxyJump` in OpenSSH's hands instead of in a second implementation here.
+openssh = { version = "0.11.6", features = ["process-mux"] }
+openssh-sftp-client = { version = "0.15.10", features = ["openssh"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "io-util"] }
+
+[dev-dependencies]
+proptest = "1.11"
