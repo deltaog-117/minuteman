@@ -33,9 +33,56 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Widget};
 use theming::{Config, Theme};
 
-use crate::atlas_view::{darkened, readable_on};
 use crate::glyphs;
 use crate::style;
+
+/// Whether text on `color` should be dark: true for the light colors. Colours that cannot be
+/// resolved to a brightness (the terminal's own default) count as dark.
+pub fn is_light(color: Color) -> bool {
+    const CUBE: [u32; 6] = [0, 95, 135, 175, 215, 255];
+    let luma = |r: u32, g: u32, b: u32| (299 * r + 587 * g + 114 * b) / 1000 > 140;
+    match color {
+        Color::Rgb(r, g, b) => luma(u32::from(r), u32::from(g), u32::from(b)),
+        Color::Indexed(n @ 16..=231) => {
+            let i = usize::from(n - 16);
+            luma(CUBE[i / 36], CUBE[(i / 6) % 6], CUBE[i % 6])
+        }
+        Color::Indexed(n @ 232..=255) => 8 + 10 * u32::from(n - 232) > 140,
+        Color::Indexed(n) => matches!(n, 2 | 3 | 6 | 7 | 10 | 11 | 14 | 15),
+        Color::Yellow
+        | Color::Cyan
+        | Color::Gray
+        | Color::LightRed
+        | Color::LightGreen
+        | Color::LightYellow
+        | Color::LightBlue
+        | Color::LightMagenta
+        | Color::LightCyan
+        | Color::White => true,
+        Color::Reset
+        | Color::Black
+        | Color::Red
+        | Color::Green
+        | Color::Blue
+        | Color::Magenta
+        | Color::DarkGray => false,
+    }
+}
+
+/// The text color to write on `background`.
+pub fn readable_on(background: Color) -> Color {
+    if is_light(background) {
+        Color::Black
+    } else {
+        Color::White
+    }
+}
+
+/// `color` darkened by `amount` (0 to 1). A color with no RGB value to darken (a basic name, or
+/// a 256-color index) becomes dark gray, the one darker shade that is always there.
+pub fn darkened(color: Color, amount: f64) -> Color {
+    style::blend_rgb(color, Color::Rgb(0, 0, 0), amount).unwrap_or(Color::DarkGray)
+}
 
 /// The theme color behind hue `n`, wrapping nothing: `n` is below [`HUES`] for a canvas that has
 /// been checked, and a larger number is taken modulo [`HUES`] rather than trusted.
@@ -385,6 +432,31 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn light_colors_get_dark_text_and_dark_ones_light_text() {
+        assert_eq!(readable_on(Color::Rgb(250, 250, 250)), Color::Black);
+        assert_eq!(readable_on(Color::Rgb(10, 10, 40)), Color::White);
+        assert_eq!(readable_on(Color::Yellow), Color::Black);
+        assert_eq!(readable_on(Color::Blue), Color::White);
+        assert_eq!(readable_on(Color::Indexed(15)), Color::Black);
+        assert_eq!(readable_on(Color::Indexed(4)), Color::White);
+        assert_eq!(readable_on(Color::Indexed(231)), Color::Black);
+        assert_eq!(readable_on(Color::Indexed(16)), Color::White);
+        assert_eq!(readable_on(Color::Indexed(255)), Color::Black);
+        assert_eq!(readable_on(Color::Indexed(232)), Color::White);
+        assert_eq!(readable_on(Color::Reset), Color::White);
+    }
+
+    #[test]
+    fn darkening_works_on_rgb_and_falls_back_to_gray_otherwise() {
+        assert_eq!(
+            darkened(Color::Rgb(200, 100, 0), 0.5),
+            Color::Rgb(100, 50, 0)
+        );
+        assert_eq!(darkened(Color::Rgb(200, 100, 0), 1.0), Color::Rgb(0, 0, 0));
+        assert_eq!(darkened(Color::Red, 0.5), Color::DarkGray);
+    }
 
     fn config() -> Config {
         Config::from_sources(None, None, None)

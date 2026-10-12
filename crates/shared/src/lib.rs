@@ -31,6 +31,8 @@ pub mod mount;
 pub mod names;
 pub mod ssh_path;
 pub mod tally;
+pub mod usage;
+pub mod usage_view;
 pub mod vfs;
 
 pub use archive_path::{Format, Mount, Route, is_archive, is_inside, route};

@@ -20,6 +20,7 @@ members = [
     "plugins/hud",
     "plugins/inspect",
     "plugins/devices",
+    "plugins/atlas",
     "plugins/archive",
     "plugins/ssh",
     "plugins/preview",

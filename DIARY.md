@@ -7606,6 +7606,60 @@ the fixture standing in as the atlas plugin: its text appeared on a hue backgrou
 white, its note reached the status line, a claimed key, a resize and a click reached it, and `q`,
 which it did not claim, quit the browser. With no plugin configured, the core atlas drew as before.
 
+## 2026-10-12 — The atlas as a plugin, step 2 of 3 (M7c)
+
+**Decision.** The atlas needs the folder scanner that the `u` view also runs, and a plugin may
+depend on `plugin_api` and `shared` only. Three courses were weighed: move the scanner into `shared`
+and let the plugin run it on the local disk (A), have the plugin sum the host's `walk` stream (B), or
+keep the scanner in the core and stream its rows to the plugin through a new request (C). Chosen: A,
+the same shape as M5 (archives) and M6 (devices): code moves unchanged and the plugin runs it
+against `LocalVfs`. B would have needed a wire change first, since `walk` carries no on-disk size,
+hard-link or device information, and the atlas's figures would then have disagreed with the `u`
+view's. C builds a protocol for one caller and leaves the scanner in the core after its only
+second user has gone.
+
+**What moved.** `scan_level` and its row types went to `shared::usage` with their tests and the
+`/usr` benchmark. Moving only the scanner left `DiskUsageView` (the stack of levels, the cursor,
+the sort, the cancel-on-drop job) behind in `tui` on a `tokio` blocking pool, and copying it into
+the plugin would have been 300 lines of the same logic twice. So it moved too, as
+`shared::usage_view`, onto a plain thread and `std::sync::mpsc`; it never needed `tokio` for
+anything but `spawn_blocking`, and `open` loses its runtime-handle argument. The treemap, the
+state and its tests moved to `plugins/atlas` with a small `Rect` of its own in place of ratatui's.
+`holding` (which device a folder is on) went to `shared::devices` since the deck and the plugin both
+need it. The wire grew one field: `open` carries `here`, because the plugin has to know the folder
+the browser is in to mark it, and a canvas event has no working directory.
+
+**What changed in the picture.** A plugin says tone, hue and mark and never a symbol, so the core
+version's per-kind volume icons, its `◆` and its `·` separators are plain ASCII now (`*`, `|`,
+`...`). The chosen tile used to be drawn with a frame in a color readable on whatever the tile was;
+a canvas frame's color is the theme's accent, which is the same color as the used part of a volume,
+so the chosen tile is instead painted in the selection color, still split by fullness, with the
+frame on top. Keys: the core let `Ctrl`/`Alt` chords fall through to the browser; the host forwards
+only the keys a canvas claims, with no way to hand one back, so a claimed key held with `Ctrl` or
+`Alt` is now ignored. `Esc`, `Backspace` and `a` are claimed only while zoomed, which keeps `Esc`
+closing the view at the map of volumes and `a` opening the appearance popup there.
+
+**Limits.** A canvas holds at most 4,000 parts and 64 KiB of text, and a big window of tiny volumes
+can want more, so the builder emits the chosen tile first and then the biggest, and leaves the
+smallest bare once either budget is reached. A property test builds the canvas for any window and
+any volumes and runs the host's own `checked` over it.
+
+**Verification.** `scripts/check` passes. New and moved: 26 for the treemap and state, 12 for the
+canvas builder (including the property test and a crowd of 6,000 volumes), 4 against the real
+`mman-atlas` process (open, claims, a key answered with a note, zoom and resize, quiet when closed,
+exit with its input), and the scanner and view tests in `shared`. Driven through a pty against the
+compiled `mman` and read through `pyte`, 16 checks passed: `V` reached the view; the totals line,
+the pinned volume, the used/free shades, and the hint appeared; `a` at the map opened the browser's
+appearance popup; `Enter` zoomed in and the title named the volume; `a` switched to apparent size;
+`Backspace` came back; a second click on the chosen tile zoomed; `o` then `Q` left the shell in the
+volume's mount point; and a copy of `mman` alone showed the install line and kept browsing. Leaving
+the view during a scan of `/` took the plugin from 140 CPU ticks in three seconds to none, so the
+scan is cancelled. This machine has one listed volume, so the multi-volume layout is covered by the
+unit tests and not by a pty session; not tried in a real kitty.
+
+**Left open.** Step 3, `plugins/wiring`. The hint reaches the status bar when the first canvas
+arrives, a frame later than the view switch used to show it.
+
 ---
 
 ---

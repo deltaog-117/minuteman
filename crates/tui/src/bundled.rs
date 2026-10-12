@@ -40,7 +40,7 @@ struct Bundled {
     how_to_get: &'static str,
 }
 
-const BUNDLED: [Bundled; 9] = [
+const BUNDLED: [Bundled; 10] = [
     Bundled {
         name: "finder",
         binary: "mman-finder",
@@ -115,6 +115,16 @@ const BUNDLED: [Bundled; 9] = [
         events: &[],
         how_to_get: "the rail of devices is a plugin and mman-devices was not found; \
             install it with `cargo install --path plugins/devices` (next to mman, or on PATH)",
+    },
+    // Provides `canvas-atlas`: the interface says when the atlas view opens and closes, how many
+    // cells it has and what the user did in it, and the plugin answers with a canvas to draw.
+    Bundled {
+        name: "atlas",
+        binary: "mman-atlas",
+        provides: &["canvas-atlas"],
+        events: &[],
+        how_to_get: "the atlas is a plugin and mman-atlas was not found; \
+            install it with `cargo install --path plugins/atlas` (next to mman, or on PATH)",
     },
     // Provides `vfs-ssh`: the paths under `ssh://` are answered by this plugin, which holds the
     // connections, so the core carries no SSH stack.
@@ -284,7 +294,7 @@ mod tests {
     #[test]
     fn a_fresh_install_starts_each_bundled_plugin_providing_its_action() {
         let started = specs_found(&[], found, &[]);
-        assert_eq!(started.len(), 9);
+        assert_eq!(started.len(), 10);
         assert_eq!(started[0].name, "finder");
         assert_eq!(started[0].command, "/opt/bin/mman-finder");
         assert_eq!(started[0].provides, ["find"]);
@@ -320,19 +330,22 @@ mod tests {
         assert_eq!(
             names(true, true),
             [
-                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
+                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices",
+                "atlas", "ssh"
             ]
         );
         assert_eq!(
             names(false, true),
             [
-                "finder", "search", "hud", "preview", "inspect", "archive", "devices", "ssh"
+                "finder", "search", "hud", "preview", "inspect", "archive", "devices", "atlas",
+                "ssh"
             ]
         );
         assert_eq!(
             names(true, false),
             [
-                "finder", "search", "git", "preview", "inspect", "archive", "devices", "ssh"
+                "finder", "search", "git", "preview", "inspect", "archive", "devices", "atlas",
+                "ssh"
             ]
         );
     }
@@ -346,6 +359,17 @@ mod tests {
             .expect("bundled");
         assert_eq!(hud.command, "/opt/bin/mman-hud");
         assert!(hud.provides.is_empty() && hud.events.is_empty());
+    }
+
+    #[test]
+    fn the_atlas_plugin_provides_the_atlas_canvas_and_says_how_to_get_it() {
+        let atlas = specs_found(&[], found, &[])
+            .into_iter()
+            .find(|spec| spec.name == "atlas")
+            .expect("bundled");
+        assert_eq!(atlas.command, "/opt/bin/mman-atlas");
+        assert_eq!(atlas.provides, ["canvas-atlas"]);
+        assert!(missing("canvas-atlas").contains("mman-atlas"));
     }
 
     #[test]
@@ -406,38 +430,40 @@ mod tests {
         assert_eq!(
             names(&[configured("finder", &[])]),
             [
-                "search", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
+                "search", "git", "hud", "preview", "inspect", "archive", "devices", "atlas", "ssh"
             ]
         );
         assert_eq!(
             names(&[configured("fzf-picker", &["find"])]),
             [
-                "search", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
+                "search", "git", "hud", "preview", "inspect", "archive", "devices", "atlas", "ssh"
             ]
         );
         assert_eq!(
             names(&[configured("search", &[])]),
             [
-                "finder", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
+                "finder", "git", "hud", "preview", "inspect", "archive", "devices", "atlas", "ssh"
             ]
         );
         assert_eq!(
             names(&[configured("grep-ui", &["locate"])]),
             [
-                "finder", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
+                "finder", "git", "hud", "preview", "inspect", "archive", "devices", "atlas", "ssh"
             ]
         );
         assert_eq!(
             names(&[configured("git", &[])]),
             [
-                "finder", "search", "hud", "preview", "inspect", "archive", "devices", "ssh"
+                "finder", "search", "hud", "preview", "inspect", "archive", "devices", "atlas",
+                "ssh"
             ]
         );
         // A plugin providing nothing must not count as standing in for the git plugin.
         assert_eq!(
             names(&[configured("blame", &[])]),
             [
-                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices", "ssh"
+                "finder", "search", "git", "hud", "preview", "inspect", "archive", "devices",
+                "atlas", "ssh"
             ]
         );
     }
@@ -446,7 +472,7 @@ mod tests {
     fn an_unrelated_plugin_leaves_the_bundled_ones_alone() {
         assert_eq!(
             specs_found(&[configured("blame", &["blame"])], found, &[]).len(),
-            9
+            10
         );
     }
 

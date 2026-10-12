@@ -19,9 +19,6 @@ mod anim;
 mod app;
 mod appearance_popup;
 mod associations;
-mod atlas;
-mod atlas_layout;
-mod atlas_view;
 mod boot_splash;
 mod browser_drag;
 mod browser_mouse;
@@ -38,7 +35,6 @@ mod deck;
 mod deck_view;
 mod desktop_entry;
 mod device_actions;
-mod disk_usage;
 mod disk_usage_view;
 mod extract_popup;
 mod filmstrip_view;
@@ -94,7 +90,6 @@ use appearance_popup::{
     AppearancePopup, AppearanceView, Hit as AppearanceHit, Outcome as AppearanceOutcome,
     Row as AppearanceRow, RowKind as AppearanceRowKind, SaveChoice, SaveTarget,
 };
-use atlas::{AtlasState, Outcome as AtlasKey};
 use boot_splash::BootSplash;
 use browser::BrowserState;
 use browser::sort::Sort;
@@ -117,7 +112,6 @@ use crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use deck::{DeckState, Event as DeckEvent, Outcome as DeckKey};
-use disk_usage::DiskUsageView;
 use extract_popup::ExtractPopup;
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect_panel::InspectPanel;
@@ -134,6 +128,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui_image::{FilterType, Resize, StatefulImage};
 use settings_popup::{Outcome as SettingsOutcome, Row as SettingsRow, SettingsPopup, SettingsView};
+use shared::usage_view::DiskUsageView;
 use shared::{DirEntryInfo, LocalVfs, Vfs};
 use shell_layout::{NudgeDir, ShellPanes, SplitDirection};
 use text_preview::{PreviewAsk, PreviewStatus as TextPreviewStatus, TextPreview};
@@ -423,9 +418,7 @@ struct Overlay<'a> {
     deck: Option<&'a DeckState>,
     /// The diagram of how the storage is wired, in the wiring view.
     wiring: Option<&'a WiringState>,
-    /// The zoomable map of the storage, in the atlas view.
-    atlas: Option<&'a AtlasState>,
-    /// A view a plugin draws in place of one the core would (the atlas, today).
+    /// A view a plugin draws (the atlas, today).
     canvas: Option<&'a CanvasPane>,
     /// `local.toml`'s tables, live for the running session — see `run`'s `local_theme`/
     /// `local_ui`/`local_panels`/`local_style`/`local_font` and `effective_theme`/`effective_ui`/
@@ -1425,10 +1418,7 @@ fn run(
     let mut deck: Option<DeckState> = None;
     // The wiring diagram, likewise only while its view is showing.
     let mut wiring: Option<WiringState> = None;
-    // The atlas, likewise only while its view is showing.
-    let mut atlas: Option<AtlasState> = None;
-    // A view served by a plugin that provides it (`canvas-atlas`); the core's own atlas above
-    // draws only when no plugin does.
+    // A view served by a plugin that provides it (`canvas-atlas`), only while its view is showing.
     let mut canvas: Option<CanvasPane> = None;
     // `local.toml`'s three tables, seeded from what `Config::load` already parsed from it (so a
     // save this session correctly carries forward whatever an earlier session saved) and mutated
@@ -1600,14 +1590,7 @@ fn run(
         } else {
             wiring = None;
         }
-        let plugin_atlas = app.has_canvas(Surface::Atlas);
-        if view_mode == ViewMode::Atlas && !plugin_atlas {
-            let map = atlas.get_or_insert_with(|| app.begin_atlas());
-            map.poll(Instant::now(), browser.current_dir());
-        } else {
-            atlas = None;
-        }
-        if view_mode == ViewMode::Atlas && plugin_atlas {
+        if view_mode == ViewMode::Atlas && app.has_canvas(Surface::Atlas) {
             let panels = effective_panels(config, &local_panels);
             let body = browser_layout(
                 terminal.size()?.into(),
@@ -1619,7 +1602,15 @@ fn run(
             .current;
             match canvas.as_mut() {
                 Some(pane) => pane.follow(app, body),
-                None => canvas = CanvasPane::open(app, Surface::Atlas, body, Instant::now()),
+                None => {
+                    canvas = CanvasPane::open(
+                        app,
+                        Surface::Atlas,
+                        body,
+                        browser.current_dir(),
+                        Instant::now(),
+                    )
+                }
             }
         } else if let Some(pane) = canvas.take() {
             pane.close(app);
@@ -1779,7 +1770,6 @@ fn run(
                     picker: picker.as_ref(),
                     deck: deck.as_ref(),
                     wiring: wiring.as_ref(),
-                    atlas: atlas.as_ref(),
                     canvas: canvas.as_ref(),
                     local_theme: &local_theme,
                     local_ui: &local_ui,
@@ -2325,19 +2315,6 @@ fn run(
                         && pane.pointer(app, layout.current, &mouse)
                     {
                         continue;
-                    }
-                    // In the atlas view the whole body is the map: a click chooses a block (and
-                    // zooms into it if it was chosen already). The wheel does nothing there, and
-                    // does not scroll the list that is not showing.
-                    if let Some(map) = atlas.as_mut() {
-                        let at = Position::new(mouse.column, mouse.row);
-                        if layout.current.contains(at) {
-                            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                                let outcome = map.click(atlas_view::layout(layout.current).map, at);
-                                apply_atlas(outcome, app, browser);
-                            }
-                            continue;
-                        }
                     }
                     // A click on a device card chooses it (and opens it if it was chosen already);
                     // a click anywhere else in the browser gives the keys back to the files.
@@ -3311,25 +3288,6 @@ fn run(
                     continue;
                 }
 
-                // In the atlas view the arrows move between blocks, `Enter` zooms in, `Backspace`
-                // out and `o` opens in the browser. Anything else is the browser's.
-                if let Some(map) = atlas.as_mut() {
-                    let panels = effective_panels(config, &local_panels);
-                    let body = browser_layout(
-                        terminal.size()?.into(),
-                        panels.columns,
-                        panels.show_hud,
-                        view_mode,
-                        effective_theme(config, &local_theme).shape,
-                    )
-                    .current;
-                    let outcome = map.key(key, atlas_view::layout(body).map);
-                    if outcome != AtlasKey::Pass {
-                        apply_atlas(outcome, app, browser);
-                        continue;
-                    }
-                }
-
                 // In the deck view `Tab` or `h` takes the keys to the rail of devices at the left;
                 // with them there, `j`, `k`, `Enter`, `m`, `e` and `Esc` are theirs, and `l` gives
                 // them back. Anything else is the browser's.
@@ -3553,7 +3511,6 @@ fn run(
                 grid_top = 0;
                 app.status = Some(match Config::save_view(view_mode.label()) {
                     Ok(()) if view_mode == ViewMode::Wiring => wiring::HINT.to_string(),
-                    Ok(()) if view_mode == ViewMode::Atlas => atlas::HINT.to_string(),
                     Ok(()) => format!("view: {}", view_mode.label()),
                     Err(e) => format!("view: {} (not saved: {e})", view_mode.label()),
                 });
@@ -3854,19 +3811,6 @@ fn apply_canvas_note(note: CanvasNote, app: &mut App, browser: &mut BrowserState
     }
 }
 
-/// Does what the atlas asked for: go to a folder, or say something. `Pass` and `Handled` ask for
-/// nothing.
-fn apply_atlas(outcome: AtlasKey, app: &mut App, browser: &mut BrowserState) {
-    match outcome {
-        AtlasKey::Goto(path) => {
-            let plan = browser.plan_goto(&path);
-            app.begin_move(browser, plan, Some("opened".into()), "folder");
-        }
-        AtlasKey::Status(text) => app.status = Some(text),
-        AtlasKey::Pass | AtlasKey::Handled => {}
-    }
-}
-
 /// Draws a preview pane into `area` — an inline image for image files (or ones an `Image`-kind
 /// preview hook thumbnailed), rendered text for code and text files (or ones a `Text`-kind hook
 /// extracted, an archive's listing, a hex dump), the children of a folder, or the file's name as a
@@ -3959,7 +3903,6 @@ fn draw(
         picker,
         deck,
         wiring,
-        atlas,
         canvas,
         local_theme,
         local_ui,
@@ -4048,14 +3991,17 @@ fn draw(
         );
     }
 
-    // A view a plugin draws, over the whole body.
+    // A view a plugin draws, over the whole body; without the plugin, why there is none.
     if let Some(pane) = canvas {
         pane.draw(frame, layout.current, config, Instant::now());
-    }
-
-    // The atlas, over the whole body.
-    if let Some(map) = atlas {
-        atlas_view::render(frame, layout.current, map, browser.current_dir(), config);
+    } else if view_mode == ViewMode::Atlas {
+        canvas_pane::draw_note(
+            frame,
+            layout.current,
+            config,
+            Surface::Atlas,
+            &bundled::missing(Surface::Atlas.provides()),
+        );
     }
 
     // The deck's rail of devices, at the left of the columns.

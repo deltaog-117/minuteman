@@ -14,14 +14,11 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The disk usage view's data: what each thing in a folder takes up, biggest first, and where the
-//! user is in it as they open folders to see what fills them.
+//! The folder scanner behind the disk usage view and the atlas: what each thing in a folder
+//! takes up, with its two sizes, one folder at a time.
 //!
-//! Sizes come from a background scan (`scan_level`) of one folder at a time, run on the blocking
-//! pool the way `inspect` and `marked_size` run theirs: it sends each finished row back over a
-//! channel and stops the moment its job is dropped. Only the folder being looked at is scanned;
-//! opening a subfolder scans that one, and going back restores the level above from memory, so
-//! memory holds the rows of the folders on the way down, never a whole tree.
+//! `scan_level` passes each finished row to a callback and stops the moment its cancel flag is
+//! set, so a caller runs it on a thread it can abandon.
 //!
 //! Three rules decide what a size means. It is the space on disk (allocated blocks, as `du`
 //! shows) by default, with the file's own length available as `Measure::Apparent`, since a sparse
@@ -33,15 +30,11 @@
 //! A folder with a million files must not cost a million rows of memory, so each level keeps at
 //! most `MAX_ROWS` of its biggest files and folds the rest into one `Kind::Rest` row.
 
-use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use shared::{FileKind, Metadata, Vfs};
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use crate::{FileKind, Metadata, Vfs};
 
 /// Entries one scan looks at before it stops and calls its answer a lower bound.
 pub const MAX_ENTRIES: u64 = 10_000_000;
@@ -248,7 +241,7 @@ fn kind_of(meta: &Metadata) -> Kind {
 }
 
 fn row_name(path: &Path) -> String {
-    shared::clean_name(&path.file_name().map_or_else(
+    crate::clean_name(&path.file_name().map_or_else(
         || path.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     ))
@@ -416,310 +409,13 @@ fn scan_level_on(
     ending
 }
 
-/// The order rows are listed in: biggest first by `measure`, then by name so equal sizes do not
-/// shuffle between frames.
-fn compare(a: &Row, b: &Row, measure: Measure) -> std::cmp::Ordering {
-    b.sizes
-        .of(measure)
-        .cmp(&a.sizes.of(measure))
-        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        .then_with(|| a.path.cmp(&b.path))
-}
-
-enum Message {
-    Rows(Vec<Row>),
-    Done(End),
-}
-
-struct Job {
-    cancel: Arc<AtomicBool>,
-    rx: UnboundedReceiver<Message>,
-}
-
-impl Drop for Job {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
-}
-
-/// One folder's rows, and where the cursor is in them.
-struct Level {
-    path: PathBuf,
-    /// Sorted by `compare`.
-    rows: Vec<Row>,
-    selected: usize,
-    /// `None` while the scan is running.
-    end: Option<End>,
-    seen: Arc<AtomicU64>,
-    /// A path to put the cursor on once its row arrives (the folder just came up out of).
-    reselect: Option<PathBuf>,
-    /// Whether the user has moved the cursor. Until then it stays on the first row, which is
-    /// always the biggest so far, instead of following whichever row happened to arrive first
-    /// while bigger ones sort in above it.
-    moved: bool,
-}
-
-impl Level {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            rows: Vec::new(),
-            selected: 0,
-            end: None,
-            seen: Arc::new(AtomicU64::new(0)),
-            reselect: None,
-            moved: false,
-        }
-    }
-
-    fn selected_path(&self) -> Option<&PathBuf> {
-        self.rows.get(self.selected).map(|row| &row.path)
-    }
-
-    /// Puts the rows in order and the cursor back on the row it was on (or on the row asked for
-    /// with `reselect`, once that row has arrived).
-    fn sort(&mut self, measure: Measure) {
-        let waiting = self.reselect.take();
-        let want = if self.moved || waiting.is_some() {
-            waiting.clone().or_else(|| self.selected_path().cloned())
-        } else {
-            None
-        };
-        self.rows.sort_by(|a, b| compare(a, b, measure));
-        let found = want
-            .as_ref()
-            .and_then(|path| self.rows.iter().position(|row| &row.path == path));
-        self.selected = found.unwrap_or(0);
-        // The row to land on may not have been scanned yet.
-        if found.is_none() && self.end.is_none() {
-            self.reselect = waiting;
-        }
-    }
-}
-
-/// The disk usage view: a stack of levels, the top one being looked at.
-pub struct DiskUsageView {
-    vfs: Arc<dyn Vfs>,
-    handle: tokio::runtime::Handle,
-    levels: Vec<Level>,
-    measure: Measure,
-    job: Option<Job>,
-    /// First row shown and rows that fit, kept from the last draw: a key moves by a page and a
-    /// click finds its row from them, and drawing only has `&self`.
-    top: Cell<usize>,
-    viewport: Cell<usize>,
-}
-
-impl DiskUsageView {
-    /// Opens the view on `path` and starts scanning it.
-    pub fn open(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>, path: PathBuf) -> Self {
-        let mut view = Self {
-            vfs,
-            handle,
-            levels: vec![Level::new(path)],
-            measure: Measure::default(),
-            job: None,
-            top: Cell::new(0),
-            viewport: Cell::new(0),
-        };
-        view.start_scan();
-        view
-    }
-
-    fn level(&self) -> &Level {
-        self.levels.last().expect("there is always a level")
-    }
-
-    fn level_mut(&mut self) -> &mut Level {
-        self.levels.last_mut().expect("there is always a level")
-    }
-
-    fn start_scan(&mut self) {
-        let (tx, rx) = unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_bg = Arc::clone(&cancel);
-        let level = self.level_mut();
-        level.end = None;
-        level.rows.clear();
-        level.selected = 0;
-        level.moved = false;
-        let (path, seen) = (level.path.clone(), Arc::clone(&level.seen));
-        seen.store(0, Ordering::Relaxed);
-        let vfs = Arc::clone(&self.vfs);
-        // Replacing the job drops the old one, which cancels its scan.
-        self.job = Some(Job { cancel, rx });
-        self.handle.spawn_blocking(move || {
-            let end = scan_level(
-                vfs.as_ref(),
-                &path,
-                MAX_ENTRIES,
-                &cancel_bg,
-                &seen,
-                &mut |rows| {
-                    let _ = tx.send(Message::Rows(rows));
-                },
-            );
-            let _ = tx.send(Message::Done(end));
-        });
-    }
-
-    /// Picks up rows the scan has finished. Call once per render tick.
-    pub fn poll(&mut self) {
-        let Some(job) = self.job.as_mut() else { return };
-        let (mut added, mut done) = (Vec::new(), None);
-        loop {
-            match job.rx.try_recv() {
-                Ok(Message::Rows(rows)) => added.extend(rows),
-                Ok(Message::Done(end)) => {
-                    done = Some(end);
-                    break;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    done = Some(End::Cancelled);
-                    break;
-                }
-            }
-        }
-        let measure = self.measure;
-        let level = self.level_mut();
-        if let Some(end) = done {
-            level.end = Some(end);
-        }
-        if !added.is_empty() || done.is_some() {
-            level.rows.extend(added);
-            level.sort(measure);
-        }
-        if done.is_some() {
-            self.job = None;
-        }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.level().path
-    }
-
-    pub fn rows(&self) -> &[Row] {
-        &self.level().rows
-    }
-
-    pub fn selected(&self) -> usize {
-        self.level().selected
-    }
-
-    pub fn selected_row(&self) -> Option<&Row> {
-        self.level().rows.get(self.level().selected)
-    }
-
-    pub fn measure(&self) -> Measure {
-        self.measure
-    }
-
-    /// `None` while the scan is running.
-    pub fn end(&self) -> Option<End> {
-        self.level().end
-    }
-
-    /// Entries the scan has looked at so far.
-    pub fn seen(&self) -> u64 {
-        self.level().seen.load(Ordering::Relaxed)
-    }
-
-    /// What the listed rows add up to, by the current measure.
-    pub fn total(&self) -> u64 {
-        self.rows().iter().fold(0u64, |sum, row| {
-            sum.saturating_add(row.sizes.of(self.measure))
-        })
-    }
-
-    pub fn top(&self) -> &Cell<usize> {
-        &self.top
-    }
-
-    pub fn viewport(&self) -> &Cell<usize> {
-        &self.viewport
-    }
-
-    pub fn move_by(&mut self, rows: isize) {
-        let level = self.level_mut();
-        let last = level.rows.len().saturating_sub(1);
-        level.selected = level.selected.saturating_add_signed(rows).min(last);
-        level.moved = true;
-    }
-
-    pub fn move_to(&mut self, index: usize) {
-        let level = self.level_mut();
-        level.selected = index.min(level.rows.len().saturating_sub(1));
-        level.moved = true;
-    }
-
-    /// Moves by a screenful (at least a row), `direction` being `1` for down and `-1` for up.
-    pub fn page(&mut self, direction: isize) {
-        let page = self.viewport.get().saturating_sub(1).max(1) as isize;
-        self.move_by(direction * page);
-    }
-
-    /// Switches between the size on disk and the apparent size, keeping the cursor on the same
-    /// row.
-    pub fn toggle_measure(&mut self) {
-        self.measure = self.measure.toggled();
-        let measure = self.measure;
-        self.level_mut().sort(measure);
-    }
-
-    /// Scans the current folder again, for when things changed on disk.
-    pub fn rescan(&mut self) {
-        let keep = self.level().selected_path().cloned();
-        self.start_scan();
-        self.level_mut().reselect = keep;
-    }
-
-    /// Opens the selected folder, if it is one and can be looked into. Returns whether it did.
-    pub fn enter(&mut self) -> bool {
-        let Some(row) = self.selected_row() else {
-            return false;
-        };
-        if row.kind != Kind::Dir {
-            return false;
-        }
-        let path = row.path.clone();
-        self.levels.push(Level::new(path));
-        self.start_scan();
-        true
-    }
-
-    /// Goes back up: to the level above if there is one on the stack, otherwise to the parent
-    /// folder, with the cursor on the folder just left. Returns whether anything changed.
-    pub fn leave(&mut self) -> bool {
-        if self.levels.len() > 1 {
-            self.levels.pop();
-            // A level left before its scan finished has only part of its rows.
-            if self.level().end.is_none() || self.level().end == Some(End::Cancelled) {
-                self.rescan();
-            } else {
-                self.job = None;
-            }
-            return true;
-        }
-        let here = self.level().path.clone();
-        let Some(parent) = here.parent() else {
-            return false;
-        };
-        let mut level = Level::new(parent.to_path_buf());
-        level.reselect = Some(here);
-        self.levels = vec![level];
-        self.start_scan();
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use shared::LocalVfs;
+    use std::time::Instant;
 
     use super::*;
+    use crate::LocalVfs;
     use proptest::prelude::*;
-    use std::time::{Duration, Instant};
 
     fn scratch(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -990,179 +686,6 @@ mod tests {
         }
     }
 
-    // ---- the view -------------------------------------------------------------------------
-
-    fn row(name: &str, kind: Kind, disk: u64, apparent: u64) -> Row {
-        Row {
-            name: name.into(),
-            path: PathBuf::from("/v").join(name),
-            kind,
-            sizes: Sizes { disk, apparent },
-            items: 1,
-            partial: false,
-        }
-    }
-
-    fn wait(view: &mut DiskUsageView) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            view.poll();
-            if view.end().is_some() {
-                return;
-            }
-            assert!(Instant::now() < deadline, "the scan never finished");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    #[test]
-    fn rows_come_out_biggest_first_by_the_chosen_measure_and_ties_by_name() {
-        let mut level = Level::new(PathBuf::from("/v"));
-        level.rows = vec![
-            row("b", Kind::File, 10, 900),
-            row("a", Kind::File, 10, 5),
-            row("big", Kind::File, 4096, 100),
-            row("c", Kind::File, 10, 5),
-        ];
-        level.sort(Measure::OnDisk);
-        let names: Vec<_> = level.rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, ["big", "a", "b", "c"]);
-        level.sort(Measure::Apparent);
-        let names: Vec<_> = level.rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, ["b", "big", "a", "c"]);
-    }
-
-    proptest! {
-        /// Rows arriving and being re-sorted must not move the cursor off the row it is on.
-        #[test]
-        fn the_cursor_stays_on_its_row_as_rows_arrive(
-            first in proptest::collection::vec(1u64..1000, 1..12),
-            later in proptest::collection::vec(1u64..1000, 0..12),
-            pick in 0usize..12,
-        ) {
-            let mut level = Level::new(PathBuf::from("/v"));
-            level.rows = first.iter().enumerate().map(|(i, s)| row(&format!("a{i}"), Kind::File, *s, *s)).collect();
-            level.sort(Measure::OnDisk);
-            level.selected = pick.min(level.rows.len() - 1);
-            level.moved = true;
-            let chosen = level.selected_path().cloned();
-            level.rows.extend(later.iter().enumerate().map(|(i, s)| row(&format!("z{i}"), Kind::File, *s, *s)));
-            level.sort(Measure::OnDisk);
-            prop_assert_eq!(level.selected_path().cloned(), chosen);
-            for pair in level.rows.windows(2) {
-                prop_assert!(pair[0].sizes.disk >= pair[1].sizes.disk);
-            }
-        }
-    }
-
-    #[test]
-    fn until_the_user_moves_the_cursor_stays_on_the_biggest_row_as_bigger_ones_arrive() {
-        let mut level = Level::new(PathBuf::from("/v"));
-        level.rows = vec![row("first", Kind::File, 10, 10)];
-        level.sort(Measure::OnDisk);
-        level.rows.push(row("bigger", Kind::File, 999, 999));
-        level.sort(Measure::OnDisk);
-        assert_eq!(level.rows[level.selected].name, "bigger");
-        level.rows.push(row("biggest", Kind::File, 5000, 5000));
-        level.sort(Measure::OnDisk);
-        assert_eq!(level.rows[level.selected].name, "biggest");
-    }
-
-    #[test]
-    fn the_view_scans_lists_drills_down_and_comes_back_to_the_same_row() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let root = scratch("view");
-        write(&root.join("small"), 10);
-        write(&root.join("sub/big"), 500_000);
-        write(&root.join("sub/other"), 100);
-        let mut view = DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.clone());
-        wait(&mut view);
-        assert_eq!(view.path(), root);
-        assert_eq!(view.rows()[0].name, "sub", "the biggest is first");
-        assert_eq!(view.end(), Some(End::Complete));
-        assert!(view.total() >= 500_110);
-
-        assert!(view.enter());
-        wait(&mut view);
-        assert_eq!(view.path(), root.join("sub"));
-        assert_eq!(view.rows()[0].name, "big");
-
-        assert!(!view.enter(), "a file cannot be opened");
-        assert!(view.leave());
-        assert_eq!(view.path(), root);
-        assert_eq!(view.selected_row().map(|r| r.name.as_str()), Some("sub"));
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn leaving_the_top_level_goes_to_the_parent_with_the_cursor_on_where_it_came_from() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let root = scratch("parent");
-        write(&root.join("aaa/x"), 10);
-        write(&root.join("zzz/y"), 900_000);
-        write(&root.join("mmm/z"), 40_000);
-        let mut view =
-            DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.join("mmm"));
-        wait(&mut view);
-        assert!(view.leave());
-        wait(&mut view);
-        assert_eq!(view.path(), root);
-        assert_eq!(view.selected_row().map(|r| r.name.as_str()), Some("mmm"));
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn switching_the_measure_re_sorts_and_keeps_the_cursor_on_the_same_row() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let root = scratch("measure");
-        write(&root.join("aa"), 1);
-        write(&root.join("bb"), 20_000);
-        let mut view = DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.clone());
-        wait(&mut view);
-        view.move_to(1);
-        let chosen = view.selected_row().unwrap().name.clone();
-        view.toggle_measure();
-        assert_eq!(view.measure(), Measure::Apparent);
-        assert_eq!(view.selected_row().unwrap().name, chosen);
-        view.toggle_measure();
-        assert_eq!(view.measure(), Measure::OnDisk);
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn moving_is_clamped_and_a_page_is_a_screenful_less_one() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let root = scratch("move");
-        for i in 0..30 {
-            write(&root.join(format!("f{i:02}")), 10 + i);
-        }
-        let mut view = DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.clone());
-        wait(&mut view);
-        view.move_by(-5);
-        assert_eq!(view.selected(), 0);
-        view.move_by(1000);
-        assert_eq!(view.selected(), 29);
-        view.move_to(0);
-        view.viewport().set(11);
-        view.page(1);
-        assert_eq!(view.selected(), 10);
-        view.page(-1);
-        assert_eq!(view.selected(), 0);
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn dropping_the_view_cancels_its_scan() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let root = scratch("drop");
-        write(&root.join("a"), 1);
-        let view = DiskUsageView::open(rt.handle().clone(), Arc::new(LocalVfs), root.clone());
-        let cancel = Arc::clone(&view.job.as_ref().unwrap().cancel);
-        drop(view);
-        assert!(cancel.load(Ordering::Relaxed));
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
     /// Benchmark stub for the scan, the one path that touches every entry under a folder. It
     /// reports how fast a real tree (`MM_SCAN_ROOT`, default `/usr`) is walked; run it with
     /// `cargo test -p tui --release -- --ignored scan_throughput --nocapture`. It is ignored
@@ -1195,7 +718,7 @@ mod tests {
 
     // ---- a backend that is not the local disk ----
 
-    fn scan_memory(mem: &shared::MemVfs, root: &str) -> Vec<Row> {
+    fn scan_memory(mem: &crate::MemVfs, root: &str) -> Vec<Row> {
         let mut rows = Vec::new();
         let end = scan_level(
             mem,
@@ -1211,7 +734,7 @@ mod tests {
 
     #[test]
     fn a_scan_of_another_backend_reports_allocated_and_apparent_sizes() {
-        let mem = shared::MemVfs::new();
+        let mem = crate::MemVfs::new();
         mem.add_file("/r/file", vec![0u8; 5000]);
         mem.add_file("/r/sub/inner", vec![0u8; 100]);
         mem.add_symlink("/r/link", "/r/file");
@@ -1236,7 +759,7 @@ mod tests {
 
     #[test]
     fn a_backend_with_no_allocated_size_is_measured_by_length_on_both_measures() {
-        let mem = shared::MemVfs::new().sparse();
+        let mem = crate::MemVfs::new().sparse();
         mem.add_file("/r/file", vec![0u8; 5000]);
 
         let rows = scan_memory(&mem, "/r");
@@ -1252,7 +775,7 @@ mod tests {
 
     #[test]
     fn a_missing_folder_on_another_backend_is_unreadable_not_empty() {
-        let mem = shared::MemVfs::new();
+        let mem = crate::MemVfs::new();
         let end = scan_level(
             &mem,
             Path::new("/nope"),
@@ -1262,20 +785,5 @@ mod tests {
             &mut |_| {},
         );
         assert_eq!(end, End::Unreadable);
-    }
-
-    #[test]
-    fn the_view_runs_on_another_backend() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mem = shared::MemVfs::new();
-        mem.add_file("/v/small", vec![0u8; 10]);
-        mem.add_file("/v/sub/big", vec![0u8; 500_000]);
-        let mut view = DiskUsageView::open(rt.handle().clone(), Arc::new(mem), PathBuf::from("/v"));
-        wait(&mut view);
-
-        assert_eq!(view.rows()[0].name, "sub", "the biggest is first");
-        assert!(view.enter());
-        wait(&mut view);
-        assert_eq!(view.rows()[0].name, "big");
     }
 }

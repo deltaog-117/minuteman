@@ -33,9 +33,9 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use plugin_api::{DevicesCommand, DevicesNote, SetDevices};
 use ratatui::layout::{Position, Rect};
-use shared::devices::Device;
 use shared::devices::activity::Rates;
 use shared::devices::plan::Plan;
+use shared::devices::{Device, holding};
 
 use crate::cargo_fit::{self, Load, Verdict};
 use crate::deck_view;
@@ -425,20 +425,6 @@ impl Default for DeckState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// The index of the device whose mount holds `dir`, preferring the deepest mount.
-pub fn holding(devices: &[Device], dir: &Path) -> Option<usize> {
-    devices
-        .iter()
-        .enumerate()
-        .filter_map(|(index, device)| {
-            let mount = device.mount.as_deref()?;
-            dir.starts_with(mount)
-                .then_some((mount.as_os_str().len(), index))
-        })
-        .max()
-        .map(|(_, index)| index)
 }
 
 #[cfg(test)]

@@ -1194,12 +1194,15 @@ mod tests {
             CanvasInput::Open {
                 width: 80,
                 height: 24,
+                here: PathBuf::from("/home/me"),
             },
         );
         assert_eq!(event_json(&event)["params"]["name"], "canvas");
         assert_eq!(
             event_json(&event)["params"]["canvas"],
-            serde_json::json!({"surface": "atlas", "input": "open", "width": 80, "height": 24})
+            serde_json::json!({
+                "surface": "atlas", "input": "open", "width": 80, "height": 24, "here": "/home/me"
+            })
         );
     }
 

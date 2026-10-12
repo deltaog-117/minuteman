@@ -51,12 +51,10 @@ use theming::{OpenRule, OpenWith, PluginSpec, PreviewHook};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::associations::{self, Associations};
-use crate::atlas::AtlasState;
 use crate::cargo_fit::{Carry, Load};
 use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
-use crate::disk_usage::DiskUsageView;
 use crate::extract_popup::{self, ExtractPopup};
 use crate::inspect_panel::InspectPanel;
 use crate::line_edit::LineEdit;
@@ -68,6 +66,7 @@ use crate::picker_popup::PickerPopup;
 use crate::plugin_views::Slots;
 use crate::search_job::{SearchJob, SearchState};
 use crate::wiring::WiringState;
+use shared::usage_view::DiskUsageView;
 
 /// How many lines of a shell command's output the status line shows before summarizing the rest.
 const STATUS_OUTPUT_LINES: usize = 8;
@@ -630,7 +629,7 @@ impl App {
     }
 
     pub fn begin_disk_usage(&self, path: PathBuf) -> DiskUsageView {
-        DiskUsageView::open(self.handle.clone(), Arc::clone(&self.vfs), path)
+        DiskUsageView::open(Arc::clone(&self.vfs), path)
     }
 
     /// The deck of device cards (`V`, the deck view). The plugin that provides `devices` looks at
@@ -678,12 +677,6 @@ impl App {
     /// only while it exists.
     pub fn begin_wiring(&self, show_hidden: bool) -> WiringState {
         WiringState::new(self.handle.clone(), Arc::clone(&self.vfs), show_hidden)
-    }
-
-    /// The map of the machine's storage (`V`, the atlas view). It looks at the machine only while
-    /// it exists.
-    pub fn begin_atlas(&self) -> AtlasState {
-        AtlasState::new(self.handle.clone(), Arc::clone(&self.vfs))
     }
 
     /// Hands the `find` action to the plugin that provides it (the fuzzy finder, which ships

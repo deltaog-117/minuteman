@@ -14,43 +14,69 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The atlas's state (`V`, the atlas view): a map of the machine's storage that zooms from the
-//! volumes, to the biggest folders on one of them, to the files in a folder. Like the deck and the
-//! wiring diagram it is pure: no `Frame`, no terminal. `atlas_view` draws it and `main` applies
-//! the few things it asks for, which are to go to a folder and to show a message.
+//! The atlas's state: a map of the machine's storage that zooms from the volumes, to the biggest
+//! folders on one of them, to the files in a folder. It is pure: no terminal and no wire. `canvas`
+//! turns it into the picture the host draws and `run` carries the keys and clicks the host
+//! forwards, and the few things it asks of the browser (go to a folder, say something).
 //!
-//! The top level is one block per mounted or plugged-in volume, sized by capacity (`devices`, looked
-//! at once every couple of seconds on the blocking pool while the view shows). Zooming into a
-//! volume hands its mount point to the disk usage view's scanner (`disk_usage::DiskUsageView`),
-//! which already scans one folder at a time on the blocking pool, cancels when dropped, sorts
-//! biggest first and keeps a stack of the levels on the way down, so zooming back out is instant
-//! and nothing holds a whole tree. The atlas only adds the picture: what a tile is, where it sits
-//! (`atlas_layout`), and how to move between tiles.
+//! The top level is one block per mounted or plugged-in volume, sized by capacity (looked at once
+//! every couple of seconds on a thread of its own while the view shows, since a `statvfs` on a
+//! share that has gone away can block). Zooming into a volume hands its mount point to
+//! `shared::usage_view::DiskUsageView`, which scans one folder at a time on a thread of its own,
+//! cancels when dropped, sorts biggest first and keeps a stack of the levels on the way down, so
+//! zooming back out is instant and nothing holds a whole tree. The atlas only adds the picture:
+//! what a tile is, where it sits (`layout`), and how to move between tiles.
 //!
 //! Nothing here waits on the disk. A scan in progress shows the rows it has so far, and the map
 //! re-lays itself out as more arrive.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Position, Rect};
+use plugin_api::Mods;
 use shared::Vfs;
-use shared::devices::Device;
 use shared::devices::probe::Sys;
+use shared::devices::{Device, holding};
+use shared::usage::Kind as RowKind;
+use shared::usage_view::DiskUsageView;
 
-use crate::atlas_layout::{self, Dir, Item, Tile};
-use crate::deck::holding;
-use crate::disk_usage::{DiskUsageView, Kind as RowKind};
+use crate::layout::{self, Dir, Item, Rect, Tile};
 
 /// How often the machine's volumes are looked at again.
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 
-/// Shown on entering the view.
+/// Shown on the status bar while the view shows.
 pub const HINT: &str = "atlas: arrows move  Enter zoom in  Backspace out  o open in browser  Tab next  a size/apparent  r rescan  V next view";
+
+/// What the plugin knows of the machine's volumes. A trait so a conversation can be played in a
+/// test without touching the real disks.
+pub trait Machine: Send + Sync + 'static {
+    fn scan(&self) -> Vec<Device>;
+}
+
+/// This machine, read from `/proc`, `/sys` and the udev database and `statvfs`.
+pub struct RealMachine(Sys);
+
+impl RealMachine {
+    pub fn new() -> Self {
+        Self(Sys::real())
+    }
+}
+
+impl Default for RealMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Machine for RealMachine {
+    fn scan(&self) -> Vec<Device> {
+        self.0.scan()
+    }
+}
 
 /// What a key or click did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,8 +102,8 @@ struct Zoom {
 }
 
 pub struct AtlasState {
-    handle: tokio::runtime::Handle,
     vfs: Arc<dyn Vfs>,
+    machine: Arc<dyn Machine>,
     /// The volumes, biggest first: the order the map lays them out in.
     devices: Vec<Device>,
     scanned: bool,
@@ -91,11 +117,11 @@ pub struct AtlasState {
 }
 
 impl AtlasState {
-    pub fn new(handle: tokio::runtime::Handle, vfs: Arc<dyn Vfs>) -> Self {
+    pub fn new(vfs: Arc<dyn Vfs>, machine: Arc<dyn Machine>) -> Self {
         let (scan_tx, scans) = channel();
         Self {
-            handle,
             vfs,
+            machine,
             devices: Vec::new(),
             scanned: false,
             selected_node: None,
@@ -110,11 +136,11 @@ impl AtlasState {
     /// An atlas that already knows its volumes and never looks at the machine, for tests.
     #[cfg(test)]
     pub fn with_devices(
-        handle: tokio::runtime::Handle,
         vfs: Arc<dyn Vfs>,
+        machine: Arc<dyn Machine>,
         devices: Vec<Device>,
     ) -> Self {
-        let mut state = Self::new(handle, vfs);
+        let mut state = Self::new(vfs, machine);
         state.last_scan = Some(Instant::now() + Duration::from_secs(3600));
         state.take(devices);
         state
@@ -123,7 +149,7 @@ impl AtlasState {
     /// Picks up what the scans have found and keeps the zoomed-into folder's scan moving. Call
     /// once per turn of the loop; `here` is the folder the browser is in, which the choice starts
     /// on.
-    pub fn poll(&mut self, now: Instant, here: &std::path::Path) {
+    pub fn poll(&mut self, now: Instant, here: &Path) {
         while let Ok(devices) = self.scans.try_recv() {
             self.take(devices);
         }
@@ -144,10 +170,11 @@ impl AtlasState {
         if due && !self.scanning.swap(true, Ordering::AcqRel) {
             self.last_scan = Some(now);
             let (tx, scanning) = (self.scan_tx.clone(), Arc::clone(&self.scanning));
+            let machine = Arc::clone(&self.machine);
             // A `statvfs` on a share that has gone away can block for a long time, which is why
             // this is off the loop and a scan still running is not started again.
-            self.handle.spawn_blocking(move || {
-                let _ = tx.send(Sys::real().scan());
+            std::thread::spawn(move || {
+                let _ = tx.send(machine.scan());
                 scanning.store(false, Ordering::Release);
             });
         }
@@ -204,7 +231,7 @@ impl AtlasState {
     }
 
     pub fn tiles(&self, map: Rect) -> Vec<Tile> {
-        atlas_layout::treemap(&self.weights(), map)
+        layout::treemap(&self.weights(), map)
     }
 
     /// The position, among `weights`, of the chosen thing.
@@ -231,7 +258,7 @@ impl AtlasState {
 
     /// The thing the browsed folder `here` is inside, if it is on the map: the volume mounted
     /// there, or the folder (one of the rows) it is under. Marked on the map as "you are here".
-    pub fn pin(&self, here: &std::path::Path) -> Option<usize> {
+    pub fn pin(&self, here: &Path) -> Option<usize> {
         match &self.zoom {
             None => holding(&self.devices, here),
             Some(zoom) => zoom
@@ -249,44 +276,51 @@ impl AtlasState {
     /// them biggest first, `Enter` zooms into the chosen tile (a file's own tile opens its folder
     /// in the browser instead), `Backspace` or `Esc` zooms back out, `o` opens the chosen tile's
     /// folder in the browser, `a` switches between size on disk and apparent size and `r` looks
-    /// again. Every other key is the browser's, so `V`, `q`, `/` and `:` work as they always do.
-    pub fn key(&mut self, key: KeyEvent, map: Rect) -> Outcome {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            || key.modifiers.contains(KeyModifiers::ALT)
-        {
+    /// again. Keys are named as the config spells them. `Pass` means the key was not the atlas's;
+    /// the host only forwards keys the canvas claims (`claims`), so that is for a key held with
+    /// `Ctrl` or `Alt` and for `Esc`, `Backspace` and `a` when there is nothing to zoom out of or
+    /// to measure.
+    pub fn key(&mut self, key: &str, mods: Mods, map: Rect) -> Outcome {
+        if mods.ctrl || mods.alt {
             return Outcome::Pass;
         }
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.go(Dir::Up, map),
-            KeyCode::Down | KeyCode::Char('j') => self.go(Dir::Down, map),
-            KeyCode::Left | KeyCode::Char('h') => self.go(Dir::Left, map),
-            KeyCode::Right | KeyCode::Char('l') => self.go(Dir::Right, map),
-            KeyCode::Tab => self.walk(1, map),
-            KeyCode::BackTab => self.walk(-1, map),
-            KeyCode::Enter => return self.activate(),
-            KeyCode::Backspace | KeyCode::Esc => {
+        match key {
+            "up" | "k" => self.go(Dir::Up, map),
+            "down" | "j" => self.go(Dir::Down, map),
+            "left" | "h" => self.go(Dir::Left, map),
+            "right" | "l" => self.go(Dir::Right, map),
+            "tab" => self.walk(1, map),
+            "backtab" => self.walk(-1, map),
+            "enter" => return self.activate(),
+            "backspace" | "esc" => {
                 if !self.zoom_out() {
                     return Outcome::Pass;
                 }
             }
-            KeyCode::Char('o') => return self.open_in_browser(),
-            KeyCode::Char('a') => {
+            "o" => return self.open_in_browser(),
+            "a" => {
                 let Some(zoom) = self.zoom.as_mut() else {
                     return Outcome::Pass;
                 };
                 zoom.view.toggle_measure();
             }
-            KeyCode::Char('r') => self.rescan(),
+            "r" => self.rescan(),
             _ => return Outcome::Pass,
         }
         Outcome::Handled
     }
 
+    /// Whether the atlas is zoomed into a volume, which is when it wants `Esc`, `Backspace` and
+    /// `a`: at the map of volumes `Esc` closes the view and `a` is the appearance popup.
+    pub fn is_zoomed(&self) -> bool {
+        self.zoom.is_some()
+    }
+
     /// A click on a tile chooses it; a click on the one already chosen zooms into it. A click on
     /// nothing, or on a small tile (which stands for several entries), does nothing.
-    pub fn click(&mut self, map: Rect, pointer: Position) -> Outcome {
+    pub fn click(&mut self, map: Rect, x: u16, y: u16) -> Outcome {
         let tiles = self.tiles(map);
-        match atlas_layout::tile_at(&tiles, pointer).map(|tile| tile.item) {
+        match layout::tile_at(&tiles, x, y).map(|tile| tile.item) {
             Some(Item::Entry(i)) if self.selected() == Some(i) => self.activate(),
             Some(Item::Entry(i)) => {
                 self.select(i);
@@ -303,7 +337,7 @@ impl AtlasState {
     fn go(&mut self, dir: Dir, map: Rect) {
         let tiles = self.tiles(map);
         let from = self.selected().unwrap_or(0);
-        if let Some(to) = atlas_layout::neighbor(&tiles, from, dir) {
+        if let Some(to) = layout::neighbor(&tiles, from, dir) {
             self.select(to);
         }
     }
@@ -311,7 +345,7 @@ impl AtlasState {
     fn walk(&mut self, step: isize, map: Rect) {
         let tiles = self.tiles(map);
         let from = self.selected().unwrap_or(0);
-        if let Some(to) = atlas_layout::cycle(&tiles, from, step) {
+        if let Some(to) = layout::cycle(&tiles, from, step) {
             self.select(to);
         }
     }
@@ -359,7 +393,7 @@ impl AtlasState {
             ));
         };
         let node = device.node.clone();
-        let view = DiskUsageView::open(self.handle.clone(), Arc::clone(&self.vfs), mount);
+        let view = DiskUsageView::open(Arc::clone(&self.vfs), mount);
         self.zoom = Some(Zoom {
             view,
             depth: 0,
@@ -418,8 +452,6 @@ impl AtlasState {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use shared::LocalVfs;
     use shared::devices::Kind;
 
@@ -438,8 +470,13 @@ mod tests {
         }
     }
 
-    fn press(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+    /// A machine that has no volumes, for a state that is given its own.
+    struct Offline;
+
+    impl Machine for Offline {
+        fn scan(&self) -> Vec<Device> {
+            Vec::new()
+        }
     }
 
     fn scratch(label: &str) -> PathBuf {
@@ -471,10 +508,9 @@ mod tests {
 
     #[test]
     fn volumes_are_laid_out_biggest_first_whatever_order_they_were_found_in() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![
                 volume("sdb1", None, 100, 50),
                 volume("sda2", Some("/"), 900, 100),
@@ -488,10 +524,9 @@ mod tests {
 
     #[test]
     fn the_choice_starts_on_the_volume_holding_the_browsed_folder() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![
                 volume("sda2", Some("/"), 900, 100),
                 volume("sda3", Some("/home"), 500, 100),
@@ -509,10 +544,9 @@ mod tests {
 
     #[test]
     fn the_choice_stays_on_its_volume_when_the_list_changes_and_falls_back_when_it_goes() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![
                 volume("sda2", Some("/"), 900, 1),
                 volume("sdb1", None, 100, 1),
@@ -538,81 +572,81 @@ mod tests {
 
     #[test]
     fn an_unmounted_volume_cannot_be_zoomed_into_and_says_why() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![volume("sdb1", None, 100, 50)],
         );
         state.poll(Instant::now(), Path::new("/"));
-        match state.key(press(KeyCode::Enter), MAP) {
+        match state.key("enter", Mods::default(), MAP) {
             Outcome::Status(text) => assert!(text.contains("not mounted"), "{text}"),
             other => panic!("{other:?}"),
         }
         assert!(state.zoomed().is_none());
         assert!(matches!(
-            state.key(press(KeyCode::Char('o')), MAP),
+            state.key("o", Mods::default(), MAP),
             Outcome::Status(_)
         ));
     }
 
     #[test]
     fn zooming_goes_volume_to_folder_to_file_and_back_out_one_level_at_a_time() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("zoom");
         write(&root.join("small"), 10);
         write(&root.join("sub/big"), 500_000);
         write(&root.join("sub/other"), 100);
         let mount = root.to_str().unwrap();
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![volume("sda1", Some(mount), 1_000_000, 400_000)],
         );
         state.poll(Instant::now(), Path::new("/"));
 
         // Into the volume: its biggest folder first.
-        assert_eq!(state.key(press(KeyCode::Enter), MAP), Outcome::Handled);
+        assert_eq!(state.key("enter", Mods::default(), MAP), Outcome::Handled);
         settle(&mut state);
         assert_eq!(state.zoomed_device().unwrap().node, "sda1");
         assert_eq!(state.zoomed().unwrap().rows()[0].name, "sub");
         assert_eq!(state.selected(), Some(0));
 
         // Into the folder, then onto its biggest file, which opens its folder in the browser.
-        assert_eq!(state.key(press(KeyCode::Enter), MAP), Outcome::Handled);
+        assert_eq!(state.key("enter", Mods::default(), MAP), Outcome::Handled);
         settle(&mut state);
         assert_eq!(state.zoomed().unwrap().path(), root.join("sub"));
         assert_eq!(state.zoomed().unwrap().rows()[0].name, "big");
         assert_eq!(
-            state.key(press(KeyCode::Enter), MAP),
+            state.key("enter", Mods::default(), MAP),
             Outcome::Goto(root.join("sub"))
         );
 
         // Back out: to the volume's folder, then to the map, with the volume chosen.
-        assert_eq!(state.key(press(KeyCode::Backspace), MAP), Outcome::Handled);
+        assert_eq!(
+            state.key("backspace", Mods::default(), MAP),
+            Outcome::Handled
+        );
         assert_eq!(state.zoomed().unwrap().path(), root);
-        assert_eq!(state.key(press(KeyCode::Esc), MAP), Outcome::Handled);
+        assert_eq!(state.key("esc", Mods::default(), MAP), Outcome::Handled);
         assert!(state.zoomed().is_none());
         assert_eq!(state.devices()[state.selected().unwrap()].node, "sda1");
         // Nothing further out: the browser's own key.
-        assert_eq!(state.key(press(KeyCode::Esc), MAP), Outcome::Pass);
+        assert_eq!(state.key("esc", Mods::default(), MAP), Outcome::Pass);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn going_out_of_a_volume_never_climbs_to_the_parent_of_its_mount_point() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("mount-top");
         write(&root.join("f"), 10);
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![volume("sda1", root.to_str(), 1_000_000, 400_000)],
         );
         state.poll(Instant::now(), Path::new("/"));
-        state.key(press(KeyCode::Enter), MAP);
+        state.key("enter", Mods::default(), MAP);
         settle(&mut state);
-        state.key(press(KeyCode::Backspace), MAP);
+        state.key("backspace", Mods::default(), MAP);
         assert!(
             state.zoomed().is_none(),
             "at the volume's own top, out means the map of volumes"
@@ -622,25 +656,24 @@ mod tests {
 
     #[test]
     fn o_opens_the_chosen_folder_or_the_folder_a_file_is_in() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("open");
         write(&root.join("sub/big"), 500_000);
         write(&root.join("top.txt"), 100);
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![volume("sda1", root.to_str(), 1_000_000, 400_000)],
         );
         state.poll(Instant::now(), Path::new("/"));
         assert_eq!(
-            state.key(press(KeyCode::Char('o')), MAP),
+            state.key("o", Mods::default(), MAP),
             Outcome::Goto(root.clone()),
             "a volume opens at its mount point"
         );
-        state.key(press(KeyCode::Enter), MAP);
+        state.key("enter", Mods::default(), MAP);
         settle(&mut state);
         assert_eq!(
-            state.key(press(KeyCode::Char('o')), MAP),
+            state.key("o", Mods::default(), MAP),
             Outcome::Goto(root.join("sub"))
         );
         let file = state
@@ -652,7 +685,7 @@ mod tests {
             .unwrap();
         state.select(file);
         assert_eq!(
-            state.key(press(KeyCode::Char('o')), MAP),
+            state.key("o", Mods::default(), MAP),
             Outcome::Goto(root.clone())
         );
         std::fs::remove_dir_all(&root).unwrap();
@@ -660,17 +693,16 @@ mod tests {
 
     #[test]
     fn the_pin_follows_the_browsed_folder_down_into_the_rows() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("pin");
         write(&root.join("sub/deep/x"), 500_000);
         write(&root.join("elsewhere/y"), 10);
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![volume("sda1", root.to_str(), 1_000_000, 400_000)],
         );
         state.poll(Instant::now(), Path::new("/"));
-        state.key(press(KeyCode::Enter), MAP);
+        state.key("enter", Mods::default(), MAP);
         settle(&mut state);
         let rows = state.zoomed().unwrap().rows();
         let sub = rows.iter().position(|r| r.name == "sub").unwrap();
@@ -681,34 +713,32 @@ mod tests {
 
     #[test]
     fn the_measure_and_rescan_keys_belong_to_the_atlas_only_once_zoomed_in() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("measure");
         write(&root.join("f"), 10);
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![volume("sda1", root.to_str(), 1_000_000, 400_000)],
         );
         state.poll(Instant::now(), Path::new("/"));
         assert_eq!(
-            state.key(press(KeyCode::Char('a')), MAP),
+            state.key("a", Mods::default(), MAP),
             Outcome::Pass,
             "on the map of volumes `a` is still the appearance popup"
         );
-        state.key(press(KeyCode::Enter), MAP);
+        state.key("enter", Mods::default(), MAP);
         settle(&mut state);
         let before = state.zoomed().unwrap().measure();
-        assert_eq!(state.key(press(KeyCode::Char('a')), MAP), Outcome::Handled);
+        assert_eq!(state.key("a", Mods::default(), MAP), Outcome::Handled);
         assert_ne!(state.zoomed().unwrap().measure(), before);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn arrows_move_between_blocks_and_tab_walks_them_all() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![
                 volume("a", Some("/a"), 600, 1),
                 volume("b", Some("/b"), 300, 1),
@@ -720,32 +750,31 @@ mod tests {
         let tiles = state.tiles(MAP);
         assert_eq!(tiles.len(), 3, "{tiles:?}");
         // The big block is on the left, the two small ones stacked on the right.
-        assert_eq!(state.key(press(KeyCode::Right), MAP), Outcome::Handled);
+        assert_eq!(state.key("right", Mods::default(), MAP), Outcome::Handled);
         let on_right = state.selected().unwrap();
         assert_ne!(on_right, 0);
-        state.key(press(KeyCode::Char('j')), MAP);
-        state.key(press(KeyCode::Char('k')), MAP);
-        state.key(press(KeyCode::Left), MAP);
+        state.key("j", Mods::default(), MAP);
+        state.key("k", Mods::default(), MAP);
+        state.key("left", Mods::default(), MAP);
         assert_eq!(state.selected(), Some(0));
 
         let mut seen = vec![0];
         for _ in 0..3 {
-            state.key(press(KeyCode::Tab), MAP);
+            state.key("tab", Mods::default(), MAP);
             seen.push(state.selected().unwrap());
         }
         assert_eq!(seen, [0, 1, 2, 0], "Tab goes through all, then round");
-        state.key(press(KeyCode::BackTab), MAP);
+        state.key("backtab", Mods::default(), MAP);
         assert_eq!(state.selected(), Some(2));
     }
 
     #[test]
     fn a_click_chooses_a_block_and_a_second_click_zooms_into_it() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("click");
         write(&root.join("f"), 10);
         let mut state = AtlasState::with_devices(
-            rt.handle().clone(),
             Arc::new(LocalVfs),
+            Arc::new(Offline),
             vec![
                 volume("big", root.to_str(), 800, 1),
                 volume("small", Some("/nowhere-small"), 200, 1),
@@ -758,48 +787,44 @@ mod tests {
             .find(|t| t.item == Item::Entry(1))
             .unwrap()
             .rect;
-        let at = Position::new(small.x + 1, small.y + 1);
-        assert_eq!(state.click(MAP, at), Outcome::Handled);
+        let at = (small.x + 1, small.y + 1);
+        assert_eq!(state.click(MAP, at.0, at.1), Outcome::Handled);
         assert_eq!(state.selected(), Some(1));
         assert!(state.zoomed().is_none(), "the first click only chooses");
         // Outside the map: nothing.
-        assert_eq!(state.click(MAP, Position::new(200, 200)), Outcome::Handled);
+        assert_eq!(state.click(MAP, 200, 200), Outcome::Handled);
         assert_eq!(state.selected(), Some(1));
         let big = tiles
             .iter()
             .find(|t| t.item == Item::Entry(0))
             .unwrap()
             .rect;
-        let on_big = Position::new(big.x + 1, big.y + 1);
-        state.click(MAP, on_big);
+        let on_big = (big.x + 1, big.y + 1);
+        state.click(MAP, on_big.0, on_big.1);
         assert_eq!(state.selected(), Some(0));
-        state.click(MAP, on_big);
+        state.click(MAP, on_big.0, on_big.1);
         assert!(state.zoomed().is_some(), "the second click zooms in");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn other_keys_are_the_browsers() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut state = AtlasState::with_devices(rt.handle().clone(), Arc::new(LocalVfs), vec![]);
-        for code in [
-            KeyCode::Char('q'),
-            KeyCode::Char('V'),
-            KeyCode::Char('/'),
-            KeyCode::Char(':'),
-        ] {
-            assert_eq!(state.key(press(code), MAP), Outcome::Pass, "{code:?}");
+        let mut state = AtlasState::with_devices(Arc::new(LocalVfs), Arc::new(Offline), vec![]);
+        for key in ["q", "V", "/", ":"] {
+            assert_eq!(state.key(key, Mods::default(), MAP), Outcome::Pass, "{key}");
         }
-        let ctrl = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
-        assert_eq!(state.key(ctrl, MAP), Outcome::Pass);
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        assert_eq!(state.key("j", ctrl, MAP), Outcome::Pass);
         // With nothing on the map, keys that move or open do nothing and do not panic.
-        for code in [
-            KeyCode::Enter,
-            KeyCode::Char('o'),
-            KeyCode::Tab,
-            KeyCode::Right,
-        ] {
-            assert_eq!(state.key(press(code), MAP), Outcome::Handled, "{code:?}");
+        for key in ["enter", "o", "tab", "right"] {
+            assert_eq!(
+                state.key(key, Mods::default(), MAP),
+                Outcome::Handled,
+                "{key}"
+            );
         }
     }
 }

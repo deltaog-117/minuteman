@@ -28,11 +28,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use theming::Config;
 
-use crate::disk_usage::{DiskUsageView, End, Kind, Row};
 use crate::glyphs;
 use crate::hud::{self, fit_width, format_size, text_width};
 use crate::style;
 use shared::format::group_thousands;
+use shared::usage::{End, Kind, Row};
+use shared::usage_view::DiskUsageView;
 
 /// Cells the bar takes.
 const GAUGE_CELLS: usize = 10;
@@ -247,8 +248,8 @@ pub fn render(frame: &mut Frame<'_>, view: &DiskUsageView, config: &Config) {
     }
 
     let toggle = match view.measure() {
-        crate::disk_usage::Measure::OnDisk => "apparent size",
-        crate::disk_usage::Measure::Apparent => "size on disk",
+        shared::usage::Measure::OnDisk => "apparent size",
+        shared::usage::Measure::Apparent => "size on disk",
     };
     let hints = format!("j/k move  enter open  h up  a {toggle}  r rescan  q close");
     frame.render_widget(
@@ -324,10 +325,11 @@ fn row_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disk_usage::{Kind, Measure, Row, Sizes};
     use proptest::prelude::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use shared::usage::Sizes;
+    use shared::usage::{Kind, Measure, Row};
     use std::path::PathBuf;
 
     #[test]
@@ -431,12 +433,9 @@ mod tests {
         Config::from_sources(None, None, None)
     }
 
-    fn fill(rt: &tokio::runtime::Runtime, root: &std::path::Path) -> DiskUsageView {
-        let mut view = DiskUsageView::open(
-            rt.handle().clone(),
-            std::sync::Arc::new(shared::LocalVfs),
-            root.to_path_buf(),
-        );
+    fn fill(root: &std::path::Path) -> DiskUsageView {
+        let mut view =
+            DiskUsageView::open(std::sync::Arc::new(shared::LocalVfs), root.to_path_buf());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while view.end().is_none() {
             view.poll();
@@ -474,20 +473,19 @@ mod tests {
             .collect()
     }
 
-    fn populated() -> (tokio::runtime::Runtime, PathBuf, DiskUsageView) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+    fn populated() -> (PathBuf, DiskUsageView) {
         let root = scratch("populated");
         std::fs::create_dir_all(root.join("logs")).unwrap();
         std::fs::write(root.join("logs/big.log"), vec![b'x'; 300_000]).unwrap();
         std::fs::write(root.join("notes.txt"), vec![b'x'; 1_200]).unwrap();
         std::fs::write(root.join("empty"), b"").unwrap();
-        let view = fill(&rt, &root);
-        (rt, root, view)
+        let view = fill(&root);
+        (root, view)
     }
 
     #[test]
     fn the_screen_shows_the_path_totals_sizes_shares_bars_and_names_biggest_first() {
-        let (_rt, root, view) = populated();
+        let (root, view) = populated();
         let out = screen(100, 14, &view, &config());
         let all = out.join("\n");
         assert!(out[0].contains("disk usage:"), "{out:?}");
@@ -520,18 +518,17 @@ mod tests {
 
     #[test]
     fn the_hint_names_the_other_measure_and_the_header_names_the_current_one() {
-        let (rt, root, mut view) = populated();
+        let (root, mut view) = populated();
         let text = |view: &DiskUsageView| screen(110, 12, view, &config()).join("\n");
         assert!(text(&view).contains("a apparent size") && text(&view).contains("on disk"));
         view.toggle_measure();
         assert!(text(&view).contains("a size on disk") && text(&view).contains("apparent size"));
-        drop(rt);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn the_ascii_glyph_set_draws_the_whole_view_in_ascii() {
-        let (_rt, root, view) = populated();
+        let (root, view) = populated();
         let mut ascii = config();
         ascii.ui.glyphs = theming::GlyphSet::Ascii;
         let all = screen(100, 14, &view, &ascii).join("\n");
@@ -562,12 +559,11 @@ mod tests {
 
     #[test]
     fn scrolling_a_long_list_keeps_the_selected_row_on_screen() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("long");
         for i in 0..60 {
             std::fs::write(root.join(format!("file{i:02}")), vec![b'x'; 100 + i]).unwrap();
         }
-        let mut view = fill(&rt, &root);
+        let mut view = fill(&root);
         screen(80, 12, &view, &config());
         view.move_to(45);
         let out = screen(80, 12, &view, &config());
@@ -582,22 +578,21 @@ mod tests {
 
     #[test]
     fn an_empty_or_unreadable_folder_says_so_and_no_size_of_screen_panics() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("empty");
-        let empty = fill(&rt, &root);
+        let empty = fill(&root);
         assert!(
             screen(60, 8, &empty, &config())
                 .join("\n")
                 .contains("empty")
         );
-        let gone = fill(&rt, &root.join("missing"));
+        let gone = fill(&root.join("missing"));
         assert!(
             screen(60, 8, &gone, &config())
                 .join("\n")
                 .contains("cannot read")
         );
 
-        let (_rt2, populated_root, view) = populated();
+        let (populated_root, view) = populated();
         for (w, h) in [
             (1, 1),
             (3, 2),
@@ -617,13 +612,8 @@ mod tests {
 
     #[test]
     fn a_scan_that_is_still_running_shows_its_progress() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let root = scratch("running");
-        let view = DiskUsageView::open(
-            rt.handle().clone(),
-            std::sync::Arc::new(shared::LocalVfs),
-            root.clone(),
-        );
+        let view = DiskUsageView::open(std::sync::Arc::new(shared::LocalVfs), root.clone());
         // Drawn before any poll: the scan has not reported, so it is still "scanning".
         let out = screen(80, 8, &view, &config()).join("\n");
         assert!(out.contains("scanning"), "{out}");

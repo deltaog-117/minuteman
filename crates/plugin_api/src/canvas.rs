@@ -270,8 +270,14 @@ fn is_false(value: &bool) -> bool {
 #[serde(tag = "input", rename_all = "snake_case")]
 pub enum CanvasInput {
     /// The view opened with this many cells (and again, with the same, if it is reopened). The
-    /// plugin should look at the machine only from now until `close`.
-    Open { width: u16, height: u16 },
+    /// plugin should look at the machine only from now until `close`. `here` is the folder the
+    /// browser is in, for a view that marks where the user is.
+    Open {
+        width: u16,
+        height: u16,
+        #[serde(default)]
+        here: PathBuf,
+    },
     /// The window changed: lay out again for this size.
     Resize { width: u16, height: u16 },
     /// The view closed.

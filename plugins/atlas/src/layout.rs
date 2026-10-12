@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! The treemap behind the atlas (`atlas`, `atlas_view`): a list of sizes laid out as rectangles of
+//! The treemap behind the atlas (`state`, `canvas`): a list of sizes laid out as rectangles of
 //! terminal cells whose areas follow the sizes, and the moves between those rectangles.
 //!
 //! Everything here is pure and works on whole cells, so a tile is never half a cell and the tiles
@@ -30,7 +30,37 @@
 //! its own, nor is a map too small to cut: its entries are folded into one `Item::Small` tile,
 //! which is drawn but never chosen.
 
-use ratatui::layout::{Position, Rect};
+/// A rectangle of canvas cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl Rect {
+    pub const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub fn right(self) -> u16 {
+        self.x.saturating_add(self.width)
+    }
+
+    pub fn bottom(self) -> u16 {
+        self.y.saturating_add(self.height)
+    }
+
+    pub fn contains(self, x: u16, y: u16) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+}
 
 /// The fewest cells an entry (or a group of them) may deserve and still get a tile of its own.
 pub const MIN_CELLS: u128 = 6;
@@ -171,8 +201,8 @@ fn split(plan: &Plan<'_>, lo: usize, hi: usize, rect: Rect, out: &mut Vec<Tile>)
 }
 
 /// The tile under `pointer`, if any.
-pub fn tile_at(tiles: &[Tile], pointer: Position) -> Option<&Tile> {
-    tiles.iter().find(|tile| tile.rect.contains(pointer))
+pub fn tile_at(tiles: &[Tile], x: u16, y: u16) -> Option<&Tile> {
+    tiles.iter().find(|tile| tile.rect.contains(x, y))
 }
 
 /// Where a tile's middle is, in half-cells across and quarter-rows down so that one unit is the
@@ -426,7 +456,7 @@ mod tests {
             let mut covered = 0u64;
             for (i, a) in tiles.iter().enumerate() {
                 prop_assert!(a.rect.width >= 1 && a.rect.height >= 1);
-                prop_assert!(area.contains(a.rect.as_position()));
+                prop_assert!(area.contains(a.rect.x, a.rect.y));
                 prop_assert!(a.rect.right() <= area.right() && a.rect.bottom() <= area.bottom());
                 covered += area_of(a.rect);
                 for b in &tiles[i + 1..] {

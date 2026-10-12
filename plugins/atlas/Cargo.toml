@@ -1,0 +1,19 @@
+[package]
+name = "atlas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The atlas Minuteman ships as a plugin: a zoomable map of the machine's storage, from the volumes to the biggest folders on one of them, sent to the host as a canvas for it to draw."
+
+[[bin]]
+name = "mman-atlas"
+path = "src/main.rs"
+
+[dependencies]
+plugin_api = { path = "../../crates/plugin_api" }
+shared = { path = "../../crates/shared" }
+serde_json = "1.0"
+
+[dev-dependencies]
+proptest = "1.11"

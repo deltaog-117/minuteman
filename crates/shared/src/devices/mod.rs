@@ -97,6 +97,21 @@ impl Device {
     }
 }
 
+/// The index of the device whose mount holds `dir`, preferring the deepest mount, so a folder on a
+/// separately mounted `/home` belongs to that and not to `/`.
+pub fn holding(devices: &[Device], dir: &std::path::Path) -> Option<usize> {
+    devices
+        .iter()
+        .enumerate()
+        .filter_map(|(index, device)| {
+            let mount = device.mount.as_deref()?;
+            dir.starts_with(mount)
+                .then_some((mount.as_os_str().len(), index))
+        })
+        .max()
+        .map(|(_, index)| index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1546,7 +1546,8 @@ fn a_view_with_no_plugin_is_nobodys_and_reaches_nobody() {
         plugin_api::Surface::Atlas,
         plugin_api::CanvasInput::Open {
             width: 10,
-            height: 4
+            height: 4,
+            here: PathBuf::new(),
         }
     ));
 }
@@ -1576,7 +1577,8 @@ fn a_plugin_that_draws_a_view_hears_it_open_and_answers_with_a_canvas_and_a_note
             Surface::Wiring,
             CanvasInput::Open {
                 width: 1,
-                height: 1
+                height: 1,
+                here: PathBuf::new(),
             }
         ),
         "the wiring is not this plugin's"
@@ -1586,7 +1588,8 @@ fn a_plugin_that_draws_a_view_hears_it_open_and_answers_with_a_canvas_and_a_note
         Surface::Atlas,
         CanvasInput::Open {
             width: 40,
-            height: 12
+            height: 12,
+            here: PathBuf::new(),
         }
     ));
     wait_for_log(&mut manager, "canvas: atlas open 40x12");

@@ -25,6 +25,7 @@
 //! inside the body, in cells of the canvas. Until the first canvas arrives, and when the plugin has
 //! stopped, it says so in place of the picture rather than showing nothing.
 
+use std::path::Path;
 use std::time::Instant;
 
 use crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -66,11 +67,18 @@ pub struct CanvasPane {
 impl CanvasPane {
     /// Opens `surface` over `body`, telling the plugin; `None`, with the reason on the status
     /// line, when no plugin can be reached.
-    pub fn open(app: &mut App, surface: Surface, body: Rect, now: Instant) -> Option<Self> {
+    pub fn open(
+        app: &mut App,
+        surface: Surface,
+        body: Rect,
+        here: &Path,
+        now: Instant,
+    ) -> Option<Self> {
         let told = (body.width, body.height);
         let input = CanvasInput::Open {
             width: told.0,
             height: told.1,
+            here: here.to_path_buf(),
         };
         if !app.dispatch_canvas(surface, input) {
             app.status = Some(crate::bundled::missing(surface.provides()));
@@ -181,27 +189,34 @@ impl CanvasPane {
                 canvas_view::paint(frame.buffer_mut(), body, canvas, config, phase);
             }
             None => {
-                frame.render_widget(style::themed_block(config, label(self.surface), true), body);
                 let note = if self.stopped {
                     crate::bundled::missing(self.surface.provides())
                 } else {
                     "loading…".to_string()
                 };
-                let inner = Rect::new(
-                    body.x.saturating_add(2),
-                    body.y.saturating_add(1),
-                    body.width.saturating_sub(4),
-                    body.height.saturating_sub(2),
-                );
-                frame.render_widget(
-                    Paragraph::new(note)
-                        .style(Style::default().fg(style::color(&config.theme.status_fg)))
-                        .wrap(ratatui::widgets::Wrap { trim: true }),
-                    inner,
-                );
+                draw_note(frame, body, config, self.surface, &note);
             }
         }
     }
+}
+
+/// Draws the view of `surface` as its frame holding only `note`, for the moment there is no
+/// canvas: while it loads, and when no plugin can draw it.
+pub fn draw_note(frame: &mut Frame<'_>, body: Rect, config: &Config, surface: Surface, note: &str) {
+    frame.render_widget(Clear, body);
+    frame.render_widget(style::themed_block(config, label(surface), true), body);
+    let inner = Rect::new(
+        body.x.saturating_add(2),
+        body.y.saturating_add(1),
+        body.width.saturating_sub(4),
+        body.height.saturating_sub(2),
+    );
+    frame.render_widget(
+        Paragraph::new(note.to_string())
+            .style(Style::default().fg(style::color(&config.theme.status_fg)))
+            .wrap(ratatui::widgets::Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn mods(modifiers: KeyModifiers) -> Mods {

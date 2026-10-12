@@ -2129,10 +2129,27 @@ draws.
        the real `mman` with the test fixture as the atlas plugin: its canvas drew from the theme,
        a claimed key, a resize and a click reached it, an unclaimed key was the browser's; with no
        plugin the core atlas drew.
-    2. [ ] `plugins/atlas` (`mman-atlas`), and delete the core atlas. It needs the volume list
-       (`shared::devices`) and a folder scanner that sums sizes by level; the scanner now in
-       `tui::disk_usage` serves the `u` view as well, so it moves to `shared` first (or the
-       plugin sums a host `walk`, which has no on-disk size). Decide that first.
+    2. [x] `plugins/atlas` (`mman-atlas`), and the core atlas deleted. Chosen as COA A (move the
+       scanner into `shared` and run it in the plugin on the local disk) over summing the host's
+       `walk` stream (B, which has no on-disk size and needs a wire change first) and streaming rows
+       from a scanner kept in the core (C, a protocol for one caller). `scan_level` and its row
+       types are `shared::usage`; `DiskUsageView`, the stack of levels and the cancel-on-drop job,
+       is `shared::usage_view` on a plain thread (it never needed `tokio` beyond `spawn_blocking`),
+       so the `u` view and the plugin run one implementation; `holding` is
+       `shared::devices::holding`. The treemap, the state and their tests moved to the plugin, and
+       the canvas `open` input gained `here` (the folder the browser is in). The plugin looks at the
+       volumes on a thread of its own while the view shows, sleeps while it is closed, and builds
+       its canvas within the host's limits (the chosen tile first, then the biggest; the smallest
+       left bare past 4,000 parts). Without `mman-atlas` the view shows a frame that says how to get
+       it. Differences from the core's atlas: ASCII symbols only (`*`, `|`, no per-kind icon), the
+       chosen block in the selection color with a frame, and a claimed key held with `Ctrl` or
+       `Alt` ignored rather than passed to the browser. Verified by 38 unit tests (a property test
+       runs the host's own `checked` over any window and any volumes), 4 against the real process,
+       and 16 checks through a pty on the compiled `mman` read through `pyte`; leaving the view
+       during a scan of `/` took the plugin from 140 CPU ticks in 3 s to none.
+       Follow-ups: this machine lists one volume, so the multi-volume layout is covered by unit
+       tests and not by a pty session; not tried in a real kitty; the status-bar hint arrives with
+       the first canvas, a frame after the view switch; the wheel does nothing on the map.
     3. [ ] `plugins/wiring`, the same way: also needs the topology and activity from `shared` (they
        already are), the folder unfolding (`wiring_folders`), and `Send`, which `canvas_note`
        already carries. Needs a click's `double` if the diagram uses it.
@@ -2439,12 +2456,15 @@ draws.
    a checkout `cargo build -p previewer`), and `cargo install --path plugins/inspect`
    (`mman-inspect`, which the Inspect panel now needs; from a checkout `cargo build -p inspector`),
    and `cargo install --path plugins/archive` (`mman-archive`, which compress and extract now need;
-   from a checkout `cargo build -p archiver`).
+   from a checkout `cargo build -p archiver`), and `cargo install --path plugins/atlas`
+   (`mman-atlas`, which the atlas view now needs; from a checkout `cargo build -p atlas`).
    Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. Nothing new to try by hand this cycle: no bundled plugin draws a canvas yet, so the atlas is
-   still the core's. The check is the test with the fixture plugin (`cargo test -p plugin_host
-   --test host_integration canvas`). `mman-ssh` is wired in since the last cycle: install it
+1. Press `V` until the title says `atlas` (the last view before the list): the same map as before,
+   now drawn by `mman-atlas` — `Enter` zooms in, `Backspace` out, `o` opens in the browser, `a`
+   swaps size on disk for apparent size once zoomed (on the map `a` is still the appearance
+   popup). Move `mman` alone somewhere without `mman-atlas` and the view says how to get it.
+   `mman-ssh` is wired in since an earlier cycle: install it
    (`cargo install --path plugins/ssh`) and `mman ssh://host/dir` browses a machine;
    `cargo test -p vfs_remote --release --test throughput -- --ignored --nocapture` times it.
    Before that: `cargo run -p tui` — mark a folder with `v` and `:compress x.tar.gz` (the header
@@ -2570,8 +2590,8 @@ draws.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
-4. Next cycle: M7c step 2, `plugins/atlas` (decide where the folder scanner lives first); M7c
-   step 1, the canvas, is done, and so is M7b. Medium Priority holds the follow-ups to remote browsing and the other features
+4. Next cycle: M7c step 3, `plugins/wiring`; M7c steps 1 and 2 (the canvas and the atlas plugin)
+   are done, and so is M7b. Medium Priority holds the follow-ups to remote browsing and the other features
    listed there. Folder moves no longer block, so the next biggest gaps are the other things that
    read on the render thread (undo of a large move, a large archive's index) and a prompt for a
    password or a new host key.

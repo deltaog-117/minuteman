@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugins/atlas` (`mman-atlas`), a ninth bundled plugin that provides `canvas-atlas`: the atlas view,
+  the zoomable map of the machine's storage, now lives in it. It looks at the volumes on a thread of
+  its own while the view shows, lays them out as a treemap, zooms into a volume's folders with the
+  disk usage scanner, and sends the picture to the host as a canvas (blocks split by how full a
+  volume is, frames, labels, claimed keys); the host asks it for nothing else. A closed view costs
+  nothing: the plugin sleeps until the host writes. Install with `cargo install --path plugins/atlas`.
+  Author: deltaog-117.
+- `shared::usage` and `shared::usage_view`: the folder scanner (`scan_level`) and the disk usage
+  view's state (`DiskUsageView`) with their tests and the `/usr` benchmark, so the `u` view and the
+  atlas plugin run one implementation. `shared::devices::holding` finds the device a folder is on.
+  Author: deltaog-117.
 - `plugin_api`: a `canvas` a plugin can draw a whole-body view with (`set_canvas`): blocks with an
   optional fill level, frames, text and orthogonal paths on a grid of cells, painted by tone, hue
   number and mark and never by color, together with the keys it claims and a status hint. The host
@@ -17,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`canvas_note`: a message, a folder to show, files to send). Author: deltaog-117.
 - `tui`: draws such a canvas in the body of the atlas view from the user's theme (`canvas_view`) and
   keeps its state (`canvas_pane`). When a plugin provides `canvas-atlas`, the atlas is that plugin's
-  and only the keys its canvas claims reach it; with none, the atlas draws itself as before. No
-  bundled plugin provides it yet. Author: deltaog-117.
+  and only the keys its canvas claims reach it; with none, the view says how to get one. `plugins/atlas` is
+  the first to provide it. Author: deltaog-117.
 - `plugin_api`: `Peer::submit` sends a request and returns a `Reply` to wait on later, so a caller
   can have several in flight; the default answers at once through `call`, and `ServeLink` writes
   the request immediately. `vfs_remote`'s writer sends up to four windows ahead of their replies
@@ -147,6 +158,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- `plugin_api`: the `open` input of a canvas view carries `here`, the folder the browser is in, so
+  a view can mark where the user is. Absent in an older host, it reads as empty. Author: deltaog-117.
+- `shared::usage_view::DiskUsageView::open` takes no `tokio` runtime handle: it scans on a thread of
+  its own and cancels when dropped, as before. Author: deltaog-117.
+- The atlas view needs `mman-atlas` installed. Without it the view shows a frame that says how to
+  get it, and the rest of `mman` runs. Its look is the same except that it draws only ASCII
+  symbols (a `*` before the name of the volume or folder you are in, `|` between figures, no icon
+  per kind of volume) and the chosen block is in the selection color with a frame round it.
+  Author: deltaog-117.
 - Browsing a remote machine (`ssh://`) is now served by the `mman-ssh` plugin: `mman` builds its
   file system from `SshVfs` and the plugin manager's own link to the plugin, and `mman-ssh` is a
   bundled plugin found beside `mman` or on `PATH` like the others. Without it, opening an `ssh://`
@@ -334,6 +354,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to get `mman-archive` and the rest of the file manager is untouched.
 
 ### Removed
+- The core atlas (`atlas`, `atlas_layout`, `atlas_view` in `tui`) and `App::begin_atlas`; the same
+  state, layout and tests live in `plugins/atlas`. Author: deltaog-117.
 - `vfs_ssh`, the in-process SSH/SFTP backend, and with it `tokio`'s companions `openssh` and
   `openssh-sftp-client` from the core's dependencies; the same engine lives on in `plugins/ssh`.
   Author: deltaog-117.
