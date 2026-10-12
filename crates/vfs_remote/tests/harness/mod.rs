@@ -26,13 +26,13 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, Once, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use plugin_api::{
-    API_VERSION, Answer, Epoch, Peer, PeerError, VfsFault, VfsRequest, request_to_line,
+    API_VERSION, Answer, Epoch, Peer, PeerError, Reply, VfsFault, VfsRequest, request_to_line,
 };
 use serde_json::{Value, json};
 use shared::LocalVfs;
@@ -153,7 +153,15 @@ impl ProcessPeer {
 }
 
 impl Peer for ProcessPeer {
-    fn call(&self, request: &VfsRequest, _after: Option<Epoch>) -> Result<Answer, PeerError> {
+    fn call(&self, request: &VfsRequest, after: Option<Epoch>) -> Result<Answer, PeerError> {
+        self.submit(request, after)?.wait()
+    }
+
+    fn submit(
+        &self,
+        request: &VfsRequest,
+        _after: Option<Epoch>,
+    ) -> Result<Box<dyn Reply>, PeerError> {
         let id = {
             let mut next = self.next_id.lock().unwrap_or_else(PoisonError::into_inner);
             *next += 1;
@@ -172,7 +180,16 @@ impl Peer for ProcessPeer {
                 .and_then(|()| stdin.flush())
                 .map_err(|_| PeerError::Stopped)?;
         }
-        match rx.recv_timeout(WAIT) {
+        Ok(Box::new(Awaited(rx)))
+    }
+}
+
+/// A request written to the process whose reply has not come yet.
+struct Awaited(Receiver<Result<Value, PeerError>>);
+
+impl Reply for Awaited {
+    fn wait(self: Box<Self>) -> Result<Answer, PeerError> {
+        match self.0.recv_timeout(WAIT) {
             Ok(Ok(value)) => Ok(Answer {
                 epoch: Epoch(1),
                 value,

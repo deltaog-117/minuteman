@@ -17,9 +17,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use plugin_api::{Answer, Bytes, IoKind, MAX_VFS_READ};
+use plugin_api::{Answer, Bytes, IoKind, MAX_VFS_READ, Reply};
 use proptest::prelude::*;
 use serde::Serialize;
 use serde_json::Value;
@@ -367,6 +367,129 @@ fn a_file_written_in_small_pieces_goes_in_few_windows_and_is_closed() {
     assert_eq!(stand.count(|r| matches!(r, VfsRequest::Write { .. })), 4);
     assert_eq!(stand.count(|r| matches!(r, VfsRequest::Flush { .. })), 1);
     assert_eq!(stand.count(|r| matches!(r, VfsRequest::Close { .. })), 1);
+}
+
+/// A plugin that is slow to answer: a submitted request is run only when its reply is waited for,
+/// so the requests a writer has in flight pile up the way they do behind a busy plugin.
+struct Lagging {
+    stand: Arc<Stand>,
+    outstanding: AtomicUsize,
+    peak: AtomicUsize,
+    /// Fail every write that is waited for.
+    refuse_writes: AtomicBool,
+}
+
+struct Deferred {
+    peer: Arc<Lagging>,
+    request: VfsRequest,
+    after: Option<Epoch>,
+}
+
+impl Reply for Deferred {
+    fn wait(self: Box<Self>) -> Result<Answer, PeerError> {
+        self.peer.outstanding.fetch_sub(1, Ordering::SeqCst);
+        if self.peer.refuse_writes.load(Ordering::SeqCst)
+            && matches!(self.request, VfsRequest::Write { .. })
+        {
+            return Err(PeerError::Fault(VfsFault::Io {
+                kind: IoKind::Other,
+                message: "disk full".to_string(),
+            }));
+        }
+        self.peer.stand.call(&self.request, self.after)
+    }
+}
+
+impl Peer for Lagging {
+    fn call(&self, request: &VfsRequest, after: Option<Epoch>) -> Result<Answer, PeerError> {
+        self.stand.call(request, after)
+    }
+}
+
+/// `Peer::submit` needs the `Arc` the reply keeps, so the lagging peer is used through this.
+struct LaggingPeer(Arc<Lagging>);
+
+impl Peer for LaggingPeer {
+    fn call(&self, request: &VfsRequest, after: Option<Epoch>) -> Result<Answer, PeerError> {
+        self.0.call(request, after)
+    }
+
+    fn submit(
+        &self,
+        request: &VfsRequest,
+        after: Option<Epoch>,
+    ) -> Result<Box<dyn Reply>, PeerError> {
+        let now = self.0.outstanding.fetch_add(1, Ordering::SeqCst) + 1;
+        self.0.peak.fetch_max(now, Ordering::SeqCst);
+        Ok(Box::new(Deferred {
+            peer: Arc::clone(&self.0),
+            request: request.clone(),
+            after,
+        }))
+    }
+}
+
+fn lagging_vfs(stand: &Arc<Stand>) -> (SshVfs, Arc<Lagging>) {
+    let lagging = Arc::new(Lagging {
+        stand: Arc::clone(stand),
+        outstanding: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        refuse_writes: AtomicBool::new(false),
+    });
+    let vfs = SshVfs::new(
+        Arc::new(MemVfs::new()) as Arc<dyn Vfs>,
+        Arc::new(LaggingPeer(Arc::clone(&lagging))) as Arc<dyn Peer>,
+    );
+    (vfs, lagging)
+}
+
+#[test]
+fn windows_are_sent_ahead_of_the_replies_within_a_bound_and_all_arrive() {
+    let body: Vec<u8> = (0..(4u32 << 20)).map(|i| (i % 251) as u8).collect();
+    let stand = Stand::new(&[]);
+    let (vfs, lagging) = lagging_vfs(&stand);
+    let mut writer = vfs.create_write(&at("/big")).unwrap();
+    for piece in body.chunks(8 << 10) {
+        writer.write_all(piece).unwrap();
+    }
+    writer.flush().unwrap();
+    drop(writer);
+    let peak = lagging.peak.load(Ordering::SeqCst);
+    assert!(peak > 1, "windows overlapped: peak {peak}");
+    assert!(peak <= 5, "the bound held: peak {peak}");
+    assert_eq!(lagging.outstanding.load(Ordering::SeqCst), 0);
+    assert_eq!(stand.file("/big"), Some(body));
+}
+
+#[test]
+fn a_write_that_fails_after_it_was_sent_is_reported_by_flush() {
+    let stand = Stand::new(&[]);
+    let (vfs, lagging) = lagging_vfs(&stand);
+    lagging.refuse_writes.store(true, Ordering::SeqCst);
+    let mut writer = vfs.create_write(&at("/out")).unwrap();
+    writer.write_all(b"some bytes").unwrap();
+    let error = writer.flush().expect_err("the refused write is reported");
+    assert!(error.to_string().contains("disk full"), "{error}");
+}
+
+#[test]
+fn the_close_waits_for_the_writes_still_on_their_way() {
+    let stand = Stand::new(&[]);
+    let (vfs, _lagging) = lagging_vfs(&stand);
+    let mut writer = vfs.create_write(&at("/out")).unwrap();
+    writer.write_all(&vec![7u8; 600 << 10]).unwrap();
+    drop(writer);
+    let calls = stand.calls();
+    let close = calls
+        .iter()
+        .position(|r| matches!(r, VfsRequest::Close { .. }))
+        .expect("closed");
+    let last_write = calls
+        .iter()
+        .rposition(|r| matches!(r, VfsRequest::Write { .. }))
+        .expect("written");
+    assert!(last_write < close, "{calls:?}");
+    assert_eq!(stand.file("/out").map(|f| f.len()), Some(600 << 10));
 }
 
 #[test]

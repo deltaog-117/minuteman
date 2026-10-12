@@ -2095,6 +2095,14 @@ draws.
        fast link and not on a slow one), then binary frames for `read`/`write` or sending the next
        window before the reply to the last, measured again through the real host; a half-written
        file when the plugin dies mid-copy is removed by the copy and not by the plugin.
+       **Upload decided: pipelined.** `Peer::submit` returns a `Reply` to wait on later, and the
+       writer keeps four 256 KiB windows in flight (`flush` and drop wait for all, and the close
+       follows them). Chosen over accepting the figure and over binary frames. Measured the same
+       way: upload 109 MiB/s through the plugin against 56 in-process (0.52x the time, was 2.4x),
+       download unchanged; through the harness's process stand-in, so step 3 measures once more
+       through the real `ServeLink`. Tested with a lagging peer (overlap bounded at five, close
+       after the last write, a refused write reported by `flush`) and `ServeLink` answering two
+       requests in flight to their own callers.
     3. [ ] switch `main.rs` from `RoutedVfs` to `SshVfs`, delete `vfs_ssh` and its dependencies
        from the core, add the missing-plugin message. From here ssh needs `mman-ssh` installed.
   - [ ] **M7c – the alternate views** (decided after M7b, with the cargo-feature fallback open).
@@ -2407,7 +2415,8 @@ draws.
 1. Nothing new to try by hand this cycle: `mman-ssh` is built but not wired in, and `mman` still
    browses `ssh://` machines in-process. Its tests are the check: `cargo test -p remoter -p
    vfs_remote` (they start a real `sshd` on a loopback port and skip themselves without one), and
-   `cargo test -p vfs_remote --release --test throughput -- --ignored --nocapture` for the timing.
+   `cargo test -p vfs_remote --release --test throughput -- --ignored --nocapture` for the timing
+   (upload is now about twice the in-process rate).
    Before that: `cargo run -p tui` — mark a folder with `v` and `:compress x.tar.gz` (the header
    shows the gauge; `Esc` stops it), then mark the archive and `:extract`; `:compress -p s.zip` asks
    twice for a password and `:extract` of that zip asks once and says `wrong password` for a bad
@@ -2532,7 +2541,7 @@ draws.
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: M7b step 3 (switch `main.rs` to `SshVfs`, delete `vfs_ssh`, add the missing-plugin
-   message), after deciding what the upload figure above asks for. Medium Priority holds the follow-ups to remote browsing and the other features
+   message); the upload figure is settled (pipelined, 109 MiB/s). Medium Priority holds the follow-ups to remote browsing and the other features
    listed there. Folder moves no longer block, so the next biggest gaps are the other things that
    read on the render thread (undo of a large move, a large archive's index) and a prompt for a
    password or a new host key.

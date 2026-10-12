@@ -31,11 +31,11 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use plugin_api::{Answer, Epoch, Peer, PeerError, VfsFault, VfsRequest, request_to_line};
+use plugin_api::{Answer, Epoch, Peer, PeerError, Reply, VfsFault, VfsRequest, request_to_line};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -189,34 +189,52 @@ impl Peer for ServeLink {
     }
 
     fn call(&self, request: &VfsRequest, after: Option<Epoch>) -> Result<Answer, PeerError> {
-        let (conn, id, reply) = {
-            let state = self.state();
-            let conn = state.conn.clone().ok_or(PeerError::Unavailable)?;
-            if after.is_some_and(|epoch| epoch != conn.epoch) {
-                return Err(PeerError::Stale);
-            }
-            if conn.life.exit() != Exit::Running {
-                return Err(PeerError::Unavailable);
-            }
-            let Some((id, reply)) = conn.pending.expect() else {
-                return Err(PeerError::Stopped);
-            };
-            // Written while the lock is held, so an `attach` cannot slip between the epoch check
-            // and the write.
-            if conn.stdin.send(request_to_line(id, request)).is_err() {
-                conn.pending.forget(id);
-                return Err(PeerError::Stopped);
-            }
-            (conn, id, reply)
+        self.submit(request, after)?.wait()
+    }
+
+    fn submit(
+        &self,
+        request: &VfsRequest,
+        after: Option<Epoch>,
+    ) -> Result<Box<dyn Reply>, PeerError> {
+        let state = self.state();
+        let conn = state.conn.clone().ok_or(PeerError::Unavailable)?;
+        if after.is_some_and(|epoch| epoch != conn.epoch) {
+            return Err(PeerError::Stale);
+        }
+        if conn.life.exit() != Exit::Running {
+            return Err(PeerError::Unavailable);
+        }
+        let Some((id, reply)) = conn.pending.expect() else {
+            return Err(PeerError::Stopped);
         };
-        match reply.recv_timeout(REPLY_TIMEOUT) {
+        // Written while the lock is held, so an `attach` cannot slip between the epoch check
+        // and the write.
+        if conn.stdin.send(request_to_line(id, request)).is_err() {
+            conn.pending.forget(id);
+            return Err(PeerError::Stopped);
+        }
+        Ok(Box::new(Waiting { conn, id, reply }))
+    }
+}
+
+/// A request written to the plugin whose reply is still to come.
+struct Waiting {
+    conn: Conn,
+    id: u64,
+    reply: Receiver<Result<Value, PeerError>>,
+}
+
+impl Reply for Waiting {
+    fn wait(self: Box<Self>) -> Result<Answer, PeerError> {
+        match self.reply.recv_timeout(REPLY_TIMEOUT) {
             Ok(Ok(value)) => Ok(Answer {
-                epoch: conn.epoch,
+                epoch: self.conn.epoch,
                 value,
             }),
             Ok(Err(error)) => Err(error),
             Err(RecvTimeoutError::Timeout) => {
-                conn.pending.forget(id);
+                self.conn.pending.forget(self.id);
                 Err(PeerError::TimedOut)
             }
             Err(RecvTimeoutError::Disconnected) => Err(PeerError::Stopped),
@@ -294,6 +312,23 @@ mod tests {
         let answer = waiter.join().unwrap().unwrap();
         assert_eq!(answer.value, json!([]));
         assert_eq!(answer.epoch, Epoch(1));
+    }
+
+    #[test]
+    fn a_second_request_is_written_before_the_first_is_answered() {
+        let link = ServeLink::new();
+        let mut fake = attached(&link);
+        let first = link.submit(&list(), None).unwrap();
+        let second = link.submit(&list(), None).unwrap();
+        // Answered in the opposite order to prove each reply finds its own request.
+        let sent_first: Value =
+            serde_json::from_str(&fake.lines.try_recv().expect("first written")).unwrap();
+        let sent_second: Value =
+            serde_json::from_str(&fake.lines.try_recv().expect("second written")).unwrap();
+        fake.pending.answer(&sent_second["id"], Ok(json!("two")));
+        fake.pending.answer(&sent_first["id"], Ok(json!("one")));
+        assert_eq!(first.wait().unwrap().value, json!("one"));
+        assert_eq!(second.wait().unwrap().value, json!("two"));
     }
 
     #[test]

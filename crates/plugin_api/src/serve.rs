@@ -325,12 +325,46 @@ pub trait Peer: Send + Sync {
     /// See [`PeerError`].
     fn call(&self, request: &VfsRequest, after: Option<Epoch>) -> Result<Answer, PeerError>;
 
+    /// Sends `request` and returns before the plugin has answered, so the caller can send the
+    /// next one while this one is on its way. The default answers at once through [`call`]
+    /// (`Peer::call`), which keeps a stand-in that never overlaps requests correct.
+    ///
+    /// # Errors
+    ///
+    /// A request that could not be sent; a failure of the answer comes from [`Reply::wait`].
+    fn submit(
+        &self,
+        request: &VfsRequest,
+        after: Option<Epoch>,
+    ) -> Result<Box<dyn Reply>, PeerError> {
+        Ok(Box::new(Settled(self.call(request, after))))
+    }
+
     /// Sends `request` for a handle opened in epoch `after` and does not wait for the reply: for
     /// closing a file from a destructor, which must not stall the interface on a plugin that has
     /// stopped answering. A request that cannot be sent is dropped, since a plugin that is gone
     /// has already let go of everything.
     fn release(&self, request: &VfsRequest, after: Epoch) {
         let _ = self.call(request, Some(after));
+    }
+}
+
+/// The answer to a request sent with [`Peer::submit`], which may not have arrived yet.
+pub trait Reply: Send {
+    /// Waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// See [`PeerError`].
+    fn wait(self: Box<Self>) -> Result<Answer, PeerError>;
+}
+
+/// An answer that was already known when it was asked for.
+struct Settled(Result<Answer, PeerError>);
+
+impl Reply for Settled {
+    fn wait(self: Box<Self>) -> Result<Answer, PeerError> {
+        self.0
     }
 }
 

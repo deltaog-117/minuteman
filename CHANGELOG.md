@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugin_api`: `Peer::submit` sends a request and returns a `Reply` to wait on later, so a caller
+  can have several in flight; the default answers at once through `call`, and `ServeLink` writes
+  the request immediately. `vfs_remote`'s writer sends up to four windows ahead of their replies
+  and waits for every one on `flush` and drop, so a copy to a remote machine through the plugin
+  no longer takes turns with it. Author: deltaog-117.
 - `plugins/ssh` (`mman-ssh`), a plugin that serves `ssh://` paths: reads, writes by offset, make,
   touch, move, copy, remove and permissions over an SFTP session with each machine, using the
   system `ssh` as before. Built and tested but not yet used by `mman`, which still browses remote

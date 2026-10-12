@@ -70,7 +70,7 @@ pub use preview::{
 };
 pub use serve::{
     Answer, Bytes, Epoch, IoKind, LinkTarget, MAX_OPEN_HANDLES, MAX_VFS_READ, METHOD_VFS, Opened,
-    PROVIDES_VFS_ARCHIVE, PROVIDES_VFS_SSH, Peer, PeerError, Resolved, VfsFault, VfsRequest,
+    PROVIDES_VFS_ARCHIVE, PROVIDES_VFS_SSH, Peer, PeerError, Reply, Resolved, VfsFault, VfsRequest,
     WireKind, WireMeta, WireScan, fault_line, reply_line, request_to_line,
 };
 pub use view::{

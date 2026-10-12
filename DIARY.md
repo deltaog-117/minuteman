@@ -7485,6 +7485,36 @@ refusal of a move between machines, a property test of writes at random offsets,
 protocol of the real binary. `SshVfs` has unit tests with an in-memory plugin, including a
 property test that a file written in any pieces and seeks equals the same writes made locally.
 
+## 2026-10-12 — Ssh upload through the plugin, pipelined (M7b)
+
+**Decision.** Step 2 left the upload figure open: 23 MiB/s through the plugin against 56 MiB/s
+in-process, because the writer sent a 256 KiB window and waited for its reply before the next.
+Chosen: send the next windows before the reply to the last (over binary frames, which change the
+wire in three places, and over accepting the figure). Author: deltaog-117.
+
+**What changed.** `Peer` gained `submit`, returning a `Reply` that is waited on later; its default
+runs `call` and hands back the settled result, so every stand-in that never overlaps requests stays
+correct without change. `ServeLink::call` is now `submit` followed by `wait`, with the epoch check
+and the write under the same lock as before. `PluginWriter` keeps up to four windows in flight
+(1 MiB): a fifth makes it read the oldest reply first. `flush` and drop read every reply, and a
+close is only sent after that, so the plugin never closes a handle with a write still unrun.
+
+**Why order does not matter.** Every `write` names its own offset and the plugin seeks to it under
+the file's lock, so the plugin running two windows in the other order gives the same file. It
+could cost a real seek, and the plugin's writer skips the seek when the offset is where it
+already is; the measured run did not suffer from it.
+
+**Measured** (256 MiB, release, loopback `sshd`, through the test harness's process stand-in, not
+`ServeLink` itself): upload 109 MiB/s against 56 in-process (0.52x the time, was 2.4x); download
+unchanged at 19 against 16. Both copies arrived byte for byte. The real host must still be
+measured once `main.rs` uses it, in step 3. Reads were not pipelined: a read-ahead needs the
+reader to guess the next offset, and download already beats in-process.
+
+**Verification.** `scripts/check` passes. New tests: a lagging peer that runs a request only when
+its reply is waited for shows windows overlap, never more than five at once, and all arrive; a write
+refused after it was sent is reported by `flush`; the close comes after the last write; and
+`ServeLink` writes a second request before the first is answered and gives each reply to its own.
+
 ---
 
 ---
