@@ -178,6 +178,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- Showing a `/` search hit, stepping to the next or previous one, going back with `Esc` or an
+  emptied query, and revealing a result from the finder now open the hit's folder in the
+  background, as `:cd` and entering a folder already did, and the trash browser lists a trashed
+  folder for its preview in the background too. On a slow backend the old folder stays up until
+  the new one lands instead of the interface waiting; a hit that cannot be opened says so in the
+  status line and leaves the browser where it was. A folder on this disk still opens in the same
+  frame. `BrowserState::plan_reveal` and `select_path` are new. Author: deltaog-117.
 - The folder under the cursor is listed in the background. Before, every redraw listed it again on
   the render thread, so with the cursor on a folder inside an archive or on an `ssh://` machine
   the interface waited on the plugin for each frame, and a hung plugin froze it. A folder on this

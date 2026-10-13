@@ -7838,6 +7838,42 @@ safe because it is modal.
 
 ---
 
+## 2026-10-13 — Search hits and the trash preview off the render thread
+
+**Decision.** The last cycle left `goto`/`reveal` and the trash view's folder preview listing on
+the render thread. Three courses were weighed: route every caller through the background move
+that `:cd` already uses (A); do only the two a user sees, the search hit and the trash preview,
+and leave the way back from a search blocking (B); and make `goto`/`reveal` non-blocking inside
+`BrowserState` with a pending slot (C). Chosen: A. B leaves a known gap. C rebuilds `NavJob` in
+a crate that has no runtime handle and changes the API the tests and `vfs_remote` use.
+
+**What changed.** `BrowserState::plan_reveal` returns the `MovePlan` to a path's folder, landing
+on the path, or `None` when the path is in the folder already shown; `select_path` moves the
+cursor there. `reveal` is built from the same two, so it behaves as before for callers that
+block. `show_search_match`, `restore_origin` and the finder's reveal call `App::begin_move`;
+`SearchOrigin` gained `path` so the way back can land on the entry the search began on. A move
+still on its way is dropped (`nav = None`) before a newer hit or `Esc` starts, since a second
+`begin_move` is otherwise ignored and the old one would land last. The trash browser polls
+`Previews::dirs` with its own cursor's folder and the frame reads `entries`. `poll_search`,
+`show_search_match`, `step_search`, `update_search` and `draw` lost a `vfs` parameter they no
+longer use.
+
+**Trade-offs.** On a slow backend the search status says "Found" a moment before the folder has
+changed, and a hit that then fails to open leaves that status behind the error. A trip that fails
+reports through the status line instead of resetting the search to idle. The local disk is
+unchanged: `begin_move`'s grace lets a quick folder land before it returns.
+
+**Verification.** `scripts/check` passes. New tests: `plan_reveal` and `select_path` in the
+browser, and four on `App` (a hit in another folder is a background move, `Esc` goes back in the
+background to the same row, `Esc` drops a trip that has not landed, and a hit that cannot be
+opened says so). The trash preview change is drawing code and has no test of its own. The real
+`mman` was not driven by hand.
+
+**Left open.** `open_file` still calls `goto` to open an archive file; it needs the archive's own
+failure message, which `begin_move` does not give.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

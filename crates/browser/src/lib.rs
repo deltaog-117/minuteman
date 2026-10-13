@@ -373,16 +373,37 @@ impl BrowserState {
     /// listing isn't re-read for a hit right here. A path with no parent (the root) is left
     /// alone.
     pub fn reveal(&mut self, vfs: &dyn Vfs, path: &Path) -> Result<(), VfsError> {
-        let Some(parent) = path.parent() else {
-            return Ok(());
-        };
-        if parent != self.current_dir {
-            self.goto(vfs, parent)?;
+        if let Some(plan) = self.plan_reveal(path) {
+            let loaded = plan.load(vfs)?;
+            self.apply_move(loaded);
         }
+        self.select_path(path);
+        Ok(())
+    }
+
+    /// The move [`reveal`](Self::reveal) makes, without making it, landing on `path`; `None` when
+    /// `path` is already in the browsed directory or has no parent, where only the cursor moves
+    /// (see [`select_path`](Self::select_path)).
+    pub fn plan_reveal(&self, path: &Path) -> Option<MovePlan> {
+        let parent = path.parent()?;
+        if parent == self.current_dir {
+            return None;
+        }
+        Some(
+            MovePlan {
+                from: self.current_dir.clone(),
+                kind: MoveKind::Typed(parent.to_path_buf()),
+                landing: Landing::First,
+            }
+            .landing_on(path.to_path_buf()),
+        )
+    }
+
+    /// Puts the cursor on `path` if it is listed here; otherwise leaves it where it is.
+    pub fn select_path(&mut self, path: &Path) {
         if let Some(index) = self.current_entries.iter().position(|e| e.path == path) {
             self.selected = index;
         }
-        Ok(())
     }
 
     pub fn move_down(&mut self) {
@@ -848,6 +869,42 @@ mod tests {
             .reveal(&vfs, &root.join("sub").join("file.txt"))
             .unwrap();
         assert_eq!(state.current_dir(), root.join("sub"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_reveal_plan_lands_on_the_entry_and_is_none_where_only_the_cursor_moves() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+        let target = root.join("sub").join("file.txt");
+
+        assert!(state.plan_reveal(&root.join("sub")).is_none());
+        assert!(state.plan_reveal(Path::new("/")).is_none());
+
+        let plan = state.plan_reveal(&target).unwrap();
+        assert_eq!(
+            state.current_dir(),
+            root,
+            "planning leaves the browser alone"
+        );
+        assert!(state.apply_move(plan.load(&vfs).unwrap()));
+        assert_eq!(state.current_dir(), root.join("sub"));
+        assert_eq!(state.selected_entry().unwrap().path, target);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn select_path_ignores_a_path_that_is_not_listed() {
+        let root = make_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::new(&vfs, root.clone()).unwrap();
+        let before = state.selected_index();
+
+        state.select_path(&root.join("nowhere"));
+        assert_eq!(state.selected_index(), before);
 
         std::fs::remove_dir_all(&root).unwrap();
     }

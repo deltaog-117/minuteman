@@ -1812,6 +1812,21 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   cursor moving onto an archive folder and back (the same script on the previous build leaves the
   cursor stuck). Still on the render thread: `goto`/`reveal` (a `/` search hit or a bookmark far
   away on a slow backend) and the trash view's folder preview.
+- ✅ **Search hits, the finder's reveal and the trash preview off the render thread (COA A)** – the
+  last reads that waited on a slow backend are now background work. `BrowserState::plan_reveal`
+  describes the trip to a hit's folder as a `MovePlan` that lands on the hit (`None` when the hit
+  is in the folder already shown, where `select_path` just moves the cursor), and the `/` search
+  (`show_search_match`, `n`/`p`/arrows), its way back (`restore_origin`, with the entry under the
+  cursor kept in `SearchOrigin::path` so the move can land on it) and the finder's reveal all run
+  it through `App::begin_move`. A trip still on its way is dropped for a newer hit or for `Esc`,
+  so an old result can never land after the new one. The trash browser's folder preview reads
+  through `Previews::dirs` instead of listing once per frame. `BrowserState::reveal` stays for
+  callers that block on purpose, built from the same plan. Chosen over doing only the two visible
+  ones (B) and over a pending slot inside `BrowserState` (C, which would repeat `NavJob`). Tested:
+  `plan_reveal` and `select_path`; a hit in another folder is a background move, `Esc` goes back
+  in the background to the row the search began on, `Esc` drops a trip that has not landed, and a
+  hit that cannot be opened says so. Not driven by hand against a stopped `mman-archive` or an
+  `ssh://` machine. Still on the render thread: opening an archive file from `open_file`.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2665,6 +2680,6 @@ draws.
    plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
    follow-ups to remote browsing and the other features listed there. Folder moves, undo and redo,
    and the folder preview no longer block (see DIARY.md, 2026-10-12 and 2026-10-13). The next
-   biggest gaps are the last few render-thread reads (`goto`/`reveal` for a search hit or bookmark
-   on a slow backend, the trash view's folder preview), a very large `.tar.gz` that is still read
-   whole to open, and a prompt for a password or a new host key.
+   biggest gaps are the one render-thread read left (opening an archive file from `open_file`;
+   search hits, the finder's reveal and the trash preview are background work now), a very large
+   `.tar.gz` that is still read whole to open, and a prompt for a password or a new host key.

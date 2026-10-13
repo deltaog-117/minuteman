@@ -1448,7 +1448,7 @@ fn run(
             return Ok(());
         }
         app.poll_bulk(browser, vfs)?;
-        app.poll_search(browser, vfs);
+        app.poll_search(browser);
         app.poll_nav(browser);
         if let Some(panel) = inspect.as_mut()
             && panel.waiting()
@@ -1619,11 +1619,16 @@ fn run(
         if app.take_resynced() {
             previews.dirs.invalidate();
         }
+        let trashed = trash_view
+            .as_ref()
+            .and_then(|view| view.preview_subject())
+            .filter(|entry| entry.is_dir);
         previews.dirs.poll(
-            browser
-                .selected_entry()
-                .filter(|entry| entry.is_dir)
-                .map(|entry| entry.path.as_path()),
+            match trash_view {
+                Some(_) => trashed.as_ref(),
+                None => browser.selected_entry().filter(|entry| entry.is_dir),
+            }
+            .map(|entry| entry.path.as_path()),
             Instant::now(),
         );
 
@@ -1734,7 +1739,6 @@ fn run(
                 browser,
                 app,
                 previews,
-                vfs,
                 config,
                 Overlay {
                     mode,
@@ -2836,9 +2840,14 @@ fn run(
                             PickerOutcome::Reveal(path) => {
                                 app.picker_closed(popup);
                                 picker = None;
-                                match browser.reveal(vfs, &path) {
-                                    Ok(()) => app.status = None,
-                                    Err(e) => app.status = Some(format!("cannot show it: {e}")),
+                                match browser.plan_reveal(&path) {
+                                    Some(plan) => {
+                                        app.begin_move(browser, plan, None, "cannot show it");
+                                    }
+                                    None => {
+                                        browser.select_path(&path);
+                                        app.status = None;
+                                    }
                                 }
                             }
                         },
@@ -3848,7 +3857,6 @@ fn draw(
     browser: &BrowserState,
     app: &App,
     previews: &mut Previews,
-    vfs: &dyn Vfs,
     config: &Config,
     overlay: Overlay<'_>,
 ) {
@@ -4226,11 +4234,16 @@ fn draw(
         trash_view::render(frame, view, config);
         if let Some(area) = trash_view::layout(frame.area()).preview {
             let subject = view.preview_subject();
-            // A trashed folder is listed once per frame, as a folder in the browser's preview is.
-            let children: Option<Vec<DirEntryInfo>> = subject
-                .as_ref()
-                .filter(|entry| entry.is_dir)
-                .map(|entry| vfs.list_dir(&entry.path).unwrap_or_default());
+            // A trashed folder is listed off this thread, as a folder in the browser's preview is
+            // (see `Previews::dirs`), so the frame only reads what has landed.
+            let children: Option<Vec<DirEntryInfo>> =
+                subject.as_ref().filter(|entry| entry.is_dir).map(|entry| {
+                    previews
+                        .dirs
+                        .entries(&entry.path)
+                        .unwrap_or_default()
+                        .to_vec()
+                });
             draw_preview_pane(
                 frame,
                 area,

@@ -111,11 +111,14 @@ pub enum ConflictSource {
 
 /// Where a `/` search started, so `Esc` (or an emptied query) can put the browser back: the
 /// directory it was in and the cursor's index there. A search can carry the browser into another
-/// directory, so the index alone is no longer enough.
+/// directory, so the index alone is no longer enough. `path` is the entry under the cursor, which
+/// is how the cursor is put back when the way back is a move that lands on it rather than the
+/// index of a listing already on screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchOrigin {
     pub dir: PathBuf,
     pub index: usize,
+    pub path: Option<PathBuf>,
 }
 
 /// A command waiting for the terminal: `main` suspends the interface, runs `line` under `sh -c`
@@ -1739,6 +1742,7 @@ impl App {
             origin: SearchOrigin {
                 dir: browser.current_dir().to_path_buf(),
                 index: browser.selected_index(),
+                path: browser.selected_entry().map(|entry| entry.path.clone()),
             },
         });
     }
@@ -2040,10 +2044,13 @@ impl App {
             Prompt::SearchInput { mut buffer, origin } => match code {
                 KeyCode::Esc => {
                     self.end_search();
-                    self.status = Some(match Self::restore_origin(vfs, browser, &origin) {
-                        Ok(()) => "search cancelled".into(),
-                        Err(e) => format!("search cancelled; could not go back: {e}"),
-                    });
+                    self.status = Some("search cancelled".into());
+                    self.restore_origin(
+                        browser,
+                        &origin,
+                        Some("search cancelled".into()),
+                        "search cancelled; could not go back",
+                    );
                 }
                 KeyCode::Enter => {
                     // Still walking: stop where the cursor is rather than jump later, unasked.
@@ -2054,11 +2061,11 @@ impl App {
                 }
                 // Through the kept matches, best first, wrapping round at either end.
                 KeyCode::Down => {
-                    self.step_search(vfs, browser, 1);
+                    self.step_search(browser, 1);
                     self.prompt = Some(Prompt::SearchInput { buffer, origin });
                 }
                 KeyCode::Up => {
-                    self.step_search(vfs, browser, -1);
+                    self.step_search(browser, -1);
                     self.prompt = Some(Prompt::SearchInput { buffer, origin });
                 }
                 KeyCode::Char(c @ ('n' | 'p'))
@@ -2066,13 +2073,13 @@ impl App {
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL) =>
                 {
-                    self.step_search(vfs, browser, if c == 'n' { 1 } else { -1 });
+                    self.step_search(browser, if c == 'n' { 1 } else { -1 });
                     self.prompt = Some(Prompt::SearchInput { buffer, origin });
                 }
                 _ => {
                     // Only a change to the text starts a new search; moving the cursor does not.
                     if buffer.edit(key) {
-                        self.update_search(vfs, browser, &buffer, &origin);
+                        self.update_search(browser, &buffer, &origin);
                     }
                     self.prompt = Some(Prompt::SearchInput { buffer, origin });
                 }
@@ -2176,20 +2183,12 @@ impl App {
     /// instantly, from the list already on screen — and otherwise walks everything below it on
     /// the blocking pool (see `search_job`), the hit arriving later through `poll_search`. A
     /// stale walk is dropped (and so cancelled) first. An empty query puts the browser back.
-    fn update_search(
-        &mut self,
-        vfs: &dyn Vfs,
-        browser: &mut BrowserState,
-        text: &str,
-        origin: &SearchOrigin,
-    ) {
+    fn update_search(&mut self, browser: &mut BrowserState, text: &str, origin: &SearchOrigin) {
         self.search_job = None;
         self.search_matches.clear();
         let Some(query) = Query::new(text) else {
             self.search_state = SearchState::Idle;
-            if let Err(e) = Self::restore_origin(vfs, browser, origin) {
-                self.status = Some(format!("could not go back: {e}"));
-            }
+            self.restore_origin(browser, origin, None, "could not go back");
             return;
         };
 
@@ -2199,7 +2198,7 @@ impl App {
             let here = rank_entries(&query, browser.current_entries());
             if !here.is_empty() {
                 self.search_matches = here;
-                self.show_search_match(vfs, browser, 0);
+                self.show_search_match(browser, 0);
                 return;
             }
         }
@@ -2221,53 +2220,66 @@ impl App {
     }
 
     /// Puts the cursor on the `position`th kept match, going to its folder if it is elsewhere.
-    fn show_search_match(&mut self, vfs: &dyn Vfs, browser: &mut BrowserState, position: usize) {
+    /// The trip is a background move like any other, so a hit on a slow machine leaves the old
+    /// folder on screen until it lands; a hit still on the way is dropped for the newer one.
+    fn show_search_match(&mut self, browser: &mut BrowserState, position: usize) {
         let Some(path) = self.search_matches.get(position).cloned() else {
             return;
         };
-        self.search_state = match browser.reveal(vfs, &path) {
-            Ok(()) => {
-                self.search_position = position;
-                SearchState::Found {
-                    position,
-                    total: self.search_matches.len(),
-                    more: self.search_matches.len() >= KEPT,
-                }
-            }
-            Err(e) => {
-                self.status = Some(format!("search: could not open {}: {e}", path.display()));
-                SearchState::Idle
-            }
+        self.search_position = position;
+        self.search_state = SearchState::Found {
+            position,
+            total: self.search_matches.len(),
+            more: self.search_matches.len() >= KEPT,
         };
+        self.nav = None;
+        match browser.plan_reveal(&path) {
+            None => browser.select_path(&path),
+            Some(plan) => {
+                let prefix = format!("search: could not open {}", path.display());
+                self.begin_move(browser, plan, None, &prefix);
+            }
+        }
     }
 
     /// Moves to the next (`+1`) or previous (`-1`) kept match, wrapping round at either end. Does
     /// nothing with fewer than two.
-    fn step_search(&mut self, vfs: &dyn Vfs, browser: &mut BrowserState, by: isize) {
+    fn step_search(&mut self, browser: &mut BrowserState, by: isize) {
         let total = self.search_matches.len();
         if total < 2 {
             return;
         }
         let next = (self.search_position as isize + by).rem_euclid(total as isize) as usize;
-        self.show_search_match(vfs, browser, next);
+        self.show_search_match(browser, next);
     }
 
-    /// Returns the browser to where a search began: its directory, then its cursor.
+    /// Returns the browser to where a search began: its directory, then its cursor. Going back to
+    /// another folder is a background move (a move still on its way is dropped first, so it
+    /// cannot land after this one); `done_status` is shown once it lands and `error_prefix` leads
+    /// the message if it cannot.
     fn restore_origin(
-        vfs: &dyn Vfs,
+        &mut self,
         browser: &mut BrowserState,
         origin: &SearchOrigin,
-    ) -> Result<(), VfsError> {
-        if browser.current_dir() != origin.dir {
-            browser.goto(vfs, &origin.dir)?;
+        done_status: Option<String>,
+        error_prefix: &str,
+    ) {
+        self.nav = None;
+        if browser.current_dir() == origin.dir {
+            browser.select_index(origin.index);
+            return;
         }
-        browser.select_index(origin.index);
-        Ok(())
+        let plan = browser.plan_goto(&origin.dir);
+        let plan = match &origin.path {
+            Some(path) => plan.landing_on(path.clone()),
+            None => plan,
+        };
+        self.begin_move(browser, plan, done_status, error_prefix);
     }
 
     /// Applies a finished search to the browser: opens the hit's directory with the cursor on it.
     /// Call once per render tick, like `poll_bulk`.
-    pub fn poll_search(&mut self, browser: &mut BrowserState, vfs: &dyn Vfs) {
+    pub fn poll_search(&mut self, browser: &mut BrowserState) {
         let Some(outcome) = self.search_job.as_mut().and_then(SearchJob::poll) else {
             return;
         };
@@ -2275,7 +2287,7 @@ impl App {
         match outcome {
             SearchOutcome::Found(paths) => {
                 self.search_matches = paths;
-                self.show_search_match(vfs, browser, 0);
+                self.show_search_match(browser, 0);
             }
             SearchOutcome::NotFound { truncated } => {
                 self.search_state = SearchState::NotFound { truncated };
@@ -3905,7 +3917,7 @@ mod tests {
         fn wait_for_search(&mut self) {
             let deadline = Instant::now() + std::time::Duration::from_secs(5);
             while self.app.search_job.is_some() && Instant::now() < deadline {
-                self.app.poll_search(&mut self.browser, &LocalVfs);
+                self.app.poll_search(&mut self.browser);
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             assert!(
@@ -5399,6 +5411,81 @@ mod tests {
         assert!(f.app.prompt.is_none());
         assert_eq!(f.browser.current_dir(), f.root.join("a").join("b"));
         assert_eq!(f.selected_name(), "aerend.md");
+    }
+
+    #[test]
+    fn a_search_hit_in_another_folder_is_a_background_move() {
+        let mut f = Fixture::new("search-bg");
+        f.app.nav_grace = Duration::ZERO;
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aerend");
+        f.wait_for_search();
+        assert!(f.app.is_busy(), "the trip to the hit is running");
+        assert_eq!(f.browser.current_dir(), f.root, "the old folder stays up");
+
+        f.wait_for_idle();
+        assert_eq!(f.browser.current_dir(), f.root.join("a").join("b"));
+        assert_eq!(f.selected_name(), "aerend.md");
+    }
+
+    #[test]
+    fn escape_goes_back_in_the_background_to_the_row_the_search_began_on() {
+        let mut f = Fixture::new("search-escape-bg");
+        f.app.nav_grace = Duration::ZERO;
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+        f.browser.select_index(2);
+        let started_on = f.selected_name();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aerend");
+        f.wait_for_search();
+        f.wait_for_idle();
+        assert_ne!(f.browser.current_dir(), f.root);
+
+        f.press(KeyCode::Esc);
+        assert!(f.app.is_busy(), "the way back is running");
+        f.wait_for_idle();
+        assert_eq!(f.browser.current_dir(), f.root);
+        assert_eq!(f.selected_name(), started_on);
+        assert_eq!(f.app.status.as_deref(), Some("search cancelled"));
+    }
+
+    #[test]
+    fn escape_drops_a_trip_to_a_hit_that_has_not_landed() {
+        let mut f = Fixture::new("search-escape-early");
+        f.app.nav_grace = Duration::ZERO;
+        deep_tree(&f);
+        f.browser.reload(&LocalVfs).unwrap();
+
+        f.app.begin_search(&f.browser);
+        f.type_text("aerend");
+        f.wait_for_search();
+        f.press(KeyCode::Esc);
+
+        // Whatever the hit's listing does now, nobody is left to apply it.
+        std::thread::sleep(Duration::from_millis(50));
+        f.app.poll_nav(&mut f.browser);
+        assert!(!f.app.is_busy());
+        assert_eq!(f.browser.current_dir(), f.root);
+        assert_eq!(f.app.status.as_deref(), Some("search cancelled"));
+    }
+
+    #[test]
+    fn a_hit_that_cannot_be_opened_says_so_and_leaves_the_browser_alone() {
+        let mut f = Fixture::new("search-gone");
+        f.app.nav_grace = Duration::ZERO;
+        // A kept match whose folder has vanished since the walk saw it.
+        f.app.search_matches = vec![f.root.join("vanished").join("x.txt")];
+        f.app.show_search_match(&mut f.browser, 0);
+        f.wait_for_idle();
+
+        assert_eq!(f.browser.current_dir(), f.root);
+        let status = f.app.status.clone().unwrap();
+        assert!(status.starts_with("search: could not open "), "{status}");
     }
 
     fn touch_files(f: &Fixture, names: &[&str]) {
