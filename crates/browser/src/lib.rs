@@ -199,9 +199,18 @@ impl BrowserState {
     /// Flips whether hidden entries are listed and re-lists, keeping the cursor on the same
     /// entry when it is still visible. Returns the new setting.
     pub fn toggle_hidden(&mut self, vfs: &dyn Vfs) -> Result<bool, VfsError> {
-        self.show_hidden = !self.show_hidden;
+        let shown = self.flip_hidden();
         self.reload(vfs)?;
-        Ok(self.show_hidden)
+        Ok(shown)
+    }
+
+    /// Flips whether hidden entries are listed without reading anything. The lists on screen
+    /// keep the old filter until the next listing is applied, so this is for a caller that
+    /// arranges that listing itself (see [`apply_listing`](Self::apply_listing)). Returns the
+    /// new setting.
+    pub fn flip_hidden(&mut self) -> bool {
+        self.show_hidden = !self.show_hidden;
+        self.show_hidden
     }
 
     pub fn current_dir(&self) -> &std::path::Path {
@@ -309,6 +318,15 @@ impl BrowserState {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Filters and sorts a listing of the selected folder that was read elsewhere (on a
+    /// background thread, for a folder that is slow to read), the way [`preview_entries`] does
+    /// for one it reads itself.
+    ///
+    /// [`preview_entries`]: Self::preview_entries
+    pub fn arrange_preview(&self, entries: Vec<DirEntryInfo>) -> Vec<DirEntryInfo> {
+        self.arrange(entries, None)
     }
 
     /// Selects `index` directly, clamped to the current entry count. No-op on an empty listing.
@@ -1123,6 +1141,25 @@ mod tests {
         assert_eq!(state.selected_entry().unwrap().name, ".dotdir");
         let shown = state.preview_entries(&vfs).len();
         assert_eq!(shown, 2);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_listing_read_elsewhere_is_arranged_like_the_one_preview_entries_reads() {
+        let root = make_hidden_tree();
+        let vfs = LocalVfs;
+        let mut state = BrowserState::with_show_hidden(&vfs, root.clone(), true).unwrap();
+        let raw = vfs.list_dir(&state.selected_entry().unwrap().path).unwrap();
+        assert_eq!(
+            state.arrange_preview(raw.clone()),
+            state.preview_entries(&vfs)
+        );
+
+        state.toggle_hidden(&vfs).unwrap();
+        state.toggle_hidden(&vfs).unwrap();
+        state.select_index(0);
+        assert_eq!(state.arrange_preview(raw), state.preview_entries(&vfs));
 
         std::fs::remove_dir_all(&root).unwrap();
     }

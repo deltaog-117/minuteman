@@ -173,6 +173,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- The folder under the cursor is listed in the background. Before, every redraw listed it again on
+  the render thread, so with the cursor on a folder inside an archive or on an `ssh://` machine
+  the interface waited on the plugin for each frame, and a hung plugin froze it. A folder on this
+  disk still shows in the same frame. After a paste, rename, create, `:` command, handover, undo,
+  hidden-files toggle or Refresh in such a folder, the lists are re-read in the background and the
+  cursor keeps its entry; on the local disk it is re-read on the spot as before. New
+  `tui::dir_preview`, `App::resync`, `LiveRefresh::kick`, `shared::is_slow` and
+  `BrowserState::arrange_preview`/`flip_hidden`. Author: deltaog-117.
 - Undo (`z`) and redo (`Z`) run in the background. Taking back a large move no longer freezes the
   interface: the status line shows "undoing… name", `Esc` stops it between two steps, and other
   operations wait until it ends. A cancelled undo or redo keeps the steps it did and leaves the

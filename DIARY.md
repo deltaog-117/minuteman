@@ -99,6 +99,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-12 | Ssh Cut-Over (M7b step 3) | One cut-over: `SshVfs` wired in, `vfs_ssh` deleted, the install line shown when `mman-ssh` is absent (COA A) | ✅ Confirmed |
 | 2026-10-12 | Canvas Primitive for Whole-Body Views (M7c step 1) | A plugin draws atlas and wiring through a `canvas` of semantic parts and claimed keys; grid, tiles, details and filmstrip stay in the core (COA C); the core atlas stays as the fallback until the plugin exists | ✅ Confirmed |
 | 2026-10-12 | The Wiring Diagram as a Plugin (M7c step 3) | The plugin owns the scan, the folders, the layout and the device actions on the local disk, with the load and the browsed folder sent as a `context` (COA A); snapshots fed from the core (B) and keeping the diagram in the core (C) not taken | ✅ Confirmed |
+| 2026-10-13 | Folder Listings Off the Render Thread | A background `DirPreview` for the cursor folder and `App::resync`, which re-reads a local folder on the spot and hands a slow one to the live refresh (COA B); a plugin-side refreshing index (A) and a progress gauge with an on-disk index cache (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -7760,6 +7761,46 @@ files of 1 MiB moved from `/tmp` to the home disk, `z` put all 300 back, `Z` mov
 read the wrong screen row. A worker that panics leaves the operation busy and the batch lost, as
 the trash does. A keypress that records a new change while an undo runs is held back by the busy
 gate; if one ever got through, a stale redo entry could appear.
+
+## 2026-10-13 — Folder listings off the render thread
+
+**Decision.** `draw` listed the folder under the cursor itself, once per frame, and every
+`browser.reload` after a file operation listed two folders on the spot. On the local disk that is
+free; for a folder inside an archive or on an `ssh://` machine each one is a round trip to a
+plugin, with a 120 s timeout when it hangs. Three courses were weighed. A: have the archive plugin
+rebuild a changed index in the background and answer "refreshing" meanwhile. B: move the interface's
+own listings onto the blocking pool. C: a progress gauge with cancel for the first open, plus an
+index cached on disk. Chosen: B. A fixes one backend and cannot serve the old index without
+risking reads at the old offsets of a file that changed; C leaves the render-thread calls where
+they are and adds a file format that has to be trusted.
+
+**What changed.** `tui::dir_preview::DirPreview` lists the folder under the cursor on the blocking
+pool when the cursor reaches it and every 500 ms after (5 s for a slow one), holding the frame at
+most 20 ms for a first listing so a local folder is never drawn empty; `entries(folder)` returns
+nothing unless the listing is of that very folder. `shared::is_slow` (remote, or inside an
+archive) is the one test for "do not wait for this". `App::resync` replaces the nine
+`browser.reload` calls: a folder on this disk is re-read as before, a slow one is passed to
+`LiveRefresh::kick`, which lists again at once through the path that already applies a listing by
+path and keeps the cursor. A kick during a running listing is kept, so a result that started
+before the change cannot be the last word. `toggle_hidden` and Refresh follow the same rule
+(`BrowserState::flip_hidden` flips the filter without reading). The local disk behaves exactly as
+before, which is why no existing test changed.
+
+**Trade-offs.** On a slow folder a paste or rename now shows its result a moment later, when the
+background listing lands, instead of blocking until it does; marks that point at deleted paths are
+dropped then too, and only if the listing differs from what is shown. A folder's preview can be
+up to its interval stale after a change made elsewhere, as the file lists already could.
+
+**Verification.** `scripts/check` passes. New tests: `is_slow` as properties, six on `DirPreview`
+(including a stand-in `Vfs` that sleeps and counts its listings), two on `LiveRefresh::kick`, one
+on `arrange_preview`. The real `mman` was driven over a PTY read through `pyte`: the preview of a
+local folder, a file created behind its back appearing there, and a folder inside a zip listed.
+Then `mman-archive` was stopped with `SIGSTOP` and `j`/`k` moved the cursor between two archive
+folders; the same script against the previous build leaves the cursor where it was.
+
+**Left open.** `goto` and `reveal` (a `/` hit or bookmark far away) and the trash view's folder
+preview still list on the render thread. A very large `.tar.gz` is still read whole to open.
+`ssh://` was not driven by hand, only through the same stopped-plugin path an archive uses.
 
 ---
 

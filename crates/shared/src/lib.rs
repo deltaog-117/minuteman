@@ -46,3 +46,10 @@ pub use ssh_path::{Host, Location, Remote, Target, TargetError, User, is_remote}
 pub use vfs::{
     DirEntryInfo, FileKind, LocalVfs, Metadata, ReadSeek, ScanEntry, Vfs, WriteSeek, create_dir_all,
 };
+
+/// Whether reading `path` may take long enough that the interface must not wait for it: it is on
+/// another machine, or in an archive whose table of contents is read by a plugin. Anything else
+/// is this machine's disk, which answers within a frame.
+pub fn is_slow(path: &std::path::Path) -> bool {
+    is_remote(path) || is_inside(path)
+}

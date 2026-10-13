@@ -33,6 +33,7 @@ mod context_menu;
 mod deck;
 mod deck_view;
 mod desktop_entry;
+mod dir_preview;
 mod disk_usage_view;
 mod extract_popup;
 mod filmstrip_view;
@@ -106,6 +107,7 @@ use crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use deck::{DeckState, Event as DeckEvent, Outcome as DeckKey};
+use dir_preview::DirPreview;
 use extract_popup::ExtractPopup;
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect_panel::InspectPanel;
@@ -693,6 +695,8 @@ struct Previews {
     text: TextPreview,
     /// The filmstrip's strip of neighbour thumbnails; filled only while that view is showing.
     thumbs: Thumbnails,
+    /// The listing of the folder under the cursor, read off the render thread.
+    dirs: DirPreview,
 }
 
 impl Previews {
@@ -703,6 +707,7 @@ impl Previews {
             image,
             text: TextPreview::new(),
             thumbs,
+            dirs: DirPreview::new(handle, vfs),
         }
     }
 
@@ -1604,6 +1609,18 @@ fn run(
             (None, None) => previews.update(browser.selected_entry(), served),
         };
         previews.ask(app, ask);
+        // The folder under the cursor is listed off this thread, so the frame below only reads
+        // what has landed. Anything this program just did to the folder makes the listing stale.
+        if app.take_resynced() {
+            previews.dirs.invalidate();
+        }
+        previews.dirs.poll(
+            browser
+                .selected_entry()
+                .filter(|entry| entry.is_dir)
+                .map(|entry| entry.path.as_path()),
+            Instant::now(),
+        );
 
         if let Some(mut panes) = shells.take() {
             let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
@@ -3410,7 +3427,7 @@ fn run(
                 });
             }
             Some(Action::ToggleHidden) => {
-                let shown = browser.toggle_hidden(vfs)?;
+                let shown = app.toggle_hidden(browser, vfs)?;
                 app.status = Some(
                     if shown {
                         "hidden files shown"
@@ -3535,7 +3552,7 @@ fn run_menu_command(
         (MenuCommand::Extract, _) => *panels.extract = app.begin_extract_form(browser),
         (MenuCommand::Appearance, _) => *panels.appearance = Some(AppearancePopup::new()),
         (MenuCommand::ToggleHidden, _) => {
-            let shown = browser.toggle_hidden(vfs)?;
+            let shown = app.toggle_hidden(browser, vfs)?;
             app.status = Some(
                 if shown {
                     "hidden files shown"
@@ -3546,8 +3563,7 @@ fn run_menu_command(
             );
         }
         (MenuCommand::Refresh, _) => {
-            browser.reload(vfs)?;
-            browser.prune_marks(vfs);
+            app.resync(browser, vfs, true)?;
             app.status = Some("refreshed".into());
         }
         // The entry the menu was opened on is gone (deleted by another program while it was
@@ -3923,12 +3939,13 @@ fn draw(
         );
     }
 
-    // Read once: the status bar wants the selected directory's item count, and the preview pane
-    // wants its listing — one `list_dir`, not two, per frame.
+    // The status bar wants the selected directory's item count and the preview pane its listing;
+    // both come from the one read `Previews::dirs` made off this thread, `None` until it lands.
     let dir_preview: Option<Vec<DirEntryInfo>> = browser
         .selected_entry()
         .filter(|e| e.is_dir)
-        .map(|_| browser.preview_entries(vfs));
+        .and_then(|entry| previews.dirs.entries(&entry.path))
+        .map(|raw| browser.arrange_preview(raw.to_vec()));
 
     // What a drop at the pointer would do right now, asked of the same function the release
     // asks, so the row lit here is the folder the files would land in.

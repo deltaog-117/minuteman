@@ -527,6 +527,9 @@ pub struct App {
     /// How many items of the trash batch just run could not be tracked for undo, for the status line.
     untracked: usize,
     live: LiveRefresh,
+    /// The listing was just brought up to date by `resync`, so the preview column's copy of a
+    /// folder may be stale too (see `take_resynced`).
+    resynced: bool,
     /// What the marked entries add up to, for the header pill (see `marked_size`).
     marked_size: MarkedSize,
     /// What the yanked or cut clipboard adds up to, for the deck's fit check. The marks are spent
@@ -596,6 +599,7 @@ impl App {
             history: History::default(),
             untracked: 0,
             live: LiveRefresh::new(handle.clone(), Arc::clone(&vfs)),
+            resynced: false,
             marked_size: MarkedSize::new(handle.clone(), Arc::clone(&vfs)),
             clipboard_size: MarkedSize::new(handle.clone(), Arc::clone(&vfs)),
             slots: Slots::default(),
@@ -1064,6 +1068,61 @@ impl App {
         self.live.poll(browser, now)
     }
 
+    /// Brings the lists up to date after this program changed the folder (a paste, a rename, a
+    /// command, an undo). A folder on this disk is re-read on the spot, as it always was; one on
+    /// another machine or in an archive is handed to the background refresh instead, since
+    /// reading it here would hold the interface up for as long as the round trips take. The
+    /// cursor keeps its entry by path either way. `prune` also drops marks left pointing at
+    /// paths that no longer exist; for a slow folder the background refresh does that once its
+    /// listing differs from what is shown.
+    ///
+    /// # Errors
+    ///
+    /// The [`VfsError`] from re-listing a folder on this disk.
+    pub fn resync(
+        &mut self,
+        browser: &mut BrowserState,
+        vfs: &dyn Vfs,
+        prune: bool,
+    ) -> Result<(), VfsError> {
+        self.resynced = true;
+        if shared::is_slow(browser.current_dir()) {
+            self.live.kick();
+            return Ok(());
+        }
+        browser.reload(vfs)?;
+        if prune {
+            browser.prune_marks(vfs);
+        }
+        Ok(())
+    }
+
+    /// Flips whether hidden entries are listed, re-reading as [`resync`](Self::resync) does.
+    /// Returns the new setting.
+    ///
+    /// # Errors
+    ///
+    /// The [`VfsError`] from re-listing a folder on this disk.
+    pub fn toggle_hidden(
+        &mut self,
+        browser: &mut BrowserState,
+        vfs: &dyn Vfs,
+    ) -> Result<bool, VfsError> {
+        if !shared::is_slow(browser.current_dir()) {
+            return browser.toggle_hidden(vfs);
+        }
+        let shown = browser.flip_hidden();
+        self.resynced = true;
+        self.live.kick();
+        Ok(shown)
+    }
+
+    /// Whether the lists were brought up to date since the last call, so the preview column's
+    /// folder listing should be read again rather than trusted for its interval.
+    pub fn take_resynced(&mut self) -> bool {
+        std::mem::take(&mut self.resynced)
+    }
+
     /// Keeps the figures the HUD shows about the browsed directory and the marks up to date: the
     /// marked entries' total size. It runs its work on the blocking
     /// pool (see `marked_size`); call once per render tick.
@@ -1236,8 +1295,7 @@ impl App {
             let bulk = self.bulk.take().expect("checked Some above");
             // Whatever the command did to the directory, show it now rather than on the next
             // background refresh; it may also have deleted marked paths.
-            browser.reload(vfs)?;
-            browser.prune_marks(vfs);
+            self.resync(browser, vfs, true)?;
             if let BulkKind::Shell { command, .. } = bulk.kind {
                 self.plugins.notify_job_finished(
                     "command",
@@ -1316,13 +1374,13 @@ impl App {
 
         match result {
             Ok(Outcome::Completed | Outcome::Skipped) if cancelled => {
-                browser.reload(vfs)?;
+                self.resync(browser, vfs, false)?;
                 self.plugins
                     .notify_job_finished(past_label, JobOutcome::Cancelled);
                 self.status = Some(format!("{past_label} cancelled"));
             }
             Ok(Outcome::Completed) => {
-                browser.reload(vfs)?;
+                self.resync(browser, vfs, false)?;
                 if let BulkKind::Paste {
                     clip,
                     dst_dir,
@@ -1418,8 +1476,7 @@ impl App {
             // of showing stale entries and stale marks alongside the failure message.
             Err(e) => {
                 if is_delete {
-                    browser.reload(vfs)?;
-                    browser.prune_marks(vfs);
+                    self.resync(browser, vfs, true)?;
                 }
                 self.plugins
                     .notify_job_finished(past_label, JobOutcome::Failed);
@@ -2197,8 +2254,7 @@ impl App {
         handover: &Handover,
         result: &std::io::Result<ExitStatus>,
     ) -> Result<()> {
-        browser.reload(vfs)?;
-        browser.prune_marks(vfs);
+        self.resync(browser, vfs, true)?;
         self.status = Some(handover_status(&handover.line, result));
         Ok(())
     }
@@ -2355,7 +2411,7 @@ impl App {
                 }
             }
         }
-        browser.reload(vfs)?;
+        self.resync(browser, vfs, false)?;
 
         self.status = Some(match (first_error, names) {
             (Some(error), _) if done > 0 => format!("{error} ({done} of {} done)", names.len()),
@@ -3405,8 +3461,7 @@ impl App {
             Report::Failed { label, error } => format!("{verb} {label} failed: {error}"),
             Report::Cancelled { label } => format!("{verb} {label} cancelled"),
         });
-        browser.reload(vfs)?;
-        browser.prune_marks(vfs);
+        self.resync(browser, vfs, true)?;
         Ok(())
     }
 
@@ -3435,7 +3490,7 @@ impl App {
                         to: parent.join(&new_name),
                     });
                 }
-                browser.reload(vfs)?;
+                self.resync(browser, vfs, false)?;
                 self.status = Some(format!("renamed to {new_name}"));
             }
             Ok(Outcome::Skipped) => self.status = Some("rename skipped".into()),
@@ -3474,7 +3529,7 @@ impl App {
             Ok(()) => {
                 self.start_history_batch();
                 self.history.record(Change::Created { path, is_dir });
-                browser.reload(vfs)?;
+                self.resync(browser, vfs, false)?;
                 self.status = Some(format!("created {trimmed}"));
             }
             Err(e) => self.status = Some(format!("create failed: {e}")),

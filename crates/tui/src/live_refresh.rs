@@ -53,6 +53,9 @@ pub struct LiveRefresh {
     in_flight: bool,
     /// `None` until the first listing, which is started immediately.
     last_started: Option<Instant>,
+    /// Something this program did changed the folder: list again as soon as no listing is
+    /// running, without waiting for the interval.
+    dirty: bool,
 }
 
 impl LiveRefresh {
@@ -65,7 +68,15 @@ impl LiveRefresh {
             vfs,
             in_flight: false,
             last_started: None,
+            dirty: false,
         }
+    }
+
+    /// Asks for a fresh listing at the next [`poll`](Self::poll). For a change made by this
+    /// program in a folder that is slow to read, where re-listing on the spot would hold the
+    /// interface up; the cursor keeps its place by path when the listing lands.
+    pub fn kick(&mut self) {
+        self.dirty = true;
     }
 
     /// Call once per render tick: applies any finished listing to `browser`, and starts the next
@@ -93,11 +104,13 @@ impl LiveRefresh {
         } else {
             INTERVAL
         };
-        let due = self
-            .last_started
-            .is_none_or(|started| now.duration_since(started) >= interval);
+        let due = self.dirty
+            || self
+                .last_started
+                .is_none_or(|started| now.duration_since(started) >= interval);
         if due && !self.in_flight {
             self.in_flight = true;
+            self.dirty = false;
             self.last_started = Some(now);
             self.spawn_listing(browser.current_dir().to_path_buf());
         }
@@ -243,6 +256,52 @@ mod tests {
             flagged,
             "the selected file's preview should have been told to re-read"
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_kick_lists_again_without_waiting_for_the_interval() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let root = scratch_dir("kick");
+        let work = root.join("work");
+        let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
+        let mut live = LiveRefresh::new(runtime.handle().clone(), Arc::new(LocalVfs));
+        // Let the first listing land, so the next one is not due for a whole interval.
+        let first = Instant::now();
+        live.poll(&mut browser, first);
+        while live.in_flight && first.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+            live.poll(&mut browser, first);
+        }
+        assert!(!live.in_flight, "the first listing never landed");
+
+        std::fs::write(work.join("made-by-us.txt"), b"hi").unwrap();
+        live.kick();
+        let kicked = Instant::now();
+        assert!(poll_until(&mut live, &mut browser, |b, _| {
+            b.current_entries()
+                .iter()
+                .any(|e| e.name == "made-by-us.txt")
+        }));
+        assert!(
+            kicked.elapsed() < INTERVAL,
+            "the listing waited for the interval"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_kick_during_a_listing_is_not_lost() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let root = scratch_dir("kick-busy");
+        let work = root.join("work");
+        let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
+        let mut live = LiveRefresh::new(runtime.handle().clone(), Arc::new(LocalVfs));
+        live.poll(&mut browser, Instant::now());
+        assert!(live.in_flight);
+
+        live.kick();
+        assert!(live.dirty, "kept for after the running listing");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

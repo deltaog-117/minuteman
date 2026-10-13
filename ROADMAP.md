@@ -1780,6 +1780,30 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   end-to-end test over a private D-Bus session (real daemon, stand-in `mman`), and the real `mman`
   driven through a PTY in every pick mode. Not yet tried against a real browser and the real
   `xdg-desktop-portal`; the dialog's file-type filters and extra choices are ignored.
+- ✅ **Folder listings off the render thread (COA B)** – the folder under the cursor is now listed
+  on the blocking pool, and a change this program makes to a slow folder is re-read there too.
+  Before, `draw` called `BrowserState::preview_entries` once per frame, so with the cursor on a
+  folder inside an archive or on an `ssh://` machine every redraw waited for a round trip to the
+  plugin (up to its 120 s timeout when it hung). New `tui::dir_preview::DirPreview` reads the
+  folder when the cursor reaches it and again every 500 ms (5 s for a slow one), gives the first
+  read a 20 ms grace so a local folder is never shown empty, and shows nothing, never another
+  folder's children, until a read lands. `App::resync` replaces the nine `browser.reload` calls
+  after a paste, rename, create, `:` command, handover or undo: a folder on this disk is re-read
+  on the spot exactly as before, a slow one is handed to the live refresh through a new
+  `LiveRefresh::kick`, which lists again at once and is not lost if a listing is already running;
+  `App::toggle_hidden` and the context menu's Refresh do the same. `shared::is_slow` (remote or
+  inside an archive) decides, so nothing changes for the local disk. Chosen as COA B over a
+  plugin-side stale-while-revalidate index (A, which risks reading at the old offsets of a changed
+  file) and a progress gauge with an on-disk index cache (C). Tested: `is_slow` as properties;
+  `DirPreview` (a quick folder lands in the same tick, a slow one does not hold the tick back, one
+  folder's listing is never shown for another, the interval is kept, `invalidate`, an unreadable
+  folder is empty); a kick lists before the interval and survives a running listing;
+  `arrange_preview` equals what `preview_entries` returns. Verified against the real binary over a
+  PTY through `pyte`: the preview of a local folder and of a folder inside a zip, a file created
+  behind the back appearing in the preview, and — with `mman-archive` stopped by `SIGSTOP` — the
+  cursor moving onto an archive folder and back (the same script on the previous build leaves the
+  cursor stuck). Still on the render thread: `goto`/`reveal` (a `/` search hit or a bookmark far
+  away on a slow backend) and the trash view's folder preview.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2631,6 +2655,8 @@ draws.
 3. Commit this cycle (step 8 of the dev loop).
 4. Next cycle: M7 is done (M7a archives, M7b ssh, M7c the atlas and the wiring diagram as
    plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
-   follow-ups to remote browsing and the other features listed there. Folder moves no longer block, so the next biggest gaps are the other things that
-   read on the render thread (a large archive's index) and a prompt for a password or a new host
-   key. Undo and redo of a large move now run in the background (see DIARY.md, 2026-10-12).
+   follow-ups to remote browsing and the other features listed there. Folder moves, undo and redo,
+   and the folder preview no longer block (see DIARY.md, 2026-10-12 and 2026-10-13). The next
+   biggest gaps are the last few render-thread reads (`goto`/`reveal` for a search hit or bookmark
+   on a slow backend, the trash view's folder preview), a very large `.tar.gz` that is still read
+   whole to open, and a prompt for a password or a new host key.
