@@ -7874,6 +7874,33 @@ failure message, which `begin_move` does not give.
 
 ---
 
+## 2026-10-13 — Opening an archive file off the render thread
+
+**Decision.** `open_file` was the last caller of the blocking `goto`, left over because
+`begin_move` shows the ssh plugin's hint whenever a plugin is missing. Three courses were weighed:
+a failure-kind argument on `begin_move` (A); a separate `begin_archive_move` (B); and working the
+message out from the target in `poll_nav` (C). Chosen: C. A and B make each of about eight callers
+remember which message is theirs, and `:cd` into an archive already got the wrong one.
+
+**What changed.** `MovePlan::target` gives the path a move goes to, as given. `NavJob` keeps it.
+`poll_nav` has one new arm: a target inside an archive (`shared::is_inside`) while no archive
+plugin runs gets `archive_open_failure`, which names the bundled plugin to install. Anything else
+fails as before, with the caller's prefix. `open_file` plans `plan_goto(mount_root)` and passes
+"cannot open the archive" as the prefix, the text it showed before.
+
+**Trade-offs.** A typed relative path is judged as typed, before it is resolved, so a path that
+only becomes an archive path after resolution gets the plain message. With the plugin running, an
+archive that cannot be read shows "cannot open the archive: …" as before; a bad path inside one
+shows the caller's prefix.
+
+**Verification.** `scripts/check` passes. New tests: `MovePlan::target`, the hint for a move into
+an archive with no plugin running, and an ordinary failure keeping its own text. The real `mman`
+was not driven by hand. `open_file` itself has no test; it only builds the plan.
+
+**Left open.** None of the folder reads on the render thread that the roadmap listed.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

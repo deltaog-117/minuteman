@@ -20,6 +20,7 @@
 //! (see `browser::MovePlan`). Dropping a job abandons it: the thread finishes its read, finds
 //! nobody listening and discards the result.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use browser::{LoadedMove, MovePlan};
@@ -39,6 +40,8 @@ pub struct NavJob {
     rx: UnboundedReceiver<Result<LoadedMove, VfsError>>,
     /// Shown while loading, and after a failure.
     pub label: String,
+    /// Where the move goes, so a failure can be told apart by what it was opening.
+    pub target: PathBuf,
     /// The status line once the move is applied, if the caller wants one.
     pub done_status: Option<String>,
     /// Put in front of the error when the move fails, e.g. `cd failed`.
@@ -56,12 +59,14 @@ impl NavJob {
     ) -> Self {
         let (tx, rx) = unbounded_channel();
         let label = plan.target_label();
+        let target = plan.target().to_path_buf();
         handle.spawn_blocking(move || {
             let _ = tx.send(plan.load(vfs.as_ref()));
         });
         Self {
             rx,
             label,
+            target,
             done_status,
             error_prefix: error_prefix.into(),
         }

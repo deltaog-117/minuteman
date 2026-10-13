@@ -1069,6 +1069,10 @@ impl App {
             Err(e) if vfs_remote::is_plugin_absent(&e) => {
                 self.status = Some(self.remote_open_failure(&e));
             }
+            // The error alone starts with a long path and would hide that the plugin is missing.
+            Err(e) if shared::is_inside(&job.target) && !self.plugins.serves_archives() => {
+                self.status = Some(self.archive_open_failure(&e));
+            }
             Err(e) => self.status = Some(format!("{}: {e}", job.error_prefix)),
         }
     }
@@ -4871,6 +4875,30 @@ mod tests {
         f.run("cd missing");
         f.wait_for_idle();
         assert_eq!(f.browser.current_dir(), f.root);
+        let status = f.app.status.clone().unwrap();
+        assert!(status.starts_with("cd failed: "), "{status}");
+    }
+
+    #[test]
+    fn a_move_into_an_archive_says_where_to_get_the_plugin_when_none_is_running() {
+        let mut f = Fixture::new("nav-archive-absent");
+        assert!(!f.app.plugins.serves_archives());
+
+        f.run("cd missing.zip!");
+        f.wait_for_idle();
+        assert_eq!(f.browser.current_dir(), f.root);
+        assert_eq!(
+            f.app.status.as_deref(),
+            Some(crate::bundled::missing(plugin_api::PROVIDES_VFS_ARCHIVE).as_str())
+        );
+    }
+
+    #[test]
+    fn a_move_to_an_ordinary_folder_keeps_its_own_failure_text() {
+        let mut f = Fixture::new("nav-plain-fail");
+
+        f.run("cd missing.zip");
+        f.wait_for_idle();
         let status = f.app.status.clone().unwrap();
         assert!(status.starts_with("cd failed: "), "{status}");
     }

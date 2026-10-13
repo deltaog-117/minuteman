@@ -117,6 +117,14 @@ impl MovePlan {
         self
     }
 
+    /// The folder the move goes to, as it was given: a typed path is not resolved yet, so a
+    /// relative one stays relative.
+    pub fn target(&self) -> &Path {
+        match &self.kind {
+            MoveKind::Into(path) | MoveKind::Typed(path) => path,
+        }
+    }
+
     /// A short name for where the move goes, for a status message.
     pub fn target_label(&self) -> String {
         let path = match &self.kind {
@@ -892,6 +900,22 @@ mod tests {
         assert!(state.apply_move(plan.load(&vfs).unwrap()));
         assert_eq!(state.current_dir(), root.join("sub"));
         assert_eq!(state.selected_entry().unwrap().path, target);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_plan_reports_where_it_goes_as_given() {
+        let root = make_tree();
+        let state = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+
+        assert_eq!(
+            state.plan_goto(Path::new("a.zip!")).target(),
+            Path::new("a.zip!")
+        );
+        let entered = state.plan_enter().unwrap();
+        assert_eq!(entered.target(), root.join("sub"));
+        assert_eq!(state.plan_leave().unwrap().target(), root.parent().unwrap());
 
         std::fs::remove_dir_all(&root).unwrap();
     }

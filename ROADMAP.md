@@ -1826,7 +1826,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `plan_reveal` and `select_path`; a hit in another folder is a background move, `Esc` goes back
   in the background to the row the search began on, `Esc` drops a trip that has not landed, and a
   hit that cannot be opened says so. Not driven by hand against a stopped `mman-archive` or an
-  `ssh://` machine. Still on the render thread: opening an archive file from `open_file`.
+  `ssh://` machine.
+- ✅ **Opening an archive file off the render thread (COA C)** – `open_file` was the last caller of
+  the blocking `goto`; it now plans `plan_goto(mount_root)` and runs it through `App::begin_move`.
+  `begin_move` could not stand in before because its failure branch always showed the ssh plugin's
+  hint for a missing plugin. `NavJob` now keeps the move's target (`MovePlan::target`), and
+  `poll_nav` uses `archive_open_failure` for a target inside an archive while no archive plugin is
+  running, so `:cd` into an archive and a bookmark inside one get the hint too. Chosen over a
+  failure-kind argument on `begin_move` (A) and a second entry point (B), which would leave every
+  caller to remember the right message. Tested: `MovePlan::target`, the hint for a move into an
+  archive with no plugin, and an ordinary failure keeping its own text. Not driven by hand against
+  the real `mman-archive`.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2680,6 +2690,6 @@ draws.
    plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
    follow-ups to remote browsing and the other features listed there. Folder moves, undo and redo,
    and the folder preview no longer block (see DIARY.md, 2026-10-12 and 2026-10-13). The next
-   biggest gaps are the one render-thread read left (opening an archive file from `open_file`;
-   search hits, the finder's reveal and the trash preview are background work now), a very large
-   `.tar.gz` that is still read whole to open, and a prompt for a password or a new host key.
+   biggest gaps are a very large `.tar.gz` that is still read whole to open, and a prompt for a
+   password or a new host key. No folder read is left on the render thread: search hits, the
+   finder's reveal, the trash preview and opening an archive file are background work now.

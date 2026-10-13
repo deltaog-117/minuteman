@@ -570,9 +570,8 @@ fn open_file(app: &mut App, browser: &mut BrowserState, vfs: &dyn Vfs, path: &Pa
     }
     if vfs_archive::is_archive(path) && !vfs_archive::is_inside(path) && !app.open_rule_covers(path)
     {
-        if let Err(error) = browser.goto(vfs, &shared::mount_root(path)) {
-            app.status = Some(app.archive_open_failure(&error));
-        }
+        let plan = browser.plan_goto(&shared::mount_root(path));
+        app.begin_move(browser, plan, None, "cannot open the archive");
         return;
     }
     app.open_default(browser, path);

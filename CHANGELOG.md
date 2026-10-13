@@ -178,6 +178,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- Opening an archive file (`enter`, a click, the menu's Open) now loads the archive in the
+  background like any other folder, so a slow archive plugin no longer holds the interface up. A
+  move into an archive that fails while the archive plugin is not running now says where to get
+  it, also for `:cd` and bookmarks, which used to show the bare error. Author: deltaog-117.
 - Showing a `/` search hit, stepping to the next or previous one, going back with `Esc` or an
   emptied query, and revealing a result from the finder now open the hit's folder in the
   background, as `:cd` and entering a folder already did, and the trash browser lists a trashed
