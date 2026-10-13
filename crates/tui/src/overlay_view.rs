@@ -33,6 +33,7 @@ use crate::compress_popup::{CompressPopup, Row as CompressRow};
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
 use crate::extract_popup::{ExtractPopup, Row as ExtractRow};
 use crate::glyphs;
+use crate::history_popup::HistoryPopup;
 use crate::hud::{fit_width, pad_to, text_width};
 use crate::inspect_panel::InspectPanel;
 use crate::settings_popup::{SettingsPopup, SettingsView};
@@ -464,6 +465,99 @@ pub fn render_extract(frame: &mut Frame<'_>, popup: &ExtractPopup, config: &Conf
     ));
     frame.render_widget(Paragraph::new(lines), inner);
 }
+
+/// The most history rows shown at once; a longer list scrolls with the cursor.
+const HISTORY_MAX_ROWS: usize = 14;
+
+/// How many rows the history popup shows in `frame`: all of them up to a limit, fewer when the
+/// screen is short.
+fn history_capacity(frame: Rect, popup: &HistoryPopup) -> usize {
+    popup
+        .len()
+        .min(HISTORY_MAX_ROWS)
+        .min(usize::from(frame.height.saturating_sub(5)))
+        .max(1)
+}
+
+/// The history popup's panel.
+pub fn history_area(frame: Rect, popup: &HistoryPopup) -> Rect {
+    panel_area(frame, history_capacity(frame, popup))
+}
+
+/// What a click landed on in the history popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryHit {
+    /// The row at this index of the whole list, not of the visible part.
+    Row(usize),
+    /// Inside the panel but not on a row.
+    Panel,
+    Outside,
+}
+
+pub fn history_hit(frame: Rect, popup: &HistoryPopup, at: ratatui::layout::Position) -> HistoryHit {
+    let area = history_area(frame, popup);
+    if !area.contains(at) {
+        return HistoryHit::Outside;
+    }
+    let inner = extract_inner(area);
+    let first_line = inner.y.saturating_add(1);
+    let line = usize::from(at.y.saturating_sub(first_line));
+    let capacity = history_capacity(frame, popup);
+    if at.y >= first_line && line < capacity && at.x >= inner.x && at.x < inner.right() {
+        HistoryHit::Row(popup.first_visible(capacity) + line)
+    } else {
+        HistoryHit::Panel
+    }
+}
+
+/// Draws the history popup: one line per entry, the ones `undo` would take back first, then the
+/// ones `redo` would do again, with the row under the cursor highlighted.
+pub fn render_history(frame: &mut Frame<'_>, popup: &HistoryPopup, config: &Config) {
+    let theme = &config.theme;
+    let area = history_area(frame.area(), popup);
+    style::cast_shadow(frame.buffer_mut(), area, config);
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, "history", true);
+    frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
+    let inner = extract_inner(area);
+
+    let label_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let dim_style = Style::default().fg(style::color(&theme.border_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+    let label_width = usize::from(inner.width).saturating_sub(HISTORY_SIDE_COLUMN);
+
+    let capacity = history_capacity(frame.area(), popup);
+    let first = popup.first_visible(capacity);
+    let mut lines = vec![Line::raw("")];
+    lines.extend(popup.rows(first, capacity).enumerate().map(|(i, row)| {
+        let base = if first + i == popup.cursor() {
+            selected_style
+        } else {
+            Style::default()
+        };
+        let side = format!("{} {}", row.side.word(), row.depth);
+        Line::from(vec![
+            Span::styled(pad_to(&side, HISTORY_SIDE_COLUMN), label_style.patch(base)),
+            Span::styled(fit_width(row.label, label_width), value_style.patch(base)),
+        ])
+    }));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "↑/↓ move, Enter go back to here, Esc close",
+        dim_style,
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Width of the "undo 12" column.
+const HISTORY_SIDE_COLUMN: usize = 9;
 
 /// The line under a form's rows: its error in the danger color, else its warning in the accent
 /// color, else blank.
@@ -1193,6 +1287,50 @@ mod tests {
         assert_eq!(
             extract_hit(frame, &form, Position::new(0, 0)),
             ExtractHit::Outside
+        );
+    }
+
+    fn history_popup(undo: usize, redo: usize) -> HistoryPopup {
+        let labels = |side: &str, n: usize| (0..n).map(|i| format!("{side} entry {i}")).collect();
+        HistoryPopup::new(file_ops::history::Summary {
+            undo: labels("undo", undo),
+            redo: labels("redo", redo),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_history_popup_draws_both_stacks() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let popup = history_popup(2, 1);
+        terminal
+            .draw(|frame| render_history(frame, &popup, &config()))
+            .unwrap();
+        let text = screen_text(&terminal);
+        for wanted in ["history", "undo 1", "undo 2", "redo 1", "redo entry 0"] {
+            assert!(text.contains(wanted), "{wanted}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_history_row_hits_its_place_in_the_whole_list_even_when_scrolled() {
+        let frame = Rect::new(0, 0, 100, 30);
+        let mut popup = history_popup(40, 0);
+        popup.focus(30);
+        let area = history_area(frame, &popup);
+        let inner = extract_inner(area);
+        let first = popup.first_visible(history_capacity(frame, &popup));
+        assert!(first > 0, "the list has scrolled");
+
+        let at = Position::new(inner.x + 2, inner.y + 1);
+        assert_eq!(history_hit(frame, &popup, at), HistoryHit::Row(first));
+        assert_eq!(
+            history_hit(frame, &popup, Position::new(inner.x + 2, inner.y)),
+            HistoryHit::Panel
+        );
+        assert_eq!(
+            history_hit(frame, &popup, Position::new(0, 0)),
+            HistoryHit::Outside
         );
     }
 

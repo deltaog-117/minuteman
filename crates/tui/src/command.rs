@@ -45,6 +45,8 @@ pub enum Command {
     /// Extracts every marked archive (or the selected one) into a directory named after it, in
     /// the browsed directory.
     Extract,
+    /// Opens the history popup, listing what `undo` and `redo` would step through.
+    History,
     /// Packs every marked entry (or the selected one) into the named archive; its extension
     /// (`.zip`, `.tar`, `.tar.gz`) picks the format. With `-p` (`--password`) a zip is sealed with
     /// a password asked for in a prompt, never typed on the command line where it would show.
@@ -73,8 +75,8 @@ pub enum Command {
 /// The first words `parse` gives a meaning of its own, which a plugin may therefore not register
 /// as a `:` command. A test keeps this in step with the `match` in `parse`.
 pub const BUILTIN_WORDS: &[&str] = &[
-    "q", "q!", "qa", "qa!", "quit", "trash", "extract", "compress", "plugin", "plugins", "cd",
-    "mkdir", "touch",
+    "q", "q!", "qa", "qa!", "quit", "trash", "extract", "history", "compress", "plugin", "plugins",
+    "cd", "mkdir", "touch",
 ];
 
 /// Characters that mean the user is writing shell, not naming a file: pipes, redirects,
@@ -113,6 +115,8 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
         // Like `trash`, only the bare form is the built-in, so `extract foo` still reaches a real
         // `extract` script on the path.
         "extract" if line[name.len()..].trim().is_empty() => Ok(Some(Command::Extract)),
+        // Bare form only, like `extract`, so `history 20` still reaches the shell's own.
+        "history" if line[name.len()..].trim().is_empty() => Ok(Some(Command::History)),
         "compress" if uses_shell_syntax(line) => Ok(Some(Command::Shell(line.into()))),
         "compress" => match split_words(line[name.len()..].trim())?.as_slice() {
             [archive] if !archive.starts_with('-') => Ok(Some(Command::Compress {
@@ -311,6 +315,7 @@ mod tests {
     fn bare_extract_is_the_built_in_but_extract_with_arguments_is_left_to_the_shell() {
         assert_eq!(parse("extract"), Ok(Some(Command::Extract)));
         assert_eq!(parse("  extract  "), Ok(Some(Command::Extract)));
+        assert_eq!(parse("history"), Ok(Some(Command::History)));
         assert_eq!(parse("extract a.zip"), Ok(shell("extract a.zip")));
     }
 

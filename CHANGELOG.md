@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A history popup: `:history` (or a key bound to the new `history` action, unbound by default)
+  lists the entries `z` would take back and the ones `Z` would do again, and `Enter` on a row goes
+  back (or forward) through every entry down to it, one after another on the background worker,
+  stopping at the first that fails or is cancelled. `history` is now a reserved `:` word.
+  Author: deltaog-117.
 - `plugins/wiring` (`mman-wiring`), a bundled plugin that provides `canvas-wiring`: the wiring
   diagram, how the machine's storage is wired from the bus to the filesystem and on into its
   folders, now lives in it. It looks at the machine on a thread of its own while the view shows,

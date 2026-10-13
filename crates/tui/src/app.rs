@@ -55,6 +55,7 @@ use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
 use crate::extract_popup::{self, ExtractPopup};
+use crate::history_popup::{HistoryPopup, Side, Walk};
 use crate::inspect_panel::InspectPanel;
 use crate::line_edit::LineEdit;
 use crate::live_refresh::LiveRefresh;
@@ -423,6 +424,35 @@ fn lexists(vfs: &dyn Vfs, path: &Path) -> bool {
     vfs.symlink_metadata(path).is_ok()
 }
 
+/// The steps of a history walk still to run (see `App::start_history_walk`).
+struct HistoryWalk {
+    side: Side,
+    /// Steps after the one on the worker.
+    remaining: usize,
+    total: usize,
+}
+
+impl HistoryWalk {
+    /// The report for the whole walk: a finished one counts its entries, one that stopped says
+    /// which step it stopped at.
+    fn summarize(&self, report: Report) -> Report {
+        let step = self.total - self.remaining;
+        match report {
+            Report::Done { .. } => Report::Done {
+                label: format!("{} entries", self.total),
+            },
+            Report::Failed { label, error } => Report::Failed {
+                label: format!("{label} (step {step} of {})", self.total),
+                error,
+            },
+            Report::Cancelled { label } => Report::Cancelled {
+                label: format!("{label} (step {step} of {})", self.total),
+            },
+            Report::Empty => Report::Empty,
+        }
+    }
+}
+
 /// The request the archive plugin is working on. The plugin reports through the UI queue, so this
 /// holds what turns its answers back into the bulk operation the rest of the interface knows.
 struct ArchiveRun {
@@ -524,6 +554,11 @@ pub struct App {
     next_archive_job: u64,
     /// What can be taken back with `Undo` and done again with `Redo` (see `file_ops::history`).
     history: History,
+    /// The undo or redo steps still to run after the one on the worker, when the history popup
+    /// asked for several (see `start_history_walk`).
+    history_walk: Option<HistoryWalk>,
+    /// `:history` was typed; `take_history_request` hands it to the loop, which owns the popup.
+    history_requested: bool,
     /// How many items of the trash batch just run could not be tracked for undo, for the status line.
     untracked: usize,
     live: LiveRefresh,
@@ -597,6 +632,8 @@ impl App {
             archive_run: None,
             next_archive_job: 1,
             history: History::default(),
+            history_walk: None,
+            history_requested: false,
             untracked: 0,
             live: LiveRefresh::new(handle.clone(), Arc::clone(&vfs)),
             resynced: false,
@@ -1328,6 +1365,13 @@ impl App {
                     Report::Done { .. } | Report::Empty => JobOutcome::Completed,
                 },
             );
+            if matches!(report, Report::Done { .. }) && self.continue_history_walk() {
+                return Ok(());
+            }
+            let report = match self.history_walk.take() {
+                Some(walk) if walk.total > 1 => walk.summarize(report),
+                _ => report,
+            };
             return self.report_history(browser, vfs, verb, past, report);
         }
 
@@ -2298,6 +2342,7 @@ impl App {
             }
             Ok(Some(Command::Trash)) => self.begin_trash(browser),
             Ok(Some(Command::Extract)) => self.begin_extract(browser),
+            Ok(Some(Command::History)) => self.history_requested = true,
             Ok(Some(Command::Compress { name, password })) => {
                 self.begin_compress(browser, &name, password);
             }
@@ -3413,6 +3458,75 @@ impl App {
             None => self.report_history(browser, vfs, "redo", "redid", Report::Empty)?,
         }
         Ok(())
+    }
+
+    /// The history popup's content, or `None` with the reason on the status line when there is
+    /// nothing to take back or do again.
+    pub fn begin_history_popup(&mut self) -> Option<HistoryPopup> {
+        let popup = HistoryPopup::new(self.history.summary());
+        if popup.is_none() {
+            self.status = Some("nothing to undo or redo".into());
+        }
+        popup
+    }
+
+    /// Whether `:history` was typed since the last call.
+    pub fn take_history_request(&mut self) -> bool {
+        std::mem::take(&mut self.history_requested)
+    }
+
+    /// Takes back (or does again) `walk.entries` entries one after another, each on the worker
+    /// like a single `undo`, and stops at the first that does not finish: what was done stays
+    /// done and the rest stays recorded.
+    pub fn start_history_walk(
+        &mut self,
+        browser: &mut BrowserState,
+        vfs: &dyn Vfs,
+        walk: Walk,
+    ) -> Result<()> {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return Ok(());
+        }
+        self.history_walk = Some(HistoryWalk {
+            side: walk.side,
+            remaining: walk.entries.saturating_sub(1),
+            total: walk.entries,
+        });
+        if !self.begin_history_step(walk.side) {
+            self.history_walk = None;
+            let (verb, past) = match walk.side {
+                Side::Undo => ("undo", "undid"),
+                Side::Redo => ("redo", "redid"),
+            };
+            self.report_history(browser, vfs, verb, past, Report::Empty)?;
+        }
+        Ok(())
+    }
+
+    /// Starts the next step of a walk after one finished; `false` when none is left.
+    fn continue_history_walk(&mut self) -> bool {
+        let Some(walk) = self.history_walk.as_mut() else {
+            return false;
+        };
+        if walk.remaining == 0 {
+            return false;
+        }
+        walk.remaining -= 1;
+        let side = walk.side;
+        self.begin_history_step(side)
+    }
+
+    fn begin_history_step(&mut self, side: Side) -> bool {
+        let (kind, batch) = match side {
+            Side::Undo => (BulkKind::Undo, self.history.begin_undo()),
+            Side::Redo => (BulkKind::Redo, self.history.begin_redo()),
+        };
+        let Some(batch) = batch else {
+            return false;
+        };
+        self.spawn_history(kind, batch);
+        true
     }
 
     /// Runs `batch` on tokio's blocking pool. Cancel is checked before each step, so the step in
@@ -5988,6 +6102,72 @@ mod tests {
         assert!(!f.app.is_busy());
         assert!(f.listed().is_empty());
         assert_eq!(f.app.status.as_deref(), Some("undid create one"));
+    }
+
+    #[test]
+    fn a_history_walk_takes_back_every_entry_down_to_the_chosen_one() {
+        let mut f = Fixture::new("undo-walk");
+        f.run("mkdir one");
+        f.run("mkdir two");
+        f.run("mkdir three");
+
+        let walk = Walk {
+            side: Side::Undo,
+            entries: 2,
+        };
+        f.app
+            .start_history_walk(&mut f.browser, &LocalVfs, walk)
+            .unwrap();
+        f.wait_for_idle();
+
+        assert_eq!(f.listed(), vec!["one"]);
+        assert_eq!(f.app.status.as_deref(), Some("undid 2 entries"));
+        let popup = f.app.begin_history_popup().unwrap();
+        let rows: Vec<_> = popup.rows(0, 10).map(|r| (r.side, r.label)).collect();
+        assert_eq!(
+            rows,
+            [
+                (Side::Undo, "create one"),
+                (Side::Redo, "create two"),
+                (Side::Redo, "create three"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_history_walk_that_hits_a_failure_keeps_what_it_did_and_the_rest_recorded() {
+        let mut f = Fixture::new("undo-walk-fail");
+        f.run("mkdir one");
+        f.run("mkdir two");
+        std::fs::write(f.root.join("one").join("kept.txt"), b"x").unwrap();
+
+        let walk = Walk {
+            side: Side::Undo,
+            entries: 2,
+        };
+        f.app
+            .start_history_walk(&mut f.browser, &LocalVfs, walk)
+            .unwrap();
+        f.wait_for_idle();
+
+        assert_eq!(f.listed(), vec!["one"]);
+        let status = f.app.status.clone().unwrap_or_default();
+        assert!(status.contains("step 2 of 2"), "{status}");
+        assert!(status.contains("failed"), "{status}");
+        let popup = f.app.begin_history_popup().unwrap();
+        let rows: Vec<_> = popup.rows(0, 10).map(|r| (r.side, r.label)).collect();
+        assert_eq!(
+            rows,
+            [(Side::Undo, "create one"), (Side::Redo, "create two")]
+        );
+    }
+
+    #[test]
+    fn the_history_popup_is_refused_with_nothing_recorded() {
+        let mut f = Fixture::new("undo-popup-empty");
+
+        assert!(f.app.begin_history_popup().is_none());
+        assert_eq!(f.app.status.as_deref(), Some("nothing to undo or redo"));
     }
 
     #[test]

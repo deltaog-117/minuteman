@@ -208,6 +208,7 @@ command ends. `MINUTEMAN_PORTAL_MMAN` names the `mman` to run when it is not on 
 | `d`         | cut (move): same as `y`, but moves; marks already in this folder are left alone |
 | `C` / `E`   | compress / extract the marked entries (opens the form) |
 | `z` / `Z`   | undo / redo the last create, rename, move, copy or trash (a whole batch is one step) |
+| `:history`  | list what `z` and `Z` would step through; `Enter` on a row goes back (or forward) to it |
 | `p`         | paste                                         |
 | `x`         | delete the marked entries (or the one under the cursor) to the trash (confirm `y` or `Y`, or `enter`) |
 | `X`         | delete the marked entries (or the one under the cursor) permanently (confirm `y` or `Y`) |

@@ -44,6 +44,8 @@ pub enum Action {
     Undo,
     /// Does again what `Undo` took back.
     Redo,
+    /// Opens the history popup: the entries `Undo` and `Redo` step through, to go back to any one.
+    History,
     /// Sends the marked entries, or the one under the cursor, to the desktop trash (asks for
     /// confirmation first, but `Enter` accepts it as well as `y` since this is reversible — see
     /// `DeletePermanently` for the destructive version).
@@ -119,7 +121,7 @@ impl Action {
     /// Every action, in the order `[keys]` lists them. A new variant goes here too: `name` will
     /// not compile without it, but this list would silently leave it out of `from_name` and of
     /// what a plugin's `list_actions` offers.
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 37] = [
         Action::MoveDown,
         Action::MoveUp,
         Action::Enter,
@@ -133,6 +135,7 @@ impl Action {
         Action::Extract,
         Action::Undo,
         Action::Redo,
+        Action::History,
         Action::Delete,
         Action::DeletePermanently,
         Action::Rename,
@@ -176,6 +179,7 @@ impl Action {
             Action::Extract => "extract",
             Action::Undo => "undo",
             Action::Redo => "redo",
+            Action::History => "history",
             Action::Delete => "delete",
             Action::DeletePermanently => "delete_permanently",
             Action::Rename => "rename",
@@ -233,6 +237,7 @@ pub struct RawKeyMap {
     pub extract: Vec<String>,
     pub undo: Vec<String>,
     pub redo: Vec<String>,
+    pub history: Vec<String>,
     pub delete: Vec<String>,
     pub delete_permanently: Vec<String>,
     pub rename: Vec<String>,
@@ -274,6 +279,7 @@ impl Default for RawKeyMap {
             extract: vec!["E".into()],
             undo: vec!["z".into()],
             redo: vec!["Z".into()],
+            history: vec![],
             delete: vec!["x".into()],
             delete_permanently: vec!["X".into()],
             rename: vec!["r".into()],
@@ -349,6 +355,7 @@ impl From<RawKeyMap> for KeyMap {
         bind_all(&raw.extract, Action::Extract);
         bind_all(&raw.undo, Action::Undo);
         bind_all(&raw.redo, Action::Redo);
+        bind_all(&raw.history, Action::History);
         bind_all(&raw.delete, Action::Delete);
         bind_all(&raw.delete_permanently, Action::DeletePermanently);
         bind_all(&raw.rename, Action::Rename);

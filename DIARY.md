@@ -100,6 +100,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-12 | Canvas Primitive for Whole-Body Views (M7c step 1) | A plugin draws atlas and wiring through a `canvas` of semantic parts and claimed keys; grid, tiles, details and filmstrip stay in the core (COA C); the core atlas stays as the fallback until the plugin exists | ✅ Confirmed |
 | 2026-10-12 | The Wiring Diagram as a Plugin (M7c step 3) | The plugin owns the scan, the folders, the layout and the device actions on the local disk, with the load and the browsed folder sent as a `context` (COA A); snapshots fed from the core (B) and keeping the diagram in the core (C) not taken | ✅ Confirmed |
 | 2026-10-13 | Folder Listings Off the Render Thread | A background `DirPreview` for the cursor folder and `App::resync`, which re-reads a local folder on the spot and hands a slow one to the live refresh (COA B); a plugin-side refreshing index (A) and a progress gauge with an on-disk index cache (C) not taken | ✅ Confirmed |
+| 2026-10-13 | History Popup | Go back to a chosen entry by walking the existing undo worker, never undoing one entry out of order (COA B) | ✅ Confirmed |
 
 ---
 
@@ -7801,6 +7802,39 @@ folders; the same script against the previous build leaves the cursor where it w
 **Left open.** `goto` and `reveal` (a `/` hit or bookmark far away) and the trash view's folder
 preview still list on the render thread. A very large `.tar.gz` is still read whole to open.
 `ssh://` was not driven by hand, only through the same stopped-plugin path an archive uses.
+
+---
+
+## 2026-10-13 — The history popup
+
+**Decision.** The roadmap's undo follow-ups began with "no popup lists the stack to pick from".
+Three courses were weighed: a read-only list (A); a list where a row goes back to that entry
+by running every newer one first (B); and undoing any single entry on its own (C). Chosen: B. A
+lists what nobody can act on. C breaks the rule `History` relies on, that each revert is checked
+against the state the entries after it left behind, so a rename followed by a trash of the
+renamed file could not be undone out of order.
+
+**What changed.** `History::summary` lists both stacks, next-to-run first, after ending the batch
+being recorded. `history_popup` is pure state: rows, a cursor, a scroll window worked out from the
+cursor alone, and `Key::Run(Walk)`. The walk is a counter in `App`: after each step finishes
+`Done`, `poll_bulk` starts the next from the same `begin_undo`/`begin_redo` calls, so the busy
+gate, `Esc` and `finish` behave as for a single `z`, and anything but `Done` ends the walk with
+the usual rule that done steps stay done and the rest stays recorded. `:history` and a new
+`history` action (unbound) open it; `history` joined the reserved `:` words so a plugin cannot
+claim it.
+
+**Trade-offs.** Going back several entries is one operation to the user but several to the
+plugins, which are told of each step's end. Going back to a row far down runs everything above
+it, which is the point but can surprise; the row says how many entries it takes ("undo 3").
+
+**Verification.** `scripts/check` passes. New: two tests of `History::summary`, six on the popup
+(one property: the cursor stays inside the window for any moves), two on the popup's drawing and
+hit-testing, three on `App` (a walk of two, a walk that stops at a failure and keeps the rest,
+and the empty case) and the `:history` parse. The real `mman` was not driven by hand.
+
+**Left open.** No default key. A click selects a row but does not run it, so a stray click cannot
+undo files. The popup is a snapshot and does not follow the history while it is open, which is
+safe because it is modal.
 
 ---
 

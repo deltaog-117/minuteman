@@ -224,6 +224,13 @@ pub enum Report {
     Cancelled { label: String },
 }
 
+/// What `History::summary` lists: one label per entry, next-to-run first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub undo: Vec<String>,
+    pub redo: Vec<String>,
+}
+
 /// The undo and redo stacks.
 #[derive(Debug)]
 pub struct History {
@@ -277,6 +284,18 @@ impl History {
 
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// What each stack holds, as the words `Report` uses, next-to-run first: the entry `undo`
+    /// would take back is the first of `undo`, the one `redo` would do again the first of `redo`.
+    /// Ends the batch in progress first, so it is listed as the entry it will be.
+    pub fn summary(&mut self) -> Summary {
+        self.commit();
+        let labels = |stack: &[Entry]| stack.iter().rev().map(|e| label(&e.changes)).collect();
+        Summary {
+            undo: labels(&self.undo),
+            redo: labels(&self.redo),
+        }
     }
 
     /// Takes the newest entry off the undo stack to be run elsewhere (`Batch::run`, on a worker
@@ -818,6 +837,45 @@ mod tests {
 
         assert_eq!(seen, [(dir.join("a"), true)]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_summary_lists_each_stack_next_to_run_first() {
+        let dir = scratch("summary");
+        let mut history = History::default();
+        for name in ["a", "b", "c"] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"").unwrap();
+            entry(
+                &mut history,
+                Change::Created {
+                    path,
+                    is_dir: false,
+                },
+            );
+        }
+        assert!(matches!(history.undo(&LocalVfs), Report::Done { .. }));
+
+        let summary = history.summary();
+
+        assert_eq!(summary.undo, ["create b", "create a"]);
+        assert_eq!(summary.redo, ["create c"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_summary_lists_a_batch_still_being_recorded_as_one_entry() {
+        let mut history = History::default();
+        history.record(Change::Created {
+            path: PathBuf::from("/x/a"),
+            is_dir: false,
+        });
+        history.record(Change::Created {
+            path: PathBuf::from("/x/b"),
+            is_dir: false,
+        });
+
+        assert_eq!(history.summary().undo, ["create 2 items"]);
     }
 
     #[test]

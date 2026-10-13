@@ -1110,6 +1110,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   recorded, and the status line says so after an overwrite. Property-tested: any sequence of
   creates and moves, undone entirely, leaves the folder as it began, and redone entirely leaves it
   as it ended.
+- ✅ **History popup (COA B: go back to a chosen entry)** – `:history`, or a key bound to the
+  `history` action (none by default), opens a popup listing the entries `z` would take back,
+  newest first, then the ones `Z` would do again. `Enter` on a row runs every entry down to and
+  including it, each on the worker like a single `z`, and stops at the first that fails or is
+  cancelled, so what was done stays done and the rest stays recorded. Chosen over a read-only list
+  (A) and undoing any single entry on its own (C), which would break the rule that an entry is
+  only reverted against the state its successors left. `History::summary` lists the stacks; the
+  popup is pure state in `history_popup`; the walk is a counter in `App`.
 - ✅ **Undo and redo in the background (COA A: a `Batch` run on a worker)** – `z` and `Z` no longer
   stall the interface on a large move. `History` hands the newest entry out as a `Batch`
   (`begin_undo`/`begin_redo`), the batch runs on tokio's blocking pool, and `finish` puts what it
@@ -2231,7 +2239,7 @@ draws.
   is asked for again after a wrong one but there is no limit on tries; legacy ZipCrypto archives
   can be opened (they are common) but are never written; and encrypted archives cannot be
   previewed beyond their listing.
-- **Undo history, follow-ups** – there is no history popup listing the stack to pick from; a compress that
+- **Undo history, follow-ups** – the history popup (`:history`) lists the stack but can only go back to a row, not undo one entry on its own, and has no key by default; a compress that
   trashed its originals, an extract, a permanent delete and an overwrite are not recorded (holding
   deleted and overwritten data in an app-owned area would make them undoable, at the cost of
   `X` no longer being immediate); a cancelled paste that had already finished its current item

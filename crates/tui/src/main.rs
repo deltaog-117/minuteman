@@ -41,6 +41,7 @@ mod glyphs;
 mod gradient;
 mod grid_view;
 mod hex_dump;
+mod history_popup;
 mod hud;
 mod image_preview;
 mod inspect_panel;
@@ -109,6 +110,7 @@ use crossterm::terminal::{
 use deck::{DeckState, Event as DeckEvent, Outcome as DeckKey};
 use dir_preview::DirPreview;
 use extract_popup::ExtractPopup;
+use history_popup::HistoryPopup;
 use image_preview::{ImagePreview, PreviewStatus as ImagePreviewStatus};
 use inspect_panel::InspectPanel;
 use picker_popup::{Outcome as PickerOutcome, PickerPopup};
@@ -406,6 +408,7 @@ struct Overlay<'a> {
     settings: Option<&'a SettingsPopup>,
     compress: Option<&'a CompressPopup>,
     extract: Option<&'a ExtractPopup>,
+    history: Option<&'a HistoryPopup>,
     appearance: Option<&'a AppearancePopup>,
     /// A plugin's picker (the fuzzy finder's), a panel over the browser while open.
     picker: Option<&'a PickerPopup>,
@@ -1404,6 +1407,8 @@ fn run(
     let mut compress: Option<CompressPopup> = None;
     // The extract form ("Extract…" on an archive's right-click menu) while one is open; modal too.
     let mut extract: Option<ExtractPopup> = None;
+    // The history popup (`:history`, or the `history` key) while one is open; modal too.
+    let mut history: Option<HistoryPopup> = None;
     // The appearance popup (`a`, or "Appearance…" on blank space's right-click menu) while one is
     // open; modal too.
     let mut appearance: Option<AppearancePopup> = None;
@@ -1622,6 +1627,10 @@ fn run(
             Instant::now(),
         );
 
+        if app.take_history_request() {
+            history = app.begin_history_popup();
+        }
+
         if let Some(mut panes) = shells.take() {
             let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
             let exited = panes.poll_exits()?;
@@ -1746,6 +1755,7 @@ fn run(
                     settings: settings.as_ref(),
                     compress: compress.as_ref(),
                     extract: extract.as_ref(),
+                    history: history.as_ref(),
                     appearance: appearance.as_ref(),
                     picker: picker.as_ref(),
                     deck: deck.as_ref(),
@@ -1794,6 +1804,7 @@ fn run(
                 || trash_view.is_some()
                 || compress.is_some()
                 || extract.is_some()
+                || history.is_some()
                 || settings.is_some()
                 || appearance.is_some()
                 || picker.is_some();
@@ -2012,6 +2023,17 @@ fn run(
                             }
                             overlay_view::ExtractHit::Panel => {}
                             overlay_view::ExtractHit::Outside => extract = None,
+                        }
+                    }
+                    continue;
+                }
+                if let Some(popup) = history.as_mut() {
+                    if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                        let at = Position::new(mouse.column, mouse.row);
+                        match overlay_view::history_hit(frame_area, popup, at) {
+                            overlay_view::HistoryHit::Row(row) => popup.focus(row),
+                            overlay_view::HistoryHit::Panel => {}
+                            overlay_view::HistoryHit::Outside => history = None,
                         }
                     }
                     continue;
@@ -2900,6 +2922,17 @@ fn run(
                     }
                     continue;
                 }
+                if let Some(popup) = history.as_mut() {
+                    match popup.key(key.code) {
+                        history_popup::Key::Stay => {}
+                        history_popup::Key::Close => history = None,
+                        history_popup::Key::Run(walk) => {
+                            history = None;
+                            app.start_history_walk(browser, vfs, walk)?;
+                        }
+                    }
+                    continue;
+                }
                 if let Some(popup) = settings.as_mut() {
                     match popup.key(key.code) {
                         SettingsOutcome::Stay => {}
@@ -3372,6 +3405,7 @@ fn run(
             }
             Some(Action::Undo) => app.undo(browser, vfs)?,
             Some(Action::Redo) => app.redo(browser, vfs)?,
+            Some(Action::History) => history = app.begin_history_popup(),
             Some(Action::Delete) => app.begin_trash(browser),
             Some(Action::DeletePermanently) => app.begin_delete_permanently(browser),
             Some(Action::Rename) => app.begin_rename(browser),
@@ -3833,6 +3867,7 @@ fn draw(
         settings,
         compress,
         extract,
+        history,
         appearance,
         picker,
         deck,
@@ -4253,6 +4288,9 @@ fn draw(
     }
     if let Some(popup) = extract {
         overlay_view::render_extract(frame, popup, config);
+    }
+    if let Some(popup) = history {
+        overlay_view::render_history(frame, popup, config);
     }
     if let Some(popup) = appearance {
         // `config` is already the effective one composed above, so its `theme`/`ui.glyphs`/
