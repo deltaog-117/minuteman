@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Opening a file on a remote machine: `enter`, a double-click or "Open with" on an `ssh://` file
+  copies it into `$XDG_CACHE_HOME/minuteman/remote-open` (or `~/.cache/...`) on the background
+  worker, with the header gauge and `Esc`, then opens the copy with your `[[open_rule]]`, the
+  desktop's program or the one you picked. A second open replaces the copy, a folder is refused,
+  a missing program is reported before anything is copied, and copies older than a day are removed
+  the next time one is made. The copy is not sent back: the status says edits stay local.
+  Author: deltaog-117.
+- `ssh://host/~` and `ssh://host/~/path` open the login's home folder (or a path under it).
+  Author: deltaog-117.
 - A history popup: `:history` (or a key bound to the new `history` action, unbound by default)
   lists the entries `z` would take back and the ones `Z` would do again, and `Enter` on a row goes
   back (or forward) through every entry down to it, one after another on the background worker,

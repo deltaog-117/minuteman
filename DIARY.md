@@ -101,6 +101,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-12 | The Wiring Diagram as a Plugin (M7c step 3) | The plugin owns the scan, the folders, the layout and the device actions on the local disk, with the load and the browsed folder sent as a `context` (COA A); snapshots fed from the core (B) and keeping the diagram in the core (C) not taken | ✅ Confirmed |
 | 2026-10-13 | Folder Listings Off the Render Thread | A background `DirPreview` for the cursor folder and `App::resync`, which re-reads a local folder on the spot and hands a slow one to the live refresh (COA B); a plugin-side refreshing index (A) and a progress gauge with an on-disk index cache (C) not taken | ✅ Confirmed |
 | 2026-10-13 | History Popup | Go back to a chosen entry by walking the existing undo worker, never undoing one entry out of order (COA B) | ✅ Confirmed |
+| 2026-10-14 | Opening a Remote File | Fetch a copy into an app-owned cache folder on the background worker, then open the copy; edits stay in the copy (COA 1); write-back (2) and an `sshfs` mount (3) not taken | ✅ Confirmed |
 
 ---
 
@@ -7898,6 +7899,41 @@ an archive with no plugin running, and an ordinary failure keeping its own text.
 was not driven by hand. `open_file` itself has no test; it only builds the plan.
 
 **Left open.** None of the folder reads on the render thread that the roadmap listed.
+
+## 2026-10-14 — Opening a file on a remote machine
+
+**Decision.** `launch` refused any `ssh://` path ("copy it here first"), since a program on this
+machine cannot read one. Three courses were weighed: fetch a copy into a cache folder and open the
+copy (1); the same plus an upload of the copy when the program exits, after asking (2); and mount
+the machine with `sshfs` and open the mounted path (3). Chosen: 1. It reuses the streaming copy and
+leaves the plugin as the only thing that talks to the machine. 2 can only know when a terminal
+program exits (a window program is started detached), and overwriting a file on a machine the user
+does not own wants its own cycle. 3 needs `sshfs` and FUSE and a second connection.
+
+**What changed.** New `crates/tui/src/remote_open.rs` gives the cache path, `$XDG_CACHE_HOME/
+minuteman/remote-open/<hash of the address>/<file name>`, so the extension survives and two
+`notes.txt` on different machines never meet. It makes the folders and sweeps those older than a
+day, all through `Vfs` (`scripts/vfs-gate` allows no direct disk use there). `launch` now checks
+the program first (so a missing one is reported before a download), then starts a new
+`BulkKind::Fetch` job: a folder is refused on the worker, a file is copied with
+`ConflictPolicy::Overwrite` (a second open replaces the copy), and `poll_bulk` hands the finished
+copy to `launch` again with the same command and terminal flag. The status says the file is a copy
+and edits are not sent back. Also: `ssh://host/~` and `ssh://host/~/rest` now expand to the login's
+home, in `SshVfs::resolve_typed`, through the `Home` request a bare `ssh://host` already used.
+
+**Trade-offs.** Edits to the copy are lost on purpose, and the status line says so. The copy goes
+whole before anything opens, so a large file waits; `Esc` abandons it, but only after the file in
+flight (the same limit as a paste). The cache is cleared by age, not on exit, so a program still
+holding a copy open is never pulled from under it.
+
+**Verification.** `scripts/check` passes. New tests: six on `App` through a `Vfs` that serves
+`ssh://box/...` from a folder (fetch then open, a second open replaces the copy, a folder is not
+fetched, a missing program is reported before any copy, no cache folder, and a file inside an
+archive on a remote is still refused), four on `remote_open`, and one on the `~` forms. Not driven
+by hand: no ssh server was available, so the real `mman` and `mman-ssh` were not run for this.
+
+**Left open.** Writing the copy back; a progress gauge for a large file; the other items under
+"Remote browsing, follow-ups".
 
 ---
 

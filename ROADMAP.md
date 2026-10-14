@@ -1837,6 +1837,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   caller to remember the right message. Tested: `MovePlan::target`, the hint for a move into an
   archive with no plugin, and an ordinary failure keeping its own text. Not driven by hand against
   the real `mman-archive`.
+- ✅ **Open a remote file with a local program** – a file on an `ssh://` machine is copied into
+  `$XDG_CACHE_HOME/minuteman/remote-open/<hash of the address>/<name>` on the background worker
+  (new `BulkKind::Fetch`, with the header gauge and `Esc`), and `launch` then opens the copy with
+  the same command. The program is looked for before anything is downloaded, a folder is refused,
+  a second open replaces the copy, and copies older than a day are swept. Edits are not written
+  back, and the status says so. `ssh://host/~` and `ssh://host/~/rest` now expand to the login's
+  home. Covered by unit tests through a `Vfs` standing in for a machine; the real `mman` was not
+  driven against an ssh server this cycle.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2329,12 +2337,12 @@ draws.
   to its 10 second timeout on its own thread), and the live refresh, a preview and the search walk
   still do their reading on their own; there is no password or key-passphrase prompt (keys and the agent only, run
   through `BatchMode`), no prompt to trust a new host key (run `ssh host` once), no bookmarks or
-  history of machines, and no way to open a remote file with a local program except copying it
-  first. A shell pane, a `:` command and the trash are refused in a remote folder. A copy passes
+  history of machines, and a remote file opened with a local program is a copy in the cache (see
+  Completed), so edits are not written back. A shell pane, a `:` command and the trash are refused in a remote folder. A copy passes
   through this machine even between two folders on one remote (the server's `copy-data` extension
   is not used), and the disk usage view and recursive delete cost one round trip per folder.
   SFTP v3 gives times in whole seconds and no inode, link count or allocated size, so Inspect
-  leaves those out. `ssh://host/~` is not expanded. The `openssh` crate is Unix only, and this was
+  leaves those out. The `openssh` crate is Unix only, and this was
   not built or tried on Windows.
 - **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed, opt-in** – a second, sandboxed
   plugin tier alongside the stage-1 out-of-process JSON-RPC host (see Completed): a plugin
@@ -2686,6 +2694,9 @@ draws.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
+   Remote files: on an `ssh://` folder press `enter` on a file with `mman-ssh` installed — it is
+   copied into `~/.cache/minuteman/remote-open` and opened from there (`Esc` abandons the copy);
+   `:cd ssh://host/~` opens the login's home.
 4. Next cycle: M7 is done (M7a archives, M7b ssh, M7c the atlas and the wiring diagram as
    plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
    follow-ups to remote browsing and the other features listed there. Folder moves, undo and redo,

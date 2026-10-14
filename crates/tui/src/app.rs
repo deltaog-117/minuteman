@@ -64,6 +64,7 @@ use crate::nav_job::{NavJob, NavPoll};
 use crate::open;
 use crate::picker_popup::PickerPopup;
 use crate::plugin_views::Slots;
+use crate::remote_open;
 use crate::search_job::{SearchJob, SearchState};
 use shared::cargo_fit::{Carry, Load};
 use shared::usage_view::DiskUsageView;
@@ -374,6 +375,14 @@ enum BulkKind {
         command: String,
         started: Instant,
     },
+    /// Copying a file from a remote machine into the cache (`remote_open`) so `command` can open
+    /// the copy at `local`; `terminal` is the `launch` flag to hand it again once the copy is in.
+    Fetch {
+        command: String,
+        terminal: bool,
+        local: PathBuf,
+        name: String,
+    },
 }
 
 impl BulkKind {
@@ -390,6 +399,7 @@ impl BulkKind {
             BulkKind::Undo => "undoing",
             BulkKind::Redo => "redoing",
             BulkKind::Shell { .. } => "running",
+            BulkKind::Fetch { .. } => "fetching",
         }
     }
 
@@ -406,6 +416,7 @@ impl BulkKind {
             BulkKind::Undo => "undo",
             BulkKind::Redo => "redo",
             BulkKind::Shell { .. } => "command",
+            BulkKind::Fetch { .. } => "fetch",
         }
     }
 }
@@ -589,6 +600,8 @@ pub struct App {
     open_rules: Vec<OpenRule>,
     /// The hand-written `[[open_with]]` entries the menu lists.
     open_with: Vec<OpenWith>,
+    /// Where a remote file is copied to before a local program opens it (see `remote_open`).
+    remote_cache: Option<PathBuf>,
     /// What the desktop has registered for each file type, read on first use rather than at
     /// startup, since most sessions never open a file.
     associations: std::cell::OnceCell<Associations>,
@@ -650,6 +663,7 @@ impl App {
             interactive: Vec::new(),
             open_rules: Vec::new(),
             open_with: Vec::new(),
+            remote_cache: remote_open::cache_root(),
             associations: std::cell::OnceCell::new(),
             handover: None,
             search_job: None,
@@ -974,6 +988,9 @@ impl App {
                         "{}… {command} — Esc to cancel",
                         bulk.kind.progressing_label()
                     )
+                }
+                BulkKind::Fetch { name, .. } => {
+                    format!("{}… {name} — Esc to cancel", bulk.kind.progressing_label())
                 }
                 BulkKind::Paste { clip, index, .. } => {
                     let cancel_hint = if bulk.cancel.is_some() {
@@ -1386,6 +1403,10 @@ impl App {
             return Ok(());
         };
         let bulk = self.bulk.take().expect("checked Some above");
+        if matches!(bulk.kind, BulkKind::Fetch { .. }) {
+            self.finish_fetch(browser, bulk, result);
+            return Ok(());
+        }
         let past_label = bulk.kind.past_label();
         let overwrote = matches!(
             &bulk.kind,
@@ -1515,6 +1536,7 @@ impl App {
                 BulkKind::Delete { .. }
                 | BulkKind::Trash { .. }
                 | BulkKind::Shell { .. }
+                | BulkKind::Fetch { .. }
                 | BulkKind::Undo
                 | BulkKind::Redo => {
                     self.plugins
@@ -1902,13 +1924,6 @@ impl App {
     /// The one place a file is handed to a program. `terminal` forces the terminal handover for a
     /// program that needs it whatever its name (a `Terminal=true` desktop entry).
     fn launch(&mut self, browser: &BrowserState, command: &str, path: &Path, terminal: bool) {
-        if shared::ssh_path::is_remote(path) {
-            self.status = Some(format!(
-                "cannot open {}: it is on a remote machine, copy it here first",
-                display_name(path)
-            ));
-            return;
-        }
         if vfs_archive::is_inside(path) {
             self.status = Some(format!(
                 "cannot open {}: it is inside an archive, copy it out first",
@@ -1924,6 +1939,10 @@ impl App {
         // `VAR=value prog` is shell syntax, not a program name to look for.
         if !program.contains('=') && !open::program_exists(program) {
             self.status = Some(format!("{program}: command not found"));
+            return;
+        }
+        if shared::ssh_path::is_remote(path) {
+            self.spawn_fetch(command, terminal, path);
             return;
         }
         let line = open::command_line(command, path);
@@ -1951,6 +1970,120 @@ impl App {
                 Err(e) => format!("cannot open {}: {e}", display_name(path)),
             },
         );
+    }
+
+    /// Starts copying the remote file `path` into the cache on the blocking pool; `poll_bulk` hands
+    /// the copy to `launch` when it lands. The program was already found, so a missing one is
+    /// reported before anything is downloaded.
+    fn spawn_fetch(&mut self, command: &str, terminal: bool, path: &Path) {
+        if self.is_busy() {
+            self.status = Some(format!(
+                "an operation is already in progress: cannot open {} yet",
+                display_name(path)
+            ));
+            return;
+        }
+        let name = display_name(path);
+        let Some((root, local)) = self.remote_cache.clone().and_then(|root| {
+            let local = remote_open::copy_path(&root, path)?;
+            Some((root, local))
+        }) else {
+            self.status = Some(format!(
+                "cannot open {name}: no cache folder to copy it to (set XDG_CACHE_HOME or HOME)"
+            ));
+            return;
+        };
+
+        let (tx, rx): (UnboundedSender<BulkMsg>, _) = unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_bg = Arc::clone(&cancel);
+        let vfs = Arc::clone(&self.vfs);
+        let src = path.to_path_buf();
+        self.handle.spawn_blocking(move || {
+            let result = (|| {
+                if vfs.is_dir(&src) {
+                    return Err(FileOpsError::Vfs(VfsError::Unsupported(
+                        "opening a folder with a program, open it instead",
+                    )));
+                }
+                let dst = remote_open::prepare(vfs.as_ref(), &root, &src)?;
+                let mut on_progress = |_: &Path| -> ControlFlow<()> {
+                    if cancel_bg.load(Ordering::Relaxed) {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                };
+                file_ops::copy_with_progress(
+                    vfs.as_ref(),
+                    &src,
+                    &dst,
+                    ConflictPolicy::Overwrite,
+                    &mut on_progress,
+                )
+            })();
+            let _ = tx.send(BulkMsg::Done(result));
+        });
+        self.bulk = Some(BulkOp {
+            kind: BulkKind::Fetch {
+                command: command.to_owned(),
+                terminal,
+                local,
+                name,
+            },
+            items_done: 0,
+            current: String::new(),
+            cancel: Some(cancel),
+            rx,
+        });
+    }
+
+    /// What follows a `Fetch`: open the copy if it arrived, or say why not. Edits made to the copy
+    /// are not sent back, and the status says so.
+    fn finish_fetch(
+        &mut self,
+        browser: &BrowserState,
+        bulk: BulkOp,
+        result: Result<Outcome, FileOpsError>,
+    ) {
+        const NOTE: &str = "a copy of the remote file, edits are not sent back";
+        let cancelled = bulk
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed));
+        let BulkKind::Fetch {
+            command,
+            terminal,
+            local,
+            name,
+        } = bulk.kind
+        else {
+            return;
+        };
+        match result {
+            Ok(_) if !cancelled => {
+                self.plugins
+                    .notify_job_finished("fetch", JobOutcome::Completed);
+                self.launch(browser, &command, &local, terminal);
+                match &mut self.status {
+                    Some(status) if status.starts_with("opening") => {
+                        status.push_str(&format!(" ({NOTE})"));
+                    }
+                    status @ None => *status = Some(NOTE.to_owned()),
+                    Some(_) => {}
+                }
+            }
+            Ok(_) | Err(FileOpsError::Cancelled) => {
+                self.plugins
+                    .notify_job_finished("fetch", JobOutcome::Cancelled);
+                self.status = Some("fetch cancelled".into());
+            }
+            Err(e) => {
+                self.plugins
+                    .notify_job_finished("fetch", JobOutcome::Failed);
+                self.status = Some(format!("cannot open {name}: {e}"));
+            }
+        }
     }
 
     /// Routes a raw key to the active prompt. No-op if there is no active prompt. Returns
@@ -5959,15 +6092,203 @@ mod tests {
         assert_eq!(f.app.take_handover(), None);
     }
 
+    /// A `Vfs` that serves `ssh://box/<path>` from `<root>/remote/<path>` on this disk and every
+    /// other path as it is, standing in for a machine on the network.
+    struct Mapped {
+        root: PathBuf,
+    }
+
+    impl Mapped {
+        fn tr(&self, path: &Path) -> PathBuf {
+            match path.strip_prefix("ssh://box") {
+                Ok(rest) => self
+                    .root
+                    .join("remote")
+                    .join(rest.strip_prefix("/").unwrap_or(rest)),
+                Err(_) => path.to_path_buf(),
+            }
+        }
+    }
+
+    impl Vfs for Mapped {
+        fn list_dir(&self, p: &Path) -> Result<Vec<shared::DirEntryInfo>, VfsError> {
+            LocalVfs.list_dir(&self.tr(p))
+        }
+        fn is_dir(&self, p: &Path) -> bool {
+            LocalVfs.is_dir(&self.tr(p))
+        }
+        fn exists(&self, p: &Path) -> bool {
+            LocalVfs.exists(&self.tr(p))
+        }
+        fn metadata(&self, p: &Path) -> Result<shared::Metadata, VfsError> {
+            LocalVfs.metadata(&self.tr(p))
+        }
+        fn symlink_metadata(&self, p: &Path) -> Result<shared::Metadata, VfsError> {
+            LocalVfs.symlink_metadata(&self.tr(p))
+        }
+        fn read_link(&self, p: &Path) -> Result<PathBuf, VfsError> {
+            LocalVfs.read_link(&self.tr(p))
+        }
+        fn open_read(&self, p: &Path) -> Result<Box<dyn shared::ReadSeek>, VfsError> {
+            LocalVfs.open_read(&self.tr(p))
+        }
+        fn scan_dir(&self, p: &Path) -> Result<Vec<shared::ScanEntry>, VfsError> {
+            LocalVfs.scan_dir(&self.tr(p))
+        }
+        fn local_path(&self, p: &Path) -> Option<PathBuf> {
+            (self.tr(p) == p).then(|| p.to_path_buf())
+        }
+        fn create_write(&self, p: &Path) -> Result<Box<dyn shared::WriteSeek>, VfsError> {
+            LocalVfs.create_write(&self.tr(p))
+        }
+        fn create_symlink(&self, target: &Path, link: &Path) -> Result<(), VfsError> {
+            LocalVfs.create_symlink(target, &self.tr(link))
+        }
+        fn set_mode(&self, p: &Path, mode: u32) -> Result<(), VfsError> {
+            LocalVfs.set_mode(&self.tr(p), mode)
+        }
+        fn replace(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
+            LocalVfs.replace(&self.tr(src), &self.tr(dst))
+        }
+        fn create_dir(&self, p: &Path) -> Result<(), VfsError> {
+            LocalVfs.create_dir(&self.tr(p))
+        }
+        fn create_file(&self, p: &Path) -> Result<(), VfsError> {
+            LocalVfs.create_file(&self.tr(p))
+        }
+        fn touch(&self, p: &Path) -> Result<(), VfsError> {
+            LocalVfs.touch(&self.tr(p))
+        }
+        fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
+            LocalVfs.copy_file(&self.tr(src), &self.tr(dst))
+        }
+        fn rename(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
+            LocalVfs.rename(&self.tr(src), &self.tr(dst))
+        }
+        fn remove_file(&self, p: &Path) -> Result<(), VfsError> {
+            LocalVfs.remove_file(&self.tr(p))
+        }
+        fn remove_dir_all(&self, p: &Path) -> Result<(), VfsError> {
+            LocalVfs.remove_dir_all(&self.tr(p))
+        }
+    }
+
+    /// A fixture whose app reaches `ssh://box/...` (the files in `<root>/remote`) and copies
+    /// remote files into `<root>/cache`. `sh` is on its interactive list, so an open hands the
+    /// terminal over instead of starting a program.
+    fn with_remote_box(label: &str) -> Fixture {
+        let mut f = Fixture::new(label);
+        std::fs::create_dir_all(f.root.join("remote/etc/conf.d")).unwrap();
+        std::fs::write(f.root.join("remote/etc/hosts"), b"127.0.0.1 box\n").unwrap();
+        f.app = App::new(f._runtime.handle().clone())
+            .with_interactive_commands(vec!["sh".into()])
+            .with_vfs(Arc::new(Mapped {
+                root: f.root.clone(),
+            }));
+        f.app.remote_cache = Some(f.root.join("cache"));
+        f
+    }
+
     #[test]
-    fn a_file_on_a_remote_machine_is_not_opened_by_a_local_program() {
-        let mut f = Fixture::new("open-remote");
+    fn a_file_on_a_remote_machine_is_fetched_and_opened_from_a_local_copy() {
+        let mut f = with_remote_box("open-remote");
 
         f.app
-            .open_with(&f.browser, "cat", Path::new("ssh://box/etc/hosts"));
+            .open_with(&f.browser, "sh -e", Path::new("ssh://box/etc/hosts"));
+        assert!(f.app.is_busy(), "the copy runs in the background");
+        let line = f.app.status_line();
+        assert!(line.starts_with("fetching… hosts"), "{line}");
+        assert_eq!(f.app.take_handover(), None, "nothing opens before the copy");
+
+        f.wait_for_idle();
+        let status = f.app.status.clone();
+        let handover = f
+            .app
+            .take_handover()
+            .unwrap_or_else(|| panic!("opened once the copy landed: {status:?}"));
+        let copy = handover
+            .line
+            .strip_prefix("sh -e '")
+            .and_then(|rest| rest.strip_suffix('\''))
+            .map(PathBuf::from)
+            .expect("the line names the copy");
+        assert!(copy.starts_with(f.root.join("cache")), "{copy:?}");
+        assert_eq!(copy.file_name(), Some("hosts".as_ref()));
+        assert_eq!(std::fs::read(&copy).unwrap(), b"127.0.0.1 box\n");
+        let status = f.app.status.as_deref().unwrap_or_default();
+        assert!(status.contains("edits are not sent back"), "{status}");
+    }
+
+    #[test]
+    fn a_second_open_of_the_same_remote_file_replaces_its_copy() {
+        let mut f = with_remote_box("open-remote-twice");
+        let remote = Path::new("ssh://box/etc/hosts");
+        f.app.open_with(&f.browser, "sh -e", remote);
+        f.wait_for_idle();
+        let _ = f.app.take_handover();
+        std::fs::write(f.root.join("remote/etc/hosts"), b"changed\n").unwrap();
+
+        f.app.open_with(&f.browser, "sh -e", remote);
+        f.wait_for_idle();
+
+        let handover = f.app.take_handover().expect("opened again");
+        let copy = handover
+            .line
+            .trim_start_matches("sh -e ")
+            .trim_matches('\'');
+        assert_eq!(std::fs::read(copy).unwrap(), b"changed\n");
+    }
+
+    #[test]
+    fn a_remote_folder_is_not_fetched_for_a_program() {
+        let mut f = with_remote_box("open-remote-folder");
+
+        f.app
+            .open_with(&f.browser, "sh -e", Path::new("ssh://box/etc/conf.d"));
+        f.wait_for_idle();
 
         let status = f.app.status.as_deref().unwrap_or_default();
-        assert!(status.contains("remote machine"), "{status}");
+        assert!(status.starts_with("cannot open conf.d"), "{status}");
+        assert_eq!(f.app.take_handover(), None);
+        assert!(!f.root.join("cache").exists(), "nothing was copied");
+    }
+
+    #[test]
+    fn a_missing_program_is_reported_before_anything_is_fetched() {
+        let mut f = with_remote_box("open-remote-missing");
+
+        f.app.open_with(
+            &f.browser,
+            "minuteman-no-such-program",
+            Path::new("ssh://box/etc/hosts"),
+        );
+
+        assert!(!f.app.is_busy());
+        let status = f.app.status.as_deref().unwrap_or_default();
+        assert!(status.contains("command not found"), "{status}");
+    }
+
+    #[test]
+    fn a_remote_file_cannot_be_opened_without_a_cache_folder() {
+        let mut f = with_remote_box("open-remote-no-cache");
+        f.app.remote_cache = None;
+
+        f.app
+            .open_with(&f.browser, "sh -e", Path::new("ssh://box/etc/hosts"));
+
+        assert!(!f.app.is_busy());
+        let status = f.app.status.as_deref().unwrap_or_default();
+        assert!(status.contains("no cache folder"), "{status}");
+    }
+
+    #[test]
+    fn a_file_inside_an_archive_on_a_remote_machine_is_still_refused() {
+        let mut f = with_remote_box("open-remote-archive");
+
+        f.app
+            .open_with(&f.browser, "sh -e", Path::new("ssh://box/a.zip!/x.txt"));
+
+        assert!(!f.app.is_busy());
         assert_eq!(f.app.take_handover(), None);
     }
 

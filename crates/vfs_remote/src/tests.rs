@@ -353,6 +353,26 @@ fn a_bare_machine_opens_at_the_login_home_and_a_path_is_taken_as_written() {
 }
 
 #[test]
+fn a_tilde_after_the_machine_is_the_login_home() {
+    let stand = Stand::new(&[]);
+    let (vfs, _mem) = vfs_over(&stand);
+    let current = Path::new("/x");
+    assert_eq!(
+        vfs.resolve_typed(Path::new("ssh://h/~"), current),
+        at("/home/me")
+    );
+    assert_eq!(
+        vfs.resolve_typed(Path::new("ssh://h/~/notes/a.txt"), current),
+        at("/home/me/notes/a.txt")
+    );
+    assert_eq!(
+        vfs.resolve_typed(Path::new("ssh://h/~other"), current),
+        at("/~other"),
+        "another user's home is not this login's"
+    );
+}
+
+#[test]
 fn a_file_written_in_small_pieces_goes_in_few_windows_and_is_closed() {
     let body: Vec<u8> = (0..(1u32 << 20)).map(|i| (i % 251) as u8).collect();
     let stand = Stand::new(&[]);

@@ -59,6 +59,7 @@ mod plugin_action;
 mod plugin_views;
 mod popup_shell;
 mod preview_view;
+mod remote_open;
 mod search_job;
 mod settings_popup;
 mod shell_init;

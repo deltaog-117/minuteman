@@ -386,7 +386,13 @@ impl Vfs for SshVfs {
             .to_str()
             .and_then(|text| text.split_once("://"))
             .is_some_and(|(_, rest)| !rest.contains('/'));
-        if names_only_a_machine
+        // `~` or `~/rest` right after the machine is the login's home too, as in `ssh host:~`.
+        let under_home = remote
+            .path()
+            .strip_prefix("/~")
+            .ok()
+            .filter(|_| !names_only_a_machine);
+        if (names_only_a_machine || under_home.is_some())
             && let Ok(home) = self.ask::<Resolved>(
                 typed,
                 &VfsRequest::Home {
@@ -394,7 +400,10 @@ impl Vfs for SshVfs {
                 },
             )
         {
-            return home.path;
+            return match under_home {
+                Some(rest) => home.path.join(rest),
+                None => home.path,
+            };
         }
         typed.to_path_buf()
     }
