@@ -79,6 +79,11 @@ pub(crate) fn lost(shown: &Path, _: Lost) -> VfsError {
     )
 }
 
+/// What a call reports when the job that asked was given up.
+pub(crate) fn cancelled(shown: &Path) -> VfsError {
+    io_error(shown, io::ErrorKind::Interrupted, "cancelled".into())
+}
+
 pub(crate) fn io_error(shown: &Path, kind: io::ErrorKind, message: String) -> VfsError {
     VfsError::Io {
         path: shown.to_path_buf(),

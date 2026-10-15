@@ -48,6 +48,14 @@ pub const PROVIDES_VFS_SSH: &str = "vfs-ssh";
 /// The method of a host -> plugin request line.
 pub const METHOD_VFS: &str = "vfs";
 
+/// The method of a host -> plugin notification that no one waits for the reply to request `id`
+/// any more, because the job that asked was given up (`Esc` on a folder being opened, the cursor
+/// leaving a folder being listed). The plugin may stop the work, but still replies, so the host
+/// can close a file that was opened meanwhile. A request that changes something may run to its
+/// end regardless, since stopping it halfway would leave the change half made. A plugin that does
+/// not know the method ignores it, as it does any line it cannot read.
+pub const METHOD_VFS_CANCEL: &str = "vfs_cancel";
+
 /// How many files a plugin keeps open for the host at once. Each can hold an unpacked entry in
 /// memory, so the count is what bounds that memory; a host that leaks handles gets a refusal
 /// rather than a plugin that grows.
@@ -298,6 +306,8 @@ pub enum PeerError {
     Fault(VfsFault),
     /// The plugin answered with something that is not what was asked.
     Garbled(String),
+    /// The caller's job was given up (see `shared::cancel`) before the answer came.
+    Cancelled,
 }
 
 impl fmt::Display for PeerError {
@@ -309,6 +319,7 @@ impl fmt::Display for PeerError {
             Self::Stale => f.write_str("the plugin was restarted since this file was opened"),
             Self::Fault(fault) => fault.fmt(f),
             Self::Garbled(why) => write!(f, "unreadable answer from the plugin: {why}"),
+            Self::Cancelled => f.write_str("cancelled"),
         }
     }
 }
@@ -351,7 +362,8 @@ pub trait Peer: Send + Sync {
 
 /// The answer to a request sent with [`Peer::submit`], which may not have arrived yet.
 pub trait Reply: Send {
-    /// Waits for the answer.
+    /// Waits for the answer, or gives up with [`PeerError::Cancelled`] once the calling thread's
+    /// `shared::cancel` token is set.
     ///
     /// # Errors
     ///
@@ -385,6 +397,15 @@ pub fn request_to_line(id: u64, request: &VfsRequest) -> String {
         method: METHOD_VFS,
         params: request,
     })
+}
+
+/// The [`METHOD_VFS_CANCEL`] line for request `id`, for the plugin's stdin.
+pub fn cancel_line(id: u64) -> String {
+    #[derive(Serialize)]
+    struct Params {
+        id: u64,
+    }
+    crate::client::notification_line(METHOD_VFS_CANCEL, &Params { id })
 }
 
 /// A plugin -> host reply line to a [`METHOD_VFS`] request.
@@ -431,6 +452,19 @@ pub fn fault_line(id: &Value, fault: &VfsFault) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn a_cancel_is_one_line_naming_the_request_and_the_plugin_reads_it_back() {
+        let line = cancel_line(41);
+        assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
+        assert_eq!(
+            crate::client::parse_vfs_cancel(&line),
+            Some(Value::from(41))
+        );
+        // Nor is it mistaken for a request or a reply.
+        assert!(crate::client::parse_vfs_request(&line).is_none());
+        assert!(crate::client::parse_incoming(&line).is_err());
+    }
 
     #[test]
     fn a_request_is_one_line_naming_its_operation() {

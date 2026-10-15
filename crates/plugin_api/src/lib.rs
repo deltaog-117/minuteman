@@ -76,9 +76,10 @@ pub use preview::{
     hex_string, is_handoff_path,
 };
 pub use serve::{
-    Answer, Bytes, Epoch, IoKind, LinkTarget, MAX_OPEN_HANDLES, MAX_VFS_READ, METHOD_VFS, Opened,
-    PROVIDES_VFS_ARCHIVE, PROVIDES_VFS_SSH, Peer, PeerError, Reply, Resolved, VfsFault, VfsRequest,
-    WireKind, WireMeta, WireScan, fault_line, reply_line, request_to_line,
+    Answer, Bytes, Epoch, IoKind, LinkTarget, MAX_OPEN_HANDLES, MAX_VFS_READ, METHOD_VFS,
+    METHOD_VFS_CANCEL, Opened, PROVIDES_VFS_ARCHIVE, PROVIDES_VFS_SSH, Peer, PeerError, Reply,
+    Resolved, VfsFault, VfsRequest, WireKind, WireMeta, WireScan, cancel_line, fault_line,
+    reply_line, request_to_line,
 };
 pub use view::{
     Glyph, Line, MAX_BADGE_CHARS, MAX_BADGES, MAX_CHARS, MAX_KEY_CHARS, MAX_SPANS, METHOD_SET_VIEW,

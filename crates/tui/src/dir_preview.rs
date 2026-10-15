@@ -23,13 +23,15 @@
 //! [`SLOW_INTERVAL`] for a slow one), which keeps the column as fresh as the per-frame read did
 //! for a folder that changes underneath it. The first listing of a folder gets a short grace
 //! period to land inside the same frame, so a local folder never shows up empty for a moment.
+//! A read of a folder the cursor has left is given up (`shared::cancel`), so a slow one does not
+//! hold back the folder the cursor is on now.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use shared::{DirEntryInfo, Vfs};
+use shared::{Cancel, DirEntryInfo, Vfs};
 
 /// How long a local folder's listing is trusted before it is read again.
 const LOCAL_INTERVAL: Duration = Duration::from_millis(500);
@@ -46,16 +48,23 @@ struct Listed {
     entries: Vec<DirEntryInfo>,
 }
 
+/// A read that is running.
+struct Reading {
+    path: PathBuf,
+    cancel: Cancel,
+}
+
 pub struct DirPreview {
-    tx: Sender<Listed>,
-    rx: Receiver<Listed>,
+    /// `None` for a read that was given up, which says nothing about the folder.
+    tx: Sender<Option<Listed>>,
+    rx: Receiver<Option<Listed>>,
     handle: tokio::runtime::Handle,
     vfs: Arc<dyn Vfs>,
     /// The latest listing that arrived and the folder it belongs to. Unfiltered, as `Vfs`
     /// returns it; the browser arranges it for the column.
     shown: Option<Listed>,
-    /// The folder being read, if a read is running; a slow one must not pile up requests.
-    in_flight: Option<PathBuf>,
+    /// The read that is running, if any; a slow one must not pile up requests.
+    in_flight: Option<Reading>,
     last_started: Option<Instant>,
 }
 
@@ -78,6 +87,11 @@ impl DirPreview {
     /// or its listing has gone stale.
     pub fn poll(&mut self, folder: Option<&Path>, now: Instant) {
         self.take_finished();
+        if let Some(reading) = &self.in_flight
+            && folder != Some(reading.path.as_path())
+        {
+            reading.cancel.cancel();
+        }
         let Some(folder) = folder else {
             return;
         };
@@ -96,9 +110,13 @@ impl DirPreview {
         if !(first || stale) {
             return;
         }
-        self.in_flight = Some(folder.to_path_buf());
+        let cancel = Cancel::new();
+        self.in_flight = Some(Reading {
+            path: folder.to_path_buf(),
+            cancel: cancel.clone(),
+        });
         self.last_started = Some(now);
-        self.spawn(folder.to_path_buf());
+        self.spawn(folder.to_path_buf(), cancel);
         if first {
             self.wait_for_it();
         }
@@ -121,37 +139,56 @@ impl DirPreview {
 
     fn take_finished(&mut self) {
         while let Ok(listed) = self.rx.try_recv() {
-            self.in_flight = None;
-            self.shown = Some(listed);
+            self.land(listed);
         }
     }
 
     /// Gives the read just started a moment to finish, so a quick one is on screen this frame.
     fn wait_for_it(&mut self) {
         if let Ok(listed) = self.rx.recv_timeout(GRACE) {
-            self.in_flight = None;
-            self.shown = Some(listed);
+            self.land(listed);
         }
     }
 
-    fn spawn(&self, path: PathBuf) {
+    fn land(&mut self, listed: Option<Listed>) {
+        self.in_flight = None;
+        match listed {
+            Some(listed) => self.shown = Some(listed),
+            // Read again at once if the cursor comes back.
+            None => self.last_started = None,
+        }
+    }
+
+    fn spawn(&self, path: PathBuf, cancel: Cancel) {
         let tx = self.tx.clone();
         let vfs = Arc::clone(&self.vfs);
         self.handle.spawn_blocking(move || {
+            let _scope = cancel.enter();
             let entries = vfs.list_dir(&path).unwrap_or_default();
+            // A read given up may have failed for that alone; it must not pass for an empty folder.
+            let listed = (!cancel.is_cancelled()).then_some(Listed { path, entries });
             // Nobody listening means the program is exiting.
-            let _ = tx.send(Listed { path, entries });
+            let _ = tx.send(listed);
         });
+    }
+}
+
+impl Drop for DirPreview {
+    fn drop(&mut self) {
+        if let Some(reading) = &self.in_flight {
+            reading.cancel.cancel();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
-    use shared::{LocalVfs, VfsError};
+    use shared::LocalVfs;
 
     use super::*;
+    use crate::test_vfs::Slow;
 
     fn scratch(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -166,88 +203,6 @@ mod tests {
 
     fn names(entries: &[DirEntryInfo]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()
-    }
-
-    /// A `Vfs` whose listings take `delay` and are counted, standing in for a remote machine.
-    struct Slow {
-        inner: LocalVfs,
-        delay: Duration,
-        lists: AtomicUsize,
-    }
-
-    impl Slow {
-        fn new(delay: Duration) -> Self {
-            Self {
-                inner: LocalVfs,
-                delay,
-                lists: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl Vfs for Slow {
-        fn list_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>, VfsError> {
-            self.lists.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(self.delay);
-            self.inner.list_dir(path)
-        }
-        fn metadata(&self, _: &Path) -> Result<shared::Metadata, VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn symlink_metadata(&self, _: &Path) -> Result<shared::Metadata, VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn read_link(&self, _: &Path) -> Result<PathBuf, VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn open_read(&self, _: &Path) -> Result<Box<dyn shared::ReadSeek>, VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn scan_dir(&self, _: &Path) -> Result<Vec<shared::ScanEntry>, VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn local_path(&self, _: &Path) -> Option<PathBuf> {
-            None
-        }
-        fn create_write(&self, _: &Path) -> Result<Box<dyn shared::WriteSeek>, VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn set_mode(&self, _: &Path, _: u32) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn replace(&self, _: &Path, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn is_dir(&self, _: &Path) -> bool {
-            unimplemented!("a preview only lists")
-        }
-        fn exists(&self, _: &Path) -> bool {
-            unimplemented!("a preview only lists")
-        }
-        fn create_dir(&self, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn create_file(&self, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn touch(&self, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn copy_file(&self, _: &Path, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn rename(&self, _: &Path, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn remove_file(&self, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
-        fn remove_dir_all(&self, _: &Path) -> Result<(), VfsError> {
-            unimplemented!("a preview only lists")
-        }
     }
 
     fn wait_for(preview: &mut DirPreview, folder: &Path) {
@@ -343,6 +298,29 @@ mod tests {
         preview.invalidate();
         preview.poll(Some(&folder), t0 + Duration::from_millis(1));
         wait_for_count(&vfs, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leaving_a_folder_gives_up_its_read_and_the_next_one_starts() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let root = scratch("leave");
+        let vfs = Arc::new(Slow::new(Duration::from_secs(60)));
+        let mut preview = DirPreview::new(runtime.handle().clone(), vfs.clone());
+        let folder = root.join("inner");
+        preview.poll(Some(&folder), Instant::now());
+        assert!(Slow::reaches(&vfs.lists, 1));
+
+        preview.poll(None, Instant::now());
+        assert!(Slow::reaches(&vfs.gave_up, 1), "the read was given up");
+        // The given-up read does not pass for an empty folder, and coming back reads it again.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while vfs.lists.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            preview.poll(Some(&folder), Instant::now());
+            assert!(preview.entries(&folder).is_none());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(vfs.lists.load(Ordering::SeqCst), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 

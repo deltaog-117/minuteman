@@ -1845,6 +1845,22 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   back, and the status says so. `ssh://host/~` and `ssh://host/~/rest` now expand to the login's
   home. Covered by unit tests through a `Vfs` standing in for a machine; the real `mman` was not
   driven against an ssh server this cycle.
+- ✅ **Giving up on a remote read at the connection (COA B)** – `Esc` on a move to an `ssh://`
+  folder now stops the work in `mman-ssh` too, not only the wait for it. A `shared::Cancel` token
+  travels with the job's thread (`Cancel::enter`), since the `Vfs` methods take none; the host's
+  `ServeLink` gives up within 20 ms of it being set, sends a new `vfs_cancel` line naming the
+  request, and closes a file the request opened after its caller left. In the plugin each request
+  runs inside its own token: a read-only call is aborted (the SFTP client's futures are cancel
+  safe), a call that changes something runs to its end, and the connect is one attempt per machine
+  that no request holds a lock across, so a second request joins it and the last one to leave
+  aborts it. The move, the live refresh, the folder preview and the `/` search each give up their
+  read when it is no longer wanted. Chosen over a plugin-only shared connect (A, which leaves the
+  interface waiting) and over also killing the connecting `ssh` (C, which means launching it
+  outside the `openssh` crate). Tested: the token's scopes and waits (one property test), the
+  host's table (a property test that an orphaned handle is closed exactly once), the shared
+  connect, the plugin process cancelling a connect stuck on a server that never speaks, and each
+  of the four jobs. Driven by hand in the real `mman`: after `Esc` the same `:cd` reconnected in
+  0.01 s, against 8.07 s before.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2332,10 +2348,13 @@ draws.
   "Open with" cannot set the default (writing `mimeapps.list`) or remember the last choice; the
   associations are read once per session, so an app installed while it runs is not seen; `l` and
   `→` on a file now open it, which someone used to browsing with them may find eager.
-- **Remote browsing, follow-ups** – opening a folder no longer blocks the interface, but a move
-  already running cannot be interrupted at the connection (`Esc` abandons it and the connect runs
-  to its 10 second timeout on its own thread), and the live refresh, a preview and the search walk
-  still do their reading on their own; there is no password or key-passphrase prompt (keys and the agent only, run
+- **Remote browsing, follow-ups** – `Esc` stops a move at the connection, but the `ssh` process a
+  given-up connect started is not killed: it runs to its own 10 second timeout, holding nothing
+  (killing it means starting the master `ssh` with `kill_on_drop` and attaching with
+  `Session::resume`, COA C of 2026-10-15); a file's preview read through the preview plugin
+  (`read_file`), a thumbnail, an image preview and the marked-size walk are not given up when the
+  cursor moves on, and in the plugin a read of a file already open (one window of at most 256 KiB)
+  is not stopped, as the reader holds the file across it; there is no password or key-passphrase prompt (keys and the agent only, run
   through `BatchMode`), no prompt to trust a new host key (run `ssh host` once), no bookmarks or
   history of machines, and a remote file opened with a local program is a copy in the cache (see
   Completed), so edits are not written back. A shell pane, a `:` command and the trash are refused in a remote folder. A copy passes
@@ -2697,10 +2716,14 @@ draws.
    Remote files: on an `ssh://` folder press `enter` on a file with `mman-ssh` installed — it is
    copied into `~/.cache/minuteman/remote-open` and opened from there (`Esc` abandons the copy);
    `:cd ssh://host/~` opens the login's home.
+   Cancelling at the connection: `:cd ssh://10.255.255.1/` (an address that never answers), wait
+   a second, press `Esc` (the status says `cancelled`), then the same `:cd` again: it starts
+   connecting at once instead of after the first attempt's 10 second timeout.
 4. Next cycle: M7 is done (M7a archives, M7b ssh, M7c the atlas and the wiring diagram as
    plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
    follow-ups to remote browsing and the other features listed there. Folder moves, undo and redo,
    and the folder preview no longer block (see DIARY.md, 2026-10-12 and 2026-10-13). The next
    biggest gaps are a very large `.tar.gz` that is still read whole to open, and a prompt for a
    password or a new host key. No folder read is left on the render thread: search hits, the
-   finder's reveal, the trash preview and opening an archive file are background work now.
+   finder's reveal, the trash preview and opening an archive file are background work now, and
+   `Esc` on a remote move stops it at the connection (see DIARY.md, 2026-10-15).

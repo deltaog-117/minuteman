@@ -1075,13 +1075,13 @@ impl App {
                 return;
             }
         };
-        let Some(job) = self.nav.take() else {
+        let Some(mut job) = self.nav.take() else {
             return;
         };
         match result {
             Ok(loaded) => {
                 browser.apply_move(loaded);
-                self.status = job.done_status;
+                self.status = job.done_status.take();
             }
             Err(e) if vfs_remote::is_plugin_absent(&e) => {
                 self.status = Some(self.remote_open_failure(&e));

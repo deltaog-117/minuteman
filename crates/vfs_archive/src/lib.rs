@@ -136,6 +136,8 @@ pub(crate) fn error_of(error: PeerError, path: &Path) -> VfsError {
         | PeerError::TimedOut
         | PeerError::Stale
         | PeerError::Garbled(_)) => io(io::ErrorKind::Other, error.to_string()),
+        // The job that asked was given up; whoever gave up on it reports that, not this.
+        error @ PeerError::Cancelled => io(io::ErrorKind::Interrupted, error.to_string()),
     }
 }
 

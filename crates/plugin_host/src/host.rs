@@ -1101,7 +1101,11 @@ async fn read_loop(
             Ok(Incoming::ArchiveDone(done)) => ui.archive_done(&plugin, done),
             Ok(Incoming::WalkCancel(cancel)) => walks.cancel(cancel.walk),
             Ok(Incoming::TallyCancel(cancel)) => tallies.cancel(cancel.tally),
-            Ok(Incoming::Response { id, outcome }) => pending.answer(&id, outcome),
+            Ok(Incoming::Response { id, outcome }) => {
+                if let Some(close) = pending.answer(&id, outcome) {
+                    let _ = stdin_tx.send(close);
+                }
+            }
             Ok(Incoming::UnknownNotification) => {}
             Ok(Incoming::Request { id, request }) => {
                 let reply = match request {

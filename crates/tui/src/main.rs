@@ -4542,6 +4542,9 @@ fn with_shifted_letter_uppercased(mut key: event::KeyEvent) -> event::KeyEvent {
 }
 
 #[cfg(test)]
+mod test_vfs;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

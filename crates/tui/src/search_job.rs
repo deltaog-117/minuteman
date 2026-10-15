@@ -19,14 +19,15 @@
 //! search; the `/` prompt starts a fresh one on every keystroke and drops the one before it.
 //! Dropping a job sets its cancel flag, and each job owns its own channel, so a slow search for
 //! `aer` can neither keep walking after the query became `aere` nor deliver its answer late and
-//! move the cursor somewhere the current query wouldn't.
+//! move the cursor somewhere the current query wouldn't. The flag is the walk's `shared::cancel`
+//! token too, so a folder on another machine being listed when it is set stops at once rather
+//! than at the next folder.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use browser::search::{Limits, Outcome, Query, find_below};
-use shared::Vfs;
+use shared::{Cancel, Vfs};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -76,7 +77,7 @@ impl SearchState {
 }
 
 pub struct SearchJob {
-    cancel: Arc<AtomicBool>,
+    cancel: Cancel,
     rx: UnboundedReceiver<Outcome>,
 }
 
@@ -90,16 +91,17 @@ impl SearchJob {
         show_hidden: bool,
     ) -> Self {
         let (tx, rx) = unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_bg = Arc::clone(&cancel);
+        let cancel = Cancel::new();
+        let token = cancel.clone();
         handle.spawn_blocking(move || {
+            let _scope = token.enter();
             let outcome = find_below(
                 vfs.as_ref(),
                 &root,
                 &query,
                 show_hidden,
                 Limits::default(),
-                &cancel_bg,
+                token.flag(),
             );
             let _ = tx.send(outcome);
         });
@@ -119,7 +121,7 @@ impl SearchJob {
 
 impl Drop for SearchJob {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
@@ -200,10 +202,10 @@ mod tests {
             Query::new("x").unwrap(),
             false,
         );
-        let flag = Arc::clone(&job.cancel);
-        assert!(!flag.load(Ordering::Relaxed));
+        let flag = job.cancel.clone();
+        assert!(!flag.is_cancelled());
         drop(job);
-        assert!(flag.load(Ordering::Relaxed));
+        assert!(flag.is_cancelled());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

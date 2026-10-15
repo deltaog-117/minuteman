@@ -24,13 +24,16 @@
 //! listings — names, sizes, modified times, permissions — rather than a directory's own mtime is
 //! what catches a file being written to in place, which never touches its directory's mtime.
 //! Going through `Vfs::list_dir` also means any future backend gets this for free.
+//!
+//! A listing of a folder the browser has since left is given up (`shared::cancel`): on another
+//! machine it may be waiting seconds for an answer nobody will look at.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use browser::BrowserState;
-use shared::{DirEntryInfo, Vfs};
+use shared::{Cancel, DirEntryInfo, Vfs};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Time between the start of one background listing and the next. Long enough that the extra
@@ -49,8 +52,9 @@ pub struct LiveRefresh {
     rx: UnboundedReceiver<Snapshot>,
     handle: tokio::runtime::Handle,
     vfs: Arc<dyn Vfs>,
-    /// A listing is already running; a slow filesystem must not pile up requests behind it.
-    in_flight: bool,
+    /// The listing already running, and the folder it reads; a slow filesystem must not pile up
+    /// requests behind it.
+    in_flight: Option<(PathBuf, Cancel)>,
     /// `None` until the first listing, which is started immediately.
     last_started: Option<Instant>,
     /// Something this program did changed the folder: list again as soon as no listing is
@@ -66,7 +70,7 @@ impl LiveRefresh {
             rx,
             handle,
             vfs,
-            in_flight: false,
+            in_flight: None,
             last_started: None,
             dirty: false,
         }
@@ -87,7 +91,7 @@ impl LiveRefresh {
         let mut selected_changed = false;
 
         while let Ok(snapshot) = self.rx.try_recv() {
-            self.in_flight = false;
+            self.in_flight = None;
             let Some((dir, current, parent)) = snapshot else {
                 continue;
             };
@@ -99,6 +103,12 @@ impl LiveRefresh {
             }
         }
 
+        if let Some((dir, cancel)) = &self.in_flight
+            && dir != browser.current_dir()
+        {
+            cancel.cancel();
+        }
+
         let interval = if shared::ssh_path::is_remote(browser.current_dir()) {
             REMOTE_INTERVAL
         } else {
@@ -108,20 +118,22 @@ impl LiveRefresh {
             || self
                 .last_started
                 .is_none_or(|started| now.duration_since(started) >= interval);
-        if due && !self.in_flight {
-            self.in_flight = true;
+        if due && self.in_flight.is_none() {
+            let (dir, cancel) = (browser.current_dir().to_path_buf(), Cancel::new());
+            self.in_flight = Some((dir.clone(), cancel.clone()));
             self.dirty = false;
             self.last_started = Some(now);
-            self.spawn_listing(browser.current_dir().to_path_buf());
+            self.spawn_listing(dir, cancel);
         }
 
         selected_changed
     }
 
-    fn spawn_listing(&self, dir: PathBuf) {
+    fn spawn_listing(&self, dir: PathBuf, cancel: Cancel) {
         let tx = self.tx.clone();
         let vfs = Arc::clone(&self.vfs);
         self.handle.spawn_blocking(move || {
+            let _scope = cancel.enter();
             let snapshot = vfs.list_dir(&dir).ok().map(|current| {
                 // Mirrors `BrowserState::refresh`: an unreadable parent is an empty column.
                 let parent = dir
@@ -130,8 +142,17 @@ impl LiveRefresh {
                     .unwrap_or_default();
                 (dir, current, parent)
             });
-            let _ = tx.send(snapshot);
+            // A listing given up may be missing its parent for that alone.
+            let _ = tx.send(snapshot.filter(|_| !cancel.is_cancelled()));
         });
+    }
+}
+
+impl Drop for LiveRefresh {
+    fn drop(&mut self) {
+        if let Some((_, cancel)) = &self.in_flight {
+            cancel.cancel();
+        }
     }
 }
 
@@ -215,6 +236,30 @@ mod tests {
     }
 
     #[test]
+    fn a_listing_of_a_folder_the_browser_left_is_given_up() {
+        use crate::test_vfs::Slow;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let root = scratch_dir("left");
+        let work = root.join("work");
+        let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
+        let vfs = Arc::new(Slow::new(Duration::from_secs(60)));
+        let mut live = LiveRefresh::new(runtime.handle().clone(), vfs.clone());
+        live.poll(&mut browser, Instant::now());
+        assert!(Slow::reaches(&vfs.lists, 1));
+
+        let moved = browser.plan_goto(&root);
+        let loaded = moved.load(&LocalVfs).unwrap();
+        assert!(browser.apply_move(loaded));
+        live.poll(&mut browser, Instant::now());
+        assert!(
+            Slow::reaches(&vfs.gave_up, 1),
+            "the old listing was given up"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_file_created_behind_the_browsers_back_shows_up() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let root = scratch_dir("create");
@@ -269,11 +314,11 @@ mod tests {
         // Let the first listing land, so the next one is not due for a whole interval.
         let first = Instant::now();
         live.poll(&mut browser, first);
-        while live.in_flight && first.elapsed() < Duration::from_secs(2) {
+        while live.in_flight.is_some() && first.elapsed() < Duration::from_secs(2) {
             std::thread::sleep(Duration::from_millis(5));
             live.poll(&mut browser, first);
         }
-        assert!(!live.in_flight, "the first listing never landed");
+        assert!(live.in_flight.is_none(), "the first listing never landed");
 
         std::fs::write(work.join("made-by-us.txt"), b"hi").unwrap();
         live.kick();
@@ -298,7 +343,7 @@ mod tests {
         let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
         let mut live = LiveRefresh::new(runtime.handle().clone(), Arc::new(LocalVfs));
         live.poll(&mut browser, Instant::now());
-        assert!(live.in_flight);
+        assert!(live.in_flight.is_some());
 
         live.kick();
         assert!(live.dirty, "kept for after the running listing");

@@ -102,6 +102,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-13 | Folder Listings Off the Render Thread | A background `DirPreview` for the cursor folder and `App::resync`, which re-reads a local folder on the spot and hands a slow one to the live refresh (COA B); a plugin-side refreshing index (A) and a progress gauge with an on-disk index cache (C) not taken | ✅ Confirmed |
 | 2026-10-13 | History Popup | Go back to a chosen entry by walking the existing undo worker, never undoing one entry out of order (COA B) | ✅ Confirmed |
 | 2026-10-14 | Opening a Remote File | Fetch a copy into an app-owned cache folder on the background worker, then open the copy; edits stay in the copy (COA 1); write-back (2) and an `sshfs` mount (3) not taken | ✅ Confirmed |
+| 2026-10-15 | Giving Up on a Remote Read | A per-thread cancel token, a `vfs_cancel` line, and one shared connect per machine that only read-only work may abort (COA B); a plugin-only shared connect (A) and killing the connecting `ssh` (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -7934,6 +7935,76 @@ by hand: no ssh server was available, so the real `mman` and `mman-ssh` were not
 
 **Left open.** Writing the copy back; a progress gauge for a large file; the other items under
 "Remote browsing, follow-ups".
+
+---
+
+## 2026-10-15 — Giving up on a remote read at the connection
+
+**Decision.** `Esc` on a move to an `ssh://` folder dropped the interface's job, but the request
+it had sent kept going. In `mman-ssh`, `Link::session` held the session lock for the whole connect,
+up to its 10 second timeout, so every later request to that machine waited behind it: the live
+refresh, a preview, and the user trying again. Three courses were weighed: a shared connect inside
+the plugin with no lock held across it (A); A plus a way to give up a request across the wire
+(B); B plus killing the connecting `ssh` process (C). Chosen: B. A would still leave a thread of
+the interface waiting for each abandoned answer. C would mean starting the master `ssh` outside
+the `openssh` crate (it starts it with a plain `.status()`, which a dropped future does not kill)
+and attaching with `Session::resume`, which ties us to the crate's control-socket layout. After B
+the orphaned `ssh` holds nothing and ends at its own timeout.
+
+**What changed.** New `shared::cancel`: a `Cancel` token, which a job enters on the thread doing
+its work, since the `Vfs` methods take no token, plus `recv` and `wait_until`, waits that give up
+within `POLL` (20 ms) of the token being set. A thread with no token waits as before. On the wire,
+`plugin_api` gains `METHOD_VFS_CANCEL` (`vfs_cancel`, a notification naming the request id),
+`cancel_line`, `parse_vfs_cancel` and `PeerError::Cancelled`. A plugin that does not know the line
+ignores it, so `API_VERSION` stays 1. In the host's `ServeLink`, a request that is already given
+up is not sent, a wait that is given up sends `vfs_cancel`, and a request whose caller leaves (a
+cancel or a timeout) is now *abandoned* rather than forgotten. The table keeps it until the reply
+comes, so a file opened for a caller who left is closed (`Pending::answer` hands back the
+`close`). If the reply landed just before the caller left, the caller drains it and closes the
+file itself. Only a cancel tells the plugin; after a timeout the work may be a long copy worth
+finishing. In `mman-ssh`, `run` keeps a token per request id and runs each request inside its
+token. New `connecting::Slot` holds the session: one attempt per machine, run as a task of its
+own, joined by whoever needs it, and aborted when its last waiter leaves.
+`Executor::run_cancellable` aborts read-only (`Retry::Safe`) calls, which the SFTP client documents
+as cancel safe. Calls that change something still use `run` and finish. In the interface,
+`NavJob`, `LiveRefresh`, `DirPreview` and `SearchJob` each own a token. A job is given up when it
+is dropped or when the browser or cursor has left its folder, and a listing that was given up is
+never shown as an empty folder.
+
+**The model**, written before the code. Host, per request id: `Waiting{opens}` →
+`Abandoned{opens}` → gone, or `Waiting` → gone; the step to gone is the reply or the process
+ending. Invariant: a handle opened for a caller who left is closed exactly once. The table's lock
+decides whether the reply or the abandoning came first, and exactly one side sees the reply.
+Plugin, per machine: `Idle` | `Live(s)` | `Connecting{attempt, waiters ≥ 1}`, every change made
+under one lock. Invariants: at most one attempt runs per machine; an attempt someone waits for is
+never aborted; an aborted attempt is never installed. The property test over the host's table found
+one real gap while I wrote it. A caller that drained a reply already delivered decided from the
+reply's shape whether it held a handle, so it could have closed a handle that no request of its
+own had opened. `give_up` now takes `opens` from the request.
+
+**Trade-offs.** A waiting thread wakes every 20 ms to look at its token; it only does so while a
+token is entered, and those threads are blocked on the network anyway. The token travels with the
+thread rather than through the `Vfs` signatures. That keeps every backend and caller unchanged, but
+a job must remember to enter its token; the four that read a remote folder in the background do.
+A read of an open remote file is not stopped halfway, because `RemoteReader` holds the SFTP file
+across the call. It is one window of at most 256 KiB.
+
+**Verification.** `scripts/check` passes. New tests: nine on `shared::cancel` (one a property test
+over nested scopes); one on the `vfs_cancel` line; five on the host's link, among them a property
+test that an orphaned handle is closed exactly once over random orders of replies, give-ups and
+takes (its regression file keeps the case it found); two on `Executor::run_cancellable`, plus its
+panic case; six on `connecting::Slot` (a shared attempt, a failure, the last
+waiter aborting it, a waiter leaving while another stays, forgetting a session, a panicking
+attempt); an end-to-end one on the real `mman-ssh` process, where a `vfs_cancel` ends a request
+stuck connecting to a server that accepts and never speaks; and one each on `NavJob`,
+`LiveRefresh` and `DirPreview` through a slow stand-in `Vfs` (moved to `tui::test_vfs`). Driven by
+hand through a pty, against the same silent server: `:cd ssh://127.0.0.1:<port>/` shows
+`BUSY opening …`, `Esc` shows `cancelled`, and the same `:cd` again reached the server 0.01 s
+later. The build of the previous commit took 8.07 s, waiting out the first attempt.
+
+**Left open.** Killing the given-up `ssh` process (C); giving up a file's preview read through the
+preview plugin, thumbnails, image previews and the marked-size walk; the rest of "Remote browsing,
+follow-ups".
 
 ---
 

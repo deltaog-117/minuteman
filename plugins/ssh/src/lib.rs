@@ -21,6 +21,7 @@
 //! agents and `ProxyJump` behave exactly as they do in a terminal. The host never sees any of it:
 //! it sends a [`plugin_api::VfsRequest`] and reads the reply.
 
+mod connecting;
 mod error;
 mod executor;
 mod link;

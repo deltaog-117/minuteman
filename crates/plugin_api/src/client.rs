@@ -21,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{EventParams, METHOD_VFS, VfsRequest};
+use crate::{EventParams, METHOD_VFS, METHOD_VFS_CANCEL, VfsRequest};
 
 /// Serializes `value` to exactly one `\n`-terminated line.
 pub(crate) fn line(value: &impl Serialize) -> String {
@@ -117,6 +117,16 @@ pub fn parse_vfs_request(text: &str) -> Option<Result<VfsAsk, VfsAskError>> {
             message: "a vfs request with no id".to_string(),
         }),
     })
+}
+
+/// Reads `text` as a [`METHOD_VFS_CANCEL`] notification and returns the `id` of the request it
+/// gives up on, or `None` for any other line.
+pub fn parse_vfs_cancel(text: &str) -> Option<Value> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    if value.get("method").and_then(Value::as_str) != Some(METHOD_VFS_CANCEL) {
+        return None;
+    }
+    value.get("params")?.get("id").cloned()
 }
 
 /// Reads one line from the host, or says why it is neither an event nor a reply.

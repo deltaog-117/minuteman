@@ -27,16 +27,30 @@
 //! handle's epoch equals the epoch of `conn` at the moment it is sent (checked under the lock that
 //! `attach` takes), so no request carrying handle `h` of epoch `e` is ever written to a process
 //! of epoch `e + 1`. A waiting request ends by exactly one of: its reply, its process ending
-//! (`fail_all`), its timeout.
+//! (`fail_all`), its timeout, its caller's job being given up (`shared::cancel`).
+//!
+//! A request whose caller stops waiting (a timeout or a cancel) is not forgotten but *abandoned*:
+//! its entry stays until the reply comes, because a reply that opened a file would otherwise hold
+//! the plugin's handle for good. Per id the states are `Waiting{opens}` -> `Abandoned{opens}` ->
+//! gone, or `Waiting` -> gone, the step to gone being the reply or `fail_all`. Invariant: a handle
+//! opened for a caller that left is closed exactly once. If the reply came first it sits in the
+//! caller's channel, which the caller drains after abandoning; if it comes after, `answer` finds
+//! the entry abandoned and hands back the `close`. The table's lock orders the two, so exactly one
+//! of them sees the reply. Only a cancel tells the plugin (`vfs_cancel`): after a timeout the work
+//! may be a long change worth finishing.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use plugin_api::{Answer, Epoch, Peer, PeerError, Reply, VfsFault, VfsRequest, request_to_line};
+use plugin_api::{
+    Answer, Epoch, Opened, Peer, PeerError, Reply, VfsFault, VfsRequest, cancel_line,
+    request_to_line,
+};
 use serde_json::Value;
+use shared::cancel::{self, Waited};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::life::{Exit, Life};
@@ -47,11 +61,28 @@ pub const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
 type Waiter = Sender<Result<Value, PeerError>>;
 
+/// A request with no reply yet. `opens` says its reply carries a handle ([`Opened`]).
+enum Entry {
+    Waiting {
+        waiter: Waiter,
+        opens: bool,
+    },
+    /// Nobody waits for the reply any more (see the module documentation).
+    Abandoned {
+        opens: bool,
+    },
+}
+
 #[derive(Default)]
 struct Table {
     /// Set when the process has ended: nothing will ever answer, so nothing new may wait.
     closed: bool,
-    waiting: HashMap<u64, Waiter>,
+    waiting: HashMap<u64, Entry>,
+}
+
+/// Whether `request`'s reply hands out a handle that must be closed again.
+fn opens(request: &VfsRequest) -> bool {
+    matches!(request, VfsRequest::Open { .. } | VfsRequest::Create { .. })
 }
 
 /// The requests written to one process of the plugin that have no reply yet.
@@ -71,28 +102,84 @@ impl Pending {
     /// Registers a request to wait for, or `None` once the process has ended. Without that, a
     /// request that raced the end (the process not yet seen as gone by whoever looked) would be
     /// registered after the last `fail_all` and wait out its whole timeout for nothing.
-    fn expect(&self) -> Option<(u64, std::sync::mpsc::Receiver<Result<Value, PeerError>>)> {
+    fn expect(&self, opens: bool) -> Option<(u64, Receiver<Result<Value, PeerError>>)> {
         let mut table = self.table();
         if table.closed {
             return None;
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = channel();
-        table.waiting.insert(id, tx);
+        table
+            .waiting
+            .insert(id, Entry::Waiting { waiter: tx, opens });
         Some((id, rx))
+    }
+
+    /// Registers a request whose reply nobody will wait for, or `None` once the process ended.
+    fn expect_none(&self) -> Option<u64> {
+        let mut table = self.table();
+        if table.closed {
+            return None;
+        }
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        table.waiting.insert(id, Entry::Abandoned { opens: false });
+        Some(id)
     }
 
     fn forget(&self, id: u64) {
         self.table().waiting.remove(&id);
     }
 
-    /// Hands the plugin's reply `id` to the request that waits for it. A reply for a request that
-    /// already timed out is dropped.
-    pub fn answer(&self, id: &Value, outcome: Result<Value, VfsFault>) {
-        let Some(id) = id.as_u64() else { return };
-        let waiter = self.table().waiting.remove(&id);
-        if let Some(waiter) = waiter {
-            let _ = waiter.send(outcome.map_err(PeerError::Fault));
+    /// The caller of `id`, reading from `reply`, stops waiting. Returns the `close` to write when
+    /// the reply already came and opened a file (`opens`); one still to come is left to
+    /// [`Self::answer`].
+    fn give_up(
+        &self,
+        id: u64,
+        opens: bool,
+        reply: &Receiver<Result<Value, PeerError>>,
+    ) -> Option<String> {
+        {
+            let mut table = self.table();
+            if let Some(entry) = table.waiting.get_mut(&id) {
+                if let Entry::Waiting { opens, .. } = *entry {
+                    *entry = Entry::Abandoned { opens };
+                }
+                return None;
+            }
+        }
+        // Not in the table, so `answer` already sent the reply to the channel.
+        match reply.try_recv() {
+            Ok(Ok(value)) if opens => self.close_line(&value),
+            _ => None,
+        }
+    }
+
+    /// The `close` line for the handle in `reply`, registered so its own reply is dropped.
+    fn close_line(&self, reply: &Value) -> Option<String> {
+        let opened: Opened = serde_json::from_value(reply.clone()).ok()?;
+        let id = self.expect_none()?;
+        Some(request_to_line(
+            id,
+            &VfsRequest::Close {
+                handle: opened.handle,
+            },
+        ))
+    }
+
+    /// Hands the plugin's reply `id` to the request that waits for it. Returns the line to write
+    /// back to the plugin when the reply opened a file for a request nobody waits for any more:
+    /// the `close` that lets the file go.
+    pub fn answer(&self, id: &Value, outcome: Result<Value, VfsFault>) -> Option<String> {
+        let id = id.as_u64()?;
+        let entry = self.table().waiting.remove(&id)?;
+        match entry {
+            Entry::Waiting { waiter, .. } => {
+                let _ = waiter.send(outcome.map_err(PeerError::Fault));
+                None
+            }
+            Entry::Abandoned { opens: true } => self.close_line(outcome.as_ref().ok()?),
+            Entry::Abandoned { opens: false } => None,
         }
     }
 
@@ -104,8 +191,10 @@ impl Pending {
             table.closed = true;
             std::mem::take(&mut table.waiting)
         };
-        for (_, waiter) in waiting {
-            let _ = waiter.send(Err(PeerError::Stopped));
+        for entry in waiting.into_values() {
+            if let Entry::Waiting { waiter, .. } = entry {
+                let _ = waiter.send(Err(PeerError::Stopped));
+            }
         }
     }
 }
@@ -182,7 +271,7 @@ impl Peer for ServeLink {
             return;
         }
         // The reply, when it comes, finds no one waiting and is dropped.
-        let Some((id, _reply)) = conn.pending.expect() else {
+        let Some(id) = conn.pending.expect_none() else {
             return;
         };
         let _ = conn.stdin.send(request_to_line(id, request));
@@ -205,7 +294,12 @@ impl Peer for ServeLink {
         if conn.life.exit() != Exit::Running {
             return Err(PeerError::Unavailable);
         }
-        let Some((id, reply)) = conn.pending.expect() else {
+        // A job given up on asks nothing more.
+        if cancel::cancelled() {
+            return Err(PeerError::Cancelled);
+        }
+        let opens = opens(request);
+        let Some((id, reply)) = conn.pending.expect(opens) else {
             return Err(PeerError::Stopped);
         };
         // Written while the lock is held, so an `attach` cannot slip between the epoch check
@@ -214,7 +308,12 @@ impl Peer for ServeLink {
             conn.pending.forget(id);
             return Err(PeerError::Stopped);
         }
-        Ok(Box::new(Waiting { conn, id, reply }))
+        Ok(Box::new(Waiting {
+            conn,
+            id,
+            opens,
+            reply,
+        }))
     }
 }
 
@@ -222,22 +321,37 @@ impl Peer for ServeLink {
 struct Waiting {
     conn: Conn,
     id: u64,
+    opens: bool,
     reply: Receiver<Result<Value, PeerError>>,
+}
+
+impl Waiting {
+    /// Stops waiting for the reply, closing the file it opened if it already came.
+    fn give_up(&self) {
+        if let Some(close) = self.conn.pending.give_up(self.id, self.opens, &self.reply) {
+            let _ = self.conn.stdin.send(close);
+        }
+    }
 }
 
 impl Reply for Waiting {
     fn wait(self: Box<Self>) -> Result<Answer, PeerError> {
-        match self.reply.recv_timeout(REPLY_TIMEOUT) {
-            Ok(Ok(value)) => Ok(Answer {
+        match cancel::recv(&self.reply, REPLY_TIMEOUT) {
+            Waited::Got(Ok(value)) => Ok(Answer {
                 epoch: self.conn.epoch,
                 value,
             }),
-            Ok(Err(error)) => Err(error),
-            Err(RecvTimeoutError::Timeout) => {
-                self.conn.pending.forget(self.id);
+            Waited::Got(Err(error)) => Err(error),
+            Waited::TimedOut => {
+                self.give_up();
                 Err(PeerError::TimedOut)
             }
-            Err(RecvTimeoutError::Disconnected) => Err(PeerError::Stopped),
+            Waited::Cancelled => {
+                self.give_up();
+                let _ = self.conn.stdin.send(cancel_line(self.id));
+                Err(PeerError::Cancelled)
+            }
+            Waited::Disconnected => Err(PeerError::Stopped),
         }
     }
 }
@@ -459,7 +573,189 @@ mod tests {
     #[test]
     fn a_reply_nobody_waits_for_is_dropped() {
         let pending = Pending::default();
-        pending.answer(&json!(99), Ok(json!({})));
-        pending.answer(&json!("not a number"), Ok(json!({})));
+        assert_eq!(pending.answer(&json!(99), Ok(json!({}))), None);
+        assert_eq!(pending.answer(&json!("not a number"), Ok(json!({}))), None);
+    }
+
+    fn open() -> VfsRequest {
+        VfsRequest::Open {
+            path: "ssh://h/f".into(),
+        }
+    }
+
+    /// `request` written to the attached process, as `submit` does, but as the concrete type.
+    fn written(link: &ServeLink, request: &VfsRequest) -> Waiting {
+        let conn = link.state().conn.clone().unwrap();
+        let opens = opens(request);
+        let (id, reply) = conn.pending.expect(opens).unwrap();
+        conn.stdin.send(request_to_line(id, request)).unwrap();
+        Waiting {
+            conn,
+            id,
+            opens,
+            reply,
+        }
+    }
+
+    /// The next line written to the fake process, waiting for it.
+    fn next_line(fake: &mut Fake) -> Value {
+        loop {
+            match fake.lines.try_recv() {
+                Ok(line) => return serde_json::from_str(&line).unwrap(),
+                Err(_) => thread::yield_now(),
+            }
+        }
+    }
+
+    /// One step of a caller and the plugin racing over one request.
+    #[derive(Debug, Clone, Copy)]
+    enum Step {
+        Reply,
+        GiveUp,
+        Take,
+    }
+
+    fn closed_handle(line: &str) -> u64 {
+        let line: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(line["params"]["op"], "close");
+        line["params"]["handle"].as_u64().unwrap()
+    }
+
+    proptest::proptest! {
+        /// Whatever order replies, give-ups and takes come in, a file opened for a caller that
+        /// left is closed exactly once, one a caller took is never closed, nothing else is ever
+        /// closed, and no request is left in the table once each has been answered.
+        #[test]
+        fn an_orphaned_handle_is_closed_exactly_once(
+            requests in proptest::collection::vec(
+                (proptest::bool::ANY, proptest::collection::vec(0u8..3, 0..6)),
+                1..8,
+            ),
+        ) {
+            let pending = Pending::default();
+            let mut closes = Vec::new();
+            let mut expected = Vec::new();
+            for (n, (opens, steps)) in requests.into_iter().enumerate() {
+                let handle = n as u64 + 100;
+                let (id, rx) = pending.expect(opens).unwrap();
+                let (mut replied, mut left, mut took) = (false, false, false);
+                let steps = steps.into_iter().map(|s| [Step::Reply, Step::GiveUp, Step::Take][s as usize]);
+                // Every request is answered in the end, as a live plugin answers all.
+                for step in steps.chain([Step::Reply]) {
+                    match step {
+                        Step::Reply if !replied => {
+                            replied = true;
+                            let value = json!({ "handle": handle, "len": 0 });
+                            closes.extend(pending.answer(&json!(id), Ok(value)));
+                        }
+                        Step::GiveUp if !left && !took => {
+                            left = true;
+                            closes.extend(pending.give_up(id, opens, &rx));
+                        }
+                        Step::Take if !left && !took => {
+                            took = rx.try_recv().is_ok();
+                        }
+                        _ => {}
+                    }
+                }
+                if opens && left {
+                    expected.push(handle);
+                }
+                proptest::prop_assert!(!pending.table().waiting.contains_key(&id));
+            }
+            let mut closed: Vec<u64> = closes.iter().map(|line| closed_handle(line)).collect();
+            closed.sort_unstable();
+            proptest::prop_assert_eq!(closed, expected);
+        }
+    }
+
+    #[test]
+    fn a_cancelled_caller_stops_waiting_at_once_and_the_plugin_is_told() {
+        let link = ServeLink::new();
+        let mut fake = attached(&link);
+        let token = shared::Cancel::new();
+        let waiter = {
+            let (link, token) = (Arc::clone(&link), token.clone());
+            thread::spawn(move || {
+                let _scope = token.enter();
+                link.call(&list(), None)
+            })
+        };
+        let sent = next_line(&mut fake);
+        let started = std::time::Instant::now();
+        token.cancel();
+        assert_eq!(waiter.join().unwrap(), Err(PeerError::Cancelled));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let cancel = next_line(&mut fake);
+        assert_eq!(cancel["method"], plugin_api::METHOD_VFS_CANCEL);
+        assert_eq!(cancel["params"]["id"], sent["id"]);
+        // The late reply finds the request abandoned and asks for nothing back.
+        assert_eq!(fake.pending.answer(&sent["id"], Ok(json!([]))), None);
+    }
+
+    #[test]
+    fn a_job_already_given_up_sends_nothing() {
+        let link = ServeLink::new();
+        let mut fake = attached(&link);
+        let token = shared::Cancel::new();
+        token.cancel();
+        let _scope = token.enter();
+        assert_eq!(link.call(&list(), None), Err(PeerError::Cancelled));
+        assert!(fake.lines.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_file_opened_after_its_caller_left_is_closed() {
+        let link = ServeLink::new();
+        let mut fake = attached(&link);
+        let token = shared::Cancel::new();
+        let waiter = {
+            let (link, token) = (Arc::clone(&link), token.clone());
+            thread::spawn(move || {
+                let _scope = token.enter();
+                link.call(&open(), None)
+            })
+        };
+        let sent = next_line(&mut fake);
+        token.cancel();
+        assert_eq!(waiter.join().unwrap(), Err(PeerError::Cancelled));
+        let close = fake
+            .pending
+            .answer(&sent["id"], Ok(json!({ "handle": 5, "len": 9 })))
+            .expect("a close for the orphaned handle");
+        let close: Value = serde_json::from_str(&close).unwrap();
+        assert_eq!(close["params"], json!({ "op": "close", "handle": 5 }));
+        // Whose own reply is expected by nobody.
+        assert_eq!(fake.pending.answer(&close["id"], Ok(json!({}))), None);
+    }
+
+    #[test]
+    fn a_file_opened_just_before_its_caller_left_is_closed_by_the_caller() {
+        let link = ServeLink::new();
+        let mut fake = attached(&link);
+        let reply = link.submit(&open(), None).unwrap();
+        let sent = next_line(&mut fake);
+        // The reply lands in the caller's channel, and only then is the caller given up on.
+        assert_eq!(
+            fake.pending
+                .answer(&sent["id"], Ok(json!({ "handle": 8, "len": 1 }))),
+            None
+        );
+        let token = shared::Cancel::new();
+        token.cancel();
+        let _scope = token.enter();
+        // A reply already there is taken, not thrown away: the caller got its file.
+        assert!(reply.wait().is_ok());
+
+        // The narrow case `recv` cannot see: the reply lands after its last look and before the
+        // caller abandons the request.
+        drop(_scope);
+        let waiting = written(&link, &open());
+        let sent = next_line(&mut fake);
+        fake.pending
+            .answer(&sent["id"], Ok(json!({ "handle": 9, "len": 1 })));
+        waiting.give_up();
+        let close = next_line(&mut fake);
+        assert_eq!(close["params"], json!({ "op": "close", "handle": 9 }));
     }
 }

@@ -20,6 +20,7 @@
 //! dependencies always point inward, toward `shared`.
 
 pub mod archive_path;
+pub mod cancel;
 pub mod cargo_fit;
 pub mod chooser;
 pub mod conformance;
@@ -37,6 +38,7 @@ pub mod usage_view;
 pub mod vfs;
 
 pub use archive_path::{Format, Mount, Route, is_archive, is_inside, route};
+pub use cancel::Cancel;
 pub use error::VfsError;
 pub use fuzzy::Query;
 pub use memory::MemVfs;

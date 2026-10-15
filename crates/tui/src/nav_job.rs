@@ -17,14 +17,15 @@
 //! Loads a folder on the blocking pool, so opening one on a slow filesystem — most of all another
 //! machine, where connecting alone can take ten seconds — never freezes the render loop. One
 //! `NavJob` is one move; the browser keeps showing the old folder until the result is applied
-//! (see `browser::MovePlan`). Dropping a job abandons it: the thread finishes its read, finds
-//! nobody listening and discards the result.
+//! (see `browser::MovePlan`). Dropping a job gives it up: its `shared::cancel` token is set, so a
+//! read waiting on another machine (or on the connection to it) stops at once, and whatever the
+//! thread still produces finds nobody listening and is discarded.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use browser::{LoadedMove, MovePlan};
-use shared::{Vfs, VfsError};
+use shared::{Cancel, Vfs, VfsError};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -38,6 +39,7 @@ pub enum NavPoll {
 
 pub struct NavJob {
     rx: UnboundedReceiver<Result<LoadedMove, VfsError>>,
+    cancel: Cancel,
     /// Shown while loading, and after a failure.
     pub label: String,
     /// Where the move goes, so a failure can be told apart by what it was opening.
@@ -60,11 +62,15 @@ impl NavJob {
         let (tx, rx) = unbounded_channel();
         let label = plan.target_label();
         let target = plan.target().to_path_buf();
+        let cancel = Cancel::new();
+        let token = cancel.clone();
         handle.spawn_blocking(move || {
+            let _scope = token.enter();
             let _ = tx.send(plan.load(vfs.as_ref()));
         });
         Self {
             rx,
+            cancel,
             label,
             target,
             done_status,
@@ -78,6 +84,12 @@ impl NavJob {
             Err(TryRecvError::Empty) => NavPoll::Pending,
             Err(TryRecvError::Disconnected) => NavPoll::Lost,
         }
+    }
+}
+
+impl Drop for NavJob {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -130,6 +142,32 @@ mod tests {
         };
         assert!(browser.apply_move(loaded));
         assert_eq!(browser.current_dir(), root.join("inner"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dropping_a_job_stops_its_read_at_once() {
+        use std::sync::atomic::Ordering;
+
+        use crate::test_vfs::Slow;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let root = scratch("drop");
+        let browser = BrowserState::new(&LocalVfs, root.clone()).unwrap();
+        let vfs = Arc::new(Slow::new(Duration::from_secs(60)));
+        let job = NavJob::start(
+            runtime.handle(),
+            Arc::clone(&vfs) as Arc<dyn Vfs>,
+            browser.plan_goto(&root.join("inner")),
+            None,
+            "cd failed",
+        );
+        assert!(Slow::reaches(&vfs.lists, 1));
+        let dropped = Instant::now();
+        drop(job);
+        assert!(Slow::reaches(&vfs.gave_up, 1), "the read was given up");
+        assert!(dropped.elapsed() < Duration::from_secs(5));
+        assert_eq!(vfs.gave_up.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 

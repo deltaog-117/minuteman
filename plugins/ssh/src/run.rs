@@ -20,17 +20,20 @@
 //!
 //! A request gets its own thread because a remote call can take seconds (a connection being made,
 //! a folder with many entries) and must not hold up the next line, which may be a read on a file
-//! that is already open.
+//! that is already open. That thread runs inside the request's `shared::cancel` token, which a
+//! `vfs_cancel` line naming the request sets, so whatever it waits for gives up with it.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use plugin_api::client::{
-    Incoming, VfsAskError, notification_line, parse_incoming, parse_vfs_request,
+    Incoming, VfsAskError, notification_line, parse_incoming, parse_vfs_cancel, parse_vfs_request,
 };
 use plugin_api::{API_VERSION, EVENT_INIT, VfsFault, VfsRequest, fault_line, reply_line};
 use serde_json::{Value, json};
+use shared::Cancel;
 
 use crate::serve::Server;
 
@@ -63,6 +66,34 @@ impl InFlight {
     }
 }
 
+/// The token of each request being answered, by its id as the host wrote it, so a `vfs_cancel`
+/// reaches the one it names.
+#[derive(Default)]
+struct Tokens(Mutex<HashMap<String, Cancel>>);
+
+impl Tokens {
+    fn map(&self) -> MutexGuard<'_, HashMap<String, Cancel>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn start(&self, id: &Value) -> Cancel {
+        let token = Cancel::new();
+        self.map().insert(id.to_string(), token.clone());
+        token
+    }
+
+    fn end(&self, id: &Value) {
+        self.map().remove(&id.to_string());
+    }
+
+    /// Gives up on request `id`. One already answered, or never seen, is nothing to give up.
+    fn cancel(&self, id: &Value) {
+        if let Some(token) = self.map().get(&id.to_string()) {
+            token.cancel();
+        }
+    }
+}
+
 /// The one place that owns `output`, so two replies never interleave on a line.
 struct Out<W>(Mutex<W>);
 
@@ -79,15 +110,23 @@ fn serve<W: Write + Send + 'static>(
     server: &Arc<Server>,
     out: &Arc<Out<W>>,
     in_flight: &Arc<InFlight>,
+    tokens: &Arc<Tokens>,
     id: Value,
     request: VfsRequest,
 ) {
     let (server, out_thread, ended) = (Arc::clone(server), Arc::clone(out), Arc::clone(in_flight));
+    let token = tokens.start(&id);
+    let (tokens_thread, id_thread) = (Arc::clone(tokens), id.clone());
     in_flight.begin();
     let spawned = thread::Builder::new()
         .name("ssh-vfs".to_string())
         .spawn(move || {
-            let line = match server.answer(&request) {
+            let answer = {
+                let _scope = token.enter();
+                server.answer(&request)
+            };
+            tokens_thread.end(&id);
+            let line = match answer {
                 Ok(value) => reply_line(&id, &value),
                 Err(fault) => fault_line(&id, &fault),
             };
@@ -96,6 +135,7 @@ fn serve<W: Write + Send + 'static>(
         });
     if spawned.is_err() {
         // Out of threads: the host's wait ends by its own timeout rather than hanging here.
+        tokens.end(&id_thread);
         in_flight.end();
         out.send(&notification_line(
             "log",
@@ -118,6 +158,7 @@ pub fn run<W: Write + Send + 'static>(
     let server = Arc::new(server);
     let out = Arc::new(Out(Mutex::new(output)));
     let in_flight = Arc::new(InFlight::default());
+    let tokens = Arc::new(Tokens::default());
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -125,7 +166,7 @@ pub fn run<W: Write + Send + 'static>(
         }
         if let Some(asked) = parse_vfs_request(&line) {
             match asked {
-                Ok((id, request)) => serve(&server, &out, &in_flight, id, request),
+                Ok((id, request)) => serve(&server, &out, &in_flight, &tokens, id, request),
                 // A request this plugin does not know (a newer host) is refused, not left to
                 // time out.
                 Err(VfsAskError {
@@ -134,6 +175,10 @@ pub fn run<W: Write + Send + 'static>(
                 }) => out.send(&fault_line(&id, &VfsFault::Unsupported { reason: message })),
                 Err(_) => {}
             }
+            continue;
+        }
+        if let Some(id) = parse_vfs_cancel(&line) {
+            tokens.cancel(&id);
             continue;
         }
         // Anything else the host writes is an event; only the greeting matters here.

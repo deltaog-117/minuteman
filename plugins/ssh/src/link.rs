@@ -20,13 +20,18 @@
 //! connection dies, the next call connects again; a read-only call is also retried once at once,
 //! since asking twice cannot do harm, while a call that changes something is not, because the
 //! first attempt may already have happened.
+//!
+//! The same line divides what may be given up: when the job that asked is cancelled (see
+//! `shared::cancel`), a read-only call stops where it is, and so does the wait for a connection,
+//! since nothing has changed yet; a call that changes something runs to its end, because stopping
+//! it halfway would leave the change half made.
 
 use std::future::{self, Future};
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
@@ -37,8 +42,9 @@ use openssh_sftp_client::openssh::{ControlPersist, KnownHosts, SessionBuilder};
 use openssh_sftp_client::{Error, Sftp, SftpOptions, UnixTimeStamp};
 use shared::{DirEntryInfo, FileKind, Metadata, ReadSeek, ScanEntry, VfsError, WriteSeek};
 
-use crate::error::{error_chain, io_error, is_transport, lost, to_vfs};
-use crate::executor::Executor;
+use crate::connecting::{Failed, Slot};
+use crate::error::{cancelled, error_chain, io_error, is_transport, lost, to_vfs};
+use crate::executor::{Executor, Lost, Unfinished};
 use crate::stream::{RemoteReader, RemoteWriter};
 use shared::ssh_path::{Remote, Target};
 
@@ -110,10 +116,10 @@ impl ConnectOptions {
     }
 }
 
-/// Whether a failed call may be repeated.
+/// Whether a failed call may be repeated, and a call whose job was given up may stop halfway.
 #[derive(Debug, Clone, Copy)]
 enum Retry {
-    /// Only reads: asking again changes nothing.
+    /// Only reads: asking again, or stopping, changes nothing.
     Safe,
     Never,
 }
@@ -122,9 +128,7 @@ pub(crate) struct Link {
     target: Target,
     options: ConnectOptions,
     executor: Arc<Executor>,
-    // Held across a connect, so callers arriving meanwhile wait for it instead of each starting
-    // their own.
-    session: Mutex<Option<Arc<Sftp>>>,
+    session: Slot<Sftp>,
 }
 
 /// Where `ssh` keeps its control socket. A Unix socket's path is limited to about 100 bytes and
@@ -267,41 +271,33 @@ impl Link {
             target,
             options,
             executor,
-            session: Mutex::new(None),
+            session: Slot::new(),
         }
     }
 
     fn session(&self, shown: &Path) -> Result<Arc<Sftp>, VfsError> {
-        let mut slot = self.session.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(live) = slot.as_ref() {
-            return Ok(Arc::clone(live));
-        }
         let target = self.target.clone();
         let options = self.options.clone();
-        let made = self
-            .executor
-            .run(async move { connect(&target, &options).await })
-            .map_err(|gone| lost(shown, gone))?;
-        match made {
-            Ok(sftp) => {
-                let live = Arc::new(sftp);
-                *slot = Some(Arc::clone(&live));
-                Ok(live)
-            }
-            Err(error) => Err(io_error(
-                shown,
-                io::ErrorKind::NotConnected,
-                format!("cannot connect to {}: {}", self.target, error_chain(&error)),
-            )),
-        }
+        self.session
+            .get(&self.executor, move || async move {
+                connect(&target, &options)
+                    .await
+                    .map_err(|error| error_chain(&error))
+            })
+            .map_err(|failed| match failed {
+                Failed::Refused(why) => io_error(
+                    shown,
+                    io::ErrorKind::NotConnected,
+                    format!("cannot connect to {}: {why}", self.target),
+                ),
+                Failed::Cancelled => cancelled(shown),
+                Failed::Lost => lost(shown, Lost),
+            })
     }
 
     /// Forgets `dead` so the next call connects afresh, unless a newer session already replaced it.
     fn forget(&self, dead: &Arc<Sftp>) {
-        let mut slot = self.session.lock().unwrap_or_else(PoisonError::into_inner);
-        if slot.as_ref().is_some_and(|live| Arc::ptr_eq(live, dead)) {
-            *slot = None;
-        }
+        self.session.forget(dead);
     }
 
     fn call<T, F, Fut>(&self, shown: &Path, retry: Retry, op: F) -> Result<T, VfsError>
@@ -316,10 +312,18 @@ impl Link {
         };
         loop {
             let session = self.session(shown)?;
-            let outcome = self
-                .executor
-                .run(op(Arc::clone(&session)))
-                .map_err(|gone| lost(shown, gone))?;
+            let work = op(Arc::clone(&session));
+            let outcome = match retry {
+                Retry::Safe => {
+                    self.executor
+                        .run_cancellable(work)
+                        .map_err(|unfinished| match unfinished {
+                            Unfinished::Cancelled => cancelled(shown),
+                            Unfinished::Lost => lost(shown, Lost),
+                        })?
+                }
+                Retry::Never => self.executor.run(work).map_err(|gone| lost(shown, gone))?,
+            };
             match outcome {
                 Ok(value) => return Ok(value),
                 Err(error) if is_transport(&error) => {

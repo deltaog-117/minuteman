@@ -165,3 +165,37 @@ fn a_host_that_speaks_another_api_version_is_told_and_left() {
     assert_eq!(said["params"]["level"], "error");
     assert!(plugin.finish().success());
 }
+
+#[test]
+fn a_cancel_ends_a_request_stuck_connecting_long_before_its_timeout() {
+    // A server that accepts and never speaks: `ssh` waits for its greeting until the connect
+    // timeout (ten seconds), so the request is stuck in the connect.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+    let port = listener.local_addr().expect("bound").port();
+    let held = thread::spawn(move || listener.accept().map(|(socket, _)| socket));
+
+    let mut plugin = Plugin::start();
+    plugin.write_raw(&request_to_line(
+        4,
+        &VfsRequest::List {
+            path: format!("ssh://127.0.0.1:{port}/").into(),
+        },
+    ));
+    let _socket = held
+        .join()
+        .expect("accepted")
+        .expect("the plugin connected");
+    let asked = std::time::Instant::now();
+    plugin.write_raw(&plugin_api::cancel_line(4));
+    let reply = plugin.next();
+    assert_eq!(reply["id"], 4);
+    match Plugin::fault(&reply) {
+        VfsFault::Io { message, .. } => assert_eq!(message, "cancelled"),
+        other => panic!("expected the cancel's error, got {other:?}"),
+    }
+    assert!(asked.elapsed() < Duration::from_secs(5));
+    // A cancel for a request already answered, or never made, is nothing.
+    plugin.write_raw(&plugin_api::cancel_line(4));
+    plugin.write_raw(&plugin_api::cancel_line(999));
+    assert!(plugin.finish().success());
+}

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `shared::cancel`: a `Cancel` token a background job enters on its thread, and waits (`recv`,
+  `wait_until`) that give up within 20 ms of it being set. Author: deltaog-117.
+- `plugin_api`: the `vfs_cancel` host -> plugin notification (`METHOD_VFS_CANCEL`, `cancel_line`,
+  `parse_vfs_cancel`), saying nobody waits for a request's reply any more, and
+  `PeerError::Cancelled`. A plugin may stop the work but still replies; one that does not know the
+  line ignores it. Author: deltaog-117.
 - Opening a file on a remote machine: `enter`, a double-click or "Open with" on an `ssh://` file
   copies it into `$XDG_CACHE_HOME/minuteman/remote-open` (or `~/.cache/...`) on the background
   worker, with the header gauge and `Esc`, then opens the copy with your `[[open_rule]]`, the
@@ -187,6 +193,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- `Esc` on a move to an `ssh://` folder now stops the work at the connection, not only the wait
+  for it: `mman-ssh` aborts the request and, when nobody else waits for it, the connect. The same
+  `:cd` right after starts connecting at once instead of waiting out the first attempt's 10 second
+  timeout. Requests to a machine no longer queue behind a connect another request started; they
+  join it. The live refresh, the folder preview and the `/` search likewise give up a remote read
+  once the browser or the cursor has left its folder. A call that changes something on the machine
+  always runs to its end. Author: deltaog-117.
 - Opening an archive file (`enter`, a click, the menu's Open) now loads the archive in the
   background like any other folder, so a slow archive plugin no longer holds the interface up. A
   move into an archive that fails while the archive plugin is not running now says where to get
@@ -427,6 +440,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Author: deltaog-117.
 
 ### Fixed
+- `plugin_host`: a file a plugin opened for a request whose caller had stopped waiting (it timed
+  out) was never closed, holding one of the plugin's 32 handles for good. It is now closed when the
+  late reply arrives. Author: deltaog-117.
 - `tui`: the permanent-delete and trash confirmations now take a capital `Y` as well as `y`.
 - `tui`: in the wiring diagram a box that was only partly inside the window was left out while the
   lines to it were still drawn, so some boxes showed and others did not. It is now drawn cut off by
