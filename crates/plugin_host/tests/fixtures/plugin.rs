@@ -37,7 +37,9 @@
 //! Because it takes the next line on stdin as a request's reply, a test must wait for these logs
 //! before sending it anything else.
 //!
-//! An `action` event is logged as `action: NAME hidden=BOOL`; with `--picker-on-action` the plugin
+//! An `action` event is logged as `action: NAME hidden=BOOL`; with `--ask-on-action` the plugin
+//! first asks the user a yes or no and logs `ask: ANSWER` (the answer as JSON, or the refusal);
+//! with `--picker-on-action` the plugin
 //! then asks for a picker (`picker: ok` or the host's refusal), sends one `picker_items` notification
 //! and asks for a walk of the directory it was told (`walk: ok` or the refusal). It logs each
 //! `picker_query` as `picker_query: PICKER GENERATION TEXT`, each `walk_batch` as `walk_batch: WALK
@@ -272,6 +274,17 @@ fn main() {
                         params["action"].as_str().unwrap_or("?")
                     ),
                 );
+                if std::env::args().any(|arg| arg == "--ask-on-action") {
+                    let asked = send_request(
+                        &mut stdout,
+                        &mut lines,
+                        &mut next_id,
+                        "ask",
+                        serde_json::json!({ "kind": "confirm", "prompt": "trust it?\u{1b}[2J" }),
+                    );
+                    let outcome = asked.map_or_else(|e| e, |answer| answer.to_string());
+                    send_log(&mut stdout, "info", &format!("ask: {outcome}"));
+                }
                 if std::env::args().any(|arg| arg == "--picker-on-action") {
                     let shown = send_request(
                         &mut stdout,

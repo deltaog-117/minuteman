@@ -24,17 +24,24 @@
 //! `vfs_cancel` line naming the request sets, so whatever it waits for gives up with it.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
+use std::time::Duration;
 
 use plugin_api::client::{
     Incoming, VfsAskError, notification_line, parse_incoming, parse_vfs_cancel, parse_vfs_request,
 };
-use plugin_api::{API_VERSION, EVENT_INIT, VfsFault, VfsRequest, fault_line, reply_line};
+use plugin_api::remote::Rpc;
+use plugin_api::{
+    API_VERSION, AskAnswer, AskSpec, EVENT_INIT, METHOD_ASK, VfsFault, VfsRequest, fault_line,
+    reply_line,
+};
 use serde_json::{Value, json};
 use shared::Cancel;
 
+use crate::ask::Ask;
 use crate::serve::Server;
 
 /// The requests that have been started and have not yet written their reply.
@@ -98,11 +105,43 @@ impl Tokens {
 struct Out<W>(Mutex<W>);
 
 impl<W: Write> Out<W> {
-    /// Writes one line. A failure means the host is gone, and the loop reading its lines ends on
-    /// its own, so there is no one to tell.
-    fn send(&self, line: &str) {
+    /// Writes one line and says whether it went out. A failure means the host is gone, and the
+    /// loop reading its lines ends on its own, so a reply has no one to tell.
+    fn send(&self, line: &str) -> bool {
         let mut out = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let _ = out.write_all(line.as_bytes()).and_then(|()| out.flush());
+        out.write_all(line.as_bytes())
+            .and_then(|()| out.flush())
+            .is_ok()
+    }
+}
+
+/// How long a question waits for the user. Longer than anyone takes to look up a password, short
+/// enough that a connection left waiting behind a forgotten prompt does end.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Questions put to the user through the host: each is an `ask` request on `output`, answered by
+/// the reply `run` hands to `rpc`.
+struct HostAsker<W> {
+    rpc: Arc<Rpc>,
+    out: Arc<Out<W>>,
+}
+
+impl<W> fmt::Debug for HostAsker<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HostAsker")
+    }
+}
+
+impl<W: Write + Send + 'static> Ask for HostAsker<W> {
+    fn ask(&self, spec: AskSpec) -> Result<AskAnswer, String> {
+        let params = serde_json::to_value(&spec).map_err(|e| e.to_string())?;
+        let reply = self.rpc.call(
+            &|line| self.out.send(&line),
+            METHOD_ASK,
+            &params,
+            ANSWER_TIMEOUT,
+        )?;
+        serde_json::from_value(reply).map_err(|_| "the host's answer was not understood".to_owned())
     }
 }
 
@@ -159,6 +198,11 @@ pub fn run<W: Write + Send + 'static>(
     let out = Arc::new(Out(Mutex::new(output)));
     let in_flight = Arc::new(InFlight::default());
     let tokens = Arc::new(Tokens::default());
+    let rpc = Arc::new(Rpc::default());
+    server.asker().install(Arc::new(HostAsker {
+        rpc: Arc::clone(&rpc),
+        out: Arc::clone(&out),
+    }));
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -172,7 +216,9 @@ pub fn run<W: Write + Send + 'static>(
                 Err(VfsAskError {
                     id: Some(id),
                     message,
-                }) => out.send(&fault_line(&id, &VfsFault::Unsupported { reason: message })),
+                }) => {
+                    out.send(&fault_line(&id, &VfsFault::Unsupported { reason: message }));
+                }
                 Err(_) => {}
             }
             continue;
@@ -181,22 +227,35 @@ pub fn run<W: Write + Send + 'static>(
             tokens.cancel(&id);
             continue;
         }
-        // Anything else the host writes is an event; only the greeting matters here.
-        if let Ok(Incoming::Event(params)) = parse_incoming(&line)
-            && params.name == EVENT_INIT
-            && params.api_version != API_VERSION
-        {
-            let message = format!(
-                "the host speaks plugin API {} and this was built for {API_VERSION}",
-                params.api_version
-            );
-            out.send(&notification_line(
-                "log",
-                &json!({ "level": "error", "message": message }),
-            ));
-            break;
+        // Anything else the host writes is the answer to a question, or an event; of the events
+        // only the greeting matters here.
+        match parse_incoming(&line) {
+            Ok(Incoming::Reply { id, error, result }) => {
+                if let Some(id) = id.as_u64() {
+                    rpc.answer(
+                        id,
+                        error.map_or_else(|| Ok(result.unwrap_or(Value::Null)), Err),
+                    );
+                }
+            }
+            Ok(Incoming::Event(params))
+                if params.name == EVENT_INIT && params.api_version != API_VERSION =>
+            {
+                let message = format!(
+                    "the host speaks plugin API {} and this was built for {API_VERSION}",
+                    params.api_version
+                );
+                out.send(&notification_line(
+                    "log",
+                    &json!({ "level": "error", "message": message }),
+                ));
+                break;
+            }
+            _ => {}
         }
     }
+    // Nobody is left to answer a question that is still waiting.
+    rpc.fail_all();
     in_flight.wait_for_none();
     Ok(())
 }

@@ -18,6 +18,7 @@ mod alt_keys;
 mod anim;
 mod app;
 mod appearance_popup;
+mod ask_popup;
 mod associations;
 mod boot_splash;
 mod browser_drag;
@@ -73,7 +74,7 @@ mod tile_view;
 mod trash_view;
 mod view_mode;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -87,6 +88,7 @@ use appearance_popup::{
     AppearancePopup, AppearanceView, Hit as AppearanceHit, Outcome as AppearanceOutcome,
     Row as AppearanceRow, RowKind as AppearanceRowKind, SaveChoice, SaveTarget,
 };
+use ask_popup::AskPopup;
 use boot_splash::BootSplash;
 use browser::BrowserState;
 use browser::sort::Sort;
@@ -118,7 +120,7 @@ use picker_popup::{Outcome as PickerOutcome, PickerPopup};
 use plugin_action::Browse;
 use plugin_api::Format;
 use plugin_api::{CanvasNote, PreviewContent, SetPreview, Surface};
-use plugin_host::UiRequest;
+use plugin_host::{AskRequest, UiRequest};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
@@ -410,6 +412,8 @@ struct Overlay<'a> {
     compress: Option<&'a CompressPopup>,
     extract: Option<&'a ExtractPopup>,
     history: Option<&'a HistoryPopup>,
+    /// The question a plugin is waiting on, drawn over everything else.
+    ask: Option<&'a AskPopup>,
     appearance: Option<&'a AppearancePopup>,
     /// A plugin's picker (the fuzzy finder's), a panel over the browser while open.
     picker: Option<&'a PickerPopup>,
@@ -1409,6 +1413,9 @@ fn run(
     let mut extract: Option<ExtractPopup> = None;
     // The history popup (`:history`, or the `history` key) while one is open; modal too.
     let mut history: Option<HistoryPopup> = None;
+    // The questions plugins wait on (a password, a host key), the first one shown; modal too, and
+    // above every other popup. Each keeps the request that its answer goes back through.
+    let mut asks: VecDeque<(AskPopup, AskRequest)> = VecDeque::new();
     // The appearance popup (`a`, or "Appearance…" on blank space's right-click menu) while one is
     // open; modal too.
     let mut appearance: Option<AppearancePopup> = None;
@@ -1473,6 +1480,11 @@ fn run(
                     picker = Some(app.begin_picker(request.plugin(), request.spec()));
                     app.status = None;
                     request.opened();
+                }
+                UiRequest::Ask(request) => {
+                    let spec = request.spec();
+                    let popup = AskPopup::new(request.plugin(), spec.kind, &spec.prompt);
+                    asks.push_back((popup, request));
                 }
                 UiRequest::Items { plugin, update } => {
                     if let Some(popup) = picker.as_mut()
@@ -1760,6 +1772,7 @@ fn run(
                     compress: compress.as_ref(),
                     extract: extract.as_ref(),
                     history: history.as_ref(),
+                    ask: asks.front().map(|(popup, _)| popup),
                     appearance: appearance.as_ref(),
                     picker: picker.as_ref(),
                     deck: deck.as_ref(),
@@ -1809,6 +1822,7 @@ fn run(
                 || compress.is_some()
                 || extract.is_some()
                 || history.is_some()
+                || !asks.is_empty()
                 || settings.is_some()
                 || appearance.is_some()
                 || picker.is_some();
@@ -1842,6 +1856,7 @@ fn run(
                     ))?;
                 }
             }
+            Some(Event::Mouse(_)) if !asks.is_empty() => {}
             Some(Event::Mouse(mouse)) => {
                 // Alt held for a drag or click is a gesture, not a tap; plain motion is not.
                 if !matches!(mouse.kind, MouseEventKind::Moved) {
@@ -2749,6 +2764,25 @@ fn run(
                     continue;
                 }
                 let key = with_caps_lock_applied(key);
+
+                // A plugin's question owns the keyboard ahead of every popup, since the plugin
+                // is waiting on it. A control chord is not text, so it is not typed into a secret.
+                if let Some((popup, _)) = asks.front_mut() {
+                    let chord = key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT);
+                    if !chord {
+                        let outcome = popup.key(key.code);
+                        if outcome != ask_popup::Key::Stay
+                            && let Some((_, request)) = asks.pop_front()
+                        {
+                            match outcome {
+                                ask_popup::Key::Answer(answer) => request.answer(&answer),
+                                _ => request.decline("declined"),
+                            }
+                        }
+                    }
+                    continue;
+                }
 
                 // The disk usage view, the Inspect panel and the menu are modal: they own the
                 // keyboard until they close, ahead of the leader, the chords and the shell.
@@ -3876,6 +3910,7 @@ fn draw(
         compress,
         extract,
         history,
+        ask,
         appearance,
         picker,
         deck,
@@ -4329,6 +4364,9 @@ fn draw(
             },
             config,
         );
+    }
+    if let Some(popup) = ask {
+        overlay_view::render_ask(frame, popup, config);
     }
     if let Some((active, target)) = &drop {
         overlay_view::render_drag_ghost(

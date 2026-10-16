@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
+use plugin_host::protocol::{AskAnswer, AskKind};
 use plugin_host::{
     ActionDispatch, EventKind, JobOutcome, PluginManager, PluginState, Restart, StateSnapshot,
     Triggers, UiRequest,
@@ -1295,6 +1296,61 @@ fn a_plugin_opens_a_picker_through_the_interface_and_hears_what_is_typed() {
     wait_for_log(&mut manager, "picker_query: 1 4 ma");
     manager.send_picker_closed("fixture", 1);
     wait_for_log(&mut manager, "picker_closed: 1");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugin_asks_the_user_through_the_interface_and_gets_the_answer() {
+    let dir = scratch_dir("ask");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--ask-on-action"],
+        provides_find(),
+    );
+    assert_eq!(
+        manager.dispatch_action("find", &dir, &[]),
+        ActionDispatch::Sent
+    );
+
+    let UiRequest::Ask(request) = wait_for_ui(&mut manager) else {
+        panic!("the first thing is the question");
+    };
+    assert_eq!(request.plugin(), "fixture");
+    assert_eq!(request.spec().kind, AskKind::Confirm);
+    // The plugin's text is cleaned before the interface sees it.
+    assert_eq!(request.spec().prompt, "trust it?[2J");
+    request.answer(&AskAnswer::Confirm { yes: true });
+    wait_for_log(&mut manager, r#"ask: {"yes":true}"#);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_question_the_user_declines_tells_the_plugin_so() {
+    let dir = scratch_dir("ask-declined");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_fixture_args(
+        &runtime,
+        &mut manager,
+        "fixture",
+        &dir,
+        &["--ask-on-action"],
+        provides_find(),
+    );
+    manager.dispatch_action("find", &dir, &[]);
+
+    let UiRequest::Ask(request) = wait_for_ui(&mut manager) else {
+        panic!("the first thing is the question");
+    };
+    request.decline("declined");
+    wait_for_log(&mut manager, "ask: declined");
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

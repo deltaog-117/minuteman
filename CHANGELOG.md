@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Answering `ssh` when it asks: opening an `ssh://` machine can now put a question to you in a
+  box titled with the plugin's name. For a host key that is not in `known_hosts` it shows the
+  fingerprint, and only `y` trusts it (`n` or `Esc` refuses, and nothing is remembered); a
+  password or a key's passphrase is typed with a dot for each character and `Enter` sends it.
+  Needs OpenSSH 8.4 or newer. Author: deltaog-117.
+- `plugin_api`: the plugin -> host request `ask` (`METHOD_ASK`, `AskKind`, `AskSpec`,
+  `AskAnswer`), whose prompt is cleaned of control and direction characters and cut at
+  `MAX_ASK_PROMPT_CHARS`. `plugin_host`: `PluginRequest::Ask`, `UiRequest::Ask` and `AskRequest`.
+  Author: deltaog-117.
+- `mman-ssh` is also the program `ssh` runs to ask (`SSH_ASKPASS`), so there is no second
+  executable to install. Author: deltaog-117.
+- `remoter`: `Ask`, `Asker` and `Server::asker`, the way a connection reaches the user, and the
+  `ConnectOptions` fields `asker` and `askpass_program`. Author: deltaog-117.
 - `shared::cancel`: a `Cancel` token a background job enters on its thread, and waits (`recv`,
   `wait_until`) that give up within 20 ms of it being set. Author: deltaog-117.
 - `plugin_api`: the `vfs_cancel` host -> plugin notification (`METHOD_VFS_CANCEL`, `cancel_line`,
@@ -193,6 +206,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- The default for an unknown host key is now to ask (`HostKeys::Ask`) instead of refusing; where
+  nobody can be asked it still refuses. `HostKeys::Strict` remains for a refusal in every case.
+  Author: deltaog-117.
+- `mman-ssh` starts its master `ssh` itself, without `BatchMode`, and attaches the `openssh` crate
+  with `Session::resume`, because the crate always starts it with `BatchMode=yes`, which forbids
+  every prompt. Each attempt has a private folder in the runtime folder; a failed attempt removes
+  it, and a later attempt removes those ten minutes old with no control socket.
+  Author: deltaog-117.
+- Giving up a connect now kills the `ssh` it started instead of leaving it to its own 10 second
+  timeout. Author: deltaog-117.
+- `scripts/vfs-gate` allows `plugins/ssh/src/master.rs` and `plugins/ssh/src/askpass.rs`, which
+  only touch this machine's runtime folder for `ssh`'s control sockets and log. Author:
+  deltaog-117.
 - `Esc` on a move to an `ssh://` folder now stops the work at the connection, not only the wait
   for it: `mman-ssh` aborts the request and, when nobody else waits for it, the connect. The same
   `:cd` right after starts connecting at once instead of waiting out the first attempt's 10 second

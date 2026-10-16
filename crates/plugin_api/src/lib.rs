@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use shared::DirEntryInfo;
 
 mod archive;
+mod ask;
 mod canvas;
 pub mod client;
 mod devices;
@@ -46,6 +47,7 @@ pub use archive::{
     Level, MAX_ARCHIVE_JOBS, MAX_ARCHIVE_TEXT_CHARS, MAX_PASSWORD_CHARS, METHOD_ARCHIVE_DONE,
     METHOD_ARCHIVE_PROGRESS, PROVIDES_ARCHIVE, Password,
 };
+pub use ask::{AskAnswer, AskKind, AskSpec, MAX_ASK_PROMPT_CHARS, METHOD_ASK};
 pub use canvas::{
     Button, Canvas, CanvasError, CanvasEvent, CanvasInput, CanvasNote, Carrying, Cells,
     EVENT_CANVAS, HUES, Item, MAX_CANVAS_CHARS, MAX_CANVAS_ITEMS, MAX_CANVAS_SIDE,

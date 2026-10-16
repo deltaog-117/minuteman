@@ -35,6 +35,7 @@ use serde::Serialize;
 use serde_json::Value;
 use shared::{FileKind, Metadata, ReadSeek, VfsError, WriteSeek};
 
+use crate::ask::Asker;
 use crate::link::ConnectOptions;
 use crate::machines::Machines;
 
@@ -55,6 +56,7 @@ struct Handles {
 }
 
 pub struct Server {
+    asker: Asker,
     machines: Machines,
     handles: Mutex<Handles>,
 }
@@ -122,9 +124,16 @@ impl Server {
     /// If the worker threads for the SSH sessions cannot be started.
     pub fn new(options: ConnectOptions) -> io::Result<Self> {
         Ok(Self {
+            asker: options.asker.clone(),
             machines: Machines::new(options)?,
             handles: Mutex::new(Handles::default()),
         })
+    }
+
+    /// Where connections find the way to ask the user something. Fill it before the first request
+    /// that can need an answer.
+    pub fn asker(&self) -> &Asker {
+        &self.asker
     }
 
     fn handles(&self) -> MutexGuard<'_, Handles> {

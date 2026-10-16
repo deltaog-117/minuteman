@@ -78,13 +78,19 @@ type Waiting = Arc<Mutex<HashMap<u64, Sender<Result<Value, PeerError>>>>>;
 /// line and hands the reply that carries the same id back to the caller waiting for it.
 pub struct ProcessPeer {
     child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    stdin: Arc<Mutex<ChildStdin>>,
     next_id: Mutex<u64>,
     waiting: Waiting,
 }
 
 impl ProcessPeer {
+    /// A host whose user declines every question the plugin asks.
     pub fn start(env: &[(&str, String)]) -> Arc<Self> {
+        Self::start_answering(env, false)
+    }
+
+    /// A host whose user answers every yes or no question with `trust`, and declines the rest.
+    pub fn start_answering(env: &[(&str, String)], trust: bool) -> Arc<Self> {
         let mut command = Command::new(plugin_binary());
         command
             .stdin(Stdio::piped())
@@ -104,13 +110,27 @@ impl ProcessPeer {
         )
         .expect("the plugin is listening");
 
+        let stdin = Arc::new(Mutex::new(stdin));
         let waiting: Waiting = Arc::default();
         let readers = Arc::clone(&waiting);
+        let replies = Arc::clone(&stdin);
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let Ok(value) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
+                // A question the plugin puts to the user, answered as the user would.
+                if value["method"] == "ask" {
+                    let reply = match (value["params"]["kind"].as_str(), trust) {
+                        (Some("confirm"), true) => json!({ "jsonrpc": "2.0", "id": value["id"],
+                            "result": { "yes": true } }),
+                        _ => json!({ "jsonrpc": "2.0", "id": value["id"],
+                            "error": { "code": -32000, "message": "declined" } }),
+                    };
+                    let mut stdin = replies.lock().unwrap_or_else(PoisonError::into_inner);
+                    let _ = writeln!(stdin, "{reply}").and_then(|()| stdin.flush());
+                    continue;
+                }
                 let Some(id) = value["id"].as_u64() else {
                     continue;
                 };
@@ -145,7 +165,7 @@ impl ProcessPeer {
         });
         Arc::new(Self {
             child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            stdin,
             next_id: Mutex::new(100),
             waiting,
         })
@@ -223,8 +243,17 @@ impl Sshd {
         self.vfs_with(true)
     }
 
-    /// One that refuses a host whose key it does not already know.
+    /// One that refuses a host whose key it does not already know, and whose user declines when
+    /// asked whether to trust it.
     pub fn vfs_strict(&self) -> SshVfs {
         self.vfs_with(false)
+    }
+
+    /// One whose user says yes when asked whether to trust a host's key.
+    pub fn vfs_trusting(&self) -> SshVfs {
+        SshVfs::new(
+            Arc::new(LocalVfs),
+            ProcessPeer::start_answering(&self.env(false), true),
+        )
     }
 }

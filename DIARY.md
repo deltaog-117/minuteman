@@ -103,6 +103,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-13 | History Popup | Go back to a chosen entry by walking the existing undo worker, never undoing one entry out of order (COA B) | ✅ Confirmed |
 | 2026-10-14 | Opening a Remote File | Fetch a copy into an app-owned cache folder on the background worker, then open the copy; edits stay in the copy (COA 1); write-back (2) and an `sshfs` mount (3) not taken | ✅ Confirmed |
 | 2026-10-15 | Giving Up on a Remote Read | A per-thread cancel token, a `vfs_cancel` line, and one shared connect per machine that only read-only work may abort (COA B); a plugin-only shared connect (A) and killing the connecting `ssh` (C) not taken | ✅ Confirmed |
+| 2026-10-16 | Answering `ssh` When It Asks | A plugin -> host `ask` request and a modal, with `ssh` run by the plugin without batch mode and `mman-ssh` itself as `SSH_ASKPASS` (COA A, route A1); `-o` options only (B) and a hand-written `known_hosts` with a pty password (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -8005,6 +8006,80 @@ later. The build of the previous commit took 8.07 s, waiting out the first attem
 **Left open.** Killing the given-up `ssh` process (C); giving up a file's preview read through the
 preview plugin, thumbnails, image previews and the marked-size walk; the rest of "Remote browsing,
 follow-ups".
+
+---
+
+## 2026-10-16 — Answering `ssh` when it asks
+
+**Decision.** A remote machine whose host key was not in `known_hosts`, or that wanted a password
+or a key's passphrase, could not be opened: `mman-ssh` only used keys and the agent, and `ssh`
+refused the rest with "Host key verification failed" or "Permission denied". Three courses were
+weighed: `SSH_ASKPASS` with a prompt relayed to the interface (A); only `-o` options, the
+existing accept-new switch for host keys and a hint for passwords (B); and a two-step flow that
+shows the fingerprint and writes `known_hosts` itself, with a password pushed to `ssh` through a
+pty (C). Chosen: A. It is the one course that covers host keys, passwords, passphrases and
+one-time codes through one path, and it leaves every trust decision and the `known_hosts` file to
+`ssh`. B would trust keys blindly and still not do passwords. C would re-implement `ssh` badly
+(hashed hosts, ports, `~/.ssh/config` aliases).
+
+A turned out to hide a second choice. The `openssh` crate starts its master `ssh` with
+`-o BatchMode=yes` on the command line, which beats everything else and forbids every prompt, so
+askpass would never run. Three routes: start the master ourselves and attach with
+`Session::resume` (A1); put a wrapper `ssh` first on `PATH` that drops the option (A2); or drop
+the crate and run `ssh -s sftp` directly (A3). Chosen: A1. A2 depends on the crate's argument
+order and on `PATH` lookup, and would break silently; A3 is a rewrite of the 687-line `link.rs`.
+A1 is a supported entry point of the crate and is the route the 2026-10-15 entry already named
+for killing a given-up connect.
+
+**What changed.** `plugin_api` gains `ask` (`METHOD_ASK`, `AskSpec` with a kind, `Secret` or
+`Confirm`, and a prompt cleaned of control and direction characters, and `AskAnswer`, where a
+secret is the zeroizing `Password`). `plugin_host` parses it into `PluginRequest::Ask` and, since a
+person typing a password can take minutes, answers it from a task instead of inside the loop that
+reads the plugin's stdout. It reaches the render thread as `UiRequest::Ask`, and the interface
+shows `ask_popup`: titled with the plugin's name as the *host* knows it, so a plugin cannot pass
+itself off as another; a dot per character, never the text; for a yes or no, only `y` accepts
+(`Enter` does nothing, so a key pressed for something else cannot trust a key). It owns the keyboard
+ahead of every other popup and swallows the mouse; a second question queues behind the first.
+In `mman-ssh`, `master.rs` makes a private folder per attempt in the runtime folder, starts the
+master without batch mode with `SSH_ASKPASS` set to its own executable and
+`SSH_ASKPASS_REQUIRE=force`, and attaches with `Session::resume`; `askpass.rs` is both halves of
+the helper, a socket in that folder that relays a question to the host, and the helper mode that
+`main` enters when `MMAN_SSH_ASKPASS` names the socket, so there is no second program to install.
+The attempt runs with `kill_on_drop`, so giving up a connect now kills its `ssh` (the gap the last
+entry left open). `HostKeys` gains `Ask`, now the default; with no one to ask it behaves like
+`Strict`, and then `BatchMode=yes` is kept, so nothing can wait on a terminal.
+
+**Found on the way.** OpenSSH does not set `SSH_ASKPASS_PROMPT=confirm` for the host-key question,
+only for some others, so it first arrived as a typed secret; the helper also takes any prompt
+holding `(yes/no` as a yes or no. The test harness that stood in for the host never answered `ask`,
+so the old strict-host-keys test waited out its timeout; the harness now answers as a user would
+(declines, or trusts when a test says so), which kept that test's meaning and gave a test that a
+trusted key connects and is remembered, through the real plugin. `scripts/vfs-gate` listed the two
+new files, which only touch this machine's runtime folder, with that reason.
+
+**Trade-offs.** Control folders are no longer cleaned by the crate: a failed attempt removes its
+own, and a later attempt sweeps those ten minutes old that hold no control socket (longer than the
+five minutes a question waits). A secret passes through the host as an ordinary JSON string, which
+is not wiped; the `Password` type is, and so is the line the helper reads it from. `ssh` asks a
+password three times, and a question times out after five minutes, neither of which can be set.
+
+**Verification.** `scripts/check` passes. New tests: the wire and its cleaning (3); the request
+parsing in the host (1) and through a fixture plugin, answered and declined (2); the popup's keys
+(4) and its drawing, including that a typed secret never appears (3); the relay and helper (4) and
+the folder, sweep, policy and log handling in `master.rs` (5); against a real `sshd` six more:
+an unknown key trusted and remembered, refused and not remembered, backed out of, nobody to ask
+(refused at once), a key passphrase right and wrong; and the same trust path through the real
+`mman-ssh` as the host's harness sees it. The cancel test now also checks that the server sees the
+connection close, and fails if `kill_on_drop` is removed. Driven by hand in the real `mman`
+through a pty against a loopback `sshd`: `:cd ssh://127.0.0.1:<port>/…` shows the box with the
+fingerprint, `n` ends in "cannot connect … Host key verification failed" with `known_hosts`
+empty, and a second `:cd` with `y` lists the folder and writes the key. No `ssh` process was left
+afterwards. Not driven by hand: a password login (the test `sshd` takes keys only; a key
+passphrase takes the same path and is tested) and a one-time code.
+
+**Left open.** Bookmarks and a history of machines; a limit or a setting for the tries and the
+wait; trusting a *changed* key (`ssh` refuses and reports it, which is right); a mouse reply to the
+box.
 
 ---
 

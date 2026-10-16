@@ -102,7 +102,7 @@ fn a_remote_folder_lists_and_a_file_reads_back() {
 }
 
 #[test]
-fn an_unknown_host_is_refused_under_strict_host_keys() {
+fn an_unknown_host_is_refused_when_the_user_does_not_trust_its_key() {
     let Some(server) = Sshd::start("strict") else {
         return;
     };
@@ -117,6 +117,30 @@ fn an_unknown_host_is_refused_under_strict_host_keys() {
         }
         other => panic!("an unknown host key must be refused, got {other:?}"),
     }
+}
+
+#[test]
+fn an_unknown_host_is_connected_to_when_the_user_trusts_its_key() {
+    let Some(server) = Sshd::start("trusting") else {
+        return;
+    };
+    let work = scratch("trusting");
+    std::fs::write(work.join("hello.txt"), "hi").unwrap();
+    let vfs = server.vfs_trusting();
+
+    let listed = vfs
+        .list_dir(&server.remote(&work))
+        .expect("the user said yes");
+
+    assert!(
+        listed.iter().any(|entry| entry.name == "hello.txt"),
+        "{listed:?}"
+    );
+    let known = std::fs::read_to_string(server.dir.join("known_hosts")).unwrap_or_default();
+    assert!(
+        known.contains("ssh-ed25519"),
+        "the key is remembered: {known:?}"
+    );
 }
 
 #[test]

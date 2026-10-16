@@ -20,6 +20,10 @@ use std::process::ExitCode;
 use remoter::{ConnectOptions, Server};
 
 fn main() -> ExitCode {
+    // `ssh` runs this executable to ask for a password; it is not the plugin then.
+    if let Some(code) = remoter::run_as_helper() {
+        return code;
+    }
     let server = match Server::new(ConnectOptions::from_env()) {
         Ok(server) => server,
         Err(e) => {

@@ -40,6 +40,8 @@ fn server_for(sshd: &Sshd) -> Server {
         known_hosts_file: Some(sshd.dir.join("known_hosts")),
         identity: Some(sshd.dir.join("user_key")),
         connect_timeout: Duration::from_secs(10),
+        asker: remoter::Asker::default(),
+        askpass_program: None,
     })
     .expect("a server")
 }

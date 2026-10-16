@@ -40,7 +40,7 @@ pub use actions::ActionRequest;
 pub use error::PluginError;
 pub use host::{ActionDispatch, LogMessage, PluginManager, Restart, Triggers};
 pub use life::{PluginInfo, PluginState};
-pub use picker::{PickerRequest, UiRequest};
+pub use picker::{AskRequest, PickerRequest, UiRequest};
 pub use protocol::{
     API_VERSION, CanvasInput, CanvasNote, DevicesCommand, DevicesNote, EventKind, JobOutcome,
     LogLevel, SetCanvas, SetDevices, SetInspect, SetPreview, SetView, Slot, StateSnapshot, Surface,

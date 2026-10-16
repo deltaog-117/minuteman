@@ -28,7 +28,6 @@
 
 use std::future::{self, Future};
 use std::io;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
@@ -38,34 +37,29 @@ use std::time::{Duration, SystemTime};
 use futures_core::Stream;
 use openssh_sftp_client::file::TokioCompatFile;
 use openssh_sftp_client::metadata::{MetaData, MetaDataBuilder, Permissions};
-use openssh_sftp_client::openssh::{ControlPersist, KnownHosts, SessionBuilder};
-use openssh_sftp_client::{Error, Sftp, SftpOptions, UnixTimeStamp};
+use openssh_sftp_client::{Error, Sftp, UnixTimeStamp};
 use shared::{DirEntryInfo, FileKind, Metadata, ReadSeek, ScanEntry, VfsError, WriteSeek};
 
+use crate::ask::Asker;
 use crate::connecting::{Failed, Slot};
 use crate::error::{cancelled, error_chain, io_error, is_transport, lost, to_vfs};
 use crate::executor::{Executor, Lost, Unfinished};
+use crate::master;
 use crate::stream::{RemoteReader, RemoteWriter};
 use shared::ssh_path::{Remote, Target};
 
 /// How long `ssh` may spend reaching a host before the attempt is given up.
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// A silent peer is noticed after about three of these, so a dropped network fails a call instead
-/// of hanging it.
-const KEEP_ALIVE: Duration = Duration::from_secs(15);
-
-/// How long the `ssh` control process lives with no one using it. While the application runs, its
-/// SFTP session is in use, so this only matters when the application dies without closing the
-/// session: the process then goes away by itself instead of holding a connection open for good.
-const IDLE_BEFORE_CLOSE: NonZeroUsize = NonZeroUsize::new(10).expect("10 is not zero");
-
 /// What to do about a host key `ssh` has not seen before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HostKeys {
-    /// Refuse a host that is not already in `known_hosts`, so the first connection is made, and
-    /// its key checked, by hand with `ssh`. The default, because trusting an unknown key
-    /// silently is what a man-in-the-middle needs.
+    /// Show the user the key's fingerprint and let them decide whether to trust it, once, and
+    /// remember it if they do. The default, because trusting an unknown key silently is what a
+    /// man-in-the-middle needs. Where nobody can be asked, it refuses like `Strict`.
     #[default]
+    Ask,
+    /// Refuse a host that is not already in `known_hosts`, so the first connection is made, and
+    /// its key checked, by hand with `ssh`.
     Strict,
     /// Remember a new host's key and trust it from then on.
     AcceptNew,
@@ -80,6 +74,12 @@ pub struct ConnectOptions {
     /// A private key to offer, besides what `ssh_config` and the agent supply.
     pub identity: Option<PathBuf>,
     pub connect_timeout: Duration,
+    /// How a password, a passphrase or a key to trust is asked for. Empty until the plugin knows
+    /// how it reaches the user; with nothing to ask through, a connection that needs an answer
+    /// fails.
+    pub asker: Asker,
+    /// The program `ssh` runs to ask: this executable, unless a test says otherwise.
+    pub askpass_program: Option<PathBuf>,
 }
 
 impl Default for ConnectOptions {
@@ -89,6 +89,8 @@ impl Default for ConnectOptions {
             known_hosts_file: None,
             identity: None,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            asker: Asker::default(),
+            askpass_program: None,
         }
     }
 }
@@ -107,7 +109,7 @@ impl ConnectOptions {
             host_keys: if std::env::var_os(ENV_ACCEPT_NEW).is_some_and(|v| v == "1") {
                 HostKeys::AcceptNew
             } else {
-                HostKeys::Strict
+                HostKeys::default()
             },
             known_hosts_file: std::env::var_os(ENV_KNOWN_HOSTS).map(PathBuf::from),
             identity: std::env::var_os(ENV_IDENTITY).map(PathBuf::from),
@@ -129,42 +131,6 @@ pub(crate) struct Link {
     options: ConnectOptions,
     executor: Arc<Executor>,
     session: Slot<Sftp>,
-}
-
-/// Where `ssh` keeps its control socket. A Unix socket's path is limited to about 100 bytes and
-/// the `openssh` crate defaults to somewhere under `$HOME`, which a long home folder can overflow,
-/// so use a short, private one: the per-user runtime folder, else `/tmp`.
-fn control_directory() -> PathBuf {
-    short_private_directory(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
-}
-
-fn short_private_directory(runtime: Option<PathBuf>) -> PathBuf {
-    // The socket's name adds about 45 bytes (`/.ssh-connectionXXXXXX/master.XXXXXXXXXXXXXXXX`).
-    const ROOM: usize = 60;
-    runtime
-        .filter(|dir| dir.is_absolute() && dir.as_os_str().len() <= ROOM)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-}
-
-async fn connect(target: &Target, options: &ConnectOptions) -> Result<Sftp, Error> {
-    let mut builder = SessionBuilder::default();
-    builder
-        .control_directory(control_directory())
-        .control_persist(ControlPersist::IdleFor(IDLE_BEFORE_CLOSE))
-        .known_hosts_check(match options.host_keys {
-            HostKeys::Strict => KnownHosts::Strict,
-            HostKeys::AcceptNew => KnownHosts::Add,
-        })
-        .connect_timeout(options.connect_timeout)
-        .server_alive_interval(KEEP_ALIVE);
-    if let Some(file) = &options.known_hosts_file {
-        builder.user_known_hosts_file(file);
-    }
-    if let Some(identity) = &options.identity {
-        builder.keyfile(identity);
-    }
-    let session = builder.connect(target.destination()).await?;
-    Sftp::from_session(session, SftpOptions::new()).await
 }
 
 fn describe(meta: &MetaData) -> Metadata {
@@ -280,7 +246,7 @@ impl Link {
         let options = self.options.clone();
         self.session
             .get(&self.executor, move || async move {
-                connect(&target, &options)
+                master::connect(&target, &options)
                     .await
                     .map_err(|error| error_chain(&error))
             })
@@ -666,22 +632,4 @@ async fn remove_tree(sftp: Arc<Sftp>, root: PathBuf) -> Result<(), Error> {
         fs.remove_dir(&folder).await?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_short_runtime_folder_is_used_and_a_long_or_missing_one_is_not() {
-        let run = PathBuf::from("/run/user/1000");
-        assert_eq!(short_private_directory(Some(run.clone())), run);
-        assert_eq!(short_private_directory(None), PathBuf::from("/tmp"));
-        let long = PathBuf::from(format!("/{}", "x".repeat(80)));
-        assert_eq!(short_private_directory(Some(long)), PathBuf::from("/tmp"));
-        assert_eq!(
-            short_private_directory(Some(PathBuf::from("relative"))),
-            PathBuf::from("/tmp")
-        );
-    }
 }

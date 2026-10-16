@@ -18,6 +18,7 @@
 //! browser. All geometry comes from `context_menu` (the menu) or is derived here from the frame
 //! alone (the panel), so this file only paints: it holds no state and decides nothing.
 
+use plugin_host::protocol::AskKind;
 use ratatui::Frame;
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -29,6 +30,7 @@ use crate::appearance_popup::{
     self, AppearancePopup, AppearanceView, ManageView, PICKER_EXTRA_LINES, Page,
     Row as AppearanceRow, RowKind as AppearanceRowKind, SV_BOX_HEIGHT, SaveView,
 };
+use crate::ask_popup::AskPopup;
 use crate::compress_popup::{CompressPopup, Row as CompressRow};
 use crate::context_menu::{ContextMenu, Entry, Item, MenuCommand, Slot};
 use crate::extract_popup::{ExtractPopup, Row as ExtractRow};
@@ -558,6 +560,80 @@ pub fn render_history(frame: &mut Frame<'_>, popup: &HistoryPopup, config: &Conf
 
 /// Width of the "undo 12" column.
 const HISTORY_SIDE_COLUMN: usize = 9;
+
+/// `prompt` broken into lines of at most `width` cells, keeping the breaks it already has.
+fn wrap_prompt(prompt: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for line in prompt.lines() {
+        let mut current = String::new();
+        for c in line.chars() {
+            if text_width(&current) + text_width(c.encode_utf8(&mut [0; 4])) > width {
+                lines.push(std::mem::take(&mut current));
+            }
+            current.push(c);
+        }
+        lines.push(current);
+    }
+    lines
+}
+
+/// Where the prompt text is drawn inside the question's panel.
+fn ask_inner(area: Rect) -> Rect {
+    area.inner(Margin::new(2, 1))
+}
+
+/// The question's panel, tall enough for its prompt on a screen of this size.
+pub fn ask_area(frame: Rect, popup: &AskPopup) -> Rect {
+    let width = PANEL_MAX_WIDTH.min(frame.width.saturating_sub(2));
+    let room = usize::from(width.saturating_sub(4));
+    let lines = wrap_prompt(popup.prompt(), room).len();
+    panel_area(frame, lines + 1)
+}
+
+/// Draws a plugin's question: who asks, what, and where the answer goes. A secret shows a dot for
+/// each character typed and never the characters.
+pub fn render_ask(frame: &mut Frame<'_>, popup: &AskPopup, config: &Config) {
+    let theme = &config.theme;
+    let area = ask_area(frame.area(), popup);
+    style::cast_shadow(frame.buffer_mut(), area, config);
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, &format!("{} asks", popup.plugin()), true);
+    frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
+    let inner = ask_inner(area);
+
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let accent_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let dim_style = Style::default().fg(style::color(&theme.border_fg));
+    let mut lines = vec![Line::raw("")];
+    lines.extend(
+        wrap_prompt(popup.prompt(), usize::from(inner.width))
+            .into_iter()
+            .map(|line| Line::styled(line, value_style)),
+    );
+    lines.push(Line::raw(""));
+    let (input, hint) = match popup.kind() {
+        AskKind::Secret => {
+            let room = usize::from(inner.width).saturating_sub(1);
+            let dots = popup.typed_len().min(room);
+            (
+                Line::styled(format!("{}▏", "•".repeat(dots)), accent_style),
+                "Enter send, Esc cancel",
+            )
+        }
+        AskKind::Confirm => (
+            Line::styled("y yes    n no", accent_style),
+            "Enter does nothing here; Esc cancels (no)",
+        ),
+    };
+    lines.push(input);
+    lines.push(Line::styled(hint, dim_style));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
 
 /// The line under a form's rows: its error in the danger color, else its warning in the accent
 /// color, else blank.
@@ -1395,5 +1471,44 @@ mod tests {
             text.contains("inspect: note.txt") && text.contains("loading…"),
             "{text}"
         );
+    }
+    #[test]
+    fn a_prompt_wraps_at_the_width_and_keeps_its_own_line_breaks() {
+        assert_eq!(wrap_prompt("abcdef\nxy", 4), ["abcd", "ef", "xy"]);
+        assert_eq!(wrap_prompt("", 4), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_secret_question_shows_who_asks_and_a_dot_per_character_never_the_text() {
+        let mut popup = AskPopup::new("mman-ssh", AskKind::Secret, "user@host's password:");
+        for c in "hunter2".chars() {
+            popup.key(crossterm::event::KeyCode::Char(c));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_ask(frame, &popup, &config()))
+            .unwrap();
+        let text = screen_text(&terminal);
+        for expected in ["mman-ssh asks", "user@host's password:", "•••••••▏"] {
+            assert!(text.contains(expected), "missing {expected}:\n{text}");
+        }
+        assert!(!text.contains("hunter2"), "{text}");
+    }
+
+    #[test]
+    fn a_yes_no_question_says_which_keys_answer_it() {
+        let popup = AskPopup::new(
+            "mman-ssh",
+            AskKind::Confirm,
+            "The authenticity of host 'h' can't be established.\nED25519 key fingerprint is SHA256:abc.",
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_ask(frame, &popup, &config()))
+            .unwrap();
+        let text = screen_text(&terminal);
+        for expected in ["fingerprint is SHA256:abc.", "y yes    n no"] {
+            assert!(text.contains(expected), "missing {expected}:\n{text}");
+        }
     }
 }

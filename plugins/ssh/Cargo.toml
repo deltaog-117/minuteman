@@ -21,7 +21,8 @@ futures-core = "0.3"
 # agents and `ProxyJump` in OpenSSH's hands instead of in a second implementation here.
 openssh = { version = "0.11.6", features = ["process-mux"] }
 openssh-sftp-client = { version = "0.15.10", features = ["openssh"] }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "io-util", "net", "process"] }
+zeroize = "1"
 
 [dev-dependencies]
 proptest = "1.11"

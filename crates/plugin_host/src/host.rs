@@ -1123,6 +1123,20 @@ async fn read_loop(
                     PluginRequest::RunAction { name } => actions.run(&plugin, name).await,
                     PluginRequest::ListActions => Ok(actions.list()),
                     PluginRequest::ShowPicker(spec) => ui.show_picker(&plugin, spec).await,
+                    // A person is typing the answer, which can take minutes, and the replies of the
+                    // plugin's other requests come through this loop meanwhile: answer from a task.
+                    PluginRequest::Ask(spec) => {
+                        let (ui, stdin_tx, plugin, id) =
+                            (ui.clone(), stdin_tx.clone(), plugin.clone(), id.clone());
+                        handle.spawn(async move {
+                            let line = match ui.ask(&plugin, spec).await {
+                                Ok(result) => protocol::ok_response(&id, result),
+                                Err(message) => protocol::err_response(&id, message),
+                            };
+                            let _ = stdin_tx.send(line);
+                        });
+                        continue;
+                    }
                     PluginRequest::Walk(request) => {
                         let number = request.walk;
                         walks
@@ -1298,6 +1312,7 @@ fn execute(request: PluginRequest) -> Result<serde_json::Value, String> {
         | PluginRequest::RunAction { .. }
         | PluginRequest::ListActions
         | PluginRequest::ShowPicker(_)
+        | PluginRequest::Ask(_)
         | PluginRequest::Walk(_)
         | PluginRequest::ReadFile(_)
         | PluginRequest::Stat(_)

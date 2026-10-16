@@ -28,8 +28,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::protocol::{
-    ArchiveDone, ArchiveProgress, CanvasNote, DevicesNote, PickerSpec, PickerUpdate, SetCanvas,
-    SetDevices, SetInspect, SetPreview, SetView,
+    ArchiveDone, ArchiveProgress, AskAnswer, AskSpec, CanvasNote, DevicesNote, PickerSpec,
+    PickerUpdate, SetCanvas, SetDevices, SetInspect, SetPreview, SetView,
 };
 
 type Reply = Result<Value, String>;
@@ -66,10 +66,43 @@ impl PickerRequest {
     }
 }
 
+/// A plugin's question for the user, waiting on the render thread. Answer it with `answer` or
+/// `decline`; dropping it unanswered tells the plugin the interface closed first.
+#[derive(Debug)]
+pub struct AskRequest {
+    plugin: String,
+    spec: AskSpec,
+    reply: oneshot::Sender<Reply>,
+}
+
+impl AskRequest {
+    /// The plugin that asked.
+    pub fn plugin(&self) -> &str {
+        &self.plugin
+    }
+
+    pub fn spec(&self) -> &AskSpec {
+        &self.spec
+    }
+
+    /// Hands the plugin what the user answered.
+    pub fn answer(self, answer: &AskAnswer) {
+        let reply = serde_json::to_value(answer).map_err(|e| e.to_string());
+        let _ = self.reply.send(reply);
+    }
+
+    /// Tells the plugin the user did not answer, and why.
+    pub fn decline(self, reason: &str) {
+        let _ = self.reply.send(Err(reason.to_string()));
+    }
+}
+
 /// Something a plugin asked of the interface that is not an action.
 #[derive(Debug)]
 pub enum UiRequest {
     ShowPicker(PickerRequest),
+    /// The plugin asks the user something and waits for the answer.
+    Ask(AskRequest),
     /// The plugin replaced what its picker lists.
     Items {
         plugin: String,
@@ -152,6 +185,22 @@ impl UiLink {
         answer
             .await
             .unwrap_or_else(|_| Err("the interface closed before opening it".to_string()))
+    }
+
+    /// Hands `spec` to the render thread and waits for the user's answer.
+    pub(crate) async fn ask(&self, plugin: &str, spec: AskSpec) -> Reply {
+        let (reply, answer) = oneshot::channel();
+        let request = AskRequest {
+            plugin: plugin.to_string(),
+            spec,
+            reply,
+        };
+        if self.tx.send(UiRequest::Ask(request)).is_err() {
+            return Err("the interface has closed".to_string());
+        }
+        answer
+            .await
+            .unwrap_or_else(|_| Err("the interface closed before it was answered".to_string()))
     }
 
     pub(crate) fn items(&self, plugin: &str, update: PickerUpdate) {

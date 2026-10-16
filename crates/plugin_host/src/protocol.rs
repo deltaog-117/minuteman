@@ -55,19 +55,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use plugin_api::{
-    API_VERSION, ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, CanvasInput, CanvasNote,
-    Change, DevicesCommand, DevicesNote, EVENT_ACTION, EVENT_COMMAND, EVENT_DIR_CHANGED,
-    EVENT_INIT, EVENT_JOB_FINISHED, EVENT_KEY, EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY,
-    EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH, EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job,
-    JobOutcome, Line, LogLevel, PickerClose, PickerIndexing, PickerSpec, PickerUpdate, ReadFile,
-    SetCanvas, SetDevices, SetInspect, SetPreview, SetView, Slot, Span, Stat, StateSnapshot,
-    Surface, TallyCancel, TallyDone, TallyEnding, TallyRequest, Tone, TreeEntry, VfsFault, View,
-    WalkCancel, WalkEnd, WalkOutcome, WalkRequest, WireEntry,
+    API_VERSION, ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, AskAnswer, AskKind,
+    AskSpec, CanvasInput, CanvasNote, Change, DevicesCommand, DevicesNote, EVENT_ACTION,
+    EVENT_COMMAND, EVENT_DIR_CHANGED, EVENT_INIT, EVENT_JOB_FINISHED, EVENT_KEY,
+    EVENT_PICKER_CLOSED, EVENT_PICKER_QUERY, EVENT_SELECTION_CHANGED, EVENT_WALK_BATCH,
+    EVENT_WALK_DONE, EventKind, Glyph, HostEvent, Job, JobOutcome, Line, LogLevel, PickerClose,
+    PickerIndexing, PickerSpec, PickerUpdate, ReadFile, SetCanvas, SetDevices, SetInspect,
+    SetPreview, SetView, Slot, Span, Stat, StateSnapshot, Surface, TallyCancel, TallyDone,
+    TallyEnding, TallyRequest, Tone, TreeEntry, VfsFault, View, WalkCancel, WalkEnd, WalkOutcome,
+    WalkRequest, WireEntry,
 };
 use plugin_api::{
-    METHOD_ARCHIVE_DONE, METHOD_ARCHIVE_PROGRESS, METHOD_CANVAS_NOTE, METHOD_DEVICES_NOTE,
-    METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_READ_FILE, METHOD_SET_CANVAS,
-    METHOD_SET_DEVICES, METHOD_SET_INSPECT, METHOD_SET_PREVIEW, METHOD_SET_VIEW,
+    METHOD_ARCHIVE_DONE, METHOD_ARCHIVE_PROGRESS, METHOD_ASK, METHOD_CANVAS_NOTE,
+    METHOD_DEVICES_NOTE, METHOD_PICKER_CLOSE, METHOD_PICKER_ITEMS, METHOD_READ_FILE,
+    METHOD_SET_CANVAS, METHOD_SET_DEVICES, METHOD_SET_INSPECT, METHOD_SET_PREVIEW, METHOD_SET_VIEW,
     METHOD_SHOW_PICKER, METHOD_STAT, METHOD_TALLY, METHOD_TALLY_CANCEL, METHOD_WALK,
     METHOD_WALK_CANCEL,
 };
@@ -141,6 +142,8 @@ pub enum PluginRequest {
     ListActions,
     /// Opens the picker the interface draws, with a list this plugin fills.
     ShowPicker(PickerSpec),
+    /// Asks the user a question the plugin cannot settle itself, and waits for the answer.
+    Ask(AskSpec),
     /// Starts listing everything below a folder, through whatever serves the browsed paths.
     Walk(WalkRequest),
     /// Reads part of a file through whatever serves the browsed paths.
@@ -232,6 +235,9 @@ impl PluginRequest {
             "list_actions" => Ok(Self::ListActions),
             METHOD_SHOW_PICKER => serde_json::from_value(params)
                 .map(Self::ShowPicker)
+                .map_err(bad),
+            METHOD_ASK => serde_json::from_value::<AskSpec>(params)
+                .map(|spec| Self::Ask(spec.checked()))
                 .map_err(bad),
             METHOD_WALK => serde_json::from_value(params).map(Self::Walk).map_err(bad),
             METHOD_READ_FILE => serde_json::from_value(params)
@@ -981,6 +987,24 @@ mod tests {
             ),
             other => panic!("expected walk, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_ask_request_parses_with_its_prompt_cleaned() {
+        let ask = r#"{"jsonrpc":"2.0","id":7,"method":"ask","params":{"kind":"secret","prompt":"pw\u001b[2J:"}}"#;
+        match parse_line(ask).unwrap() {
+            Incoming::Request {
+                request: PluginRequest::Ask(spec),
+                ..
+            } => assert_eq!(
+                (spec.kind, spec.prompt.as_str()),
+                (AskKind::Secret, "pw[2J:")
+            ),
+            other => panic!("expected ask, got {other:?}"),
+        }
+        let bad =
+            r#"{"jsonrpc":"2.0","id":8,"method":"ask","params":{"kind":"shout","prompt":"x"}}"#;
+        assert!(parse_line(bad).is_err());
     }
 
     #[test]

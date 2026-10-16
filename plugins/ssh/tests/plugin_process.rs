@@ -18,7 +18,7 @@
 //! replies, what it does with a line it cannot read, and how it ends. Nothing here needs a
 //! server; the requests used are ones the plugin answers before it would connect anywhere.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread;
@@ -181,7 +181,7 @@ fn a_cancel_ends_a_request_stuck_connecting_long_before_its_timeout() {
             path: format!("ssh://127.0.0.1:{port}/").into(),
         },
     ));
-    let _socket = held
+    let mut socket = held
         .join()
         .expect("accepted")
         .expect("the plugin connected");
@@ -194,6 +194,20 @@ fn a_cancel_ends_a_request_stuck_connecting_long_before_its_timeout() {
         other => panic!("expected the cancel's error, got {other:?}"),
     }
     assert!(asked.elapsed() < Duration::from_secs(5));
+    // The `ssh` it started is killed with the attempt, not left to its own timeout: the server
+    // sees its connection close (after the greeting `ssh` sends first) within a few seconds.
+    socket
+        .set_read_timeout(Some(Duration::from_secs(4)))
+        .expect("a timeout");
+    let mut greeting = [0; 512];
+    let closed = loop {
+        match socket.read(&mut greeting) {
+            Ok(0) => break true,
+            Ok(_) => {}
+            Err(_) => break false,
+        }
+    };
+    assert!(closed, "the cancelled attempt's ssh is still connected");
     // A cancel for a request already answered, or never made, is nothing.
     plugin.write_raw(&plugin_api::cancel_line(4));
     plugin.write_raw(&plugin_api::cancel_line(999));

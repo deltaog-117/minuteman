@@ -1861,6 +1861,24 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   connect, the plugin process cancelling a connect stuck on a server that never speaks, and each
   of the four jobs. Driven by hand in the real `mman`: after `Esc` the same `:cd` reconnected in
   0.01 s, against 8.07 s before.
+- ✅ **Answering `ssh` when it asks (COA A, route A1)** – connecting to an `ssh://` machine can now
+  ask you something: whether to trust an unknown host key (the fingerprint is shown, only `y`
+  accepts, `n` or `Esc` refuses and nothing is remembered), the password, or a key's passphrase.
+  A new plugin -> host request, `ask` (`plugin_api::AskSpec` / `AskAnswer`), opens a modal over
+  everything with the plugin's name as its title and a dot per character typed; the host answers
+  it from a task, so the plugin's other replies keep flowing while someone types. In `mman-ssh`
+  the `openssh` crate could not do it (it starts the master with `BatchMode=yes`, which forbids
+  every prompt), so the master `ssh` is now started by the plugin without batch mode and handed to
+  the crate with `Session::resume`; `SSH_ASKPASS` is `mman-ssh` itself, which forwards the
+  question over a private socket to the plugin and prints the answer (no extra program to
+  install; OpenSSH 8.4 or newer). The default host-key policy is now `Ask`; with no one to ask it
+  refuses like `Strict`. Giving up a connect now also kills its `ssh` (the gap left as "COA C"
+  on 2026-10-15). Tested against a real `sshd`: trust, refusal, backing out, nobody to ask, a
+  key passphrase right and wrong; the whole wire through the real `mman-ssh`; the host and the
+  modal; the kill. Driven by hand in the real `mman`: `n` fails with "Host key verification
+  failed" and remembers nothing, `y` lists the folder and writes `known_hosts`. A password
+  prompt was not driven by hand (the test `sshd` takes keys only); the passphrase prompt takes
+  the same path and is tested end to end.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2348,14 +2366,15 @@ draws.
   "Open with" cannot set the default (writing `mimeapps.list`) or remember the last choice; the
   associations are read once per session, so an app installed while it runs is not seen; `l` and
   `→` on a file now open it, which someone used to browsing with them may find eager.
-- **Remote browsing, follow-ups** – `Esc` stops a move at the connection, but the `ssh` process a
-  given-up connect started is not killed: it runs to its own 10 second timeout, holding nothing
-  (killing it means starting the master `ssh` with `kill_on_drop` and attaching with
-  `Session::resume`, COA C of 2026-10-15); a file's preview read through the preview plugin
+- **Remote browsing, follow-ups** – a file's preview read through the preview plugin
   (`read_file`), a thumbnail, an image preview and the marked-size walk are not given up when the
   cursor moves on, and in the plugin a read of a file already open (one window of at most 256 KiB)
-  is not stopped, as the reader holds the file across it; there is no password or key-passphrase prompt (keys and the agent only, run
-  through `BatchMode`), no prompt to trust a new host key (run `ssh host` once), no bookmarks or
+  is not stopped, as the reader holds the file across it; a question from `ssh` (a password, a
+  passphrase, a host key) waits five minutes at most and `ssh` itself asks three times for a
+  password, neither of which can be set; a one-time code (keyboard-interactive) is asked for like a
+  password, with the characters hidden, and was not tried; the modal question takes the keyboard
+  and ignores the mouse, so a second machine's question waits behind the first; a changed host key
+  is refused by `ssh` and reported, never offered for trusting; there are no bookmarks or
   history of machines, and a remote file opened with a local program is a copy in the cache (see
   Completed), so edits are not written back. A shell pane, a `:` command and the trash are refused in a remote folder. A copy passes
   through this machine even between two folders on one remote (the server's `copy-data` extension
@@ -2713,6 +2732,10 @@ draws.
 2. `scripts/check` (format check, clippy and the whole workspace's tests — new this cycle; see
    DIARY.md) to verify everything still passes.
 3. Commit this cycle (step 8 of the dev loop).
+   Asking: `:cd ssh://host/` on a machine whose key is not in your `known_hosts` shows a
+   "ssh asks" box with the fingerprint; `y` trusts it (and writes `known_hosts`), `n` or `Esc`
+   refuses. A key with a passphrase, or a password login, asks the same way. Needs OpenSSH 8.4 or
+   newer; rebuild with `cargo install --path plugins/ssh` so `mman-ssh` is the new one.
    Remote files: on an `ssh://` folder press `enter` on a file with `mman-ssh` installed — it is
    copied into `~/.cache/minuteman/remote-open` and opened from there (`Esc` abandons the copy);
    `:cd ssh://host/~` opens the login's home.
@@ -2723,7 +2746,7 @@ draws.
    plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
    follow-ups to remote browsing and the other features listed there. Folder moves, undo and redo,
    and the folder preview no longer block (see DIARY.md, 2026-10-12 and 2026-10-13). The next
-   biggest gaps are a very large `.tar.gz` that is still read whole to open, and a prompt for a
-   password or a new host key. No folder read is left on the render thread: search hits, the
+   biggest gap is a very large `.tar.gz` that is still read whole to open; a prompt for a password
+   or a new host key is done (see Completed). No folder read is left on the render thread: search hits, the
    finder's reveal, the trash preview and opening an archive file are background work now, and
    `Esc` on a remote move stops it at the connection (see DIARY.md, 2026-10-15).
