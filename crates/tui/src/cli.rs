@@ -17,7 +17,8 @@
 //! Command-line parsing: `minuteman [--cwd-file <path>] [--chooser-file <path> [--pick <kind>]
 //! [--pick-name <name>]] [start_dir]`, `minuteman init
 //! <bash|zsh|fish>`, `minuteman init-terminal <kitty|alacritty|wezterm>`, `minuteman init-appearance`,
-//! `minuteman glyphs`, and `minuteman plugin check <name or folder>`.
+//! `minuteman glyphs`, and `minuteman plugin <check <name or folder> | new <name> [--lang sh|python] |
+//! add <folder>>`.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -26,6 +27,7 @@ use std::{fs, io};
 
 use shared::chooser::PickKind;
 
+use crate::plugin_new::{Lang, NameError, PluginName};
 use crate::shell_init::Shell;
 use crate::terminal_init::Terminal;
 
@@ -42,6 +44,10 @@ pub enum Command {
     Glyphs,
     /// Start one plugin for half a second and say whether it looks healthy, then exit.
     PluginCheck(String),
+    /// Write a working plugin to start from into the drop-in folder.
+    PluginNew(PluginName, Lang),
+    /// Copy a plugin folder into the drop-in folder.
+    PluginAdd(PathBuf),
     Run(RunArgs),
 }
 
@@ -75,8 +81,10 @@ pub enum CliError {
     UnknownPick(String),
     /// `--pick` or `--pick-name` given without anywhere to write the answer.
     PickWithoutChooserFile(&'static str),
-    /// `plugin` without `check` and the one thing to check.
+    /// `plugin` without `check`, `new` or `add`, or without the one thing they take.
     PluginUsage,
+    BadPluginName(NameError),
+    UnknownLang(String),
 }
 
 impl fmt::Display for CliError {
@@ -109,7 +117,14 @@ impl fmt::Display for CliError {
                 "unsupported pick '{name}' (expected file, files, directory, or save)"
             ),
             Self::PickWithoutChooserFile(flag) => write!(f, "{flag} needs --chooser-file"),
-            Self::PluginUsage => write!(f, "usage: plugin check <plugin name or folder>"),
+            Self::PluginUsage => write!(
+                f,
+                "usage: plugin check <plugin name or folder> | plugin new <name> [--lang sh|python] | plugin add <folder>"
+            ),
+            Self::BadPluginName(e) => write!(f, "{e}"),
+            Self::UnknownLang(name) => {
+                write!(f, "unsupported language '{name}' (expected sh or python)")
+            }
         }
     }
 }
@@ -142,14 +157,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliErr
             };
         }
         if is_first && arg == "plugin" {
-            if args.next().is_none_or(|word| word != "check") {
-                return Err(CliError::PluginUsage);
-            }
-            let target = args.next().ok_or(CliError::PluginUsage)?;
-            return match args.next() {
-                None => Ok(Command::PluginCheck(target.to_string_lossy().into_owned())),
-                Some(extra) => Err(CliError::ExtraArgument(PathBuf::from(extra))),
-            };
+            return parse_plugin(args);
         }
         if is_first && arg == "init-terminal" {
             let name = args.next().ok_or(CliError::MissingTerminal)?;
@@ -212,6 +220,49 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliErr
     };
 
     Ok(Command::Run(run))
+}
+
+/// The words after `plugin`.
+fn parse_plugin(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliError> {
+    let word = args.next().ok_or(CliError::PluginUsage)?;
+    if word == "check" {
+        let target = args.next().ok_or(CliError::PluginUsage)?;
+        return match args.next() {
+            None => Ok(Command::PluginCheck(target.to_string_lossy().into_owned())),
+            Some(extra) => Err(CliError::ExtraArgument(PathBuf::from(extra))),
+        };
+    }
+    if word == "add" {
+        let folder = args.next().ok_or(CliError::PluginUsage)?;
+        return match args.next() {
+            None => Ok(Command::PluginAdd(PathBuf::from(folder))),
+            Some(extra) => Err(CliError::ExtraArgument(PathBuf::from(extra))),
+        };
+    }
+    if word != "new" {
+        return Err(CliError::PluginUsage);
+    }
+    let mut name: Option<PluginName> = None;
+    let mut lang = Lang::default();
+    while let Some(arg) = args.next() {
+        let arg = arg.to_string_lossy().into_owned();
+        let value = if arg == "--lang" {
+            let value = args.next().ok_or(CliError::MissingValue("--lang"))?;
+            Some(value.to_string_lossy().into_owned())
+        } else {
+            arg.strip_prefix("--lang=").map(str::to_owned)
+        };
+        if let Some(value) = value {
+            lang = Lang::parse(&value).ok_or(CliError::UnknownLang(value))?;
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            return Err(CliError::UnknownFlag(arg));
+        } else if name.is_some() {
+            return Err(CliError::ExtraArgument(PathBuf::from(arg)));
+        } else {
+            name = Some(PluginName::try_new(&arg).map_err(CliError::BadPluginName)?);
+        }
+    }
+    Ok(Command::PluginNew(name.ok_or(CliError::PluginUsage)?, lang))
 }
 
 fn parse_pick(name: &str) -> Result<PickKind, CliError> {
@@ -418,7 +469,7 @@ mod tests {
         assert_eq!(parse_strs(&["plugin"]), Err(CliError::PluginUsage));
         assert_eq!(parse_strs(&["plugin", "check"]), Err(CliError::PluginUsage));
         assert_eq!(
-            parse_strs(&["plugin", "new", "x"]),
+            parse_strs(&["plugin", "remove", "x"]),
             Err(CliError::PluginUsage)
         );
         assert_eq!(
@@ -443,5 +494,67 @@ mod tests {
         let read = fs::read(&file).expect("just written");
         let _ = fs::remove_file(&file);
         assert_eq!(read, dir.as_os_str().as_encoded_bytes());
+    }
+    #[test]
+    fn plugin_new_takes_a_name_and_an_optional_language() {
+        let name = PluginName::try_new("hello").unwrap();
+        assert_eq!(
+            parse_strs(&["plugin", "new", "hello"]),
+            Ok(Command::PluginNew(name.clone(), Lang::Sh))
+        );
+        for spelling in [&["--lang", "python"][..], &["--lang=python"]] {
+            let mut args = vec!["plugin", "new", "hello"];
+            args.extend_from_slice(spelling);
+            assert_eq!(
+                parse_strs(&args),
+                Ok(Command::PluginNew(name.clone(), Lang::Python))
+            );
+        }
+        assert_eq!(
+            parse_strs(&["plugin", "new", "--lang", "sh", "hello"]),
+            Ok(Command::PluginNew(name, Lang::Sh))
+        );
+    }
+
+    #[test]
+    fn plugin_new_refuses_what_cannot_be_a_name_a_language_or_an_argument() {
+        assert_eq!(parse_strs(&["plugin", "new"]), Err(CliError::PluginUsage));
+        assert_eq!(
+            parse_strs(&["plugin", "new", "../x"]),
+            Err(CliError::BadPluginName(NameError::BadStart('.')))
+        );
+        assert_eq!(
+            parse_strs(&["plugin", "new", "x", "--lang", "rust"]),
+            Err(CliError::UnknownLang("rust".into()))
+        );
+        assert_eq!(
+            parse_strs(&["plugin", "new", "x", "--lang"]),
+            Err(CliError::MissingValue("--lang"))
+        );
+        assert_eq!(
+            parse_strs(&["plugin", "new", "x", "--bogus"]),
+            Err(CliError::UnknownFlag("--bogus".into()))
+        );
+        assert_eq!(
+            parse_strs(&["plugin", "new", "x", "y"]),
+            Err(CliError::ExtraArgument("y".into()))
+        );
+    }
+
+    #[test]
+    fn plugin_add_takes_exactly_one_folder() {
+        assert_eq!(
+            parse_strs(&["plugin", "add", "./p"]),
+            Ok(Command::PluginAdd("./p".into()))
+        );
+        assert_eq!(parse_strs(&["plugin", "add"]), Err(CliError::PluginUsage));
+        assert_eq!(
+            parse_strs(&["plugin", "add", "a", "b"]),
+            Err(CliError::ExtraArgument("b".into()))
+        );
+        assert_eq!(
+            parse_strs(&["plugin", "remove"]),
+            Err(CliError::PluginUsage)
+        );
     }
 }

@@ -8533,6 +8533,42 @@ test now goes through `begin_plugin_test` and `poll_plugin_test`.
 `mman plugin new`, `mman plugin add`, `plugin_dirs`, a double-click to choose a folder and reloading
 config by hand-edit are unchanged.
 
+## 2026-10-18 — `mman plugin new` and `mman plugin add`
+
+**Context.** A plugin could be checked from the shell but not started or installed from it: a new
+author wrote `plugin.toml` and a program from nothing, and the only way to install a folder was the
+plugin menu's picker.
+
+**Decision.** Chosen as COA B of three: `new` plus `add` for a local folder, over `new` alone (A) and
+over also cloning a git URL (C). C fetches third-party code that runs with the user's permissions
+with no sandbox to hold it, which the roadmap already rules out. The `rust` skeleton is left out: the
+generated crate would need `plugin_api`, which is not published, so it would build only inside a
+checkout. `PluginName` (`plugin_new.rs`) is a newtype whose only constructor accepts ASCII letters,
+digits, `-` and `_`, so the generated manifest and program never need quoting and a name cannot be
+`..` or hidden; it is stricter than a manifest requires on purpose, and `add` applies it to a
+manifest's name too, since that name becomes a folder. The skeleton program answers the `command`
+event by matching `"name":"command"` in the line, which needs no JSON parser in `sh`: the host
+writes the name first and escapes any quote inside a path, so the text cannot appear inside a value.
+`add` runs the checks `plugin check` runs (API version, name, keys, `:` words) before it copies,
+copies under a staging name and renames into place, and bounds the copy because the folder is
+somebody else's (no links or special files, no `.git`, 5,000 files, 64 MiB, 16 levels). It copies
+rather than links so the plugin survives the original moving. `Config::dropin_dir` became public so
+the folder is named in one place. Both new files are on the `vfs-gate` list, as they write to the
+app's own config folder.
+
+**Verification.** `scripts/check` passes. Property tests: any accepted name yields a manifest the
+loader reads back; a copy holds every file with its contents. Unit tests cover the name rules, both
+programs answering a `command` event and nothing else (the Python one is skipped on a machine with no
+`python3`), an existing folder left alone, a failed write leaving nothing, links, the depth limit,
+keys and versions refused before copying, and the command-line forms. One existing test used `plugin
+new` as its example of an unknown subcommand; it now uses `plugin remove`. By hand against the
+compiled `mman` with a throwaway config folder, then over a PTY with both plugins switched on: `:hello`
+and `:py` each put `hello from <name>` on the status bar. The switch was set in `local.toml`, not by
+clicking through the menu.
+
+**Left open.** The `rust` skeleton, `add` from a git URL, `plugin_dirs`, a double-click to choose a
+folder, the version check when the add form is filled from a folder, and reloading config by hand-edit.
+
 ---
 
 ---

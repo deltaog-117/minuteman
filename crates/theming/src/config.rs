@@ -507,8 +507,8 @@ impl Config {
             read(Self::appearance_path()).as_deref(),
             read(Self::local_path()).as_deref(),
         );
-        if let Some(dir) = Self::config_dir() {
-            let found = dropin::scan(&dir.join("plugins"));
+        if let Some(dir) = Self::dropin_dir() {
+            let found = dropin::scan(&dir);
             config.dropins = found.found;
             config.dropin_notices = found.notices;
         }
@@ -698,6 +698,11 @@ impl Config {
 
     fn local_path() -> Option<PathBuf> {
         Self::config_dir().map(|dir| dir.join("local.toml"))
+    }
+
+    /// The folder drop-in plugins live in: `plugins/` beside the config files.
+    pub fn dropin_dir() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("plugins"))
     }
 
     fn config_dir() -> Option<PathBuf> {

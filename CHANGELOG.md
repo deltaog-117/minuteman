@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mman plugin new <name> [--lang sh|python]` writes a working plugin into
+  `~/.config/minuteman/plugins/<name>/`: a `plugin.toml` and a short program that answers `:<name>`
+  with a line on the status bar, ready for `mman plugin check <name>` and the plugin menu. A name
+  is 1 to 64 letters, digits, `-` and `_`, starting with a letter or digit. A folder that exists is
+  never touched, and a failed write leaves nothing behind. Rust is not offered yet. Author:
+  deltaog-117.
+- `mman plugin add <folder>` checks a plugin folder (its manifest, API version, name, and its keys
+  and `:` words against the interface and the other plugins) and, only if it passes, copies it into
+  the same folder. It is copied, not linked, and never from a URL. A link or special file in it
+  is refused, `.git` is left behind, and a folder over 5,000 files, 64 MiB or 16 levels is refused;
+  nothing is left half-copied. Author: deltaog-117.
 - `mman plugin check <name or folder>` starts one plugin for half a second and says whether it looks
   healthy: it keeps running, it finishes at once (allowed), it ended at start with its exit status,
   closed its output, or logged an error (a plugin built for another protocol version says so

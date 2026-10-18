@@ -93,7 +93,7 @@ fn run_for(
 }
 
 /// What the plugin menu would list with nothing switched on or off by hand.
-fn roster(config: &Config) -> Vec<Entry> {
+pub(crate) fn roster(config: &Config) -> Vec<Entry> {
     let listing = bundled::listing(&config.plugins, &config.preview_hooks);
     let entries = plugin_roster::build(
         &config.plugins,

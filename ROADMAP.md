@@ -1891,6 +1891,23 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   and opening a file inside one still inflates up to that file each time (a file's bytes are not
   kept); gzip checkpoints (B) would remove both.
 
+- ✅ **`mman plugin new` and `mman plugin add`** – the command line can now start and install a
+  plugin. `new <name> [--lang sh|python]` writes `plugin.toml` and a short program into the drop-in
+  folder; the program answers a `command` event with a `log` line, so `:<name>` shows
+  `[name] hello from name` once the plugin is switched on. A `PluginName` newtype (1 to 64 ASCII
+  letters, digits, `-`, `_`, starting alphanumeric) is the only way to name one, so a name can never
+  be `..`, hidden, or need quoting in the folder, the TOML or the program. `add <folder>` holds the
+  folder to the same checks as `plugin check` before copying anything, then copies it under a
+  staging name and renames it into place; it follows no link, takes no special file, leaves `.git`
+  behind and stops at 5,000 files, 64 MiB or 16 levels. Chosen as COA B (local folders only) over
+  `new` alone (A) and also cloning a git URL (C), which would run third-party code with no sandbox.
+  `Config::dropin_dir` is the one place the folder is named. Property-tested: any accepted name
+  makes a manifest the loader reads back with that name, and a copy holds every file with its
+  contents. Verified against the real binary with a throwaway config folder: `new` in both
+  languages, `check` on each, `add` from outside, and a refusal for an existing folder, a taken
+  name, a folder already in place and one with no manifest; then over a PTY the two plugins,
+  switched on, answered `:hello` and `:py` on the status bar.
+
 ## 🔴 High Priority: a small core and bundled plugins
 
 The goal: the core is only the file operations (create, delete, move, copy, rename, touch, and the
@@ -2341,11 +2358,14 @@ draws.
   check <name or folder>` runs the same probe and holds a manifest's version, keys and `:` words
   against what is taken (COA A; a plugin does not answer `init`, so "handshake" means what the
   probe can see, and an additive `ready` message stays an option). Start and test runs in the
-  background (`probe_job`), so the screen stays live during the half second. Still to do: the
+  background (`probe_job`), so the screen stays live during the half second. `mman plugin new <name>
+  [--lang sh|python]` writes a working skeleton and `mman plugin add <folder>` checks and copies a
+  local plugin folder into the drop-in directory (COA B). Still to do: the
   version check is not applied when the add form is filled from a folder; a `plugin_dirs` list in
   `config.toml` for the folders the found list scans, choosing a folder with a double-click, a check
-  of keys and `:` words when a drop-in is switched on; `mman plugin new <name> --lang
-  python|rust|sh` for a working skeleton; `mman plugin add <path or git url>`; reloading a
+  of keys and `:` words when a drop-in is switched on; the `rust` skeleton for `mman plugin new`
+  (the generated crate has nowhere to get `plugin_api` until it is published); `mman plugin add`
+  from a git URL (waits for a sandbox); reloading a
   hand-edited config without a restart (switching a plugin from the menu is already live). A curated index
   and one-step install wait for a sandbox or a declared, enforced permission list (see the
   community plugin ecosystem under the long-term vision).
@@ -2656,7 +2676,11 @@ draws.
    checkout `cargo build -p wiring`).
    Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. Run `mman plugin check git` (a name the plugin menu lists) or `mman plugin check ~/path/to/folder`
+1. Run `mman plugin new hello` (add `--lang python` for Python), `mman plugin check hello`, then
+   switch it on with `space p` and run `:hello`: the status bar says `hello from hello`. Copy a
+   plugin folder from elsewhere with `mman plugin add ~/path/to/folder`; it is refused with the
+   reason if its manifest, version, name, keys or `:` words do not fit. Before that: run
+   `mman plugin check git` (a name the plugin menu lists) or `mman plugin check ~/path/to/folder`
    (a folder with a `plugin.toml`): it starts the plugin for half a second and prints one line,
    exiting 1 when something is wrong; add `api_version = 99` to a manifest to see it refused. Then
    press `space p`, then `a`: the plugins found in the browsed folder are listed with their

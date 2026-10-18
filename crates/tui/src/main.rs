@@ -58,7 +58,9 @@ mod overlay_view;
 mod picker_popup;
 mod picker_view;
 mod plugin_action;
+mod plugin_add;
 mod plugin_check;
+mod plugin_new;
 mod plugin_program;
 mod plugin_roster;
 mod plugin_source;
@@ -814,6 +816,44 @@ fn main() -> Result<()> {
                 }
                 Err(report) => {
                     eprintln!("{report}");
+                    std::process::exit(1);
+                }
+            };
+        }
+        Ok(cli::Command::PluginNew(name, lang)) => {
+            let Some(root) = Config::dropin_dir() else {
+                eprintln!("minuteman: {}", plugin_new::NewError::NoConfigDir);
+                std::process::exit(1);
+            };
+            return match plugin_new::create(&root, &name, lang) {
+                Ok(dir) => {
+                    println!("created {}", dir.display());
+                    println!("try it:  mman plugin check {name}", name = name.as_str());
+                    println!(
+                        "then switch it on in the plugin menu (space p) and run it as :{}",
+                        name.as_str()
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("minuteman: {e}");
+                    std::process::exit(1);
+                }
+            };
+        }
+        Ok(cli::Command::PluginAdd(folder)) => {
+            let Some(root) = Config::dropin_dir() else {
+                eprintln!("minuteman: {}", plugin_add::AddError::NoConfigDir);
+                std::process::exit(1);
+            };
+            return match plugin_add::add(&folder, &root, &Config::load()) {
+                Ok((name, dir)) => {
+                    println!("added {name} to {}", dir.display());
+                    println!("it is off until you switch it on in the plugin menu (space p)");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("minuteman: {e}");
                     std::process::exit(1);
                 }
             };
