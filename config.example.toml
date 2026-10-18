@@ -32,7 +32,8 @@ mouse_range_modifier = "either"
 # of staged, modified and untracked files, and the state of the selected file. It runs `git status`
 # in the background (read-only, without taking git's index lock) whenever you browse inside a
 # repository. It is the bundled `git` plugin (`mman-git`, next to `mman` or on your PATH); without
-# that program there is no segment. Set this to false to never start it, and so never run git.
+# that program there is no segment. Set this to false to never start it, and so never run git; as
+# long as it is true you can also switch it off and on from the plugin menu (`space` then `p`).
 git_status = true
 
 # Whether dot-prefixed files and directories are listed when Minuteman starts. The `hidden` key
@@ -65,7 +66,8 @@ typewriter_preview = true
 # load average, and memory used/total. Off by default because it is Linux-specific (it reads
 # nothing and shows nothing elsewhere) and, unlike the git segment, has nothing to do with the
 # files you're browsing. It is drawn by the bundled mman-hud plugin: without that program next
-# to mman (or on PATH) there is nothing to show.
+# to mman (or on PATH) there is nothing to show. This only sets whether it starts on: the plugin
+# menu (`space` then `p`) can switch it on or off either way and remembers that in local.toml.
 system_hud = false
 
 # Programs that take over the whole terminal. A `:` command whose first word is one of these

@@ -111,8 +111,9 @@ A `[[plugin]]` of your own that lists `provides = ["find"]` takes its place (see
 `provides = ["locate"]`. The git branch and the state of the selected file in the status bar are a
 plugin too, `mman-git`: without it the status bar simply has no git segment and the list no
 marks beside changed files (`+` staged, `~` modified, `?` untracked, `!` conflicted), and
-`git_status = false` in `config.toml` keeps it from starting. The header's system figures (`system_hud = true`)
-are `mman-hud`, and without it that pill is absent. The preview column's text, hex dump and archive
+`git_status = false` in `config.toml` keeps it from starting (and the plugin menu cannot override that). The header's system
+figures are `mman-hud`: `system_hud = true` starts it, and so can the plugin menu (`space p`), which also switches `git` off and on
+without a config edit; without the program that pill is absent. The preview column's text, hex dump and archive
 listing are `mman-preview`: it reads the selected file through `mman` and sends back a finished
 document, `mman` does the scrolling and drawing, and without it the column shows only the file's
 name and a notice at startup says how to get it (a `[[plugin]]` that lists `provides = ["preview"]`

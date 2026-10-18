@@ -283,9 +283,14 @@ pub struct RawLocal {
     /// on disk when this is `None`, so the popups, which never set it, cannot erase it.
     pub view: Option<String>,
     /// The names of the plugins the plugin menu switched off, bundled ones included. Written by
-    /// [`Config::save_disabled_plugins`]; `save_local` keeps whatever is on disk when this is
+    /// [`Config::save_plugin_switches`]; `save_local` keeps whatever is on disk when this is
     /// `None`, so the popups, which never set it, cannot switch a plugin back on.
     pub disabled_plugins: Option<Vec<String>>,
+    /// The names of the plugins the plugin menu switched on although they start off (the system
+    /// figures, unless `system_hud = true`). Kept apart from `disabled_plugins` because "off" is
+    /// the default for those, so a list of the ones that are off could not say it. Written by
+    /// [`Config::save_plugin_switches`] and kept by `save_local` in the same way.
+    pub enabled_plugins: Option<Vec<String>>,
 }
 
 /// One theme a user named and saved from the appearance popup. `name` is unique within
@@ -419,6 +424,8 @@ pub struct Config {
     /// See `RawLocal::disabled_plugins`: the plugins that do not start and that the plugin menu
     /// shows as off.
     pub disabled_plugins: Vec<String>,
+    /// See `RawLocal::enabled_plugins`: the plugins that start although they are off by default.
+    pub enabled_plugins: Vec<String>,
 }
 
 impl Config {
@@ -512,6 +519,7 @@ impl Config {
             local_active_custom_theme: local.active_custom_theme,
             local_bookmarks: local.bookmarks,
             disabled_plugins: local.disabled_plugins.unwrap_or_default(),
+            enabled_plugins: local.enabled_plugins.unwrap_or_default(),
         }
     }
 
@@ -530,6 +538,9 @@ impl Config {
         if local.disabled_plugins.is_none() {
             local.disabled_plugins = Self::stored_local().disabled_plugins;
         }
+        if local.enabled_plugins.is_none() {
+            local.enabled_plugins = Self::stored_local().enabled_plugins;
+        }
         let text = toml::to_string(&local)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         std::fs::write(dir.join("local.toml"), text)
@@ -547,16 +558,18 @@ impl Config {
         Self::save_local(&local)
     }
 
-    /// Remembers which plugins the plugin menu switched off, leaving everything else in
-    /// `local.toml` as it is on disk. The list replaces the stored one whole, so a plugin
-    /// switched back on is simply left out of it.
+    /// Remembers which plugins the plugin menu switched off (`disabled`) and which it switched on
+    /// although they start off (`enabled`), leaving everything else in `local.toml` as it is on
+    /// disk. Each list replaces the stored one whole, so a plugin put back to its default is
+    /// simply left out of it.
     ///
     /// # Errors
     ///
     /// The I/O error from writing the file; never fatal for the caller.
-    pub fn save_disabled_plugins(names: &[String]) -> io::Result<()> {
+    pub fn save_plugin_switches(disabled: &[String], enabled: &[String]) -> io::Result<()> {
         let mut local = Self::stored_local();
-        local.disabled_plugins = Some(names.to_vec());
+        local.disabled_plugins = Some(disabled.to_vec());
+        local.enabled_plugins = Some(enabled.to_vec());
         Self::save_local(&local)
     }
 
@@ -880,14 +893,12 @@ mod tests {
     }
 
     #[test]
-    fn disabled_plugins_round_trip_through_local_toml_and_default_to_none() {
-        assert!(
-            Config::from_sources(None, None, None)
-                .disabled_plugins
-                .is_empty()
-        );
+    fn plugin_switches_round_trip_through_local_toml_and_default_to_none() {
+        let fresh = Config::from_sources(None, None, None);
+        assert!(fresh.disabled_plugins.is_empty() && fresh.enabled_plugins.is_empty());
         let local = RawLocal {
             disabled_plugins: Some(vec!["finder".into(), "git".into()]),
+            enabled_plugins: Some(vec!["hud".into()]),
             ..Default::default()
         };
         let text = toml::to_string(&local).unwrap();
@@ -895,6 +906,10 @@ mod tests {
         assert_eq!(
             Config::from_sources(None, None, Some(&text)).disabled_plugins,
             ["finder", "git"]
+        );
+        assert_eq!(
+            Config::from_sources(None, None, Some(&text)).enabled_plugins,
+            ["hud"]
         );
     }
 

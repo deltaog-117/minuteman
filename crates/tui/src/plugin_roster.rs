@@ -21,8 +21,12 @@
 //! A plugin is either bundled (it ships with Minuteman and needs no config) or the user's own
 //! (a `[[plugin]]` table). Both can be switched off. Two things cannot be switched from the menu,
 //! and the entry says why instead of pretending: a bundled plugin whose program is not installed,
-//! and one that `config.toml` already decides (`git_status`, `system_hud`), since the menu writes
-//! only `local.toml` and a hand-written file must keep winning.
+//! and git while `config.toml` says `git_status = false`, since the menu writes only `local.toml`
+//! and a hand-written veto must keep winning.
+//!
+//! Most plugins start on, so `local.toml` keeps the names switched off. The system figures start
+//! off unless `system_hud = true`, so `local.toml` keeps the names switched on for them; which
+//! list a plugin belongs to is its `default_on`.
 
 use theming::PluginSpec;
 
@@ -56,6 +60,9 @@ pub struct Entry {
     /// Why the menu cannot switch it, when it cannot.
     pub locked: Option<String>,
     pub enabled: bool,
+    /// Whether it starts on when the menu has not touched it; decides which list of `local.toml`
+    /// remembers a switch.
+    pub default_on: bool,
 }
 
 impl Entry {
@@ -64,20 +71,23 @@ impl Entry {
     }
 }
 
-/// What the config decides about the two bundled plugins it can turn off.
+/// What the config decides about the two bundled plugins it has a setting for.
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigSwitches {
+    /// `false` is a veto: git never runs and the menu cannot switch it on.
     pub git_status: bool,
+    /// Whether the system figures start on; the menu can still switch them either way.
     pub system_hud: bool,
 }
 
 /// Every plugin the menu lists: the user's `[[plugin]]` tables in order, then the bundled ones
-/// they have not replaced. `disabled` is the list `local.toml` keeps.
+/// they have not replaced. `disabled` and `enabled` are the lists `local.toml` keeps.
 pub fn build(
     configured: &[PluginSpec],
     bundled: Vec<Listed>,
     switches: ConfigSwitches,
     disabled: &[String],
+    enabled: &[String],
 ) -> Vec<Entry> {
     let yours = configured.iter().map(|spec| Entry {
         name: spec.name.clone(),
@@ -86,14 +96,23 @@ pub fn build(
         spec: Some(spec.clone()),
         locked: None,
         enabled: !disabled.contains(&spec.name),
+        default_on: true,
     });
     let shipped = bundled.into_iter().map(|listed| {
         let locked = locked_reason(&listed, switches);
+        let default_on = listed.name != "hud" || switches.system_hud;
+        let named = |list: &[String]| list.iter().any(|name| name == listed.name);
         Entry {
             name: listed.name.to_string(),
             origin: Origin::Bundled,
             provides: listed.provides.iter().map(ToString::to_string).collect(),
-            enabled: locked.is_none() && !disabled.iter().any(|name| name == listed.name),
+            enabled: locked.is_none()
+                && if default_on {
+                    !named(disabled)
+                } else {
+                    named(enabled)
+                },
+            default_on,
             spec: listed.spec,
             locked,
         }
@@ -104,7 +123,6 @@ pub fn build(
 fn locked_reason(listed: &Listed, switches: ConfigSwitches) -> Option<String> {
     match listed.name {
         "git" if !switches.git_status => Some("off: git_status = false in config.toml".into()),
-        "hud" if !switches.system_hud => Some("off: system_hud is not set in config.toml".into()),
         _ if listed.spec.is_none() => Some("not installed".into()),
         _ => None,
     }
@@ -113,12 +131,23 @@ fn locked_reason(listed: &Listed, switches: ConfigSwitches) -> Option<String> {
 /// The names to keep in `local.toml` after `name` is switched on or off: the old list without the
 /// name, plus the name again when it is switched off. Sorted, so the file does not shuffle.
 pub fn disabled_after(disabled: &[String], name: &str, enabled: bool) -> Vec<String> {
-    let mut next: Vec<String> = disabled
+    kept_after(disabled, name, !enabled)
+}
+
+/// The names to keep as switched on after `name` is switched on or off, for a plugin that starts
+/// off: the mirror of [`disabled_after`].
+pub fn enabled_after(enabled_list: &[String], name: &str, enabled: bool) -> Vec<String> {
+    kept_after(enabled_list, name, enabled)
+}
+
+/// `list` without `name`, plus `name` again when `keep`; sorted and without repeats.
+fn kept_after(list: &[String], name: &str, keep: bool) -> Vec<String> {
+    let mut next: Vec<String> = list
         .iter()
         .filter(|kept| kept.as_str() != name)
         .cloned()
         .collect();
-    if !enabled {
+    if keep {
         next.push(name.to_string());
     }
     next.sort();
@@ -158,7 +187,13 @@ mod tests {
 
     #[test]
     fn the_users_plugins_come_first_then_the_bundled_ones() {
-        let entries = build(&[spec("mine")], vec![listed("finder", true)], ALL_ON, &[]);
+        let entries = build(
+            &[spec("mine")],
+            vec![listed("finder", true)],
+            ALL_ON,
+            &[],
+            &[],
+        );
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["mine", "finder"]);
         assert_eq!(entries[0].origin, Origin::Yours);
@@ -173,36 +208,89 @@ mod tests {
             vec![listed("finder", true)],
             ALL_ON,
             &["mine".to_string(), "finder".to_string()],
+            &[],
         );
         assert!(entries.iter().all(|e| !e.enabled && e.can_switch()));
     }
 
     #[test]
     fn a_bundled_plugin_that_is_not_installed_is_off_and_cannot_be_switched() {
-        let entries = build(&[], vec![listed("finder", false)], ALL_ON, &[]);
+        let entries = build(&[], vec![listed("finder", false)], ALL_ON, &[], &[]);
         assert!(!entries[0].enabled);
         assert_eq!(entries[0].locked.as_deref(), Some("not installed"));
         assert!(!entries[0].can_switch());
     }
 
     #[test]
-    fn the_config_keeps_the_say_over_git_and_the_system_hud() {
+    fn git_status_false_in_the_config_is_a_veto_the_menu_cannot_lift() {
         let off = ConfigSwitches {
             git_status: false,
             system_hud: false,
         };
         let entries = build(
             &[],
-            vec![listed("git", true), listed("hud", true)],
+            vec![listed("git", true)],
             off,
             &[],
+            &["git".to_string()],
         );
-        assert!(entries.iter().all(|e| !e.enabled && !e.can_switch()));
+        assert!(!entries[0].enabled && !entries[0].can_switch());
         assert!(entries[0].locked.as_deref().unwrap().contains("git_status"));
-        assert!(entries[1].locked.as_deref().unwrap().contains("system_hud"));
 
-        let on = build(&[], vec![listed("git", true)], ALL_ON, &[]);
-        assert!(on[0].enabled && on[0].can_switch());
+        let on = build(&[], vec![listed("git", true)], ALL_ON, &[], &[]);
+        assert!(on[0].enabled && on[0].can_switch() && on[0].default_on);
+    }
+
+    #[test]
+    fn the_system_figures_start_off_and_the_menu_can_switch_them_on() {
+        let off = ConfigSwitches {
+            git_status: true,
+            system_hud: false,
+        };
+        let fresh = build(&[], vec![listed("hud", true)], off, &[], &[]);
+        assert!(!fresh[0].enabled && fresh[0].can_switch() && !fresh[0].default_on);
+
+        let chosen = build(
+            &[],
+            vec![listed("hud", true)],
+            off,
+            &[],
+            &["hud".to_string()],
+        );
+        assert!(chosen[0].enabled);
+
+        // Listing it in the wrong list changes nothing: only the default's own list counts.
+        let stray = build(
+            &[],
+            vec![listed("hud", true)],
+            off,
+            &["hud".to_string()],
+            &[],
+        );
+        assert!(!stray[0].enabled);
+    }
+
+    #[test]
+    fn system_hud_true_starts_them_on_and_the_menu_can_switch_them_off() {
+        let on = build(&[], vec![listed("hud", true)], ALL_ON, &[], &[]);
+        assert!(on[0].enabled && on[0].default_on);
+        let off = build(
+            &[],
+            vec![listed("hud", true)],
+            ALL_ON,
+            &["hud".to_string()],
+            &[],
+        );
+        assert!(!off[0].enabled && off[0].can_switch());
+    }
+
+    #[test]
+    fn switching_on_adds_the_name_for_a_plugin_that_starts_off() {
+        let none: Vec<String> = Vec::new();
+        let on = enabled_after(&none, "hud", true);
+        assert_eq!(on, ["hud"]);
+        assert_eq!(enabled_after(&on, "hud", true), ["hud"]);
+        assert!(enabled_after(&on, "hud", false).is_empty());
     }
 
     #[test]

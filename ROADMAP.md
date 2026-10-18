@@ -2302,9 +2302,10 @@ draws.
   a confirmation that names the file, its size and the command that reinstalls it. Not planned: an
   install button that fetches or builds third-party code, as a plugin runs with the user's own
   permissions and there is no sandbox yet. Done so far: the menu (`space p`) lists every plugin and
-  switches any of them on and off live, keeping the switched-off names in `local.toml`; still to
-  do: the add form, removing a plugin of your own, deleting a bundled program, and moving
-  `git_status` and `system_hud` so the menu can switch `git` and `hud` too.
+  switches any of them on and off live, keeping the choice in `local.toml`, and that includes `git`
+  and `hud` (`system_hud` and `git_status = true` only set whether they start on; `git_status =
+  false` is a veto the menu cannot lift); still to do, in this order: deleting a bundled program,
+  keeping a user's own `[[plugin]]` tables in `local.toml` and removing one, then the add form.
 - **Easier plugin authoring and adding** – a `plugin.toml` manifest beside a plugin (name, command,
   keys, `provides`, API version) so adding one is "point at a path" and the form fills itself in;
   a drop-in `~/.config/minuteman/plugins/<name>/` directory found without a config edit;

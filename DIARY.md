@@ -105,6 +105,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-15 | Giving Up on a Remote Read | A per-thread cancel token, a `vfs_cancel` line, and one shared connect per machine that only read-only work may abort (COA B); a plugin-only shared connect (A) and killing the connecting `ssh` (C) not taken | ✅ Confirmed |
 | 2026-10-16 | Answering `ssh` When It Asks | A plugin -> host `ask` request and a modal, with `ssh` run by the plugin without batch mode and `mman-ssh` itself as `SSH_ASKPASS` (COA A, route A1); `-o` options only (B) and a hand-written `known_hosts` with a pty password (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, First Slice | A core popup (`space p`) that switches any plugin on and off live and keeps the switched-off names in `local.toml` (COA B, step one); installing and fetching plugins from the menu rejected (COA C) | ✅ Confirmed |
+| 2026-10-18 | Plugin Menu, `git` and `hud` | Four small cycles in a set order (COA A); the menu switches `git` and `hud` through `local.toml`, with `git_status = false` kept as a veto; one cycle for all of it (C) and own plugins first (B) not taken | ✅ Confirmed |
 
 ---
 
@@ -8125,6 +8126,40 @@ columns.
 
 **Left open.** Adding a plugin by form, removing one, deleting a bundled program, and the
 manifest, drop-in directory and `mman plugin` commands under "Easier plugin authoring and adding".
+
+---
+
+## 2026-10-18 — `git` and `hud` in the plugin menu
+
+**Decision.** What is left of the plugin manager was weighed as four small cycles in a set order
+(A), the user's own plugins first (B), or everything in one go (C). Chosen: A, so each diff stays
+reviewable and the destructive step, deleting a bundled program, is reviewed on its own. The order
+is: `git` and `hud`, deleting a bundled program, keeping `[[plugin]]` tables in `local.toml` with
+removal, then the add form. This is the first.
+
+**What changed.** The menu used to lock `git` and `hud` whenever `config.toml` decided them. Now
+`system_hud` and `git_status = true` only say whether they start on, and the menu switches them
+like any other plugin. Most plugins start on, so `local.toml` keeps the names switched off
+(`disabled_plugins`). The system figures start off, so a list of the ones that are off cannot say
+"switched on"; a second list, `enabled_plugins`, does. Which list a plugin uses is its
+`default_on`, and a name in the wrong list changes nothing. `git_status = false` is the one
+setting the menu does not override: it exists for anyone who wants git never to run, so the row
+stays locked and says why. `Config::save_disabled_plugins` became `save_plugin_switches`, which
+writes both lists.
+
+**Trade-offs.** `system_hud = false` is not a veto, unlike `git_status = false`. The example
+config has always carried `system_hud = false`, so a veto would have locked the figures off for
+everyone who copied it. A user who sets `system_hud = true` and later switches it off in the menu
+has two places that say different things; `local.toml` wins, as it does for the other settings.
+
+**Verification.** `scripts/check` passes. New and changed tests: the roster's rules for `git`
+(veto and switchable) and for `hud` (off by default, switched on, started on and switched off, a
+name in the wrong list ignored), the mirror helper for the on list, and the config round trip for
+both lists. Not driven by hand in the real `mman` this time: the new rows were not toggled
+through a pty, so the end-to-end switching of `hud` is covered by the unit tests only.
+
+**Left open.** Deleting a bundled program, a user's own plugins in `local.toml` and their
+removal, and the add form.
 
 ---
 

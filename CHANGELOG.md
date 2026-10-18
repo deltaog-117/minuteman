@@ -215,6 +215,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- The plugin menu can now switch `git` and `hud` as well as the rest. `system_hud` and
+  `git_status = true` only say whether they start on; the menu's choice is kept in `local.toml`
+  (`disabled_plugins` for a plugin that starts on, a new `enabled_plugins` for the system figures,
+  which start off). `git_status = false` is still a veto that the menu cannot lift, and is shown
+  with that reason. Author: deltaog-117.
 - An action whose plugin you switched off (`f`, `L`, Inspect, compress, extract and the rest) now
   says the plugin is switched off and where to turn it on, instead of how to install it.
   Author: deltaog-117.

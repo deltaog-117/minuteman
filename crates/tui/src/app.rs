@@ -604,6 +604,8 @@ pub struct App {
     system_hud: bool,
     /// The names `local.toml` keeps as switched off in the plugin menu.
     plugin_disabled: Vec<String>,
+    /// The plugins the menu switched on although they start off (`local.toml`).
+    plugin_enabled: Vec<String>,
     /// Every plugin the plugin menu lists, with whether it is on; see `plugin_roster`.
     plugin_roster: Vec<plugin_roster::Entry>,
     /// The `[[preview_hook]]` tables, of which the ones that extract text go to the bundled
@@ -675,6 +677,7 @@ impl App {
             git_status: true,
             system_hud: false,
             plugin_disabled: Vec::new(),
+            plugin_enabled: Vec::new(),
             plugin_roster: Vec::new(),
             preview_hooks: Vec::new(),
             handle,
@@ -953,6 +956,7 @@ impl App {
                 system_hud: self.system_hud,
             },
             &self.plugin_disabled,
+            &self.plugin_enabled,
         );
         let to_start: Vec<PluginSpec> = self
             .plugin_roster
@@ -968,9 +972,11 @@ impl App {
         self
     }
 
-    /// Sets the plugins the plugin menu switched off (`local.toml`). Call before `with_plugins`.
-    pub fn with_disabled_plugins(mut self, names: Vec<String>) -> Self {
-        self.plugin_disabled = names;
+    /// Sets the plugins the plugin menu switched off and the ones it switched on although they
+    /// start off (`local.toml`). Call before `with_plugins`.
+    pub fn with_plugin_switches(mut self, disabled: Vec<String>, enabled: Vec<String>) -> Self {
+        self.plugin_disabled = disabled;
+        self.plugin_enabled = enabled;
         self
     }
 
@@ -1055,9 +1061,15 @@ impl App {
             self.plugins.remove(&name);
         }
         self.plugin_roster[index].enabled = enable;
-        self.plugin_disabled = plugin_roster::disabled_after(&self.plugin_disabled, &name, enable);
+        if self.plugin_roster[index].default_on {
+            self.plugin_disabled =
+                plugin_roster::disabled_after(&self.plugin_disabled, &name, enable);
+        } else {
+            self.plugin_enabled = plugin_roster::enabled_after(&self.plugin_enabled, &name, enable);
+        }
         let verb = if enable { "on" } else { "off" };
-        self.status = Some(match Config::save_disabled_plugins(&self.plugin_disabled) {
+        let saved = Config::save_plugin_switches(&self.plugin_disabled, &self.plugin_enabled);
+        self.status = Some(match saved {
             Ok(()) => format!("plugin {name}: switched {verb}"),
             Err(e) => {
                 format!("plugin {name}: switched {verb}, but could not save to local.toml: {e}")

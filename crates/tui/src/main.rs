@@ -848,7 +848,10 @@ fn main() -> Result<()> {
         .with_ssh_link(ssh_link)
         .with_git_status(config.git_status)
         .with_system_hud(config.system_hud)
-        .with_disabled_plugins(config.disabled_plugins.clone())
+        .with_plugin_switches(
+            config.disabled_plugins.clone(),
+            config.enabled_plugins.clone(),
+        )
         .with_preview_hooks(config.preview_hooks.clone())
         .with_interactive_commands(config.interactive_commands.clone())
         .with_open_config(config.open_rules.clone(), config.open_with.clone())
@@ -970,6 +973,7 @@ fn persist_local(
         // `save_local` keeps the view `V` saved; the popups never set it.
         view: None,
         disabled_plugins: None,
+        enabled_plugins: None,
     };
     if let Err(e) = Config::save_local(&local) {
         app.status = Some(format!("could not save to local.toml: {e}"));
