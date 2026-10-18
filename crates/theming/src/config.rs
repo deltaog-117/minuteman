@@ -282,6 +282,10 @@ pub struct RawLocal {
     /// next launch starts there. Written by [`Config::save_view`]; `save_local` keeps whatever is
     /// on disk when this is `None`, so the popups, which never set it, cannot erase it.
     pub view: Option<String>,
+    /// The names of the plugins the plugin menu switched off, bundled ones included. Written by
+    /// [`Config::save_disabled_plugins`]; `save_local` keeps whatever is on disk when this is
+    /// `None`, so the popups, which never set it, cannot switch a plugin back on.
+    pub disabled_plugins: Option<Vec<String>>,
 }
 
 /// One theme a user named and saved from the appearance popup. `name` is unique within
@@ -412,6 +416,9 @@ pub struct Config {
     pub local_active_custom_theme: Option<String>,
     /// See `RawLocal::bookmarks`.
     pub local_bookmarks: BTreeMap<char, PathBuf>,
+    /// See `RawLocal::disabled_plugins`: the plugins that do not start and that the plugin menu
+    /// shows as off.
+    pub disabled_plugins: Vec<String>,
 }
 
 impl Config {
@@ -504,6 +511,7 @@ impl Config {
             local_custom_themes: local.custom_themes,
             local_active_custom_theme: local.active_custom_theme,
             local_bookmarks: local.bookmarks,
+            disabled_plugins: local.disabled_plugins.unwrap_or_default(),
         }
     }
 
@@ -519,6 +527,9 @@ impl Config {
         if local.view.is_none() {
             local.view = Self::stored_local().view;
         }
+        if local.disabled_plugins.is_none() {
+            local.disabled_plugins = Self::stored_local().disabled_plugins;
+        }
         let text = toml::to_string(&local)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         std::fs::write(dir.join("local.toml"), text)
@@ -533,6 +544,19 @@ impl Config {
     pub fn save_view(view: &str) -> io::Result<()> {
         let mut local = Self::stored_local();
         local.view = Some(view.to_string());
+        Self::save_local(&local)
+    }
+
+    /// Remembers which plugins the plugin menu switched off, leaving everything else in
+    /// `local.toml` as it is on disk. The list replaces the stored one whole, so a plugin
+    /// switched back on is simply left out of it.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from writing the file; never fatal for the caller.
+    pub fn save_disabled_plugins(names: &[String]) -> io::Result<()> {
+        let mut local = Self::stored_local();
+        local.disabled_plugins = Some(names.to_vec());
         Self::save_local(&local)
     }
 
@@ -852,6 +876,25 @@ mod tests {
                 .view
                 .as_deref(),
             Some("details")
+        );
+    }
+
+    #[test]
+    fn disabled_plugins_round_trip_through_local_toml_and_default_to_none() {
+        assert!(
+            Config::from_sources(None, None, None)
+                .disabled_plugins
+                .is_empty()
+        );
+        let local = RawLocal {
+            disabled_plugins: Some(vec!["finder".into(), "git".into()]),
+            ..Default::default()
+        };
+        let text = toml::to_string(&local).unwrap();
+        assert_eq!(toml::from_str::<RawLocal>(&text).unwrap(), local);
+        assert_eq!(
+            Config::from_sources(None, None, Some(&text)).disabled_plugins,
+            ["finder", "git"]
         );
     }
 

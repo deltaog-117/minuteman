@@ -104,6 +104,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-14 | Opening a Remote File | Fetch a copy into an app-owned cache folder on the background worker, then open the copy; edits stay in the copy (COA 1); write-back (2) and an `sshfs` mount (3) not taken | ✅ Confirmed |
 | 2026-10-15 | Giving Up on a Remote Read | A per-thread cancel token, a `vfs_cancel` line, and one shared connect per machine that only read-only work may abort (COA B); a plugin-only shared connect (A) and killing the connecting `ssh` (C) not taken | ✅ Confirmed |
 | 2026-10-16 | Answering `ssh` When It Asks | A plugin -> host `ask` request and a modal, with `ssh` run by the plugin without batch mode and `mman-ssh` itself as `SSH_ASKPASS` (COA A, route A1); `-o` options only (B) and a hand-written `known_hosts` with a pty password (C) not taken | ✅ Confirmed |
+| 2026-10-18 | Plugin Menu, First Slice | A core popup (`space p`) that switches any plugin on and off live and keeps the switched-off names in `local.toml` (COA B, step one); installing and fetching plugins from the menu rejected (COA C) | ✅ Confirmed |
 
 ---
 
@@ -8080,6 +8081,50 @@ passphrase takes the same path and is tested) and a one-time code.
 **Left open.** Bookmarks and a history of machines; a limit or a setting for the tries and the
 wait; trusting a *changed* key (`ssh` refuses and reports it, which is right); a mouse reply to the
 box.
+
+---
+
+## 2026-10-18 — A menu to switch plugins on and off
+
+**Decision.** Plugins were switched off only by editing `config.toml` and restarting: `git_status`
+and `system_hud` for two of them, and for the rest by removing the program. Three courses were
+weighed: a menu that switches plugins and keeps the choice (A); that plus adding and removing the
+user's own plugins by form (B); and B plus installing, fetching and deleting programs from the
+menu (C). Chosen: B, built in steps, the first being the switch itself. C would run third-party
+code from inside the interface, and a plugin runs with the user's own permissions and has no
+sandbox. The menu is core, not a plugin, so it still works when a plugin is broken. Deleting a
+bundled program from the menu stays on the roadmap as its own last step, with a confirmation that
+names the file and the command that reinstalls it.
+
+**What changed.** `space p` opens the menu: one row per plugin, the user's `[[plugin]]` tables
+first, then the bundled ones, with where each comes from and where it stands. `Enter`, `space`,
+`h` or `l` switches the row: off stops the process on purpose (it is not a crash) and frees the
+`:` words it held; on starts it. The switched-off names are kept as `disabled_plugins` in
+`local.toml`, never in the hand-written `config.toml`, and a name left out means on. `PluginManager::remove`
+and `Registry::forget` are the host's side. A row the menu cannot switch says why instead: a
+bundled plugin whose program is not installed, and `git` and `hud` while `git_status` or
+`system_hud` in `config.toml` decides them. A refused action (`f`, `L`, Inspect, compress and so
+on) now says the plugin is switched off and where to turn it on, instead of how to install it.
+
+**Trade-offs.** `hud` is off by default through `system_hud`, so the menu cannot turn it on until
+that setting is moved into `local.toml`; the same holds for `git` with `git_status = false`.
+Switching off a plugin that serves `ssh://` or archive paths while browsing one leaves the
+browser to report the failure on its next read. A plugin written by hand in `config.toml` can be
+switched off but not edited or removed from the menu.
+
+**Verification.** `scripts/check` passes. New tests: the roster's rules, including a property test
+on the saved list (6); the popup's keys, including a property test that a toggle is always in
+range (4); `Registry::forget` (1); the config round trip (1); and, across a real process
+boundary, that a removed plugin is stopped, forgotten, not restarted by its key and can be
+spawned again (1). Driven by hand in the real `mman` through a pty with the config folder pointed
+at an empty directory: `space p` listed eleven plugins, `Enter` on `finder` printed "switched off"
+and wrote `disabled_plugins = ["finder"]`, `f` then said the finder plugin is switched off, and
+switching it on again printed "switched on" and emptied the list. Not driven by hand: that the
+finder's picker opens after being switched back on, and the menu in a window narrower than 80
+columns.
+
+**Left open.** Adding a plugin by form, removing one, deleting a bundled program, and the
+manifest, drop-in directory and `mman plugin` commands under "Easier plugin authoring and adding".
 
 ---
 

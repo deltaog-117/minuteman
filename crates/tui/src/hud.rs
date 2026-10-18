@@ -700,6 +700,7 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
         Mode::Leader if !view.shell_open => vec![
             fixed("x", "trash"),
             fixed("t", "settings"),
+            fixed("p", "plugins"),
             bound(Action::Leader, "cancel"),
         ],
         Mode::Leader => vec![
@@ -1089,6 +1090,7 @@ mod tests {
             local_custom_themes: Vec::new(),
             local_active_custom_theme: None,
             local_bookmarks: std::collections::BTreeMap::new(),
+            disabled_plugins: Vec::new(),
         }
     }
 
@@ -1487,7 +1489,7 @@ mod tests {
         let text = render_to_text(120, |f, a| {
             render_status_bar(f, a, &view(Mode::Leader, None, ""), &config)
         });
-        for expected in ["LEADER", "trash", "settings"] {
+        for expected in ["LEADER", "trash", "settings", "plugins"] {
             assert!(text.contains(expected), "missing {expected:?} in {text:?}");
         }
         assert!(!text.contains("split"), "{text:?}");

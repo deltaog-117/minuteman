@@ -57,7 +57,9 @@ mod overlay_view;
 mod picker_popup;
 mod picker_view;
 mod plugin_action;
+mod plugin_roster;
 mod plugin_views;
+mod plugins_popup;
 mod popup_shell;
 mod preview_view;
 mod remote_open;
@@ -121,6 +123,7 @@ use plugin_action::Browse;
 use plugin_api::Format;
 use plugin_api::{CanvasNote, PreviewContent, SetPreview, Surface};
 use plugin_host::{AskRequest, UiRequest};
+use plugins_popup::{Outcome as PluginsOutcome, PluginsPopup};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
@@ -409,6 +412,8 @@ struct Overlay<'a> {
     /// The trash browser, which covers the whole screen when open.
     trash: Option<&'a TrashView>,
     settings: Option<&'a SettingsPopup>,
+    /// The plugin menu (`Space` then `p`).
+    plugins_menu: Option<&'a PluginsPopup>,
     compress: Option<&'a CompressPopup>,
     extract: Option<&'a ExtractPopup>,
     history: Option<&'a HistoryPopup>,
@@ -843,6 +848,7 @@ fn main() -> Result<()> {
         .with_ssh_link(ssh_link)
         .with_git_status(config.git_status)
         .with_system_hud(config.system_hud)
+        .with_disabled_plugins(config.disabled_plugins.clone())
         .with_preview_hooks(config.preview_hooks.clone())
         .with_interactive_commands(config.interactive_commands.clone())
         .with_open_config(config.open_rules.clone(), config.open_with.clone())
@@ -963,6 +969,7 @@ fn persist_local(
         bookmarks: local_bookmarks.clone(),
         // `save_local` keeps the view `V` saved; the popups never set it.
         view: None,
+        disabled_plugins: None,
     };
     if let Err(e) = Config::save_local(&local) {
         app.status = Some(format!("could not save to local.toml: {e}"));
@@ -1407,6 +1414,8 @@ fn run(
     let mut trash_view: Option<TrashView> = None;
     // The settings popup (`Space` then `t` with no shell pane open) while one is open; modal too.
     let mut settings: Option<SettingsPopup> = None;
+    // The plugin menu (`Space` then `p` with no shell pane open) while one is open; modal too.
+    let mut plugins_menu: Option<PluginsPopup> = None;
     // The compress form ("Compress…" on an entry's right-click menu) while one is open; modal too.
     let mut compress: Option<CompressPopup> = None;
     // The extract form ("Extract…" on an archive's right-click menu) while one is open; modal too.
@@ -1769,6 +1778,7 @@ fn run(
                     usage: usage.as_ref(),
                     trash: trash_view.as_ref(),
                     settings: settings.as_ref(),
+                    plugins_menu: plugins_menu.as_ref(),
                     compress: compress.as_ref(),
                     extract: extract.as_ref(),
                     history: history.as_ref(),
@@ -1824,6 +1834,7 @@ fn run(
                 || history.is_some()
                 || !asks.is_empty()
                 || settings.is_some()
+                || plugins_menu.is_some()
                 || appearance.is_some()
                 || picker.is_some();
             browse = plugin_action::accept(request, mode, modal_open);
@@ -2060,6 +2071,12 @@ fn run(
                 if settings.is_some() {
                     if matches!(mouse.kind, MouseEventKind::Down(_)) {
                         settings = None;
+                    }
+                    continue;
+                }
+                if plugins_menu.is_some() {
+                    if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        plugins_menu = None;
                     }
                     continue;
                 }
@@ -2976,6 +2993,17 @@ fn run(
                     }
                     continue;
                 }
+                if let Some(popup) = plugins_menu.as_mut() {
+                    let rows = app.plugin_rows().len();
+                    match popup.key(key.code, rows) {
+                        PluginsOutcome::Stay => {}
+                        PluginsOutcome::Close => plugins_menu = None,
+                        PluginsOutcome::Toggle(row) => {
+                            app.toggle_plugin(row, browser.current_dir());
+                        }
+                    }
+                    continue;
+                }
                 if let Some(popup) = settings.as_mut() {
                     match popup.key(key.code) {
                         SettingsOutcome::Stay => {}
@@ -3124,6 +3152,8 @@ fn run(
                     } else if key.code == KeyCode::Char('x') {
                         // Likewise `x` has no pane to close, so it opens the trash instead.
                         trash_view = Some(app.begin_trash_view());
+                    } else if key.code == KeyCode::Char('p') {
+                        plugins_menu = Some(PluginsPopup::new());
                     }
                     continue;
                 }
@@ -3515,7 +3545,7 @@ fn run(
                 );
             }
             // Starts a leader chord: the pane commands when a shell is open, otherwise the
-            // browser's own (`t` settings, `x` trash). The status bar lists what can follow
+            // browser's own (`t` settings, `x` trash, `p` plugins). The status bar lists what can follow
             // (see `hud::hints`).
             Some(Action::Leader) => pending_leader = true,
             // Guarded explicitly rather than relying on it being unreachable while panes
@@ -3907,6 +3937,7 @@ fn draw(
         usage,
         trash,
         settings,
+        plugins_menu,
         compress,
         extract,
         history,
@@ -4330,6 +4361,9 @@ fn draw(
             },
             config,
         );
+    }
+    if let Some(popup) = plugins_menu {
+        overlay_view::render_plugins(frame, popup, &app.plugin_rows(), config);
     }
     if let Some(popup) = compress {
         overlay_view::render_compress(frame, popup, config);

@@ -2292,6 +2292,27 @@ draws.
 
 ## 🟡 Medium Priority (Important)
 
+- **Plugin manager menu** – a menu in the core (not a plugin, so it still works when a plugin is
+  broken) to enable, disable, add and remove plugins at a moment's notice. Chosen as COA B: every
+  plugin, bundled ones included, can be switched off and on; a plugin of your own is added with a
+  form (name, command, args, keys, `:` commands, events, `provides`) and removed by deleting its
+  entry; the changes are kept in `local.toml`, never in the hand-written `config.toml` (a plugin
+  declared there can be disabled but not edited or removed from the menu). A bundled plugin's
+  binary can be deleted from the menu as a last, separate step, only from a path the user owns, after
+  a confirmation that names the file, its size and the command that reinstalls it. Not planned: an
+  install button that fetches or builds third-party code, as a plugin runs with the user's own
+  permissions and there is no sandbox yet. Done so far: the menu (`space p`) lists every plugin and
+  switches any of them on and off live, keeping the switched-off names in `local.toml`; still to
+  do: the add form, removing a plugin of your own, deleting a bundled program, and moving
+  `git_status` and `system_hud` so the menu can switch `git` and `hud` too.
+- **Easier plugin authoring and adding** – a `plugin.toml` manifest beside a plugin (name, command,
+  keys, `provides`, API version) so adding one is "point at a path" and the form fills itself in;
+  a drop-in `~/.config/minuteman/plugins/<name>/` directory found without a config edit;
+  `mman plugin new <name> --lang python|rust|sh` for a working skeleton; `mman plugin check <name>`
+  to start a plugin once and verify the handshake, the API version and key collisions;
+  `mman plugin add <path or git url>`; reloading plugin config without a restart. A curated index
+  and one-step install wait for a sandbox or a declared, enforced permission list (see the
+  community plugin ecosystem under the long-term vision).
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
   compression are not supported, the codecs being opt-in cargo features if wanted; extraction does not restore modified times (only writing a zip records them, as UTC, since
   the standard library has no time zone database); the compress form's "Save in" folder must

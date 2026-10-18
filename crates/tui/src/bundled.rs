@@ -155,42 +155,53 @@ fn beside_mman(binary: &str) -> Option<String> {
     program_exists(&path.to_string_lossy()).then(|| path.to_string_lossy().into_owned())
 }
 
-/// The bundled plugins to start besides `configured`, with the command that runs each.
-/// `git_status = false` in the config leaves the git plugin out, and the system plugin starts
-/// only with `system_hud = true`.
-pub fn specs(
-    configured: &[PluginSpec],
-    git_status: bool,
-    system_hud: bool,
-    hooks: &[PreviewHook],
-) -> Vec<PluginSpec> {
-    let mut found = specs_found(
-        configured,
-        |binary| beside_mman(binary).or_else(|| program_exists(binary).then(|| binary.to_string())),
-        hooks,
-    );
-    if !git_status {
-        found.retain(|spec| spec.name != "git");
-    }
-    if !system_hud {
-        found.retain(|spec| spec.name != "hud");
-    }
-    found
-}
-
-/// `specs`, with `locate` standing in for the search for a program, which says where it is.
+/// The programs that were found, with `locate` standing in for the search for one, which says
+/// where it is.
+#[cfg(test)]
 fn specs_found(
     configured: &[PluginSpec],
     locate: impl Fn(&str) -> Option<String>,
     hooks: &[PreviewHook],
 ) -> Vec<PluginSpec> {
+    listing_found(configured, locate, hooks)
+        .into_iter()
+        .filter_map(|listed| listed.spec)
+        .collect()
+}
+
+/// A bundled plugin as the plugin menu lists it: every one the user has not replaced, whether or
+/// not its program could be found.
+pub struct Listed {
+    pub name: &'static str,
+    /// What to start; `None` when the program was not found.
+    pub spec: Option<PluginSpec>,
+    pub provides: &'static [&'static str],
+}
+
+/// The bundled plugins a `[[plugin]]` of the user's has not replaced, found or not, for the plugin
+/// menu.
+pub fn listing(configured: &[PluginSpec], hooks: &[PreviewHook]) -> Vec<Listed> {
+    listing_found(
+        configured,
+        |binary| beside_mman(binary).or_else(|| program_exists(binary).then(|| binary.to_string())),
+        hooks,
+    )
+}
+
+/// `listing`, with `locate` standing in for the search for a program.
+fn listing_found(
+    configured: &[PluginSpec],
+    locate: impl Fn(&str) -> Option<String>,
+    hooks: &[PreviewHook],
+) -> Vec<Listed> {
     BUNDLED
         .iter()
         .filter(|bundled| !replaced(bundled, configured))
-        .filter_map(|bundled| {
-            Some(PluginSpec {
+        .map(|bundled| Listed {
+            name: bundled.name,
+            spec: locate(bundled.binary).map(|command| PluginSpec {
                 name: bundled.name.to_string(),
-                command: locate(bundled.binary)?,
+                command,
                 args: if bundled.name == "preview" {
                     hook_args(hooks)
                 } else {
@@ -204,7 +215,8 @@ fn specs_found(
                     .iter()
                     .map(|name| name.to_string())
                     .collect(),
-            })
+            }),
+            provides: bundled.provides,
         })
         .collect()
 }

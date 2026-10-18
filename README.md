@@ -224,7 +224,7 @@ command ends. `MINUTEMAN_PORTAL_MMAN` names the `mman` to run when it is not on 
 | `PageUp` / `PageDown` / `Home` / `End` | jump a screenful up or down, or to the first or last entry (in any view) |
 | `.`         | show or hide dot-files (hidden by default; `show_hidden = true` in `config.toml` starts them shown) |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
-| `space`     | leader — commands for the mini-shell panes (below); with no shell open, `space x` opens the trash browser and `space t` the settings popup |
+| `space`     | leader — commands for the mini-shell panes (below); with no shell open, `space x` opens the trash browser, `space t` the settings popup and `space p` the plugin menu, which switches any plugin on or off at once and remembers it in `local.toml` |
 
 ### Mouse
 
@@ -293,7 +293,7 @@ terminals honour, including over `ssh` and inside `tmux`.
 | `r` / `m`     | resize / move mode (`hjkl` to nudge, `Esc` to leave) |
 | `t`           | flip the focused split between side by side and stacked |
 
-With no shell open, `space` offers only `x` (the trash browser) and `t` (the settings popup).
+With no shell open, `space` offers only `x` (the trash browser), `t` (the settings popup) and `p` (the plugin menu).
 
 Pressing `space` lists these in the status bar. Clicking a pane focuses it and starts typing;
 dragging a divider, the box's title bar, or its right border resizes and moves things.

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A plugin menu: `space` then `p` lists every plugin, the ones you configured first and the
+  bundled ones after, and `Enter` (or `space`, `h`, `l`) switches the one under the cursor off or
+  on at once, stopping or starting its process. The switched-off names are kept as
+  `disabled_plugins` in `local.toml`, so the choice lasts, and `config.toml` is never written. A
+  bundled plugin whose program is missing, and `git` and `hud` while `git_status` or `system_hud`
+  decides them, are shown with the reason and cannot be switched from the menu. Author:
+  deltaog-117.
+- `plugin_host`: `PluginManager::remove`, which stops a plugin on purpose and forgets it and the
+  `:` words it held (`Registry::forget`). Author: deltaog-117.
 - Answering `ssh` when it asks: opening an `ssh://` machine can now put a question to you in a
   box titled with the plugin's name. For a host key that is not in `known_hosts` it shows the
   fingerprint, and only `y` trusts it (`n` or `Esc` refuses, and nothing is remembered); a
@@ -206,6 +215,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- An action whose plugin you switched off (`f`, `L`, Inspect, compress, extract and the rest) now
+  says the plugin is switched off and where to turn it on, instead of how to install it.
+  Author: deltaog-117.
 - The default for an unknown host key is now to ask (`HostKeys::Ask`) instead of refusing; where
   nobody can be asked it still refuses. `HostKeys::Strict` remains for a refusal in every case.
   Author: deltaog-117.

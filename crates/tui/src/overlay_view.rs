@@ -26,6 +26,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use theming::{Config, Hsv, Theme};
 
+use crate::app::PluginRow;
 use crate::appearance_popup::{
     self, AppearancePopup, AppearanceView, ManageView, PICKER_EXTRA_LINES, Page,
     Row as AppearanceRow, RowKind as AppearanceRowKind, SV_BOX_HEIGHT, SaveView,
@@ -38,6 +39,7 @@ use crate::glyphs;
 use crate::history_popup::HistoryPopup;
 use crate::hud::{fit_width, pad_to, text_width};
 use crate::inspect_panel::InspectPanel;
+use crate::plugins_popup::PluginsPopup;
 use crate::settings_popup::{SettingsPopup, SettingsView};
 use crate::style;
 
@@ -757,6 +759,80 @@ pub fn render_settings(
     lines.push(Line::styled(
         "j/k moves, h/l/enter changes, Esc closes — session only, not saved",
         Style::default().fg(style::color(&theme.border_fg)),
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Width of the plugin menu's name column: the longest bundled name is `inspect`/`archive` and a
+/// user's own can be longer, so a long one is cut rather than pushing the state off the panel.
+const PLUGIN_NAME_COLUMN: usize = 18;
+/// Width of its origin column (`bundled`).
+const PLUGIN_ORIGIN_COLUMN: usize = 9;
+
+/// Draws the plugin menu: one row per plugin with where it comes from and where it stands, the
+/// cursor's row highlighted the same way a selected file is. A switched-off plugin and one the
+/// menu cannot switch are dimmed. Every switch is applied at once and saved to `local.toml`.
+pub fn render_plugins(
+    frame: &mut Frame<'_>,
+    popup: &PluginsPopup,
+    rows: &[PluginRow],
+    config: &Config,
+) {
+    let theme = &config.theme;
+    let area = panel_area(frame.area(), rows.len().max(1));
+    style::cast_shadow(frame.buffer_mut(), area, config);
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, "plugins", true);
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
+
+    let state_width =
+        usize::from(inner.width).saturating_sub(PLUGIN_NAME_COLUMN + PLUGIN_ORIGIN_COLUMN + 2);
+    let name_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let dim = Style::default().fg(style::color(&theme.border_fg));
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+
+    let mut lines = vec![Line::raw("")];
+    if rows.is_empty() {
+        lines.push(Line::styled("no plugins", dim));
+    }
+    lines.extend(rows.iter().enumerate().map(|(i, row)| {
+        let base = if i == popup.cursor() {
+            selected_style
+        } else {
+            Style::default()
+        };
+        let state_style = if row.locked || !row.on {
+            dim
+        } else {
+            value_style
+        };
+        Line::from(vec![
+            Span::styled(
+                pad_to(
+                    &fit_width(&row.name, PLUGIN_NAME_COLUMN - 1),
+                    PLUGIN_NAME_COLUMN,
+                ),
+                name_style.patch(base),
+            ),
+            Span::styled(
+                pad_to(row.origin, PLUGIN_ORIGIN_COLUMN + 2),
+                dim.patch(base),
+            ),
+            Span::styled(fit_width(&row.state, state_width), state_style.patch(base)),
+        ])
+    }));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "j/k moves, Enter switches on or off, Esc closes — saved to local.toml",
+        dim,
     ));
     frame.render_widget(Paragraph::new(lines), inner);
 }

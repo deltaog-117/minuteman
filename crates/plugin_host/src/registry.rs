@@ -163,6 +163,12 @@ impl Registry {
             .retain(|_, owner| owner.plugin != plugin || !owner.runtime);
     }
 
+    /// Forgets every word `plugin` holds, config and runtime alike, for a plugin that is taken
+    /// out of the session rather than started again.
+    pub fn forget(&mut self, plugin: &str) {
+        self.owners.retain(|_, owner| owner.plugin != plugin);
+    }
+
     /// The plugin that answers `word`, if any.
     pub fn owner(&self, word: &str) -> Option<&str> {
         self.owners.get(word).map(|owner| owner.plugin.as_str())
@@ -190,6 +196,21 @@ mod tests {
         let mut registry = Registry::default();
         registry.reserve(["cd".to_string(), "q".to_string()]);
         registry
+    }
+
+    #[test]
+    fn forgetting_a_plugin_frees_its_config_and_runtime_words_and_nobody_else_s() {
+        let mut registry = registry();
+        registry.register("a", "blame", false).unwrap();
+        registry.register("a", "log", true).unwrap();
+        registry.register("b", "stats", false).unwrap();
+
+        registry.forget("a");
+
+        assert_eq!(registry.owner("blame"), None);
+        assert_eq!(registry.owner("log"), None);
+        assert_eq!(registry.owner("stats"), Some("b"));
+        assert_eq!(registry.register("b", "blame", false), Ok(()));
     }
 
     #[test]

@@ -141,6 +141,18 @@ pub struct PluginInfo {
     pub restarts: u32,
 }
 
+impl PluginInfo {
+    /// A short word for the plugin menu: how it stands, without the crash detail.
+    pub fn state_label(&self) -> String {
+        match &self.state {
+            PluginState::Running => "on · running".to_string(),
+            PluginState::Finished => "on · idle".to_string(),
+            PluginState::Crashed(_) => "on · crashed, starts again when used".to_string(),
+            PluginState::Stopped(_) => "on · stopped after repeated crashes".to_string(),
+        }
+    }
+}
+
 impl fmt::Display for PluginInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: ", self.name)?;

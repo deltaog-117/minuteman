@@ -864,6 +864,20 @@ impl PluginManager {
         }
     }
 
+    /// Takes the named plugin out of the session: its process is stopped (on purpose, so it is
+    /// not a crash), it is forgotten, and the `:` words it held are free for another plugin. It
+    /// does not start again when a key or command is meant for it; `spawn` brings it back.
+    /// Returns whether there was such a plugin.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let Some(index) = self.plugins.iter().position(|p| p.name == name) else {
+            return false;
+        };
+        let plugin = self.plugins.remove(index);
+        plugin.process.life.stop();
+        plugin.registry.lock().forget(name);
+        true
+    }
+
     /// Declares the words of the interface's own `:` commands, which no plugin may claim. Call
     /// before spawning, so a plugin's config cannot get ahead of them.
     pub fn reserve_commands(&mut self, words: impl IntoIterator<Item = String>) {

@@ -598,6 +598,16 @@ fn spawn_fixture_with(
         .unwrap();
 }
 
+fn spawn_listener_on_b(
+    runtime: &tokio::runtime::Runtime,
+    manager: &mut PluginManager,
+    dir: &std::path::Path,
+) {
+    manager
+        .spawn(runtime.handle(), "fixture", FIXTURE, &[], on_key_b(), dir)
+        .unwrap();
+}
+
 fn on_key_b() -> Triggers {
     Triggers {
         keys: vec![KeyCode::Char('b')],
@@ -731,6 +741,43 @@ fn restart_stops_a_plugin_that_is_still_running_and_says_nothing_about_it() {
         "stopping a plugin on purpose is not a crash"
     );
     assert_eq!(manager.summaries()[0].state, PluginState::Running);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_removed_plugin_is_stopped_on_purpose_forgotten_and_can_be_spawned_again() {
+    let dir = scratch_dir("remove");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut manager = PluginManager::new();
+    spawn_listener_on_b(&runtime, &mut manager, &dir);
+    let first = pid_in(&wait_for_log(&mut manager, "ready pid="));
+
+    assert!(manager.remove("fixture"));
+    assert!(!manager.remove("fixture"), "nothing left to remove");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !is_gone(first) {
+        assert!(Instant::now() < deadline, "the process is still alive");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(manager.summaries().is_empty());
+    assert!(
+        !manager.dispatch_key(KeyCode::Char('b'), &dir, &[]),
+        "a removed plugin must not be started again by its key"
+    );
+    assert!(
+        manager
+            .poll()
+            .iter()
+            .all(|m| !m.message.starts_with("exited")),
+        "removing a plugin on purpose is not a crash"
+    );
+
+    spawn_listener_on_b(&runtime, &mut manager, &dir);
+    let second = pid_in(&wait_for_log(&mut manager, "ready pid="));
+    assert_ne!(first, second);
+    assert_eq!(manager.summaries().len(), 1);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

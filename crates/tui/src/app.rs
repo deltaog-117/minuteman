@@ -47,7 +47,7 @@ use plugin_host::{
 };
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
-use theming::{OpenRule, OpenWith, PluginSpec, PreviewHook};
+use theming::{Config, OpenRule, OpenWith, PluginSpec, PreviewHook};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::associations::{self, Associations};
@@ -63,6 +63,7 @@ use crate::marked_size::{MarkedSize, Total};
 use crate::nav_job::{NavJob, NavPoll};
 use crate::open;
 use crate::picker_popup::PickerPopup;
+use crate::plugin_roster::{self, ConfigSwitches};
 use crate::plugin_views::Slots;
 use crate::remote_open;
 use crate::search_job::{SearchJob, SearchState};
@@ -552,6 +553,17 @@ pub struct Progress {
     pub batch: Option<(usize, usize)>,
 }
 
+/// One line of the plugin menu, as `App::plugin_rows` hands it to the view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRow {
+    pub name: String,
+    pub origin: &'static str,
+    pub state: String,
+    pub on: bool,
+    /// The menu cannot switch it; `state` says why.
+    pub locked: bool,
+}
+
 pub struct App {
     pub clipboard: Option<Clipboard>,
     pub prompt: Option<Prompt>,
@@ -590,6 +602,10 @@ pub struct App {
     git_status: bool,
     /// Whether the bundled system plugin is started (`system_hud` in `config.toml`).
     system_hud: bool,
+    /// The names `local.toml` keeps as switched off in the plugin menu.
+    plugin_disabled: Vec<String>,
+    /// Every plugin the plugin menu lists, with whether it is on; see `plugin_roster`.
+    plugin_roster: Vec<plugin_roster::Entry>,
     /// The `[[preview_hook]]` tables, of which the ones that extract text go to the bundled
     /// preview plugin when it starts.
     preview_hooks: Vec<PreviewHook>,
@@ -658,6 +674,8 @@ impl App {
             slots: Slots::default(),
             git_status: true,
             system_hud: false,
+            plugin_disabled: Vec::new(),
+            plugin_roster: Vec::new(),
             preview_hooks: Vec::new(),
             handle,
             interactive: Vec::new(),
@@ -708,7 +726,7 @@ impl App {
             .dispatch_devices(DevicesCommand::Watch { on: true })
         {
             deck.set_missing(Some("mman-devices was not found".into()));
-            self.status = Some(crate::bundled::missing("devices"));
+            self.status = Some(self.missing_notice("devices"));
         }
         deck
     }
@@ -735,7 +753,7 @@ impl App {
     /// Asks the devices plugin to do `command` to a device, or says where to get the plugin.
     pub fn ask_devices(&mut self, command: DevicesCommand) {
         if !self.plugins.dispatch_devices(command) {
-            self.status = Some(crate::bundled::missing("devices"));
+            self.status = Some(self.missing_notice("devices"));
         }
     }
 
@@ -770,7 +788,7 @@ impl App {
                 self.status = Some(format!("opening {what}…"));
                 self.finding_since = Some(Instant::now());
             }
-            ActionDispatch::NoProvider => self.status = Some(crate::bundled::missing(name)),
+            ActionDispatch::NoProvider => self.status = Some(self.missing_notice(name)),
             // The plugin's own log line says why, and `poll_plugins` puts it in the status bar.
             ActionDispatch::Unavailable => {}
         }
@@ -848,7 +866,7 @@ impl App {
         if self.plugins.serves_ssh() {
             format!("cannot open the remote folder: {error}")
         } else {
-            crate::bundled::missing(plugin_api::PROVIDES_VFS_SSH)
+            self.missing_notice(plugin_api::PROVIDES_VFS_SSH)
         }
     }
 
@@ -858,7 +876,7 @@ impl App {
         if self.plugins.serves_archives() {
             format!("cannot open the archive: {error}")
         } else {
-            crate::bundled::missing(plugin_api::PROVIDES_VFS_ARCHIVE)
+            self.missing_notice(plugin_api::PROVIDES_VFS_ARCHIVE)
         }
     }
 
@@ -917,47 +935,151 @@ impl App {
     /// than treated as fatal — the same "one bad entry must never take the whole session down"
     /// rule `theming::Config::load` already follows for a malformed config file.
     pub fn with_plugins(mut self, specs: Vec<PluginSpec>, cwd: &Path) -> Self {
-        let bundled = crate::bundled::specs(
-            &specs,
-            self.git_status,
-            self.system_hud,
-            &self.preview_hooks,
-        );
+        let listing = crate::bundled::listing(&specs, &self.preview_hooks);
+        let found: Vec<PluginSpec> = listing
+            .iter()
+            .filter_map(|listed| listed.spec.clone())
+            .collect();
         // Without a previewer the column shows only names; say why instead of leaving it a mystery.
-        if let Some(notice) = crate::bundled::missing_previewer(&specs, &bundled) {
+        // A previewer the user switched off is not missing, so only what was not found counts.
+        if let Some(notice) = crate::bundled::missing_previewer(&specs, &found) {
             self.status = Some(notice);
         }
-        for spec in specs.into_iter().chain(bundled) {
-            if let Err(e) = self.plugins.spawn(
-                &self.handle,
-                &spec.name,
-                &spec.command,
-                &spec.args,
-                Triggers {
-                    keys: spec.on_keys,
-                    commands: spec.commands,
-                    actions: spec.provides,
-                    events: spec
-                        .events
-                        .iter()
-                        .filter_map(|name| {
-                            let kind = EventKind::parse(name);
-                            if kind.is_none() {
-                                eprintln!(
-                                    "minuteman: plugin {}: unknown event '{name}'",
-                                    spec.name
-                                );
-                            }
-                            kind
-                        })
-                        .collect(),
-                },
-                cwd,
-            ) {
+        self.plugin_roster = plugin_roster::build(
+            &specs,
+            listing,
+            ConfigSwitches {
+                git_status: self.git_status,
+                system_hud: self.system_hud,
+            },
+            &self.plugin_disabled,
+        );
+        let to_start: Vec<PluginSpec> = self
+            .plugin_roster
+            .iter()
+            .filter(|entry| entry.enabled)
+            .filter_map(|entry| entry.spec.clone())
+            .collect();
+        for spec in &to_start {
+            if let Err(e) = self.start_plugin(spec, cwd) {
                 eprintln!("minuteman: {e}");
             }
         }
         self
+    }
+
+    /// Sets the plugins the plugin menu switched off (`local.toml`). Call before `with_plugins`.
+    pub fn with_disabled_plugins(mut self, names: Vec<String>) -> Self {
+        self.plugin_disabled = names;
+        self
+    }
+
+    fn start_plugin(
+        &mut self,
+        spec: &PluginSpec,
+        cwd: &Path,
+    ) -> Result<(), plugin_host::PluginError> {
+        self.plugins.spawn(
+            &self.handle,
+            &spec.name,
+            &spec.command,
+            &spec.args,
+            Triggers {
+                keys: spec.on_keys.clone(),
+                commands: spec.commands.clone(),
+                actions: spec.provides.clone(),
+                events: spec
+                    .events
+                    .iter()
+                    .filter_map(|name| {
+                        let kind = EventKind::parse(name);
+                        if kind.is_none() {
+                            eprintln!("minuteman: plugin {}: unknown event '{name}'", spec.name);
+                        }
+                        kind
+                    })
+                    .collect(),
+            },
+            cwd,
+        )
+    }
+
+    /// One line of the plugin menu for each plugin: name, where it comes from and where it stands.
+    pub fn plugin_rows(&self) -> Vec<PluginRow> {
+        let summaries = self.plugins.summaries();
+        self.plugin_roster
+            .iter()
+            .map(|entry| {
+                let state = match (&entry.locked, entry.enabled) {
+                    (Some(why), _) => why.clone(),
+                    (None, false) => "off".to_string(),
+                    (None, true) => summaries
+                        .iter()
+                        .find(|info| info.name == entry.name)
+                        .map_or_else(|| "on".to_string(), |info| info.state_label()),
+                };
+                PluginRow {
+                    name: entry.name.clone(),
+                    origin: entry.origin.label(),
+                    state,
+                    on: entry.enabled,
+                    locked: entry.locked.is_some(),
+                }
+            })
+            .collect()
+    }
+
+    /// Switches the plugin on row `index` of the menu: a running one is stopped and forgotten, an
+    /// off one is started, and the list of switched-off plugins is saved to `local.toml`. A row
+    /// the menu cannot switch says why instead. The change is already made when the save fails,
+    /// and the status line says so.
+    pub fn toggle_plugin(&mut self, index: usize, cwd: &Path) {
+        let Some(entry) = self.plugin_roster.get(index) else {
+            return;
+        };
+        let name = entry.name.clone();
+        if let Some(why) = &entry.locked {
+            self.status = Some(format!("plugin {name}: {why}"));
+            return;
+        }
+        let enable = !entry.enabled;
+        if enable {
+            let Some(spec) = entry.spec.clone() else {
+                return;
+            };
+            if let Err(e) = self.start_plugin(&spec, cwd) {
+                self.status = Some(format!("plugin {name}: could not start: {e}"));
+                return;
+            }
+        } else {
+            self.plugins.remove(&name);
+        }
+        self.plugin_roster[index].enabled = enable;
+        self.plugin_disabled = plugin_roster::disabled_after(&self.plugin_disabled, &name, enable);
+        let verb = if enable { "on" } else { "off" };
+        self.status = Some(match Config::save_disabled_plugins(&self.plugin_disabled) {
+            Ok(()) => format!("plugin {name}: switched {verb}"),
+            Err(e) => {
+                format!("plugin {name}: switched {verb}, but could not save to local.toml: {e}")
+            }
+        });
+    }
+
+    /// What to say when nothing answers `action`: that the plugin is switched off, if one the
+    /// menu knows would answer it, and otherwise where to get one.
+    fn missing_notice(&self, action: &str) -> String {
+        let switched_off = self.plugin_roster.iter().find(|entry| {
+            !entry.enabled
+                && entry.can_switch()
+                && entry.provides.iter().any(|provided| provided == action)
+        });
+        match switched_off {
+            Some(entry) => format!(
+                "the {} plugin is switched off; `space p` opens the plugin menu to switch it on",
+                entry.name
+            ),
+            None => crate::bundled::missing(action),
+        }
     }
 
     #[cfg(test)]
@@ -1816,7 +1938,7 @@ impl App {
         if self.plugins.dispatch_inspect(Some(path)) {
             Some(InspectPanel::open(path))
         } else {
-            self.status = Some(crate::bundled::missing("inspect"));
+            self.status = Some(self.missing_notice("inspect"));
             None
         }
     }
@@ -3163,7 +3285,7 @@ impl App {
         let job = self.next_archive_job;
         self.next_archive_job += 1;
         if !self.plugins.dispatch_archive(job, work) {
-            return Err(crate::bundled::missing("archive"));
+            return Err(self.missing_notice("archive"));
         }
         let (tx, rx, cancel) = Self::archive_channel();
         self.archive_run = Some(ArchiveRun {
