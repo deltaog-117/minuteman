@@ -47,8 +47,9 @@ pub enum Outcome {
     /// closes the add flow with [`PluginsPopup::close_form`] or hands back why it cannot with
     /// [`PluginsPopup::refuse`].
     Add(RawPluginSpec),
-    /// The review card asks to start the plugin once, to see that it runs; the caller answers
-    /// with [`PluginsPopup::refuse`] (why not) or [`PluginsPopup::report`] (it ran).
+    /// The review card asks to start the plugin once, to see that it runs; the caller starts the
+    /// test in the background and answers with [`PluginsPopup::refuse`] (why not) or
+    /// [`PluginsPopup::report`] (a line now, and the verdict when it comes).
     Test(RawPluginSpec),
     /// The add form was given a folder; the caller reads its manifest and answers with
     /// [`PluginsPopup::fill`] or [`PluginsPopup::refuse`].
@@ -146,6 +147,11 @@ impl PluginsPopup {
     /// until [`pick_done`](Self::pick_done) or [`pick_cancel`](Self::pick_cancel).
     pub fn picking(&self) -> bool {
         self.picking
+    }
+
+    /// Whether the review card is open on the plugin called `name`.
+    pub fn reviewing(&self, name: &str) -> bool {
+        matches!(&self.add, Some(Add::Review { item, .. }) if item.found.spec.name == name)
     }
 
     /// Opens the add flow on the plugins found.

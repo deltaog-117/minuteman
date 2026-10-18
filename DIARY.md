@@ -8510,6 +8510,29 @@ folder, and `check` is not given a plugin's keys and words for a bundled or `con
 (they were settled at load). `mman plugin new`, `plugin_dirs`, a double-click to choose a folder
 and reloading config by hand-edit are unchanged.
 
+## 2026-10-18 — Start and test runs in the background
+
+**Context.** "Start and test" in the plugin review card called the half-second probe on the
+interface's thread, so a healthy plugin froze the screen and every key for the whole window.
+
+**Decision.** Chosen as COA A of three: a `ProbeJob` (`probe_job.rs`) in the shape of `NavJob`,
+rather than a bare thread owned by the popup (B) or running the probe through the plugin host's
+event stream (C), which would blur a passive probe with a running plugin. `App::test_plugin` became
+`begin_plugin_test` (the conflict check, then the job starts and returns at once) and
+`poll_plugin_test` (the main loop collects the verdict). The card shows `testing <name>…` meanwhile.
+A second Start and test while one runs is refused with "still testing <name>". Leaving the card,
+closing the menu or clicking away drops the job, and a verdict is shown only on the card of the
+plugin it belongs to. The probe has no cancel token, so a dropped job's program is stopped by the
+probe itself at the end of its window.
+
+**Verification.** `scripts/check` passes. New tests: starting returns long before the window ends
+and the verdict follows; a program that ends at once gives a failed verdict. The app's start-and-test
+test now goes through `begin_plugin_test` and `poll_plugin_test`.
+
+**Left open.** The version check is not applied when the add form is filled from a folder;
+`mman plugin new`, `mman plugin add`, `plugin_dirs`, a double-click to choose a folder and reloading
+config by hand-edit are unchanged.
+
 ---
 
 ---

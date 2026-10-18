@@ -66,6 +66,7 @@ mod plugin_views;
 mod plugins_popup;
 mod popup_shell;
 mod preview_view;
+mod probe_job;
 mod remote_open;
 mod search_job;
 mod settings_popup;
@@ -1490,6 +1491,11 @@ fn run(
         app.poll_bulk(browser, vfs)?;
         app.poll_search(browser);
         app.poll_nav(browser);
+        if let Some((name, verdict)) = app.poll_plugin_test()
+            && let Some(popup) = plugins_menu.as_mut().filter(|p| p.reviewing(&name))
+        {
+            popup.report(verdict.unwrap_or_else(|why| why));
+        }
         if let Some(panel) = inspect.as_mut()
             && panel.waiting()
             && !app.inspector_running()
@@ -2102,6 +2108,7 @@ fn run(
                 }
                 if plugins_menu.as_ref().is_some_and(|popup| !popup.picking()) {
                     if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                        app.cancel_plugin_test();
                         plugins_menu = None;
                     }
                     continue;
@@ -3070,6 +3077,7 @@ fn run(
                     match popup.key(key.code, rows) {
                         PluginsOutcome::Stay => {}
                         PluginsOutcome::OpenAdd => {
+                            app.cancel_plugin_test();
                             popup.open_found(
                                 app.plugin_candidates(browser.current_dir(), &config.keys),
                             );
@@ -3081,12 +3089,16 @@ fn run(
                             );
                         }
                         PluginsOutcome::Test(spec) => {
-                            match app.test_plugin(spec, &config.keys, browser.current_dir()) {
-                                Ok(message) => popup.report(message),
+                            let name = spec.name.clone();
+                            match app.begin_plugin_test(spec, &config.keys, browser.current_dir()) {
+                                Ok(()) => popup.report(format!("testing {name}…")),
                                 Err(why) => popup.refuse(why),
                             }
                         }
-                        PluginsOutcome::Close => plugins_menu = None,
+                        PluginsOutcome::Close => {
+                            app.cancel_plugin_test();
+                            plugins_menu = None;
+                        }
                         PluginsOutcome::Toggle(row) => {
                             app.toggle_plugin(row, browser.current_dir());
                         }

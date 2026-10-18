@@ -2340,8 +2340,8 @@ draws.
   manifest takes an optional `api_version` whose mismatch blocks Test and Add, and `mman plugin
   check <name or folder>` runs the same probe and holds a manifest's version, keys and `:` words
   against what is taken (COA A; a plugin does not answer `init`, so "handshake" means what the
-  probe can see, and an additive `ready` message stays an option). Still to do: Start and test
-  runs on the interface's thread, so a healthy plugin holds the screen for the half second; the
+  probe can see, and an additive `ready` message stays an option). Start and test runs in the
+  background (`probe_job`), so the screen stays live during the half second. Still to do: the
   version check is not applied when the add form is filled from a folder; a `plugin_dirs` list in
   `config.toml` for the folders the found list scans, choosing a folder with a double-click, a check
   of keys and `:` words when a drop-in is switched on; `mman plugin new <name> --lang

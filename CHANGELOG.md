@@ -276,6 +276,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- "Start and test" in the plugin review card no longer freezes the screen for the half second: the
+  test runs in the background, the card says `testing <name>…`, and the verdict replaces it. A
+  second test is refused while one runs, and leaving the card or closing the menu drops it.
+  Author: deltaog-117.
 - "Start and test" in the plugin review card now watches the program for half a second after
   starting it, and says what it saw: still running, finished at once, ended at start with its exit
   status, or an error it logged. Before, it only showed that the program could be started. The

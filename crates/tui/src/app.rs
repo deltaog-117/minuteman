@@ -67,6 +67,7 @@ use crate::plugin_program::{self, Program};
 use crate::plugin_roster::{self, ConfigSwitches, Origin};
 use crate::plugin_source::{self, Candidate};
 use crate::plugin_views::Slots;
+use crate::probe_job::{ProbeJob, ProbePoll};
 use crate::remote_open;
 use crate::search_job::{SearchJob, SearchState};
 use shared::cargo_fit::{Carry, Load};
@@ -637,6 +638,8 @@ pub struct App {
     /// A folder being opened in the background (see `nav_job`); while it runs the app is busy and
     /// the browser still shows the old folder.
     nav: Option<NavJob>,
+    /// The plugin menu's "Start and test" in flight, if any (see `probe_job`).
+    plugin_test: Option<ProbeJob>,
     /// How long `begin_move` waits for the folder before going busy and returning. A local folder
     /// opens well inside it, so ordinary browsing never drops a key pressed right after; only a
     /// slow one (another machine) takes the background route.
@@ -700,6 +703,7 @@ impl App {
             handover: None,
             search_job: None,
             nav: None,
+            plugin_test: None,
             nav_grace: Duration::from_millis(40),
             search_state: SearchState::Idle,
             search_matches: Vec::new(),
@@ -1182,33 +1186,55 @@ impl App {
     }
 
     /// Starts the plugin once and watches it for half a second (see `plugin_host::probe`), to show
-    /// that its program runs and does not complain, without adding it or writing anything.
-    /// Refused for the reasons [`add_plugin`](Self::add_plugin) refuses.
+    /// that its program runs and does not complain, without adding it or writing anything. The
+    /// watching happens in the background; [`poll_plugin_test`](Self::poll_plugin_test) hands back
+    /// the verdict. Refused for the reasons [`add_plugin`](Self::add_plugin) refuses.
     ///
     /// # Errors
     ///
-    /// The reason, when something already has the plugin's name, a key or a `:` word, when its
-    /// program will not start, or when it ends or logs an error at once.
-    pub fn test_plugin(
+    /// The reason, when something already has the plugin's name, a key or a `:` word, or when
+    /// another test is still running.
+    pub fn begin_plugin_test(
         &mut self,
         raw: RawPluginSpec,
         keys: &KeyMap,
         cwd: &Path,
-    ) -> Result<String, String> {
+    ) -> Result<(), String> {
+        if let Some(running) = &self.plugin_test {
+            return Err(format!("still testing {}", running.name));
+        }
         if let Some(why) = plugin_roster::conflict(&self.plugin_roster, &raw, keys) {
             return Err(why);
         }
         let name = raw.name.clone();
         let spec = PluginSpec::from(raw);
-        plugin_host::probe::probe(
-            &name,
-            &spec.command,
-            &spec.args,
-            cwd,
+        self.plugin_test = Some(ProbeJob::start(
+            &self.handle,
+            name,
+            spec.command,
+            spec.args,
+            cwd.to_path_buf(),
             plugin_host::probe::WINDOW,
-        )
-        .map_err(|e| format!("could not start {name}: {e}"))?
-        .verdict(&name)
+        ));
+        Ok(())
+    }
+
+    /// The finished test, if there is one: the plugin's name and its verdict (`Ok` when it looks
+    /// healthy). `None` while it still runs or when none was started.
+    pub fn poll_plugin_test(&mut self) -> Option<(String, Result<String, String>)> {
+        let job = self.plugin_test.as_mut()?;
+        let verdict = match job.poll() {
+            ProbePoll::Pending => return None,
+            ProbePoll::Done(verdict) => verdict,
+            ProbePoll::Lost => Err("the test stopped without an answer".to_string()),
+        };
+        let job = self.plugin_test.take()?;
+        Some((job.name, verdict))
+    }
+
+    /// Gives up the running test, if any; its verdict is never shown.
+    pub fn cancel_plugin_test(&mut self) {
+        self.plugin_test = None;
     }
 
     /// The program behind row `index`, when the menu may delete it: a bundled plugin's, found,
@@ -7393,11 +7419,25 @@ mod tests {
             args: vec!["-c".into(), script.into()],
             ..RawPluginSpec::default()
         };
-        let calm = fx.app.test_plugin(raw("calm", "sleep 30"), &keys, &fx.root);
-        assert_eq!(calm, Ok("calm starts and keeps running".to_string()));
-        let brief = fx.app.test_plugin(raw("brief", "exit 2"), &keys, &fx.root);
+        let mut verdict = |raw| {
+            fx.app
+                .begin_plugin_test(raw, &keys, &fx.root)
+                .expect("a free name starts");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some((_, verdict)) = fx.app.poll_plugin_test() {
+                    return verdict;
+                }
+                assert!(Instant::now() < deadline, "the test never answered");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
         assert_eq!(
-            brief,
+            verdict(raw("calm", "sleep 30")),
+            Ok("calm starts and keeps running".to_string())
+        );
+        assert_eq!(
+            verdict(raw("brief", "exit 2")),
             Err("brief ended at start: exit status: 2".to_string())
         );
         assert_eq!(
