@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A `.tar.gz` that was slow to open opens at once the next time. Its list of files is kept in
+  `~/.cache/minuteman/archive-index` (private to you, 32 archives at most) and used while the
+  archive keeps the size and time it had; one that opens in under a quarter of a second is not
+  kept. A 1 GiB archive went from about 0.3 s to about 0.1 ms on the second open. Author:
+  deltaog-117.
 - Adding a plugin no longer starts with a form. `space p` then `a` opens a list of the plugins
   found in the browsed folder (the folder itself and each folder directly in it that holds a
   `plugin.toml`, except those the menu already lists), each with its description; a plugin that
@@ -261,6 +266,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- A `.tar.gz` is no longer refused for inflating to more than 512 MiB: opening one may now take up
+  to 120 seconds, after which it is an error that says to extract it instead. A listing is still
+  never cut short quietly. Author: deltaog-117.
 - The plugin menu can now switch `git` and `hud` as well as the rest. `system_hud` and
   `git_status = true` only say whether they start on; the menu's choice is kept in `local.toml`
   (`disabled_plugins` for a plugin that starts on, a new `enabled_plugins` for the system figures,

@@ -110,6 +110,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Plugin Menu, the Add Form | A multi-row text form modelled on the compress form, refusing clashes and unstartable programs before anything is written (COA A); a one-question-at-a-time prompt (B) and a `:plugin add` command (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, Deleting a Program | A `d` key and an inline `y`/`n` question naming the file, its size and the reinstall command; only a plain file of the running user (COA A); moving it to the trash (B) and printing the commands only (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Authoring, Manifest and Drop-ins | A `plugin.toml` with a `[[plugin]]` table's keys, found in `plugins/<name>/` of the config directory and listed off until switched on (COA B); the manifest alone (A) and the full `mman plugin` CLI first (C) not taken | ✅ Confirmed |
+| 2026-10-18 | Large `.tar.gz` Archives | A 120 s time budget instead of the 512 MiB cap, and the listing of a slow one kept in the cache folder (COA A) | ✅ Confirmed |
 
 ---
 
@@ -8428,6 +8429,38 @@ goes into a folder, so a folder with no readable manifest is refused with the re
 **Verification.** `scripts/check` passes. New test: `Q` takes a plugin folder under the cursor,
 refuses a plain one by name, takes the browsed plugin folder from a file, and refuses with nothing
 under the cursor.
+
+### Large `.tar.gz`: a Time Budget and a Listing Kept on Disk
+
+**Problem.** A `.tar.gz` cannot be listed without inflating it end to end, so every open of a big
+one paid the full cost again whenever the archive plugin started afresh, and one that inflated to
+more than 512 MiB could not be opened at all.
+
+**Options.** (A) keep the listing on disk, keyed by the archive's path, size and time; (B) record
+gzip checkpoints so a read can resume mid-stream, which needs a deflate decoder that exposes its
+window; (C) stream the listing in batches over the plugin protocol. A was chosen with a change to
+the cap: B is the real cure but adds a codec's worth of new code reading untrusted input, and C
+changes the protocol every plugin shares.
+
+**Decision.** The byte cap became a time budget (`INDEX_BUDGET`, 120 s): what an archive costs is
+the work of inflating it, and the memory it can fill was already bounded by the entry limit. The
+indexer records the entries it reads (`Index::build_recording`); a `.tar.gz` that took 250 ms or
+more has them written to the cache folder (`cache.rs`), atomically and private to the user, and
+on the next open they are replayed through the same builder (`Index::from_entries`), so the entry
+limit and the tree's rules hold for stored entries too. Any problem with the cache (missing,
+damaged, another version, another size or time) is a miss and never an error. `cache.rs` is in the
+`vfs-gate` allow-list with the reason, as the app's own cache folder is local by nature.
+
+**Verification.** `scripts/check` passes. New tests: a listing is stored and read back, a changed
+size or time or another path is a miss, a damaged file is a miss and the next store replaces it,
+the folder and files are private and only 32 stay, a stored listing is what a second run lists
+and a changed archive is read again, a quick archive and the other formats leave nothing on disk,
+and a `.tar.gz` past its time is an error. The ignored benchmark: a 1 GiB archive opens cold in
+about 0.3 s and from the cache in about 0.1 ms.
+
+**Left open.** The first open of a very large archive, and opening a file inside one, still
+inflate from the start; checkpoints (B) would remove both. A hand-edited cache file can show a
+wrong listing, since the cache is trusted as the user's own.
 
 ---
 

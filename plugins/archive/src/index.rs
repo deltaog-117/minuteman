@@ -18,24 +18,28 @@
 //! folder can be listed without touching the data and a file opened on its own.
 //!
 //! An archive is untrusted input that gets opened just by moving the cursor onto it, so every read
-//! is bounded: a limit on entries, on how much of a `.tar.gz` is inflated while indexing, on what
-//! a zip's central directory may claim, and on how large one entry may be when it is opened.
+//! is bounded: a limit on entries, on how long a `.tar.gz` may take to inflate while indexing, on
+//! what a zip's central directory may claim, and on how large one entry may be when it is opened.
 //! Going over a limit is an error, never a quietly shortened listing, because a folder that looks
 //! complete and is not would mislead.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
+use serde::{Deserialize, Serialize};
 use shared::{ReadSeek, Vfs};
 
 use shared::Format;
 
 /// Entries an archive may hold and still be browsed.
 pub const MAX_ENTRIES: usize = 200_000;
-/// Bytes a `.tar.gz` may inflate to while it is indexed, or while one entry is looked for in it.
-pub const MAX_INFLATED: u64 = 512 << 20;
+/// How long a `.tar.gz` may spend inflating while it is indexed, or while one entry is looked for
+/// in it. Time rather than bytes is the bound: what an archive costs is the work of inflating it,
+/// and the memory it can fill is already capped by [`MAX_ENTRIES`], so a large honest archive is
+/// served and a decompression bomb still ends.
+pub const INDEX_BUDGET: Duration = Duration::from_secs(120);
 /// The largest entry that is opened (it is held in memory, since a compressed stream cannot seek).
 pub const MAX_ENTRY_BYTES: u64 = 256 << 20;
 /// A zip whose central directory claims more than this is refused before the `zip` crate reads it
@@ -50,14 +54,14 @@ const S_IFLNK: u32 = 0o120_000;
 
 /// What the archive file looked like when it was indexed. An index is reused only while the file
 /// still looks the same.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {
     pub len: u64,
     pub modified: Option<SystemTime>,
 }
 
 /// Where an entry's bytes are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
     /// Position in a zip's central directory.
     Zip(usize),
@@ -67,7 +71,7 @@ pub enum Source {
     TarGz { ordinal: usize },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Content {
     Dir,
     File(Source),
@@ -144,7 +148,10 @@ fn parts_of(raw: &str) -> Option<Vec<String>> {
     Some(parts)
 }
 
-struct Entry {
+/// One entry as the archive listed it, before it is placed in the tree. Replaying a list of these
+/// through [`Builder::add`] rebuilds an index, which is what the on-disk cache keeps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Entry {
     parts: Vec<String>,
     content: Content,
     size: u64,
@@ -155,6 +162,8 @@ struct Entry {
 struct Builder {
     nodes: Vec<Node>,
     by_path: HashMap<String, usize>,
+    /// Every entry added, when the caller wants them back to store.
+    recorded: Option<Vec<Entry>>,
 }
 
 impl Builder {
@@ -170,6 +179,14 @@ impl Builder {
         Self {
             nodes: vec![root],
             by_path: HashMap::from([(String::new(), ROOT)]),
+            recorded: None,
+        }
+    }
+
+    fn recording() -> Self {
+        Self {
+            recorded: Some(Vec::new()),
+            ..Self::new()
         }
     }
 
@@ -190,6 +207,9 @@ impl Builder {
     /// file of the same name replaces an earlier one, as extracting would; a name that is a
     /// folder in one place and a file in another keeps the first.
     fn add(&mut self, entry: Entry) -> io::Result<()> {
+        if let Some(recorded) = &mut self.recorded {
+            recorded.push(entry.clone());
+        }
         let Some((last, above)) = entry.parts.split_last() else {
             // An entry for the root itself (`./`) only says when it was changed.
             self.nodes[ROOT].modified = entry.modified.or(self.nodes[ROOT].modified);
@@ -260,6 +280,28 @@ impl Builder {
     }
 }
 
+/// Reads `file` into `builder`; a `.tar.gz` gets `budget` of inflating time.
+fn fill(
+    file: Box<dyn ReadSeek>,
+    format: Format,
+    builder: &mut Builder,
+    budget: Duration,
+) -> io::Result<()> {
+    match format {
+        Format::Zip => index_zip(file, builder),
+        Format::Tar => {
+            let mut archive = tar::Archive::new(BufReader::new(file));
+            // Seeking past each entry's data makes this cost the headers, not the file.
+            index_tar(archive.entries_with_seek()?, builder, true)
+        }
+        Format::TarGz => {
+            let inflated = Budgeted::new(GzDecoder::new(BufReader::new(file)), budget);
+            let mut archive = tar::Archive::new(inflated);
+            index_tar(archive.entries()?, builder, false)
+        }
+    }
+}
+
 fn folder(name: &str) -> Node {
     Node {
         name: name.to_owned(),
@@ -313,18 +355,37 @@ impl Index {
     /// reports.
     pub fn build(file: Box<dyn ReadSeek>, format: Format, stamp: Stamp) -> io::Result<Self> {
         let mut builder = Builder::new();
-        match format {
-            Format::Zip => index_zip(file, &mut builder)?,
-            Format::Tar => {
-                let mut archive = tar::Archive::new(BufReader::new(file));
-                // Seeking past each entry's data makes this cost the headers, not the file.
-                index_tar(archive.entries_with_seek()?, &mut builder, true)?;
-            }
-            Format::TarGz => {
-                let inflated = Capped::new(GzDecoder::new(BufReader::new(file)), MAX_INFLATED);
-                let mut archive = tar::Archive::new(inflated);
-                index_tar(archive.entries()?, &mut builder, false)?;
-            }
+        fill(file, format, &mut builder, INDEX_BUDGET)?;
+        Ok(builder.finish(stamp))
+    }
+
+    /// Like [`Index::build`], and hands back the entries it read so they can be stored and
+    /// replayed with [`Index::from_entries`] instead of inflating the archive again.
+    ///
+    /// # Errors
+    ///
+    /// As [`Index::build`].
+    pub(crate) fn build_recording(
+        file: Box<dyn ReadSeek>,
+        format: Format,
+        stamp: Stamp,
+    ) -> io::Result<(Self, Vec<Entry>)> {
+        let mut builder = Builder::recording();
+        fill(file, format, &mut builder, INDEX_BUDGET)?;
+        let entries = builder.recorded.take().unwrap_or_default();
+        Ok((builder.finish(stamp), entries))
+    }
+
+    /// The index that [`Index::build_recording`] made, from the entries it handed back. Goes
+    /// through the same builder, so the limits and the tree's rules hold for stored entries too.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidData` when the entries are over a limit.
+    pub(crate) fn from_entries(entries: Vec<Entry>, stamp: Stamp) -> io::Result<Self> {
+        let mut builder = Builder::new();
+        for entry in entries {
+            builder.add(entry)?;
         }
         Ok(builder.finish(stamp))
     }
@@ -378,37 +439,33 @@ fn split_rev(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// A reader that fails, rather than reporting end of file, once `left` bytes have been read from
-/// `inner` and more are still coming. A plain `Read::take` would end quietly, and a tar reader
+/// A reader that fails, rather than reporting end of file, once `budget` has passed since it was
+/// made and more data is still wanted. A plain `Read::take` would end quietly, and a tar reader
 /// that finds the stream ended takes it for the archive's real end, so a cut-off index would pass
 /// for a complete one.
-struct Capped<R> {
+struct Budgeted<R> {
     inner: R,
-    left: u64,
+    deadline: Instant,
 }
 
-impl<R> Capped<R> {
-    fn new(inner: R, left: u64) -> Self {
-        Self { inner, left }
+impl<R> Budgeted<R> {
+    fn new(inner: R, budget: Duration) -> Self {
+        Self {
+            inner,
+            deadline: Instant::now() + budget,
+        }
     }
 }
 
-impl<R: Read> Read for Capped<R> {
+impl<R: Read> Read for Budgeted<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
+        if Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "archive takes too long to inflate to browse, extract it instead",
+            ));
         }
-        if self.left == 0 {
-            // Exactly at the cap is fine if the stream ends there; only more data is over it.
-            return match self.inner.read(&mut [0u8; 1])? {
-                0 => Ok(0),
-                _ => Err(invalid("archive inflates to more than can be browsed")),
-            };
-        }
-        let room = usize::try_from(self.left).map_or(buf.len(), |left| buf.len().min(left));
-        let read = self.inner.read(&mut buf[..room])?;
-        self.left -= read as u64;
-        Ok(read)
+        self.inner.read(buf)
     }
 }
 
@@ -650,7 +707,7 @@ pub fn open_entry(
             Ok(Box::new(Cursor::new(read_capped(entry, declared)?)))
         }
         Source::TarGz { ordinal } => {
-            let inflated = Capped::new(GzDecoder::new(BufReader::new(file)), MAX_INFLATED);
+            let inflated = Budgeted::new(GzDecoder::new(BufReader::new(file)), INDEX_BUDGET);
             let mut archive = tar::Archive::new(inflated);
             let mut entries = archive.entries()?;
             let entry = entries
@@ -679,4 +736,44 @@ pub(crate) fn civil_seconds_for_test(year: u16, month: u8, day: u8) -> i64 {
     civil_time(year, month, day, 0, 0, 0)
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(-1, |d| i64::try_from(d.as_secs()).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    fn tar_gz() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(3);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, "a.txt", &b"abc"[..])
+            .unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&builder.into_inner().unwrap()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn a_tar_gz_past_its_time_is_an_error_not_a_shorter_listing() {
+        let mut builder = Builder::new();
+        let file = Box::new(Cursor::new(tar_gz()));
+        let error = fill(file, Format::TarGz, &mut builder, Duration::ZERO).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn a_tar_gz_within_its_time_is_listed_whole() {
+        let mut builder = Builder::new();
+        let file = Box::new(Cursor::new(tar_gz()));
+        fill(file, Format::TarGz, &mut builder, INDEX_BUDGET).unwrap();
+        let index = builder.finish(Stamp {
+            len: 0,
+            modified: None,
+        });
+        assert!(index.resolve("a.txt", true).is_some());
+    }
 }

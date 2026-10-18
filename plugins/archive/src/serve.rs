@@ -36,6 +36,7 @@ use serde::Serialize;
 use serde_json::Value;
 use shared::{FileKind, Metadata, ReadSeek, Vfs, VfsError};
 
+use crate::cache::DiskCache;
 use crate::engine::ArchiveVfs;
 
 /// One open file. Its own lock lets reads of different files run at the same time.
@@ -107,7 +108,7 @@ impl Server {
     /// A server for the archives that `inner` (the host's files) holds.
     pub fn new(inner: Arc<dyn Vfs>) -> Self {
         Self {
-            engine: ArchiveVfs::new(inner),
+            engine: ArchiveVfs::new(inner).with_disk_cache(DiskCache::in_user_cache()),
             handles: Mutex::new(Handles::default()),
         }
     }

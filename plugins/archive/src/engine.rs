@@ -28,11 +28,13 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use shared::{DirEntryInfo, FileKind, Metadata, ReadSeek, ScanEntry, Vfs, VfsError, WriteSeek};
 
-use shared::{Mount, Route, is_inside, route};
+use shared::{Format, Mount, Route, is_inside, route};
 
+use crate::cache::DiskCache;
 use crate::index::{self, Content, Index, Node, Stamp};
 
 const READ_ONLY: &str = "an archive is read-only";
@@ -43,6 +45,8 @@ pub struct ArchiveVfs {
     inner: Arc<dyn Vfs>,
     // Most recently used first.
     cache: Mutex<Vec<(PathBuf, Arc<Index>)>>,
+    /// The listings of big `.tar.gz` files kept between runs, when there is a place for them.
+    disk: Option<DiskCache>,
 }
 
 fn read_only<T>() -> Result<T, VfsError> {
@@ -54,7 +58,44 @@ impl ArchiveVfs {
         Self {
             inner,
             cache: Mutex::new(Vec::new()),
+            disk: None,
         }
+    }
+
+    /// The same, keeping the listing of a `.tar.gz` that was slow to read in `disk` for the next
+    /// run. `None` keeps nothing.
+    #[must_use]
+    pub fn with_disk_cache(mut self, disk: Option<DiskCache>) -> Self {
+        self.disk = disk;
+        self
+    }
+
+    /// Reads the table of contents of the archive `mount` names. A `.tar.gz` comes from the disk
+    /// cache when it holds the archive as it is now, and is stored there when reading it was slow.
+    fn read_index(&self, mount: &Mount, stamp: Stamp) -> Result<Index, VfsError> {
+        let failed = |source| VfsError::Io {
+            path: mount.root.clone(),
+            source,
+        };
+        let disk = self.disk.as_ref().filter(|_| mount.format == Format::TarGz);
+        if let Some(disk) = disk
+            && let Some(entries) = disk.load(&mount.archive, stamp)
+            && let Ok(index) = Index::from_entries(entries, stamp)
+        {
+            return Ok(index);
+        }
+        let reader = self.inner.open_read(&mount.archive)?;
+        let Some(disk) = disk else {
+            return Index::build(reader, mount.format, stamp).map_err(failed);
+        };
+        let started = Instant::now();
+        let (index, entries) =
+            Index::build_recording(reader, mount.format, stamp).map_err(failed)?;
+        if disk.worth_storing(started.elapsed()) {
+            // The cache only saves time: one that cannot be written costs the next open its speed.
+            let _ = disk.store(&mount.archive, stamp, &entries);
+        }
+        Ok(index)
     }
 
     /// The table of contents of the archive `mount` names, read now or reused if the file has not
@@ -78,12 +119,7 @@ impl ArchiveVfs {
                 return Ok(Arc::clone(index));
             }
         }
-        let reader = self.inner.open_read(&mount.archive)?;
-        let built = Index::build(reader, mount.format, stamp).map_err(|source| VfsError::Io {
-            path: mount.root.clone(),
-            source,
-        })?;
-        let index = Arc::new(built);
+        let index = Arc::new(self.read_index(mount, stamp)?);
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         cache.retain(|(path, _)| *path != mount.archive);
         cache.insert(0, (mount.archive.clone(), Arc::clone(&index)));
@@ -745,6 +781,83 @@ mod tests {
             }
             assert!(!vfs.exists(&root.join("../evil.txt")), "{name}");
         }
+    }
+
+    #[test]
+    fn a_tar_gz_listing_is_kept_on_disk_and_used_while_the_archive_is_unchanged() {
+        let dir =
+            std::env::temp_dir().join(format!("minuteman-engine-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = || DiskCache::at(dir.clone()).storing_after(Duration::ZERO);
+        let bytes = gzip(&tar_bytes(&[file("f.txt", b"hello")]));
+
+        let (first, mem, root) = vfs_with("a.tar.gz", bytes.clone());
+        let first = first.with_disk_cache(Some(cache()));
+        assert_eq!(names(&first, &root), ["f.txt"]);
+
+        // Rename the file inside the stored listing: a new run that lists the new name read it
+        // from the disk, not from the archive.
+        let stored = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let text = std::fs::read_to_string(&stored).unwrap();
+        std::fs::write(&stored, text.replace("f.txt", "g.txt")).unwrap();
+        let second = ArchiveVfs::new(mem.clone()).with_disk_cache(Some(cache()));
+        assert_eq!(names(&second, &root), ["g.txt"]);
+
+        // The archive changed (a new time), so the stored listing is not used.
+        mem.add_file("/x/a.tar.gz", bytes);
+        let third = ArchiveVfs::new(mem).with_disk_cache(Some(cache()));
+        assert_eq!(names(&third, &root), ["f.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A gigabyte inflated, twice the old byte cap, in a megabyte of gzip. Run with
+    /// `cargo test -p archiver --release -- --ignored --nocapture a_tar_gz_of_a_gigabyte`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn a_tar_gz_of_a_gigabyte_opens_and_then_opens_again_from_disk() {
+        let dir = std::env::temp_dir().join(format!("minuteman-engine-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1 << 30);
+        header.set_mode(0o644);
+        tar.append_data(&mut header, "big.bin", io::repeat(0).take(1 << 30))
+            .unwrap();
+        let bytes = tar.into_inner().unwrap().finish().unwrap();
+
+        let (cold, mem, root) = vfs_with("big.tar.gz", bytes);
+        let cache = || DiskCache::at(dir.clone()).storing_after(Duration::ZERO);
+        let cold = cold.with_disk_cache(Some(cache()));
+        let started = std::time::Instant::now();
+        assert_eq!(names(&cold, &root), ["big.bin"]);
+        println!("cold: {:?}", started.elapsed());
+
+        let warm = ArchiveVfs::new(mem).with_disk_cache(Some(cache()));
+        let started = std::time::Instant::now();
+        assert_eq!(names(&warm, &root), ["big.bin"]);
+        println!("from disk: {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fast_tar_gz_and_other_formats_leave_nothing_on_disk() {
+        let dir =
+            std::env::temp_dir().join(format!("minuteman-engine-fast-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (name, bytes) in every_format(&[file("f.txt", b"hello")]) {
+            let (vfs, _mem, root) = vfs_with(name, bytes);
+            let vfs = vfs.with_disk_cache(Some(DiskCache::at(dir.clone())));
+            assert_eq!(names(&vfs, &root), ["f.txt"], "{name}");
+        }
+        assert!(!dir.exists());
     }
 
     #[test]

@@ -1879,6 +1879,17 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   failed" and remembers nothing, `y` lists the folder and writes `known_hosts`. A password
   prompt was not driven by hand (the test `sshd` takes keys only); the passphrase prompt takes
   the same path and is tested end to end.
+- ✅ **A big `.tar.gz` opens, and opens again at once.** Chosen as COA A with a change to the cap
+  (over keeping gzip checkpoints, B, and a streamed listing on a protocol change, C). The 512 MiB
+  inflate cap is now a 120 second budget (`INDEX_BUDGET`), so an archive of any honest size opens
+  and a decompression bomb still ends, as an error and never a shorter listing. A `.tar.gz` that
+  took a quarter of a second or more to index has its entries kept in the cache folder
+  (`~/.cache/minuteman/archive-index`, private to the user, 32 listings kept) under its path, size
+  and time, and the next run reads them back instead of inflating the file: a 1 GiB archive, past
+  the old cap, opens cold in about 0.3 s and again from the cache in about 0.1 ms (an ignored
+  benchmark test). Follow-ups: the first open of a very large archive is still the full inflate,
+  and opening a file inside one still inflates up to that file each time (a file's bytes are not
+  kept); gzip checkpoints (B) would remove both.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2358,7 +2369,8 @@ draws.
   entry is copied out by extracting it; an encrypted zip lists but its entries cannot be opened
   from inside (extract it, which asks for the password); `rar`, `7z`, `xz`, `zstd` and `bzip2`
   are not served; indexing a large `.tar.gz` no longer freezes the interface (opening it is a
-  background move) but is still read whole, so a very large one is slow to open; a zip link is shown as the file holding its text;
+  background move) and is read whole the first time (a slow one is then kept in the cache
+  folder for the next open); a zip link is shown as the file holding its text;
   the parent column does not highlight the archive's row; inside an archive the owner, link count
   and device are blank, as the format has none.
 - **VFS, follow-ups** – archives are now read and written through `Vfs` and browsed as folders, but
@@ -2788,8 +2800,8 @@ draws.
 4. Next cycle: M7 is done (M7a archives, M7b ssh, M7c the atlas and the wiring diagram as
    plugins; the grid, tiles, details and filmstrip stay in the core). Medium Priority holds the
    follow-ups to remote browsing and the other features listed there. Folder moves, undo and redo,
-   and the folder preview no longer block (see DIARY.md, 2026-10-12 and 2026-10-13). The next
-   biggest gap is a very large `.tar.gz` that is still read whole to open; a prompt for a password
+   and the folder preview no longer block (see DIARY.md, 2026-10-12 and 2026-10-13). A large
+   `.tar.gz` is read whole only the first time now (see Completed); a prompt for a password
    or a new host key is done (see Completed). No folder read is left on the render thread: search hits, the
    finder's reveal, the trash preview and opening an archive file are background work now, and
    `Esc` on a remote move stops it at the connection (see DIARY.md, 2026-10-15).

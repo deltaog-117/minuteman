@@ -28,6 +28,7 @@
 //! flags that stop them, and `run` only moves lines between the host's pipes and the session.
 
 pub mod archive;
+pub mod cache;
 pub mod engine;
 pub mod error;
 pub mod index;
