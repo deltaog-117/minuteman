@@ -27,12 +27,25 @@ pub enum Outcome {
     Stay,
     /// Switch the plugin on this row on if it is off, off if it is on.
     Toggle(usize),
+    /// Ask to delete the program of the plugin on this row; the caller decides whether it may and
+    /// hands the question back with [`PluginsPopup::ask_removal`].
+    Remove(usize),
+    /// The user said yes to the question asked for this row.
+    ConfirmRemove(usize),
     Close,
+}
+
+/// The question waiting for a `y`.
+#[derive(Debug)]
+struct Asking {
+    row: usize,
+    lines: Vec<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct PluginsPopup {
     cursor: usize,
+    asking: Option<Asking>,
 }
 
 impl PluginsPopup {
@@ -45,10 +58,35 @@ impl PluginsPopup {
         self.cursor
     }
 
+    /// Shows `lines` as a question about deleting the program of the plugin on `row`.
+    pub fn ask_removal(&mut self, row: usize, lines: Vec<String>) {
+        self.asking = Some(Asking { row, lines });
+    }
+
+    /// The lines of the question being asked, if one is.
+    pub fn question(&self) -> Option<&[String]> {
+        self.asking.as_ref().map(|asking| asking.lines.as_slice())
+    }
+
     /// `j`/`k`/the arrows move with wraparound over `rows` rows; `Enter`, space, `h` and `l`
-    /// switch the plugin under the cursor; `Esc`/`q` closes the menu. With no rows nothing but
-    /// closing does anything.
+    /// switch the plugin under the cursor; `d` asks to delete its program; `Esc`/`q` closes the
+    /// menu. With no rows nothing but closing does anything. While a question is showing only `y`
+    /// (yes) and `n` or `Esc` (no) are heard, so a key pressed for something else cannot delete.
     pub fn key(&mut self, code: KeyCode, rows: usize) -> Outcome {
+        if let Some(asking) = &self.asking {
+            return match code {
+                KeyCode::Char('y' | 'Y') => {
+                    let row = asking.row;
+                    self.asking = None;
+                    Outcome::ConfirmRemove(row)
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                    self.asking = None;
+                    Outcome::Stay
+                }
+                _ => Outcome::Stay,
+            };
+        }
         match code {
             KeyCode::Esc | KeyCode::Char('q') => Outcome::Close,
             _ if rows == 0 => Outcome::Stay,
@@ -60,6 +98,7 @@ impl PluginsPopup {
                 self.cursor = (self.cursor + rows - 1) % rows;
                 Outcome::Stay
             }
+            KeyCode::Char('d') => Outcome::Remove(self.cursor.min(rows - 1)),
             KeyCode::Enter | KeyCode::Char(' ' | 'h' | 'l') | KeyCode::Left | KeyCode::Right => {
                 Outcome::Toggle(self.cursor.min(rows - 1))
             }
@@ -105,6 +144,37 @@ mod tests {
         assert_eq!(popup.key(KeyCode::Char('q'), 0), Outcome::Close);
         assert_eq!(popup.key(KeyCode::Enter, 0), Outcome::Stay);
         assert_eq!(popup.key(KeyCode::Char('z'), 3), Outcome::Stay);
+    }
+
+    #[test]
+    fn d_asks_and_only_y_confirms_while_the_question_shows() {
+        let mut popup = PluginsPopup::new();
+        popup.key(KeyCode::Down, 4);
+        assert_eq!(popup.key(KeyCode::Char('d'), 4), Outcome::Remove(1));
+        popup.ask_removal(1, vec!["Delete?".into()]);
+        assert!(popup.question().is_some());
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Char('q'),
+            KeyCode::Char('d'),
+        ] {
+            assert_eq!(popup.key(code, 4), Outcome::Stay);
+            assert!(popup.question().is_some());
+        }
+        assert_eq!(popup.key(KeyCode::Char('y'), 4), Outcome::ConfirmRemove(1));
+        assert!(popup.question().is_none());
+    }
+
+    #[test]
+    fn n_and_esc_drop_the_question_without_closing_the_menu() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut popup = PluginsPopup::new();
+            popup.ask_removal(0, vec!["Delete?".into()]);
+            assert_eq!(popup.key(code, 2), Outcome::Stay);
+            assert!(popup.question().is_none());
+            assert_eq!(popup.key(KeyCode::Esc, 2), Outcome::Close);
+        }
     }
 
     proptest! {

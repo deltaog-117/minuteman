@@ -26,6 +26,7 @@ declare -A allowed=(
   [crates/portal_backend/src/terminal.rs]="looks for a terminal program on this machine's PATH"
   [plugins/hud/src/figures.rs]="reads this machine's /proc"
   [plugins/git/src/status.rs]="finds a repository for the git program, which runs on the local disk"
+  [crates/tui/src/plugin_program.rs]="finds and deletes a bundled plugin's program on this machine's disk, which is not a path a Vfs serves"
   [crates/tui/src/open.rs]="finds programs to launch on this machine's PATH"
   [crates/tui/src/mime_type.rs]="the shared MIME database, and sniffing a local file to pick a desktop program for it"
   [crates/tui/src/associations.rs]="the desktop's application and MIME-association files"

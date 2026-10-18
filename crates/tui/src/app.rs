@@ -63,7 +63,8 @@ use crate::marked_size::{MarkedSize, Total};
 use crate::nav_job::{NavJob, NavPoll};
 use crate::open;
 use crate::picker_popup::PickerPopup;
-use crate::plugin_roster::{self, ConfigSwitches};
+use crate::plugin_program::{self, Program};
+use crate::plugin_roster::{self, ConfigSwitches, Origin};
 use crate::plugin_views::Slots;
 use crate::remote_open;
 use crate::search_job::{SearchJob, SearchState};
@@ -1075,6 +1076,69 @@ impl App {
                 format!("plugin {name}: switched {verb}, but could not save to local.toml: {e}")
             }
         });
+    }
+
+    /// The program behind row `index`, when the menu may delete it: a bundled plugin's, found,
+    /// a plain file of the running user's. Otherwise the reason, without the plugin's name.
+    fn removable_program(&self, index: usize) -> Result<Program, String> {
+        let entry = self.plugin_roster.get(index).ok_or("no such plugin")?;
+        if entry.origin != Origin::Bundled {
+            return Err("only a bundled plugin's program is deleted from here".to_string());
+        }
+        let spec = entry.spec.as_ref().ok_or("its program is not installed")?;
+        plugin_program::inspect(&entry.name, &spec.command)
+    }
+
+    /// The lines that ask whether to delete the program of the plugin on row `index`, or `None`
+    /// with the reason on the status line when the menu may not.
+    pub fn program_removal_question(&mut self, index: usize) -> Option<Vec<String>> {
+        let name = self.plugin_roster.get(index)?.name.clone();
+        match self.removable_program(index) {
+            Ok(program) => Some(program.question(&name)),
+            Err(why) => {
+                self.status = Some(format!("plugin {name}: {why}"));
+                None
+            }
+        }
+    }
+
+    /// Deletes the program of the plugin on row `index` after the user said yes: the file is
+    /// checked again, the running plugin is stopped first, and the row becomes one whose program
+    /// is not installed. The status line says what was deleted and how to get it back.
+    pub fn delete_plugin_program(&mut self, index: usize) {
+        let Some(name) = self
+            .plugin_roster
+            .get(index)
+            .map(|entry| entry.name.clone())
+        else {
+            return;
+        };
+        let program = match self.removable_program(index) {
+            Ok(program) => program,
+            Err(why) => {
+                self.status = Some(format!("plugin {name}: {why}"));
+                return;
+            }
+        };
+        self.plugins.remove(&name);
+        if let Err(e) = program.remove() {
+            self.status = Some(format!(
+                "plugin {name}: could not delete {}: {e}",
+                program.path.display()
+            ));
+            return;
+        }
+        let entry = &mut self.plugin_roster[index];
+        entry.enabled = false;
+        entry.spec = None;
+        entry
+            .locked
+            .get_or_insert_with(|| "not installed".to_string());
+        self.status = Some(format!(
+            "plugin {name}: deleted {}; to get it back: {}",
+            program.path.display(),
+            program.reinstall
+        ));
     }
 
     /// What to say when nothing answers `action`: that the plugin is switched off, if one the

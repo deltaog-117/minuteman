@@ -2304,8 +2304,11 @@ draws.
   permissions and there is no sandbox yet. Done so far: the menu (`space p`) lists every plugin and
   switches any of them on and off live, keeping the choice in `local.toml`, and that includes `git`
   and `hud` (`system_hud` and `git_status = true` only set whether they start on; `git_status =
-  false` is a veto the menu cannot lift); still to do, in this order: deleting a bundled program,
-  keeping a user's own `[[plugin]]` tables in `local.toml` and removing one, then the add form.
+  false` is a veto the menu cannot lift), and `d` deletes a bundled plugin's program after a
+  confirmation naming the file, its size and the reinstall command (only a plain file the user
+  owns; a link, another user's file and a plugin of your own are refused); still to do, in this
+  order: keeping a user's own `[[plugin]]` tables in `local.toml` and removing one, then the add
+  form.
 - **Easier plugin authoring and adding** – a `plugin.toml` manifest beside a plugin (name, command,
   keys, `provides`, API version) so adding one is "point at a path" and the form fills itself in;
   a drop-in `~/.config/minuteman/plugins/<name>/` directory found without a config edit;

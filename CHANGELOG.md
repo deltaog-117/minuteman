@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The plugin menu can delete a bundled plugin's program: `d` on a row asks, naming the file, its
+  size and the command that installs it again (`cargo install --path plugins/<name>`), and only `y`
+  deletes it; `n` or `Esc` keeps it. It stops the running plugin first and leaves the row as "not
+  installed". Only a plain file that you own is deleted, so a program in `/usr/bin` from a package
+  manager, a link, and a plugin of your own are refused with the reason. Author: deltaog-117.
 - A plugin menu: `space` then `p` lists every plugin, the ones you configured first and the
   bundled ones after, and `Enter` (or `space`, `h`, `l`) switches the one under the cursor off or
   on at once, stopping or starting its process. The switched-off names are kept as

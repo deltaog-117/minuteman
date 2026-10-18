@@ -106,6 +106,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-16 | Answering `ssh` When It Asks | A plugin -> host `ask` request and a modal, with `ssh` run by the plugin without batch mode and `mman-ssh` itself as `SSH_ASKPASS` (COA A, route A1); `-o` options only (B) and a hand-written `known_hosts` with a pty password (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, First Slice | A core popup (`space p`) that switches any plugin on and off live and keeps the switched-off names in `local.toml` (COA B, step one); installing and fetching plugins from the menu rejected (COA C) | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, `git` and `hud` | Four small cycles in a set order (COA A); the menu switches `git` and `hud` through `local.toml`, with `git_status = false` kept as a veto; one cycle for all of it (C) and own plugins first (B) not taken | ✅ Confirmed |
+| 2026-10-18 | Plugin Menu, Deleting a Program | A `d` key and an inline `y`/`n` question naming the file, its size and the reinstall command; only a plain file of the running user (COA A); moving it to the trash (B) and printing the commands only (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -8160,6 +8161,40 @@ through a pty, so the end-to-end switching of `hud` is covered by the unit tests
 
 **Left open.** Deleting a bundled program, a user's own plugins in `local.toml` and their
 removal, and the add form.
+
+---
+
+## 2026-10-18 — Deleting a bundled plugin's program
+
+**Decision.** Three ways to delete a bundled program from the menu: `d` with a confirmation that
+names the file, its size and the reinstall command (A), the same but moving the file to the trash
+(B), or only printing the `rm` and install commands (C). Chosen: A, as the roadmap describes it.
+The ownership check and the confirmation are the safeguards; B would leave a program in the trash
+that cannot be read back on macOS, and C does nothing the user cannot already do.
+
+**What changed.** `d` on a row of the plugin menu asks inline, replacing the hint line with the
+question; only `y` deletes, and `n` or `Esc` drops the question without closing the menu, so a key
+pressed for something else cannot delete. `plugin_program` finds the file (a path with a `/` as it
+is, otherwise the first match on `PATH`), refuses anything that is not a plain file owned by the
+running user, and names the reinstall command from the plugin's name. A link is refused rather
+than followed, and `/usr/bin` programs from a package manager are refused because root owns them.
+The file is checked again at the moment of `y`, the running plugin is stopped first, and the row
+becomes one whose program is not installed. A plugin of your own is refused: its program is not
+Minuteman's to delete.
+
+**Trade-offs.** The reinstall command assumes a plugin's folder has the plugin's name, which is
+true of all eleven bundled ones. Taking the user id needs one `unsafe` call to `geteuid`, the
+first in the interface crate; the alternative, reading the owner of `/proc/self`, does not exist
+on macOS. `scripts/vfs-gate` lists `plugin_program.rs` as a file that is local by nature, with the
+reason, since a program on this machine's disk is not a path a `Vfs` serves.
+
+**Verification.** `scripts/check` passes. New tests: the rule (regular file and owner, as a
+property), a name found on a path and a path taken as it is, a file of the user's named and
+deleted while its neighbour stays, a file of another user's and a link both refused and left, and
+the popup (`d` asks, only `y` confirms, `n` and `Esc` keep the menu open). Not driven by hand in
+the real `mman`: the inline question was not seen in a terminal, so its layout is untested.
+
+**Left open.** A user's own plugins in `local.toml` and their removal, and the add form.
 
 ---
 

@@ -779,7 +779,10 @@ pub fn render_plugins(
     config: &Config,
 ) {
     let theme = &config.theme;
-    let area = panel_area(frame.area(), rows.len().max(1));
+    // A question replaces the hint line and needs the lines of the question beyond it.
+    let question = popup.question();
+    let extra = question.map_or(0, |lines| lines.len().saturating_sub(1));
+    let area = panel_area(frame.area(), rows.len().max(1) + extra);
     style::cast_shadow(frame.buffer_mut(), area, config);
     frame.render_widget(Clear, area);
     let block = style::themed_block(config, "plugins", true);
@@ -830,10 +833,23 @@ pub fn render_plugins(
         ])
     }));
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "j/k moves, Enter switches on or off, Esc closes — saved to local.toml",
-        dim,
-    ));
+    match question {
+        Some(asked) => lines.extend(asked.iter().enumerate().map(|(i, text)| {
+            let width = usize::from(inner.width);
+            Line::styled(
+                if i == 1 {
+                    fit_tail(text, width)
+                } else {
+                    fit_width(text, width)
+                },
+                if i == 0 { name_style } else { value_style },
+            )
+        })),
+        None => lines.push(Line::styled(
+            "j/k moves, Enter switches on or off, d deletes the program, Esc closes",
+            dim,
+        )),
+    }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 

@@ -57,6 +57,7 @@ mod overlay_view;
 mod picker_popup;
 mod picker_view;
 mod plugin_action;
+mod plugin_program;
 mod plugin_roster;
 mod plugin_views;
 mod plugins_popup;
@@ -3005,6 +3006,12 @@ fn run(
                         PluginsOutcome::Toggle(row) => {
                             app.toggle_plugin(row, browser.current_dir());
                         }
+                        PluginsOutcome::Remove(row) => {
+                            if let Some(lines) = app.program_removal_question(row) {
+                                popup.ask_removal(row, lines);
+                            }
+                        }
+                        PluginsOutcome::ConfirmRemove(row) => app.delete_plugin_program(row),
                     }
                     continue;
                 }
