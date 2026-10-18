@@ -86,6 +86,20 @@ pub fn choose(path: &Path, is_dir: bool) -> Choice {
     }
 }
 
+/// Decides what `Q` chooses while the browser is choosing a plugin folder: the folder under the
+/// cursor, or else the one being browsed. Unlike `Enter` it never goes into a folder, so a folder
+/// with no manifest is refused with the reason.
+pub fn choose_here(cursor: Option<(&Path, bool)>, dir: &Path) -> Choice {
+    let target = match cursor {
+        Some((path, true)) => path,
+        _ => dir,
+    };
+    match DropIn::load(target) {
+        Ok(found) => Choice::Chosen(found),
+        Err(why) => Choice::Refused(format!("{}: {why}", target.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +194,29 @@ mod tests {
             Choice::Refused(why) if why.contains("bad")
         ));
         assert_eq!(choose(&tmp.path().join("file"), false), Choice::NotAFolder);
+    }
+
+    #[test]
+    fn q_chooses_the_folder_under_the_cursor_or_else_the_one_browsed() {
+        let tmp = Scratch::new();
+        plugin(&tmp.path().join("good"), "good");
+        fs::create_dir(tmp.path().join("plain")).expect("create plain folder");
+        let good = tmp.path().join("good");
+        let plain = tmp.path().join("plain");
+        assert!(matches!(
+            choose_here(Some((&good, true)), tmp.path()),
+            Choice::Chosen(found) if found.spec.name == "good"
+        ));
+        assert!(matches!(
+            choose_here(Some((&plain, true)), tmp.path()),
+            Choice::Refused(why) if why.contains("plain")
+        ));
+        let file = good.join("notes");
+        assert!(matches!(
+            choose_here(Some((&file, false)), &good),
+            Choice::Chosen(found) if found.spec.name == "good"
+        ));
+        assert!(matches!(choose_here(None, &plain), Choice::Refused(_)));
     }
 
     #[test]

@@ -3032,6 +3032,22 @@ fn run(
                                 }
                             }
                         }
+                        KeyCode::Char('Q') => {
+                            let cursor = browser
+                                .selected_entry()
+                                .map(|entry| (entry.path.as_path(), entry.is_dir));
+                            match plugin_source::choose_here(cursor, browser.current_dir()) {
+                                plugin_source::Choice::Chosen(found) => {
+                                    popup.pick_done(Ok(app.candidate(found, &config.keys)));
+                                }
+                                plugin_source::Choice::Refused(why) => {
+                                    popup.pick_done(Err(why));
+                                }
+                                plugin_source::Choice::Enter
+                                | plugin_source::Choice::NotAFolder => {}
+                            }
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -3046,7 +3062,8 @@ fn run(
                         }
                         PluginsOutcome::Browse => {
                             app.status = Some(
-                                "choose a plugin folder: Enter on it picks it, Esc cancels".into(),
+                                "choose a plugin folder: Enter or Q on it picks it, Esc cancels"
+                                    .into(),
                             );
                         }
                         PluginsOutcome::Test(spec) => {

@@ -8415,6 +8415,20 @@ on `gem` opened its card, and `Esc` returned to the list.
 **Left open.** A handshake check in Start and test; `plugin_dirs` in `config.toml` to scan folders
 the user names; a double-click that chooses; `mman plugin check` and `add`.
 
+### Plugin Folder Picker: `Q` Chooses the Folder You Are In
+
+**Problem.** Browsing for a plugin folder chose only with `Enter`, and `Enter` on a folder without
+a `plugin.toml` went into it. Standing inside the plugin folder, nothing chose it, and a folder with
+no manifest never said why it was not a plugin.
+
+**Decision.** `Q`, the key the `--pick` folder chooser already uses, chooses the folder under the
+cursor, or the browsed folder when the cursor is on a file (`plugin_source::choose_here`). It never
+goes into a folder, so a folder with no readable manifest is refused with the reason.
+
+**Verification.** `scripts/check` passes. New test: `Q` takes a plugin folder under the cursor,
+refuses a plain one by name, takes the browsed plugin folder from a file, and refuses with nothing
+under the cursor.
+
 ---
 
 ---

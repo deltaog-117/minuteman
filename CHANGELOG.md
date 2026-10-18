@@ -529,6 +529,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Author: deltaog-117.
 
 ### Fixed
+- Browsing for a plugin folder could not choose a folder that has no `plugin.toml` in a way that
+  explained itself, and could never choose the folder being browsed: `Enter` only went into it.
+  `Q` now chooses the folder under the cursor, or the browsed folder when the cursor is on a file,
+  and a folder with no readable manifest says why. Author: deltaog-117.
 - `plugin_host`: a file a plugin opened for a request whose caller had stopped waiting (it timed
   out) was never closed, holding one of the plugin's 32 handles for good. It is now closed when the
   late reply arrives. Author: deltaog-117.
