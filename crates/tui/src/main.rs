@@ -856,6 +856,7 @@ fn main() -> Result<()> {
         .with_preview_hooks(config.preview_hooks.clone())
         .with_interactive_commands(config.interactive_commands.clone())
         .with_open_config(config.open_rules.clone(), config.open_with.clone())
+        .with_menu_plugins(config.local_plugin_names.clone())
         .with_plugins(config.plugins.clone(), browser.current_dir());
     if let Some(remote) = remote_start {
         let plan = browser.plan_goto(&remote);
@@ -975,6 +976,7 @@ fn persist_local(
         view: None,
         disabled_plugins: None,
         enabled_plugins: None,
+        plugin: None,
     };
     if let Err(e) = Config::save_local(&local) {
         app.status = Some(format!("could not save to local.toml: {e}"));
@@ -3007,11 +3009,14 @@ fn run(
                             app.toggle_plugin(row, browser.current_dir());
                         }
                         PluginsOutcome::Remove(row) => {
-                            if let Some(lines) = app.program_removal_question(row) {
+                            if let Some(lines) = app.removal_question(row) {
                                 popup.ask_removal(row, lines);
                             }
                         }
-                        PluginsOutcome::ConfirmRemove(row) => app.delete_plugin_program(row),
+                        PluginsOutcome::ConfirmRemove(row) => {
+                            app.confirm_removal(row);
+                            popup.clamp(app.plugin_rows().len());
+                        }
                     }
                     continue;
                 }

@@ -106,6 +106,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-16 | Answering `ssh` When It Asks | A plugin -> host `ask` request and a modal, with `ssh` run by the plugin without batch mode and `mman-ssh` itself as `SSH_ASKPASS` (COA A, route A1); `-o` options only (B) and a hand-written `known_hosts` with a pty password (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, First Slice | A core popup (`space p`) that switches any plugin on and off live and keeps the switched-off names in `local.toml` (COA B, step one); installing and fetching plugins from the menu rejected (COA C) | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, `git` and `hud` | Four small cycles in a set order (COA A); the menu switches `git` and `hud` through `local.toml`, with `git_status = false` kept as a veto; one cycle for all of it (C) and own plugins first (B) not taken | ✅ Confirmed |
+| 2026-10-18 | Plugin Menu, Own Plugins in `local.toml` | `[[plugin]]` tables in `local.toml` merged after `config.toml`'s, `d` removes them with a question; one approach, no COAs asked (the roadmap fixed it) | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, Deleting a Program | A `d` key and an inline `y`/`n` question naming the file, its size and the reinstall command; only a plain file of the running user (COA A); moving it to the trash (B) and printing the commands only (C) not taken | ✅ Confirmed |
 
 ---
@@ -8195,6 +8196,43 @@ the popup (`d` asks, only `y` confirms, `n` and `Esc` keep the menu open). Not d
 the real `mman`: the inline question was not seen in a terminal, so its layout is untested.
 
 **Left open.** A user's own plugins in `local.toml` and their removal, and the add form.
+
+---
+
+## 2026-10-18 — A user's own plugins in `local.toml`, and removing one
+
+**Decision.** The roadmap fixed the shape (the menu writes only `local.toml`, never the
+hand-written `config.toml`), so no COAs were asked. `RawLocal` gained `plugin: Option<Vec<
+RawPluginSpec>>`, kept the way `disabled_plugins` is: `None` means "keep what is on disk", so the
+appearance and settings popups, which build a `RawLocal` from scratch, cannot erase it.
+
+**What changed.** `RawPluginSpec` is now public and serializable (empty lists skipped, so a saved
+table reads like a hand-written one). `Config.plugins` is `config.toml`'s tables followed by
+`local.toml`'s; `Config.local_plugin_names` says which came from where. A name already used
+(by `config.toml`, or earlier in `local.toml`, or empty) is dropped from `local.toml`, since the
+menu works on names and a hand-written entry must win. The roster's `Entry` gained
+`kept_by_menu`. `d` on a row now means "remove": a bundled row deletes its program as before, a
+`local.toml` row asks "Remove plugin X from the menu?" and `y` stops it, drops its row, and
+calls `Config::forget_local_plugin`, which also takes the name out of both switch lists; a
+`config.toml` row is refused with the reason. The program the plugin runs is never touched. The
+cursor is clamped after a removal so it cannot sit on a row that no longer exists.
+
+**Trade-offs.** One key for two kinds of removal keeps the menu's hint line short, at the cost of
+the question text being what tells them apart. The file rewrite goes through the existing
+`save_local` (whole-file re-serialize, which the file's own doc already accepts as it is never
+hand-edited), so `local.toml` comments would be lost, as before.
+
+**Verification.** `scripts/check` passes (one `vfs_remote` ssh test failed once with a refused
+key and passed on the rerun and in the full run; it touches nothing changed here). New tests: a
+table round-trips and lands after `config.toml`'s, a duplicate or empty name is not taken, forgetting
+drops the table and its names and nothing else (the pure `without_plugin`, so the test never writes
+the real config), the roster marks only `local.toml`'s plugins, and the cursor clamps. Driven in
+the real `mman` through a PTY with an isolated `XDG_CONFIG_HOME`: three plugins (one in
+`config.toml`, two in `local.toml`) listed; `d` showed the question, `n` kept it, `y` removed the
+row and printed "removed"; `local.toml` then held the other plugin and `disabled_plugins`
+untouched; `d` on the `config.toml` plugin said "declared in config.toml; remove it there".
+
+**Left open.** The add form, which will write the same tables.
 
 ---
 

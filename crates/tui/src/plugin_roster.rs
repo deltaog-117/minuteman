@@ -63,6 +63,9 @@ pub struct Entry {
     /// Whether it starts on when the menu has not touched it; decides which list of `local.toml`
     /// remembers a switch.
     pub default_on: bool,
+    /// Whether `local.toml` holds the plugin's table, which makes it the one kind the menu can
+    /// remove; a `[[plugin]]` in the hand-written `config.toml` is the user's to edit there.
+    pub kept_by_menu: bool,
 }
 
 impl Entry {
@@ -81,13 +84,15 @@ pub struct ConfigSwitches {
 }
 
 /// Every plugin the menu lists: the user's `[[plugin]]` tables in order, then the bundled ones
-/// they have not replaced. `disabled` and `enabled` are the lists `local.toml` keeps.
+/// they have not replaced. `disabled` and `enabled` are the lists `local.toml` keeps, and
+/// `kept_by_menu` the names of the `configured` plugins that `local.toml` holds.
 pub fn build(
     configured: &[PluginSpec],
     bundled: Vec<Listed>,
     switches: ConfigSwitches,
     disabled: &[String],
     enabled: &[String],
+    kept_by_menu: &[String],
 ) -> Vec<Entry> {
     let yours = configured.iter().map(|spec| Entry {
         name: spec.name.clone(),
@@ -97,6 +102,7 @@ pub fn build(
         locked: None,
         enabled: !disabled.contains(&spec.name),
         default_on: true,
+        kept_by_menu: kept_by_menu.contains(&spec.name),
     });
     let shipped = bundled.into_iter().map(|listed| {
         let locked = locked_reason(&listed, switches);
@@ -113,6 +119,7 @@ pub fn build(
                     named(enabled)
                 },
             default_on,
+            kept_by_menu: false,
             spec: listed.spec,
             locked,
         }
@@ -193,12 +200,27 @@ mod tests {
             ALL_ON,
             &[],
             &[],
+            &[],
         );
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["mine", "finder"]);
         assert_eq!(entries[0].origin, Origin::Yours);
         assert_eq!(entries[1].origin, Origin::Bundled);
         assert!(entries.iter().all(|e| e.enabled && e.can_switch()));
+    }
+
+    #[test]
+    fn only_the_plugins_local_toml_holds_are_kept_by_the_menu() {
+        let entries = build(
+            &[spec("hand"), spec("menu")],
+            vec![listed("finder", true)],
+            ALL_ON,
+            &[],
+            &[],
+            &["menu".to_string(), "finder".to_string()],
+        );
+        let kept: Vec<bool> = entries.iter().map(|e| e.kept_by_menu).collect();
+        assert_eq!(kept, [false, true, false]);
     }
 
     #[test]
@@ -209,13 +231,14 @@ mod tests {
             ALL_ON,
             &["mine".to_string(), "finder".to_string()],
             &[],
+            &[],
         );
         assert!(entries.iter().all(|e| !e.enabled && e.can_switch()));
     }
 
     #[test]
     fn a_bundled_plugin_that_is_not_installed_is_off_and_cannot_be_switched() {
-        let entries = build(&[], vec![listed("finder", false)], ALL_ON, &[], &[]);
+        let entries = build(&[], vec![listed("finder", false)], ALL_ON, &[], &[], &[]);
         assert!(!entries[0].enabled);
         assert_eq!(entries[0].locked.as_deref(), Some("not installed"));
         assert!(!entries[0].can_switch());
@@ -233,11 +256,12 @@ mod tests {
             off,
             &[],
             &["git".to_string()],
+            &[],
         );
         assert!(!entries[0].enabled && !entries[0].can_switch());
         assert!(entries[0].locked.as_deref().unwrap().contains("git_status"));
 
-        let on = build(&[], vec![listed("git", true)], ALL_ON, &[], &[]);
+        let on = build(&[], vec![listed("git", true)], ALL_ON, &[], &[], &[]);
         assert!(on[0].enabled && on[0].can_switch() && on[0].default_on);
     }
 
@@ -247,7 +271,7 @@ mod tests {
             git_status: true,
             system_hud: false,
         };
-        let fresh = build(&[], vec![listed("hud", true)], off, &[], &[]);
+        let fresh = build(&[], vec![listed("hud", true)], off, &[], &[], &[]);
         assert!(!fresh[0].enabled && fresh[0].can_switch() && !fresh[0].default_on);
 
         let chosen = build(
@@ -256,6 +280,7 @@ mod tests {
             off,
             &[],
             &["hud".to_string()],
+            &[],
         );
         assert!(chosen[0].enabled);
 
@@ -266,19 +291,21 @@ mod tests {
             off,
             &["hud".to_string()],
             &[],
+            &[],
         );
         assert!(!stray[0].enabled);
     }
 
     #[test]
     fn system_hud_true_starts_them_on_and_the_menu_can_switch_them_off() {
-        let on = build(&[], vec![listed("hud", true)], ALL_ON, &[], &[]);
+        let on = build(&[], vec![listed("hud", true)], ALL_ON, &[], &[], &[]);
         assert!(on[0].enabled && on[0].default_on);
         let off = build(
             &[],
             vec![listed("hud", true)],
             ALL_ON,
             &["hud".to_string()],
+            &[],
             &[],
         );
         assert!(!off[0].enabled && off[0].can_switch());

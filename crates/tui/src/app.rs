@@ -607,6 +607,8 @@ pub struct App {
     plugin_disabled: Vec<String>,
     /// The plugins the menu switched on although they start off (`local.toml`).
     plugin_enabled: Vec<String>,
+    /// The `[[plugin]]` names `local.toml` holds, which the plugin menu may remove.
+    plugin_menu_kept: Vec<String>,
     /// Every plugin the plugin menu lists, with whether it is on; see `plugin_roster`.
     plugin_roster: Vec<plugin_roster::Entry>,
     /// The `[[preview_hook]]` tables, of which the ones that extract text go to the bundled
@@ -679,6 +681,7 @@ impl App {
             system_hud: false,
             plugin_disabled: Vec::new(),
             plugin_enabled: Vec::new(),
+            plugin_menu_kept: Vec::new(),
             plugin_roster: Vec::new(),
             preview_hooks: Vec::new(),
             handle,
@@ -958,6 +961,7 @@ impl App {
             },
             &self.plugin_disabled,
             &self.plugin_enabled,
+            &self.plugin_menu_kept,
         );
         let to_start: Vec<PluginSpec> = self
             .plugin_roster
@@ -978,6 +982,13 @@ impl App {
     pub fn with_plugin_switches(mut self, disabled: Vec<String>, enabled: Vec<String>) -> Self {
         self.plugin_disabled = disabled;
         self.plugin_enabled = enabled;
+        self
+    }
+
+    /// Sets the names of the plugins `local.toml` holds, the ones the plugin menu may remove.
+    /// Call before `with_plugins`.
+    pub fn with_menu_plugins(mut self, names: Vec<String>) -> Self {
+        self.plugin_menu_kept = names;
         self
     }
 
@@ -1089,10 +1100,30 @@ impl App {
         plugin_program::inspect(&entry.name, &spec.command)
     }
 
-    /// The lines that ask whether to delete the program of the plugin on row `index`, or `None`
-    /// with the reason on the status line when the menu may not.
-    pub fn program_removal_question(&mut self, index: usize) -> Option<Vec<String>> {
-        let name = self.plugin_roster.get(index)?.name.clone();
+    /// The lines that ask whether to remove what `d` means on row `index` — the program of a
+    /// bundled plugin, or the entry of one the menu keeps in `local.toml` — or `None` with the
+    /// reason on the status line when the menu may not remove either.
+    pub fn removal_question(&mut self, index: usize) -> Option<Vec<String>> {
+        let entry = self.plugin_roster.get(index)?;
+        let name = entry.name.clone();
+        if entry.origin == Origin::Yours {
+            return match (&entry.spec, entry.kept_by_menu) {
+                (Some(spec), true) => Some(vec![
+                    format!("Remove plugin {name} from the menu?"),
+                    format!("{} {}", spec.command, spec.args.join(" "))
+                        .trim_end()
+                        .to_string(),
+                    "Its table is deleted from local.toml; the program itself stays".to_string(),
+                    "y removes it, n or Esc keeps it".to_string(),
+                ]),
+                _ => {
+                    self.status = Some(format!(
+                        "plugin {name}: declared in config.toml; remove it there"
+                    ));
+                    None
+                }
+            };
+        }
         match self.removable_program(index) {
             Ok(program) => Some(program.question(&name)),
             Err(why) => {
@@ -1100,6 +1131,39 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Carries out the removal the user said yes to on row `index`: forgets a plugin the menu
+    /// keeps, or deletes a bundled plugin's program.
+    pub fn confirm_removal(&mut self, index: usize) {
+        match self.plugin_roster.get(index) {
+            Some(entry) if entry.origin == Origin::Yours => self.forget_plugin(index),
+            _ => self.delete_plugin_program(index),
+        }
+    }
+
+    /// Stops the plugin on row `index`, drops its table from `local.toml` and its row from the
+    /// menu. Refused for a plugin the menu does not keep: `config.toml` is the user's to edit.
+    fn forget_plugin(&mut self, index: usize) {
+        let Some(entry) = self.plugin_roster.get(index) else {
+            return;
+        };
+        let name = entry.name.clone();
+        if !entry.kept_by_menu {
+            self.status = Some(format!(
+                "plugin {name}: declared in config.toml; remove it there"
+            ));
+            return;
+        }
+        self.plugins.remove(&name);
+        self.plugin_roster.remove(index);
+        self.plugin_menu_kept.retain(|kept| *kept != name);
+        self.plugin_disabled.retain(|kept| *kept != name);
+        self.plugin_enabled.retain(|kept| *kept != name);
+        self.status = Some(match Config::forget_local_plugin(&name) {
+            Ok(_) => format!("plugin {name}: removed"),
+            Err(e) => format!("plugin {name}: removed, but could not save to local.toml: {e}"),
+        });
     }
 
     /// Deletes the program of the plugin on row `index` after the user said yes: the file is

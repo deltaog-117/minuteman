@@ -2306,9 +2306,10 @@ draws.
   and `hud` (`system_hud` and `git_status = true` only set whether they start on; `git_status =
   false` is a veto the menu cannot lift), and `d` deletes a bundled plugin's program after a
   confirmation naming the file, its size and the reinstall command (only a plain file the user
-  owns; a link, another user's file and a plugin of your own are refused); still to do, in this
-  order: keeping a user's own `[[plugin]]` tables in `local.toml` and removing one, then the add
-  form.
+  owns; a link, another user's file and a plugin of your own are refused), and `[[plugin]]`
+  tables in `local.toml` are started with the others and removed with `d` (a question, then the
+  table and its switch names are deleted; a plugin declared in `config.toml` is refused); still
+  to do: the add form.
 - **Easier plugin authoring and adding** – a `plugin.toml` manifest beside a plugin (name, command,
   keys, `provides`, API version) so adding one is "point at a path" and the form fills itself in;
   a drop-in `~/.config/minuteman/plugins/<name>/` directory found without a config edit;

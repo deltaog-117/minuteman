@@ -32,7 +32,7 @@ pub use appearance::{Font, Mods, RawFont, RawStyles, STYLE_ELEMENTS, Styles};
 pub use color::{Hsv, hex_to_hsv};
 pub use config::{
     Config, CustomTheme, HookKind, OpenRule, OpenWith, PluginSpec, PreviewHook, RangeModifier,
-    RawLocal,
+    RawLocal, RawPluginSpec,
 };
 pub use keymap::{Action, KeyMap};
 pub use palette::TerminalPalette;

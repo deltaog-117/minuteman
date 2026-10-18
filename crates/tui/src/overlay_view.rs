@@ -846,7 +846,7 @@ pub fn render_plugins(
             )
         })),
         None => lines.push(Line::styled(
-            "j/k moves, Enter switches on or off, d deletes the program, Esc closes",
+            "j/k moves, Enter switches on or off, d removes, Esc closes",
             dim,
         )),
     }

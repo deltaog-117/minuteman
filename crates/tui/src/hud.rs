@@ -1092,6 +1092,7 @@ mod tests {
             local_bookmarks: std::collections::BTreeMap::new(),
             disabled_plugins: Vec::new(),
             enabled_plugins: Vec::new(),
+            local_plugin_names: Vec::new(),
         }
     }
 

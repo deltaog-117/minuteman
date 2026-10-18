@@ -105,21 +105,28 @@ pub enum HookKind {
 /// `on_key`, speaking the `plugin_host` crate's line-delimited JSON-RPC protocol over its own stdio.
 /// Any language that can read a line and print one works — no compile step, no per-language host
 /// bindings.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(default)]
-struct RawPluginSpec {
-    name: String,
-    command: String,
-    args: Vec<String>,
+pub struct RawPluginSpec {
+    pub name: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     /// One key string (`on_key = "b"`, how it was first written) or a list of them.
-    #[serde(deserialize_with = "one_or_many")]
-    on_key: Vec<String>,
-    commands: Vec<String>,
+    #[serde(
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub on_key: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
     /// The events (`dir_changed`, `selection_changed`, `job_finished`) the plugin wants to hear
     /// about as they happen, on top of its keys and commands.
-    events: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
     /// The interface's actions (`find`, ...) this plugin answers in the interface's place.
-    provides: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +242,45 @@ fn default_interactive_commands() -> Vec<String> {
         .collect()
 }
 
+/// Every plugin to run: those of `config.toml` first, then the ones of `local.toml` whose names
+/// they do not already use (a hand-written entry wins, and the menu could not remove it anyway),
+/// and the names that came from `local.toml`. A name used twice inside `local.toml` keeps its
+/// first entry, since the menu works on names.
+fn merge_plugins(
+    config: Vec<RawPluginSpec>,
+    local: Option<Vec<RawPluginSpec>>,
+) -> (Vec<PluginSpec>, Vec<String>) {
+    let mut taken: Vec<String> = config.iter().map(|spec| spec.name.clone()).collect();
+    let mut plugins: Vec<PluginSpec> = config.into_iter().map(PluginSpec::from).collect();
+    let mut local_names = Vec::new();
+    for spec in local.unwrap_or_default() {
+        if spec.name.is_empty() || taken.contains(&spec.name) {
+            continue;
+        }
+        taken.push(spec.name.clone());
+        local_names.push(spec.name.clone());
+        plugins.push(spec.into());
+    }
+    (plugins, local_names)
+}
+
+/// `local` without the plugin called `name`, and without that name in either switch list, plus
+/// whether the plugin was there.
+fn without_plugin(mut local: RawLocal, name: &str) -> (RawLocal, bool) {
+    let mut kept = local.plugin.take().unwrap_or_default();
+    let before = kept.len();
+    kept.retain(|spec| spec.name != name);
+    let found = kept.len() != before;
+    local.plugin = Some(kept);
+    for names in [&mut local.disabled_plugins, &mut local.enabled_plugins]
+        .into_iter()
+        .flatten()
+    {
+        names.retain(|listed| listed != name);
+    }
+    (local, found)
+}
+
 /// `appearance.toml`: the whole look in one file.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -291,6 +337,10 @@ pub struct RawLocal {
     /// the default for those, so a list of the ones that are off could not say it. Written by
     /// [`Config::save_plugin_switches`] and kept by `save_local` in the same way.
     pub enabled_plugins: Option<Vec<String>>,
+    /// The `[[plugin]]` tables of the user's own plugins that the plugin menu keeps, so a plugin
+    /// can be added and removed without touching the hand-written `config.toml`. `None` keeps
+    /// what is on disk, like the lists above.
+    pub plugin: Option<Vec<RawPluginSpec>>,
 }
 
 /// One theme a user named and saved from the appearance popup. `name` is unique within
@@ -426,6 +476,9 @@ pub struct Config {
     pub disabled_plugins: Vec<String>,
     /// See `RawLocal::enabled_plugins`: the plugins that start although they are off by default.
     pub enabled_plugins: Vec<String>,
+    /// The names of `plugins` that came from `local.toml` rather than `config.toml`: the ones the
+    /// plugin menu may remove.
+    pub local_plugin_names: Vec<String>,
 }
 
 impl Config {
@@ -476,6 +529,7 @@ impl Config {
             ..theme.clone()
         } != RawTheme::default();
         let panels: PanelsConfig = config.panels.overlay(local.panels.clone()).into();
+        let (plugins, local_plugin_names) = merge_plugins(config.plugin, local.plugin);
 
         Self {
             alt_tap: config.alt_tap.unwrap_or(true),
@@ -497,7 +551,7 @@ impl Config {
             open_with: config.open_with,
             open_rules: config.open_rule,
             preview_hooks: config.preview_hook,
-            plugins: config.plugin.into_iter().map(PluginSpec::from).collect(),
+            plugins,
             keys: config.keys.into(),
             theme: theme.clone().into(),
             theme_is_customized,
@@ -520,6 +574,7 @@ impl Config {
             local_bookmarks: local.bookmarks,
             disabled_plugins: local.disabled_plugins.unwrap_or_default(),
             enabled_plugins: local.enabled_plugins.unwrap_or_default(),
+            local_plugin_names,
         }
     }
 
@@ -540,6 +595,9 @@ impl Config {
         }
         if local.enabled_plugins.is_none() {
             local.enabled_plugins = Self::stored_local().enabled_plugins;
+        }
+        if local.plugin.is_none() {
+            local.plugin = Self::stored_local().plugin;
         }
         let text = toml::to_string(&local)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -571,6 +629,21 @@ impl Config {
         local.disabled_plugins = Some(disabled.to_vec());
         local.enabled_plugins = Some(enabled.to_vec());
         Self::save_local(&local)
+    }
+
+    /// Removes the plugin the menu keeps in `local.toml` under `name`, and with it the name from
+    /// the two switch lists, leaving everything else in the file as it is on disk. Returns
+    /// whether a plugin of that name was there; the file is left alone when none was.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from writing the file; never fatal for the caller.
+    pub fn forget_local_plugin(name: &str) -> io::Result<bool> {
+        let (local, found) = without_plugin(Self::stored_local(), name);
+        if found {
+            Self::save_local(&local)?;
+        }
+        Ok(found)
     }
 
     /// `local.toml` as it is on disk now; empty if absent or unreadable (no warning, as the screen
@@ -911,6 +984,74 @@ mod tests {
             Config::from_sources(None, None, Some(&text)).enabled_plugins,
             ["hud"]
         );
+    }
+
+    fn mine(name: &str) -> RawPluginSpec {
+        RawPluginSpec {
+            name: name.into(),
+            command: "python3".into(),
+            args: vec!["p.py".into()],
+            on_key: vec!["b".into()],
+            commands: vec!["blame".into()],
+            events: vec!["dir_changed".into()],
+            provides: vec!["find".into()],
+        }
+    }
+
+    #[test]
+    fn a_plugin_kept_in_local_toml_round_trips_and_is_listed_after_config_toml() {
+        let local = RawLocal {
+            plugin: Some(vec![mine("menu")]),
+            ..Default::default()
+        };
+        let text = toml::to_string(&local).unwrap();
+        assert_eq!(toml::from_str::<RawLocal>(&text).unwrap(), local);
+        let config = Config::from_sources(
+            Some("[[plugin]]\nname = \"hand\"\ncommand = \"true\"\n"),
+            None,
+            Some(&text),
+        );
+        let names: Vec<&str> = config.plugins.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["hand", "menu"]);
+        assert_eq!(config.local_plugin_names, ["menu"]);
+        assert_eq!(config.plugins[1].on_keys, [KeyCode::Char('b')]);
+    }
+
+    #[test]
+    fn a_name_config_toml_already_uses_is_not_taken_from_local_toml() {
+        let local = RawLocal {
+            plugin: Some(vec![mine("hand"), mine("twice"), mine("twice"), mine("")]),
+            ..Default::default()
+        };
+        let text = toml::to_string(&local).unwrap();
+        let config = Config::from_sources(
+            Some("[[plugin]]\nname = \"hand\"\ncommand = \"true\"\n"),
+            None,
+            Some(&text),
+        );
+        assert_eq!(config.plugins[0].command, "true");
+        assert_eq!(config.plugins.len(), 2);
+        assert_eq!(config.local_plugin_names, ["twice"]);
+    }
+
+    #[test]
+    fn forgetting_a_plugin_drops_its_table_and_its_switches_and_nothing_else() {
+        let local = RawLocal {
+            plugin: Some(vec![mine("a"), mine("b")]),
+            disabled_plugins: Some(vec!["a".into(), "git".into()]),
+            enabled_plugins: Some(vec!["a".into(), "hud".into()]),
+            view: Some("grid".into()),
+            ..Default::default()
+        };
+        let (after, found) = without_plugin(local.clone(), "a");
+        assert!(found);
+        assert_eq!(after.plugin, Some(vec![mine("b")]));
+        assert_eq!(after.disabled_plugins, Some(vec!["git".to_string()]));
+        assert_eq!(after.enabled_plugins, Some(vec!["hud".to_string()]));
+        assert_eq!(after.view, local.view);
+        let (same, found) = without_plugin(after.clone(), "a");
+        assert!(!found);
+        assert_eq!(same, after);
     }
 
     #[test]

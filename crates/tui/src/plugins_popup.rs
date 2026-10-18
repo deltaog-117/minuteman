@@ -27,7 +27,7 @@ pub enum Outcome {
     Stay,
     /// Switch the plugin on this row on if it is off, off if it is on.
     Toggle(usize),
-    /// Ask to delete the program of the plugin on this row; the caller decides whether it may and
+    /// Ask to remove the plugin on this row (its program if bundled, its entry if the menu keeps it); the caller decides whether it may and
     /// hands the question back with [`PluginsPopup::ask_removal`].
     Remove(usize),
     /// The user said yes to the question asked for this row.
@@ -58,6 +58,11 @@ impl PluginsPopup {
         self.cursor
     }
 
+    /// Puts the cursor back on a row after rows were taken away.
+    pub fn clamp(&mut self, rows: usize) {
+        self.cursor = self.cursor.min(rows.saturating_sub(1));
+    }
+
     /// Shows `lines` as a question about deleting the program of the plugin on `row`.
     pub fn ask_removal(&mut self, row: usize, lines: Vec<String>) {
         self.asking = Some(Asking { row, lines });
@@ -69,7 +74,7 @@ impl PluginsPopup {
     }
 
     /// `j`/`k`/the arrows move with wraparound over `rows` rows; `Enter`, space, `h` and `l`
-    /// switch the plugin under the cursor; `d` asks to delete its program; `Esc`/`q` closes the
+    /// switch the plugin under the cursor; `d` asks to remove it; `Esc`/`q` closes the
     /// menu. With no rows nothing but closing does anything. While a question is showing only `y`
     /// (yes) and `n` or `Esc` (no) are heard, so a key pressed for something else cannot delete.
     pub fn key(&mut self, code: KeyCode, rows: usize) -> Outcome {
@@ -135,6 +140,17 @@ mod tests {
         ] {
             assert_eq!(popup.key(code, 4), Outcome::Toggle(1));
         }
+    }
+
+    #[test]
+    fn the_cursor_moves_back_onto_a_row_when_the_last_one_is_removed() {
+        let mut popup = PluginsPopup::new();
+        popup.key(KeyCode::Char('k'), 3);
+        assert_eq!(popup.cursor(), 2);
+        popup.clamp(2);
+        assert_eq!(popup.cursor(), 1);
+        popup.clamp(0);
+        assert_eq!(popup.cursor(), 0);
     }
 
     #[test]

@@ -225,7 +225,7 @@ command ends. `MINUTEMAN_PORTAL_MMAN` names the `mman` to run when it is not on 
 | `PageUp` / `PageDown` / `Home` / `End` | jump a screenful up or down, or to the first or last entry (in any view) |
 | `.`         | show or hide dot-files (hidden by default; `show_hidden = true` in `config.toml` starts them shown) |
 | `v`         | toggle mark on the selection (Ranger-style: queue files for the next bulk action) |
-| `space`     | leader — commands for the mini-shell panes (below); with no shell open, `space x` opens the trash browser, `space t` the settings popup and `space p` the plugin menu, which switches any plugin on or off at once and remembers it in `local.toml`, and deletes a bundled plugin's program with `d` after a `y` to confirm |
+| `space`     | leader — commands for the mini-shell panes (below); with no shell open, `space x` opens the trash browser, `space t` the settings popup and `space p` the plugin menu, which switches any plugin on or off at once and remembers it in `local.toml`, and, with `d` and a `y` to confirm, deletes a bundled plugin's program or removes a plugin kept as a `[[plugin]]` table in `local.toml` |
 
 ### Mouse
 
