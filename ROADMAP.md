@@ -2313,11 +2313,14 @@ draws.
   refuses a name, key or `:` word something else has, starts the program before writing
   anything, and keeps the plugin in `local.toml`. Done; the manifest that will fill the form in
   is under "Easier plugin authoring and adding".
-- **Easier plugin authoring and adding** – a `plugin.toml` manifest beside a plugin (name, command,
-  keys, `provides`, API version) so adding one is "point at a path" and the form fills itself in;
-  a drop-in `~/.config/minuteman/plugins/<name>/` directory found without a config edit;
-  `mman plugin new <name> --lang python|rust|sh` for a working skeleton; `mman plugin check <name>`
-  to start a plugin once and verify the handshake, the API version and key collisions;
+- **Easier plugin authoring and adding** – done so far: a `plugin.toml` manifest (the keys of a
+  `[[plugin]]` table plus a `description`; `{dir}` and a leading `./` in `command` refer to its
+  folder) and the drop-in directory `~/.config/minuteman/plugins/<name>/`, found at launch and
+  listed in the plugin menu as `drop-in`, off until switched on; a name already taken keeps its
+  owner and the drop-in is reported; a bad manifest is reported and skipped. The add form takes
+  a folder (its first row) and fills the rest from the manifest. Still to do: an API version in
+  the manifest, a check of keys and `:` words when a drop-in is switched on; `mman plugin new <name> --lang
+  python|rust|sh` for a working skeleton; `mman plugin check <name>` to start a plugin once and verify the handshake, the API version and key collisions;
   `mman plugin add <path or git url>`; reloading plugin config without a restart. A curated index
   and one-step install wait for a sandbox or a declared, enforced permission list (see the
   community plugin ecosystem under the long-term vision).

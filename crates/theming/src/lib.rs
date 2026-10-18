@@ -21,6 +21,7 @@
 pub mod appearance;
 pub mod color;
 pub mod config;
+pub mod dropin;
 pub mod keymap;
 pub mod palette;
 pub mod panels;
@@ -34,6 +35,7 @@ pub use config::{
     Config, CustomTheme, HookKind, OpenRule, OpenWith, PluginSpec, PreviewHook, RangeModifier,
     RawLocal, RawPluginSpec,
 };
+pub use dropin::{DropIn, ManifestError};
 pub use keymap::{Action, KeyMap, parse_key};
 pub use palette::TerminalPalette;
 pub use panels::{ColumnLayout, PanelsConfig, RawPanels};

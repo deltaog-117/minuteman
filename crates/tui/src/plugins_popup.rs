@@ -38,6 +38,9 @@ pub enum Outcome {
     /// The add form was filled in; the caller adds the plugin and either closes the form with
     /// [`PluginsPopup::close_form`] or hands back why it cannot with [`PluginsPopup::refuse`].
     Add(RawPluginSpec),
+    /// The add form was given a folder; the caller reads its manifest and answers with
+    /// [`PluginsPopup::fill`] or [`PluginsPopup::refuse`].
+    Load(String),
     Close,
 }
 
@@ -91,6 +94,15 @@ impl PluginsPopup {
         self.form = None;
     }
 
+    /// Writes a read manifest into the add form's rows, or says why it cannot be.
+    pub fn fill(&mut self, found: &theming::DropIn) {
+        if let Some(form) = &mut self.form
+            && let Err(why) = form.fill(found)
+        {
+            form.set_error(why);
+        }
+    }
+
     /// Keeps the add form open and says why its plugin was not added.
     pub fn refuse(&mut self, message: impl Into<String>) {
         if let Some(form) = &mut self.form {
@@ -111,6 +123,7 @@ impl PluginsPopup {
                     Outcome::Stay
                 }
                 add_plugin_form::Key::Submit(spec) => Outcome::Add(spec),
+                add_plugin_form::Key::Load(path) => Outcome::Load(path),
             };
         }
         if let Some(asking) = &self.asking {
@@ -238,6 +251,8 @@ mod tests {
         // Even with no rows, and even for keys the list would act on.
         assert_eq!(popup.key(KeyCode::Char('a'), 0), Outcome::Stay);
         assert!(popup.form().is_some());
+        // The form opens on the folder row; Tab moves on to the name.
+        popup.key(KeyCode::Tab, 3);
         for c in ['q', 'd', 'j', 'a'] {
             assert_eq!(popup.key(KeyCode::Char(c), 3), Outcome::Stay);
         }
@@ -254,6 +269,7 @@ mod tests {
     fn a_filled_form_asks_to_add_and_a_refusal_keeps_it_open_with_the_reason() {
         let mut popup = PluginsPopup::new();
         popup.key(KeyCode::Char('a'), 1);
+        popup.key(KeyCode::Tab, 1);
         for c in "blame".chars() {
             popup.key(KeyCode::Char(c), 1);
         }

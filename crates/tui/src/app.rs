@@ -47,7 +47,7 @@ use plugin_host::{
 };
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
-use theming::{Config, KeyMap, OpenRule, OpenWith, PluginSpec, PreviewHook, RawPluginSpec};
+use theming::{Config, DropIn, KeyMap, OpenRule, OpenWith, PluginSpec, PreviewHook, RawPluginSpec};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::associations::{self, Associations};
@@ -609,6 +609,10 @@ pub struct App {
     plugin_enabled: Vec<String>,
     /// The `[[plugin]]` names `local.toml` holds, which the plugin menu may remove.
     plugin_menu_kept: Vec<String>,
+    /// The drop-in plugins found in the config directory, and a line for each folder whose
+    /// manifest was not accepted; both come from `Config::load`.
+    plugin_dropins: Vec<DropIn>,
+    dropin_notices: Vec<String>,
     /// Every plugin the plugin menu lists, with whether it is on; see `plugin_roster`.
     plugin_roster: Vec<plugin_roster::Entry>,
     /// The `[[preview_hook]]` tables, of which the ones that extract text go to the bundled
@@ -682,6 +686,8 @@ impl App {
             plugin_disabled: Vec::new(),
             plugin_enabled: Vec::new(),
             plugin_menu_kept: Vec::new(),
+            plugin_dropins: Vec::new(),
+            dropin_notices: Vec::new(),
             plugin_roster: Vec::new(),
             preview_hooks: Vec::new(),
             handle,
@@ -952,7 +958,7 @@ impl App {
         if let Some(notice) = crate::bundled::missing_previewer(&specs, &found) {
             self.status = Some(notice);
         }
-        self.plugin_roster = plugin_roster::build(
+        let roster = plugin_roster::build(
             &specs,
             listing,
             ConfigSwitches {
@@ -963,6 +969,13 @@ impl App {
             &self.plugin_enabled,
             &self.plugin_menu_kept,
         );
+        let (roster, skipped) =
+            plugin_roster::with_dropins(roster, &self.plugin_dropins, &self.plugin_enabled);
+        self.plugin_roster = roster;
+        let notices: Vec<String> = self.dropin_notices.iter().cloned().chain(skipped).collect();
+        if !notices.is_empty() {
+            self.status = Some(notices.join("; "));
+        }
         let to_start: Vec<PluginSpec> = self
             .plugin_roster
             .iter()
@@ -989,6 +1002,14 @@ impl App {
     /// Call before `with_plugins`.
     pub fn with_menu_plugins(mut self, names: Vec<String>) -> Self {
         self.plugin_menu_kept = names;
+        self
+    }
+
+    /// Sets the drop-in plugins the plugin menu lists (switched off until the user switches them
+    /// on) and the notices about folders that were not accepted. Call before `with_plugins`.
+    pub fn with_dropins(mut self, found: Vec<DropIn>, notices: Vec<String>) -> Self {
+        self.plugin_dropins = found;
+        self.dropin_notices = notices;
         self
     }
 
@@ -1127,6 +1148,7 @@ impl App {
                 enabled: true,
                 default_on: true,
                 kept_by_menu: true,
+                folder: None,
             },
         );
         self.status = Some(match Config::add_local_plugin(raw) {
@@ -1140,6 +1162,12 @@ impl App {
     /// a plain file of the running user's. Otherwise the reason, without the plugin's name.
     fn removable_program(&self, index: usize) -> Result<Program, String> {
         let entry = self.plugin_roster.get(index).ok_or("no such plugin")?;
+        if let (Origin::DropIn, Some(folder)) = (entry.origin, &entry.folder) {
+            return Err(format!(
+                "a drop-in plugin is removed by deleting its folder, {}",
+                folder.display()
+            ));
+        }
         if entry.origin != Origin::Bundled {
             return Err("only a bundled plugin's program is deleted from here".to_string());
         }

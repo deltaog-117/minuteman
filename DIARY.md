@@ -109,6 +109,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Plugin Menu, Own Plugins in `local.toml` | `[[plugin]]` tables in `local.toml` merged after `config.toml`'s, `d` removes them with a question; one approach, no COAs asked (the roadmap fixed it) | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, the Add Form | A multi-row text form modelled on the compress form, refusing clashes and unstartable programs before anything is written (COA A); a one-question-at-a-time prompt (B) and a `:plugin add` command (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, Deleting a Program | A `d` key and an inline `y`/`n` question naming the file, its size and the reinstall command; only a plain file of the running user (COA A); moving it to the trash (B) and printing the commands only (C) not taken | ✅ Confirmed |
+| 2026-10-18 | Plugin Authoring, Manifest and Drop-ins | A `plugin.toml` with a `[[plugin]]` table's keys, found in `plugins/<name>/` of the config directory and listed off until switched on (COA B); the manifest alone (A) and the full `mman plugin` CLI first (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -8276,6 +8277,93 @@ open; `9` was accepted, the row appeared as "yours, on" and `local.toml` held th
 table with `on_key = ["9"]`.
 
 **Left open.** The `plugin.toml` manifest and the rest of "Easier plugin authoring and adding".
+
+---
+
+## 2026-10-18 — Drop-in plugins and the `plugin.toml` manifest
+
+**Decision.** Three ways were put forward for "Easier plugin authoring and adding" and COA B
+chosen: the manifest and the drop-in folder together. The manifest alone (A) would have had no
+reader but the add form, so its format would have gone untested against real use; the full
+`mman plugin new/check/add` set first (C) leans on a manifest and a discovery rule that did not
+exist yet, so it risked being redone. Two defaults were put to the user and accepted: a drop-in
+whose name is already taken loses and is reported, and a drop-in is listed switched off until the
+user switches it on, since a folder copied in starts a program.
+
+**What changed.** `theming::dropin` reads `plugin.toml` with the keys of a `[[plugin]]` table
+(flattened from `RawPluginSpec`, so the two cannot drift) plus a `description`. `name` falls back
+to the folder's name; `{dir}` in `command` and `args` is the folder, and a `command` that begins
+with `./` is taken from it. `DropIn::from_manifest` is the only way to get a `DropIn`, and it
+refuses an empty or spaced name and an empty command, so the rest of the program never sees one.
+`scan` goes through `plugins/` in the config directory in folder-name order, skips a folder with
+no manifest without a word, and turns every bad one into a line instead of an error, so one broken
+plugin hides no other. A manifest over 64 KiB is not read. `Config::load` runs the scan (the pure
+`from_sources` does not, so its tests still touch no file) and the result reaches `App` through
+`with_dropins`. `plugin_roster::with_dropins` lists them after the user's own plugins as origin
+`drop-in`, `default_on = false`, so switching one on goes to the same `enabled_plugins` list as the
+system figures and needs no new field in `local.toml`. A name that a user's or a bundled plugin
+(installed or not) already has, or an earlier folder has, is left out with a line saying which
+kind kept it. `d` on a drop-in says its folder is the thing to delete. `scripts/vfs-gate` lists
+`dropin.rs` with the reason, as it does `config.rs`.
+
+**Trade-offs.** Reusing the `[[plugin]]` keys means a plugin moves between a manifest and
+`config.toml` by copying lines, at the price of calling the key list `on_key` rather than the
+friendlier `keys`. A key or `:` word that a drop-in shares with another plugin is not checked when
+it is found, as the keymap is not known there; the add form checks them, and the first plugin to
+start keeps the key. `{dir}` is explicit where running the plugin with its folder as the working
+directory would have been implicit, and would have changed what the plugin sees as its cwd.
+
+**Verification.** `scripts/check` passes. New tests: every key of the manifest is read; the name
+defaults to the folder's; `{dir}` and `./` resolve; six kinds of bad manifest are named; a
+property test that whatever text is read, an accepted manifest has a name without spaces or
+slashes and a command; a scan lists folders in order, passes over folders without a manifest,
+reports the bad ones, keeps the first of two folders with one name, and treats a missing folder
+as empty; a manifest over the cap is refused; in the roster, a drop-in is listed after the user's
+own and off, on when `enabled_plugins` names it, and never takes a taken name.
+
+**Left open.** `mman plugin new`, `check` and `add`; reloading plugin config without a restart; an API version in
+the manifest; a check of keys and `:` words when a drop-in is switched on.
+
+---
+
+## 2026-10-18 — The add form takes a folder
+
+**Author:** deltaog-117
+
+**What.** The plugin menu's add form has a new first row, "Folder". Enter on it, or moving off it
+with a new path in it, reads `<folder>/plugin.toml` and writes the plugin's fields into the other
+rows, which stay editable. The manifest's description shows on the line under the rows.
+
+**Why this shape.** Three ways were weighed: a Folder row on the existing form (chosen), a
+two-step flow with a read-only preview, and the first plus path completion and a picker over the
+drop-in scan. The first is the smallest change that matches "point at a path and the form fills
+itself in", and the other two can be built on it.
+
+**How.** The form stays pure, as `compress_popup` is: it never reads a file. `Key::Load(path)`
+asks, `main` resolves the text (`resolve_dir`: `~`, a path relative to the browsed folder, and the
+path of a `plugin.toml` meaning its folder), calls `DropIn::load`, and answers with
+`PluginsPopup::fill` or `refuse`. That keeps one parser for the manifest, so `{dir}` and `./`
+resolve exactly as they do for a drop-in found at launch. A path is asked for once: pressing Enter
+on the same text again is an add, not a second read. The form now opens on the Folder row, so two
+popup tests and the menu draw test press Tab before typing a name.
+
+**Trade-offs.** The arguments row writes an argument with a space in double quotes, and has no
+way to write one that holds a `"`; filling it would drop the quote and add a different plugin, so
+`fill` refuses such a manifest and changes nothing. The saved command is the resolved one, absolute
+and still showing `dir/./run.sh` for a `./run.sh` command; it runs, but is not tidy, and the
+existing drop-in test asserts that spelling.
+
+**Verification.** `scripts/check` passes. New tests: Enter on a new path asks once and a fill
+round-trips to the manifest's own table; leaving the row loads a new or edited path and an empty
+one loads nothing; a quote in an argument is refused and leaves the rows alone; path resolution
+for `~`, relative, absolute, `plugin.toml` and no home; a property test that any arguments written
+into the row read back unchanged. Against the real binary on a PTY through `pyte`: `space p a`, a
+typed folder and Enter filled six rows with the arguments as `--x "a b"`; a manifest key the
+interface already binds was refused with the reason; a free key was added, the status said
+`plugin blame: added`, and `local.toml` held the table.
+
+**Left open.** `mman plugin new`, `check` and `add`; reloading plugin config without a restart; an
+API version in the manifest; a check of keys and `:` words when a drop-in is switched on.
 
 ---
 

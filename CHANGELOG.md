@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The add-plugin form takes a folder: its first row, "Folder", accepts the path of a plugin's
+  folder (or of its `plugin.toml`; `~` and paths relative to the browsed folder work). Enter on
+  that row, or moving off it, reads the manifest and fills the name, command, arguments, keys,
+  `:` commands, events and actions below it, ready to edit and add; the manifest's description
+  shows under the rows. A folder with no readable manifest says why and leaves the rows alone, as
+  does a manifest with a double quote in an argument, which the arguments row cannot write. The
+  form now opens on the Folder row, so a name is reached with one Tab. Author: deltaog-117.
+- Drop-in plugins: a folder under `~/.config/minuteman/plugins/` holding a `plugin.toml` is found
+  at launch and listed in the plugin menu as `drop-in`, switched off until you switch it on (a
+  folder copied in starts nothing by itself). The manifest has the keys of a `[[plugin]]` table
+  (`name`, `command`, `args`, `on_key`, `commands`, `events`, `provides`) and a `description`;
+  `name` defaults to the folder's, `{dir}` in `command` and `args` is the folder, and a `command`
+  starting with `./` is taken from it. A manifest that cannot be read is reported on the status
+  line and skipped, and a name that a plugin of yours or a bundled one already has keeps it. `d` on
+  a drop-in says to delete its folder. Author: deltaog-117.
 - The plugin menu can add a plugin of your own: `a` opens a form with a row each for the name, the
   command, its arguments (`"quoted"` if one holds a space), its keys, its `:` commands, the events
   it follows and the actions it provides. Enter checks it and says what is wrong without closing

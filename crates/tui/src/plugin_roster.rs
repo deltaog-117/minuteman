@@ -24,11 +24,18 @@
 //! and git while `config.toml` says `git_status = false`, since the menu writes only `local.toml`
 //! and a hand-written veto must keep winning.
 //!
+//! A third kind is the drop-in: a folder with a `plugin.toml` under the config directory (see
+//! `theming::dropin`). Finding one starts nothing: it is listed off, and switching it on is the
+//! user's say-so, kept in the same list as the system figures. The menu does not remove it; its
+//! folder is the user's to delete.
+//!
 //! Most plugins start on, so `local.toml` keeps the names switched off. The system figures start
 //! off unless `system_hud = true`, so `local.toml` keeps the names switched on for them; which
 //! list a plugin belongs to is its `default_on`.
 
-use theming::{KeyMap, PluginSpec, RawPluginSpec, parse_key};
+use std::path::PathBuf;
+
+use theming::{DropIn, KeyMap, PluginSpec, RawPluginSpec, parse_key};
 
 use crate::bundled::Listed;
 use crate::command::BUILTIN_WORDS;
@@ -38,6 +45,7 @@ use crate::command::BUILTIN_WORDS;
 pub enum Origin {
     Bundled,
     Yours,
+    DropIn,
 }
 
 impl Origin {
@@ -45,6 +53,7 @@ impl Origin {
         match self {
             Origin::Bundled => "bundled",
             Origin::Yours => "yours",
+            Origin::DropIn => "drop-in",
         }
     }
 }
@@ -67,6 +76,8 @@ pub struct Entry {
     /// Whether `local.toml` holds the plugin's table, which makes it the one kind the menu can
     /// remove; a `[[plugin]]` in the hand-written `config.toml` is the user's to edit there.
     pub kept_by_menu: bool,
+    /// The folder a drop-in plugin lives in.
+    pub folder: Option<PathBuf>,
 }
 
 impl Entry {
@@ -104,6 +115,7 @@ pub fn build(
         enabled: !disabled.contains(&spec.name),
         default_on: true,
         kept_by_menu: kept_by_menu.contains(&spec.name),
+        folder: None,
     });
     let shipped = bundled.into_iter().map(|listed| {
         let locked = locked_reason(&listed, switches);
@@ -121,11 +133,57 @@ pub fn build(
                 },
             default_on,
             kept_by_menu: false,
+            folder: None,
             spec: listed.spec,
             locked,
         }
     });
     yours.chain(shipped).collect()
+}
+
+/// `entries` with the drop-in plugins listed after the user's own, all switched off unless
+/// `enabled` names them, and a line for each that was left out because its name is already taken
+/// by `entries` (bundled ones included, installed or not) or by an earlier drop-in. The plugin
+/// that was there first keeps the name, as the add form also decides.
+pub fn with_dropins(
+    mut entries: Vec<Entry>,
+    dropins: &[DropIn],
+    enabled: &[String],
+) -> (Vec<Entry>, Vec<String>) {
+    let at = entries
+        .iter()
+        .take_while(|entry| entry.origin == Origin::Yours)
+        .count();
+    let mut notices = Vec::new();
+    let mut added = Vec::new();
+    for dropin in dropins {
+        let name = &dropin.spec.name;
+        let taken = entries
+            .iter()
+            .chain(&added)
+            .find(|entry| entry.name == *name);
+        if let Some(taken) = taken {
+            notices.push(format!(
+                "drop-in {name}: skipped, a {} plugin has that name",
+                taken.origin.label()
+            ));
+            continue;
+        }
+        let spec = PluginSpec::from(dropin.spec.clone());
+        added.push(Entry {
+            name: name.clone(),
+            origin: Origin::DropIn,
+            provides: spec.provides.clone(),
+            spec: Some(spec),
+            locked: None,
+            enabled: enabled.contains(name),
+            default_on: false,
+            kept_by_menu: false,
+            folder: Some(dropin.dir.clone()),
+        });
+    }
+    entries.splice(at..at, added);
+    (entries, notices)
 }
 
 fn locked_reason(listed: &Listed, switches: ConfigSwitches) -> Option<String> {
@@ -342,6 +400,60 @@ mod tests {
             &[],
         );
         assert!(!stray[0].enabled);
+    }
+
+    fn dropin(name: &str) -> DropIn {
+        DropIn::from_manifest(
+            std::path::Path::new("/plugins").join(name).as_path(),
+            "command = 'true'",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_drop_in_is_listed_after_the_users_own_and_starts_off() {
+        let base = build(
+            &[spec("mine")],
+            vec![listed("finder", true)],
+            ALL_ON,
+            &[],
+            &[],
+            &[],
+        );
+        let (entries, notices) = with_dropins(base, &[dropin("extra")], &[]);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["mine", "extra", "finder"]);
+        assert!(notices.is_empty());
+        let extra = &entries[1];
+        assert_eq!(extra.origin, Origin::DropIn);
+        assert!(!extra.enabled && !extra.default_on && !extra.kept_by_menu);
+        assert!(extra.can_switch());
+        assert_eq!(extra.folder.as_deref(), Some("/plugins/extra".as_ref()));
+    }
+
+    #[test]
+    fn a_drop_in_the_user_switched_on_starts_on() {
+        let (entries, _) = with_dropins(Vec::new(), &[dropin("extra")], &["extra".to_string()]);
+        assert!(entries[0].enabled);
+    }
+
+    #[test]
+    fn a_drop_in_never_takes_a_name_that_is_taken() {
+        let base = build(
+            &[spec("mine")],
+            vec![listed("finder", false)],
+            ALL_ON,
+            &[],
+            &[],
+            &[],
+        );
+        let found = [dropin("mine"), dropin("finder"), dropin("fresh")];
+        let (entries, notices) = with_dropins(base, &found, &[]);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["mine", "fresh", "finder"]);
+        assert_eq!(notices.len(), 2);
+        assert!(notices[0].contains("mine") && notices[0].contains("yours"));
+        assert!(notices[1].contains("finder") && notices[1].contains("bundled"));
     }
 
     #[test]

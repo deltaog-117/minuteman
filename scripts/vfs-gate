@@ -18,6 +18,7 @@ declare -A allowed=(
   [plugins/ssh/src/askpass.rs]="removes the socket its helper asks through from this machine's runtime folder, which is not a path a Vfs serves"
   [crates/trash/src/lib.rs]="the desktop trash is a local-disk concept"
   [crates/theming/src/config.rs]="the app's own config and appearance files"
+  [crates/theming/src/dropin.rs]="the drop-in plugin folders of the app's own config directory"
   [crates/shared/src/devices/topology.rs]="reads this machine's /sys to see how its disks are wired, which are not paths a Vfs serves"
   [crates/shared/src/devices/probe.rs]="reads this machine's /proc and /sys to list its disks, which are not paths a Vfs serves"
   [crates/tui/src/cli.rs]="writes the --cwd-file the shell wrapper reads, and the --chooser-file the portal backend reads"

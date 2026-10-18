@@ -1093,6 +1093,8 @@ mod tests {
             disabled_plugins: Vec::new(),
             enabled_plugins: Vec::new(),
             local_plugin_names: Vec::new(),
+            dropins: Vec::new(),
+            dropin_notices: Vec::new(),
         }
     }
 

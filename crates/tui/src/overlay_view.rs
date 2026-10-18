@@ -916,13 +916,13 @@ fn render_add_plugin(frame: &mut Frame<'_>, form: &AddPluginForm, config: &Confi
     }));
     lines.push(feedback_line(
         form.error(),
-        None,
+        form.note(),
         usize::from(inner.width),
         theme,
     ));
     lines.push(Line::styled(
         fit_width(
-            "↑/↓ or Tab move, Enter adds, Esc cancels",
+            "↑/↓ or Tab move, Enter adds (loads on the folder row), Esc cancels",
             usize::from(inner.width),
         ),
         dim_style,
@@ -1476,6 +1476,7 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut popup = PluginsPopup::new();
         popup.key(KeyCode::Char('a'), 0);
+        popup.key(KeyCode::Tab, 0);
         for c in "blame".chars() {
             popup.key(KeyCode::Char(c), 0);
         }
@@ -1487,6 +1488,7 @@ mod tests {
         let text = screen_text(&terminal);
         for wanted in [
             "add plugin",
+            "Folder",
             "blame▏",
             ": commands",
             "required, the program to run",

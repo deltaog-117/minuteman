@@ -23,6 +23,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::appearance::{Font, RawFont, RawStyles, Styles};
+use crate::dropin::{self, DropIn};
 use crate::keymap::{KeyMap, RawKeyMap, parse_key};
 use crate::panels::{PanelsConfig, RawPanels};
 use crate::shape::RawShape;
@@ -487,6 +488,12 @@ pub struct Config {
     /// The names of `plugins` that came from `local.toml` rather than `config.toml`: the ones the
     /// plugin menu may remove.
     pub local_plugin_names: Vec<String>,
+    /// The plugins found as folders under `plugins/` in the config directory (see `dropin`); they
+    /// start off, and the plugin menu switches them on. Empty from `from_sources`, which touches
+    /// no file; `load` fills it.
+    pub dropins: Vec<DropIn>,
+    /// One line for each folder under `plugins/` whose manifest was not accepted.
+    pub dropin_notices: Vec<String>,
 }
 
 impl Config {
@@ -495,11 +502,17 @@ impl Config {
     /// file must never prevent the app from starting.
     pub fn load() -> Self {
         let read = |path: Option<PathBuf>| path.and_then(|p| std::fs::read_to_string(p).ok());
-        Self::from_sources(
+        let mut config = Self::from_sources(
             read(Self::config_path()).as_deref(),
             read(Self::appearance_path()).as_deref(),
             read(Self::local_path()).as_deref(),
-        )
+        );
+        if let Some(dir) = Self::config_dir() {
+            let found = dropin::scan(&dir.join("plugins"));
+            config.dropins = found.found;
+            config.dropin_notices = found.notices;
+        }
+        config
     }
 
     /// Builds a config from the text of the three files (each `None` when absent). Split out from
@@ -583,6 +596,8 @@ impl Config {
             disabled_plugins: local.disabled_plugins.unwrap_or_default(),
             enabled_plugins: local.enabled_plugins.unwrap_or_default(),
             local_plugin_names,
+            dropins: Vec::new(),
+            dropin_notices: Vec::new(),
         }
     }
 

@@ -858,6 +858,7 @@ fn main() -> Result<()> {
         .with_interactive_commands(config.interactive_commands.clone())
         .with_open_config(config.open_rules.clone(), config.open_with.clone())
         .with_menu_plugins(config.local_plugin_names.clone())
+        .with_dropins(config.dropins.clone(), config.dropin_notices.clone())
         .with_plugins(config.plugins.clone(), browser.current_dir());
     if let Some(remote) = remote_start {
         let plan = browser.plan_goto(&remote);
@@ -3017,6 +3018,18 @@ fn run(
                         PluginsOutcome::ConfirmRemove(row) => {
                             app.confirm_removal(row);
                             popup.clamp(app.plugin_rows().len());
+                        }
+                        PluginsOutcome::Load(path) => {
+                            let home = std::env::var_os("HOME").map(PathBuf::from);
+                            let dir = add_plugin_form::resolve_dir(
+                                &path,
+                                home.as_deref(),
+                                browser.current_dir(),
+                            );
+                            match theming::DropIn::load(&dir) {
+                                Ok(found) => popup.fill(&found),
+                                Err(why) => popup.refuse(format!("{}: {why}", dir.display())),
+                            }
                         }
                         PluginsOutcome::Add(spec) => {
                             match app.add_plugin(spec, &config.keys, browser.current_dir()) {

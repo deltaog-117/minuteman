@@ -167,6 +167,12 @@ interactive_commands = [
 # asking for a picker (`show_picker`), has the tree below a folder listed for it through the
 # host's own paths (`walk`) and sends the results back (`picker_items`); `plugin_api` has the
 # shapes, and `plugins/finder` is a worked example in Rust.
+# A plugin can also be a folder instead of a table here: `~/.config/minuteman/plugins/<name>/` with
+# a `plugin.toml` in it that has the same keys as a `[[plugin]]` (`name` may be left out and is then
+# the folder's name) and an optional `description`. `{dir}` in `command` and `args` stands for the
+# folder, and a `command` starting with `./` is taken from it. Such a plugin is listed in the plugin
+# menu (`space p`) as `drop-in` and does not start until you switch it on there; a name that a
+# plugin here or a bundled one already has keeps it, and the folder is reported.
 # [[plugin]]
 # name = "dir-stats"
 # command = "python3"
