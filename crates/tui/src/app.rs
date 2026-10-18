@@ -1163,16 +1163,22 @@ impl App {
         Ok(())
     }
 
-    /// The plugins the menu can offer to add from `dir`: the folder itself and each folder in it
-    /// with a `plugin.toml`, without those the menu already lists, each with the reason it cannot
-    /// be added yet (a name, key or `:` word taken) if there is one.
-    pub fn plugin_candidates(&self, dir: &Path, keys: &KeyMap) -> Vec<Candidate> {
+    /// The plugins the menu can offer to add from `dir` and from each of `extra` (the configured
+    /// `plugin_dirs`): the folder itself and each folder in it with a `plugin.toml`, without those
+    /// the menu already lists, each with the reason it cannot be added yet (a name, key or `:`
+    /// word taken) if there is one.
+    pub fn plugin_candidates(
+        &self,
+        dir: &Path,
+        extra: &[PathBuf],
+        keys: &KeyMap,
+    ) -> Vec<Candidate> {
         let listed: Vec<PathBuf> = self
             .plugin_roster
             .iter()
             .filter_map(|entry| entry.folder.clone())
             .collect();
-        plugin_source::find(dir, &listed)
+        plugin_source::find_all(dir, extra, &listed)
             .into_iter()
             .map(|found| self.candidate(found, keys))
             .collect()

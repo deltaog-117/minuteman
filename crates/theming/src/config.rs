@@ -222,6 +222,8 @@ struct RawConfig {
     preview_hook: Vec<PreviewHook>,
     /// The `[[plugin]]` tables, in the order they were spawned.
     plugin: Vec<RawPluginSpec>,
+    /// Folders the plugin menu's found list scans as well as the one being browsed.
+    plugin_dirs: Vec<String>,
     keys: RawKeyMap,
     theme: RawTheme,
     ui: RawUi,
@@ -435,6 +437,9 @@ pub struct Config {
     pub preview_hooks: Vec<PreviewHook>,
     /// The `[[plugin]]` tables, in the order they were spawned — see `plugin_host::PluginManager`.
     pub plugins: Vec<PluginSpec>,
+    /// The `plugin_dirs` of `config.toml`, as written (`~` is not yet expanded): folders whose
+    /// plugin subfolders the plugin menu's found list offers next to those of the browsed folder.
+    pub plugin_dirs: Vec<String>,
     pub keys: KeyMap,
     pub theme: Theme,
     /// Whether `[theme]` (a `name`, or even a single overridden field) was actually set in any of
@@ -573,6 +578,7 @@ impl Config {
             open_rules: config.open_rule,
             preview_hooks: config.preview_hook,
             plugins,
+            plugin_dirs: config.plugin_dirs,
             keys: config.keys.into(),
             theme: theme.clone().into(),
             theme_is_customized,
@@ -767,6 +773,21 @@ mod tests {
         assert_eq!(keys, default_keys);
         let panels: PanelsConfig = raw.panels.into();
         assert_eq!(panels, PanelsConfig::default());
+    }
+
+    #[test]
+    fn plugin_dirs_default_to_none_and_are_kept_as_written() {
+        assert!(
+            Config::from_sources(None, None, None)
+                .plugin_dirs
+                .is_empty()
+        );
+        let config = Config::from_sources(
+            Some("plugin_dirs = [\"~/code/plugins\", \"/opt/mman\"]\n"),
+            None,
+            None,
+        );
+        assert_eq!(config.plugin_dirs, ["~/code/plugins", "/opt/mman"]);
     }
 
     #[test]

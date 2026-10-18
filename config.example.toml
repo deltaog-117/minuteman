@@ -127,6 +127,12 @@ interactive_commands = [
 # command = "ffmpegthumbnailer -i {in} -o {out} -s 512"
 # kind = "image"
 
+# Folders the plugin menu's found list (`space` then `p`, then `a`) scans as well as the folder you
+# are browsing. Each one is looked into the same way: itself and the folders directly inside it that
+# hold a `plugin.toml`. `~` is your home; an entry that is not an absolute path, or a folder that
+# does not exist, is ignored. Read at startup.
+# plugin_dirs = ["~/code/mman-plugins"]
+
 # Plugins: external processes Minuteman spawns at startup, speaking a small line-delimited
 # JSON-RPC protocol over their own stdin/stdout (see the `plugin_host` crate). Any language that can
 # read a line and print one works — no compile step, no per-language bindings — and a plugin

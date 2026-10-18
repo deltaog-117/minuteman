@@ -59,6 +59,39 @@ pub fn find(root: &Path, skip: &[PathBuf]) -> Vec<DropIn> {
         .collect()
 }
 
+/// The folders `plugin_dirs` names, as paths: `~` is `home`, and an entry that is blank or not
+/// absolute is dropped, since a relative one would mean a different folder for every browsed
+/// folder. A folder named twice is kept once.
+pub fn configured_roots(dirs: &[String], home: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for text in dirs {
+        let text = text.trim();
+        let path = match (text.strip_prefix('~'), home) {
+            (Some(""), Some(home)) => home.to_path_buf(),
+            (Some(rest), Some(home)) if rest.starts_with('/') => home.join(&rest[1..]),
+            _ => PathBuf::from(text),
+        };
+        if path.is_absolute() && !roots.contains(&path) {
+            roots.push(path);
+        }
+    }
+    roots
+}
+
+/// [`find`] over `root` and then over each of `extra`, the same plugin folder listed once (the
+/// browsed folder may be one of the configured ones, or sit inside one).
+pub fn find_all(root: &Path, extra: &[PathBuf], skip: &[PathBuf]) -> Vec<DropIn> {
+    let mut found = find(root, skip);
+    for dir in extra.iter().filter(|dir| dir.as_path() != root) {
+        for plugin in find(dir, skip) {
+            if !found.iter().any(|known| known.dir == plugin.dir) {
+                found.push(plugin);
+            }
+        }
+    }
+    found
+}
+
 /// What `Enter` means on a row while the browser is choosing a plugin folder.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Choice {
@@ -175,6 +208,57 @@ mod tests {
         fs::write(tmp.path().join("broken").join(MANIFEST), "name = [").expect("write manifest");
         let skip = [tmp.path().join("listed")];
         assert_eq!(names(&find(tmp.path(), &skip)), ["kept"]);
+    }
+
+    #[test]
+    fn configured_folders_expand_the_home_and_drop_what_is_relative_or_repeated() {
+        let home = Path::new("/home/u");
+        let dirs = [
+            "~/plugins".to_string(),
+            " /opt/mman ".to_string(),
+            "~".to_string(),
+            "relative/dir".to_string(),
+            "".to_string(),
+            "/home/u/plugins".to_string(),
+        ];
+        assert_eq!(
+            configured_roots(&dirs, Some(home)),
+            [
+                PathBuf::from("/home/u/plugins"),
+                PathBuf::from("/opt/mman"),
+                PathBuf::from("/home/u"),
+            ]
+        );
+        assert_eq!(
+            configured_roots(&["~/x".to_string()], None),
+            Vec::<PathBuf>::new(),
+            "a `~` with no home to expand to is not a folder"
+        );
+    }
+
+    #[test]
+    fn configured_folders_are_scanned_after_the_browsed_one_and_nothing_is_listed_twice() {
+        let tmp = Scratch::new();
+        let browsed = tmp.path().join("browsed");
+        let shelf = tmp.path().join("shelf");
+        plugin(&browsed.join("here"), "here");
+        plugin(&shelf.join("there"), "there");
+        plugin(&shelf.join("here_too"), "here_too");
+        let extra = [
+            shelf.clone(),
+            browsed.clone(),
+            tmp.path().join("missing"),
+            shelf.clone(),
+        ];
+        assert_eq!(
+            names(&find_all(&browsed, &extra, &[])),
+            ["here", "here_too", "there"]
+        );
+        assert_eq!(
+            names(&find_all(&browsed, &extra, &[shelf.join("there")])),
+            ["here", "here_too"],
+            "a plugin the menu already lists is left out of every folder"
+        );
     }
 
     #[test]

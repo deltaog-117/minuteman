@@ -110,6 +110,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Plugin Menu, the Add Form | A multi-row text form modelled on the compress form, refusing clashes and unstartable programs before anything is written (COA A); a one-question-at-a-time prompt (B) and a `:plugin add` command (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, Deleting a Program | A `d` key and an inline `y`/`n` question naming the file, its size and the reinstall command; only a plain file of the running user (COA A); moving it to the trash (B) and printing the commands only (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Authoring, Manifest and Drop-ins | A `plugin.toml` with a `[[plugin]]` table's keys, found in `plugins/<name>/` of the config directory and listed off until switched on (COA B); the manifest alone (A) and the full `mman plugin` CLI first (C) not taken | ✅ Confirmed |
+| 2026-10-18 | Plugin Menu, `plugin_dirs` | A read-only `plugin_dirs` list in `config.toml`, scanned one level deep after the browsed folder (COA A); a list the picker adds to (B) and background scanning into the roster (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Large `.tar.gz` Archives | A 120 s time budget instead of the 512 MiB cap, and the listing of a slow one kept in the cache folder (COA A) | ✅ Confirmed |
 | 2026-10-18 | Plugin Start Check | A passive half-second probe shared by the review card and `mman plugin check`, plus an optional `api_version` in the manifest (COA A); an acknowledgement message (B) and a static-only check (C) not taken | ✅ Confirmed |
 
@@ -8568,6 +8569,29 @@ clicking through the menu.
 
 **Left open.** The `rust` skeleton, `add` from a git URL, `plugin_dirs`, a double-click to choose a
 folder, the version check when the add form is filled from a folder, and reloading config by hand-edit.
+
+---
+
+## 2026-10-18 — `plugin_dirs`
+
+**Context.** The plugin menu's found list scanned only the folder being browsed, so a person who keeps
+their plugins in one place had to browse there every time.
+
+**Decision.** Chosen as COA A of three: a `plugin_dirs` list in `config.toml`, read at startup, whose
+folders are scanned after the browsed one with the same one-level rule. B (a key in the picker saves
+the folder to `local.toml`) is a larger surface (a key, a save, a way to remove) and can be added on
+top of this list without changing it. C (scanning in the background into the roster) changes the model
+the roster and the popup depend on. `Config::plugin_dirs` keeps the text as written; the expansion
+lives in `plugin_source::configured_roots`, which takes `home` as an argument, so it is tested without
+touching the environment. It drops a blank or relative entry because a relative folder would mean
+something different for each browsed folder. `find_all` lists a plugin folder once even when the
+browsed folder is one of the configured ones, and applies the menu's `skip` list to all of them.
+
+**Verification.** `scripts/check` passes. New tests: the expansion (home, trimming, relative and
+repeated entries, no home), the scan order and the single listing with a missing folder in the list, and
+the config field's default and parsing. Not tried by hand in the running interface.
+
+**Left open.** Adding or removing a folder from the menu, and reloading `config.toml` without a restart.
 
 ---
 

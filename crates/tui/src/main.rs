@@ -3118,9 +3118,16 @@ fn run(
                         PluginsOutcome::Stay => {}
                         PluginsOutcome::OpenAdd => {
                             app.cancel_plugin_test();
-                            popup.open_found(
-                                app.plugin_candidates(browser.current_dir(), &config.keys),
+                            let home = std::env::var_os("HOME").map(PathBuf::from);
+                            let extra = plugin_source::configured_roots(
+                                &config.plugin_dirs,
+                                home.as_deref(),
                             );
+                            popup.open_found(app.plugin_candidates(
+                                browser.current_dir(),
+                                &extra,
+                                &config.keys,
+                            ));
                         }
                         PluginsOutcome::Browse => {
                             app.status = Some(

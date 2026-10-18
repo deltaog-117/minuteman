@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `plugin_dirs = ["~/code/mman-plugins"]` in `config.toml` names folders the plugin menu's found
+  list scans as well as the folder being browsed (`space`, `p`, `a`). Each is read like the browsed
+  one: itself and the folders directly inside it that hold a `plugin.toml`. `~` is the home; an
+  entry that is not an absolute path or not a folder is ignored, and a plugin found twice is listed
+  once. It is read at startup. Author: deltaog-117.
 - `mman plugin new <name> [--lang sh|python]` writes a working plugin into
   `~/.config/minuteman/plugins/<name>/`: a `plugin.toml` and a short program that answers `:<name>`
   with a line on the status bar, ready for `mman plugin check <name>` and the plugin menu. A name

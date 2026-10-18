@@ -1891,6 +1891,14 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   and opening a file inside one still inflates up to that file each time (a file's bytes are not
   kept); gzip checkpoints (B) would remove both.
 
+- ✅ **`plugin_dirs`** – `config.toml` takes a `plugin_dirs` list of folders that the plugin menu's
+  found list scans after the browsed folder, each one level deep like the browsed one
+  (`plugin_source::find_all`). `~` is expanded and an entry that is relative or blank is dropped
+  (a relative one would mean a different folder for every browsed folder); a missing folder finds
+  nothing; a plugin reached twice, or already in the menu, is listed once. Chosen as COA A (a
+  read-only list, read at startup) over a list the picker could add to (B) and always-on background
+  scanning into the roster (C). Not done: adding or removing a folder from the menu, and a reload
+  without a restart.
 - ✅ **`mman plugin new` and `mman plugin add`** – the command line can now start and install a
   plugin. `new <name> [--lang sh|python]` writes `plugin.toml` and a short program into the drop-in
   folder; the program answers a `command` event with a `log` line, so `:<name>` shows
@@ -2361,8 +2369,8 @@ draws.
   background (`probe_job`), so the screen stays live during the half second. `mman plugin new <name>
   [--lang sh|python]` writes a working skeleton and `mman plugin add <folder>` checks and copies a
   local plugin folder into the drop-in directory (COA B). Still to do: the
-  version check is not applied when the add form is filled from a folder; a `plugin_dirs` list in
-  `config.toml` for the folders the found list scans, choosing a folder with a double-click, a check
+  version check is not applied when the add form is filled from a folder; choosing a folder with a
+  double-click, a check
   of keys and `:` words when a drop-in is switched on; the `rust` skeleton for `mman plugin new`
   (the generated crate has nowhere to get `plugin_api` until it is published); `mman plugin add`
   from a git URL (waits for a sandbox); reloading a

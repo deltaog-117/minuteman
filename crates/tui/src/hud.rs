@@ -1078,6 +1078,7 @@ mod tests {
             open_rules: Vec::new(),
             preview_hooks: Vec::new(),
             plugins: Vec::new(),
+            plugin_dirs: Vec::new(),
             keys: theming::keymap::RawKeyMap::default().into(),
             theme: theming::Theme::default(),
             theme_is_customized: false,
