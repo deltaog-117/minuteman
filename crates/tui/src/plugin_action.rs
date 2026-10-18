@@ -68,6 +68,7 @@ fn check(name: &str, mode: Mode, modal_open: bool) -> Result<Action, &'static st
         Mode::Leader | Mode::Resize | Mode::Move | Mode::BookmarkJump | Mode::BookmarkSet => {
             Err("a key chord is waiting for its next key")
         }
+        Mode::PickPlugin => Err("the plugin menu is choosing a folder"),
         Mode::Prompt { .. } => Err("a prompt is open"),
         Mode::Busy => Err("a job is running"),
     }
@@ -77,13 +78,14 @@ fn check(name: &str, mode: Mode, modal_open: bool) -> Result<Action, &'static st
 mod tests {
     use super::*;
 
-    const EVERY_OTHER_MODE: [Mode; 9] = [
+    const EVERY_OTHER_MODE: [Mode; 10] = [
         Mode::Shell,
         Mode::Leader,
         Mode::Resize,
         Mode::Move,
         Mode::BookmarkJump,
         Mode::BookmarkSet,
+        Mode::PickPlugin,
         Mode::Busy,
         Mode::Prompt {
             label: "rename",

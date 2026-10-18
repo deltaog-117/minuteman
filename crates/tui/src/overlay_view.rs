@@ -40,7 +40,8 @@ use crate::glyphs;
 use crate::history_popup::HistoryPopup;
 use crate::hud::{fit_width, pad_to, text_width};
 use crate::inspect_panel::InspectPanel;
-use crate::plugins_popup::PluginsPopup;
+use crate::plugin_source::Candidate;
+use crate::plugins_popup::{Add, PluginsPopup, REVIEW_ACTIONS};
 use crate::settings_popup::{SettingsPopup, SettingsView};
 use crate::style;
 
@@ -779,9 +780,28 @@ pub fn render_plugins(
     rows: &[PluginRow],
     config: &Config,
 ) {
-    if let Some(form) = popup.form() {
-        render_add_plugin(frame, form, config);
-        return;
+    match popup.add_flow() {
+        Some(Add::Form(form)) => {
+            render_add_plugin(frame, form, config);
+            return;
+        }
+        Some(Add::Found {
+            items,
+            cursor,
+            notice,
+        }) => {
+            render_found_plugins(frame, items, *cursor, notice.as_deref(), config);
+            return;
+        }
+        Some(Add::Review {
+            item,
+            cursor,
+            result,
+        }) => {
+            render_review_plugin(frame, item, *cursor, result.as_deref(), config);
+            return;
+        }
+        None => {}
     }
     let theme = &config.theme;
     // A question replaces the hint line and needs the lines of the question beyond it.
@@ -855,6 +875,183 @@ pub fn render_plugins(
             dim,
         )),
     }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Most plugin rows the found list shows at once; it scrolls past that.
+const FOUND_VISIBLE_ROWS: usize = 10;
+
+/// Draws the first step of adding a plugin: what was found, then the two ways to go on without
+/// one. Nothing here is typed.
+fn render_found_plugins(
+    frame: &mut Frame<'_>,
+    items: &[Candidate],
+    cursor: usize,
+    notice: Option<&str>,
+    config: &Config,
+) {
+    let theme = &config.theme;
+    let total = Add::found_rows(items);
+    let shown = total.min(FOUND_VISIBLE_ROWS);
+    let first = (cursor + 1).saturating_sub(shown).min(total - shown);
+    // One more line than the rows, for the heading above them.
+    let area = panel_area(frame.area(), shown + 1);
+    style::cast_shadow(frame.buffer_mut(), area, config);
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, "add plugin", true);
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
+
+    let width = usize::from(inner.width);
+    let name_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let dim = Style::default().fg(style::color(&theme.border_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+
+    let heading = if items.is_empty() {
+        "no plugin folder found here"
+    } else {
+        "found here"
+    };
+    let mut lines = vec![Line::raw(""), Line::styled(heading, dim)];
+    lines.extend((first..first + shown).map(|row| {
+        let base = if row == cursor {
+            selected_style
+        } else {
+            Style::default()
+        };
+        match items.get(row) {
+            Some(item) => {
+                let note = if item.issue.is_some() {
+                    "cannot be added yet"
+                } else {
+                    item.found.description.as_str()
+                };
+                Line::from(vec![
+                    Span::styled(
+                        pad_to(
+                            &fit_width(&item.found.spec.name, PLUGIN_NAME_COLUMN - 1),
+                            PLUGIN_NAME_COLUMN,
+                        ),
+                        name_style.patch(base),
+                    ),
+                    Span::styled(
+                        fit_width(note, width.saturating_sub(PLUGIN_NAME_COLUMN)),
+                        dim.patch(base),
+                    ),
+                ])
+            }
+            None => {
+                let label = if row == items.len() {
+                    "Browse for a folder…"
+                } else {
+                    "Manual…"
+                };
+                Line::styled(fit_width(label, width), name_style.patch(base))
+            }
+        }
+    }));
+    lines.push(feedback_line(notice, None, width, theme));
+    lines.push(Line::styled(
+        fit_width(
+            "j/k moves, Enter picks, Tab browses for a folder, Esc cancels",
+            width,
+        ),
+        dim,
+    ));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Label column of the review card.
+const REVIEW_LABEL_COLUMN: usize = 10;
+
+/// Draws what one plugin will do, read from its manifest and typed by nobody, with the three
+/// things to do about it.
+fn render_review_plugin(
+    frame: &mut Frame<'_>,
+    item: &Candidate,
+    cursor: usize,
+    result: Option<&str>,
+    config: &Config,
+) {
+    let theme = &config.theme;
+    let spec = &item.found.spec;
+    let area = panel_area(frame.area(), 7);
+    style::cast_shadow(frame.buffer_mut(), area, config);
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, &format!("add plugin: {}", spec.name), true);
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
+
+    let width = usize::from(inner.width);
+    let value_width = width.saturating_sub(REVIEW_LABEL_COLUMN);
+    let label_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let dim = Style::default().fg(style::color(&theme.border_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+
+    let field = |label: &str, text: String| {
+        let (text, style) = if text.is_empty() {
+            ("none".to_string(), dim)
+        } else {
+            (text, value_style)
+        };
+        Line::from(vec![
+            Span::styled(pad_to(label, REVIEW_LABEL_COLUMN), label_style),
+            Span::styled(fit_tail(&text, value_width), style),
+        ])
+    };
+    let runs = format!("{} {}", spec.command, spec.args.join(" "));
+    let colon_words: Vec<String> = spec
+        .commands
+        .iter()
+        .map(|word| format!(":{word}"))
+        .collect();
+    let mut lines = vec![
+        Line::raw(""),
+        Line::styled(fit_width(&item.found.description, width), dim),
+        field("runs", runs.trim_end().to_string()),
+        field("keys", spec.on_key.join(" ")),
+        field("words", colon_words.join(" ")),
+        field("events", spec.events.join(" ")),
+        // A refusal, then what a test said, then nothing.
+        feedback_line(
+            item.issue.as_deref().or(result),
+            if item.issue.is_some() { result } else { None },
+            width,
+            theme,
+        ),
+    ];
+    let mut buttons: Vec<Span<'static>> = Vec::new();
+    for (i, label) in REVIEW_ACTIONS.iter().enumerate() {
+        let off = item.issue.is_some() && i != REVIEW_ACTIONS.len() - 1;
+        let base = if i == cursor {
+            selected_style
+        } else if off {
+            dim
+        } else {
+            value_style
+        };
+        buttons.push(Span::styled(format!(" {label} "), base));
+        buttons.push(Span::raw("  "));
+    }
+    lines.push(Line::from(buttons));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        fit_width("←/→ choose, Enter does it, t tests, Esc goes back", width),
+        dim,
+    ));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1476,6 +1673,10 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut popup = PluginsPopup::new();
         popup.key(KeyCode::Char('a'), 0);
+        popup.open_found(vec![]);
+        // Browse is the first row and Manual the second.
+        popup.key(KeyCode::Down, 0);
+        popup.key(KeyCode::Enter, 0);
         popup.key(KeyCode::Tab, 0);
         for c in "blame".chars() {
             popup.key(KeyCode::Char(c), 0);
@@ -1498,6 +1699,82 @@ mod tests {
             assert!(text.contains(wanted), "{wanted}: {text}");
         }
         assert!(!text.contains("no plugins"), "{text}");
+    }
+
+    fn candidate(name: &str, issue: Option<&str>) -> Candidate {
+        Candidate {
+            found: theming::DropIn {
+                dir: std::path::PathBuf::from("/p").join(name),
+                spec: theming::RawPluginSpec {
+                    name: name.into(),
+                    command: "/p/run.sh".into(),
+                    args: vec!["--fast".into()],
+                    on_key: vec!["b".into()],
+                    commands: vec!["blame".into()],
+                    ..theming::RawPluginSpec::default()
+                },
+                description: "shows who last changed the line".into(),
+            },
+            issue: issue.map(Into::into),
+        }
+    }
+
+    fn drawn(popup: &PluginsPopup) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_plugins(frame, popup, &[], &config()))
+            .unwrap();
+        screen_text(&terminal)
+    }
+
+    #[test]
+    fn the_found_list_names_each_plugin_and_ends_with_browse_and_manual() {
+        use crossterm::event::KeyCode;
+        let mut popup = PluginsPopup::new();
+        popup.key(KeyCode::Char('a'), 0);
+        popup.open_found(vec![
+            candidate("blame", None),
+            candidate("wc", Some("taken")),
+        ]);
+        let text = drawn(&popup);
+        for wanted in [
+            "found here",
+            "blame",
+            "shows who last changed the line",
+            "cannot be added yet",
+            "Browse for a folder…",
+            "Manual…",
+            "Tab browses",
+        ] {
+            assert!(text.contains(wanted), "{wanted}: {text}");
+        }
+        popup.open_found(vec![]);
+        assert!(drawn(&popup).contains("no plugin folder found here"));
+    }
+
+    #[test]
+    fn the_review_card_shows_what_the_manifest_says_and_why_an_add_is_refused() {
+        use crossterm::event::KeyCode;
+        let mut popup = PluginsPopup::new();
+        popup.open_found(vec![candidate("blame", None)]);
+        popup.key(KeyCode::Enter, 0);
+        let text = drawn(&popup);
+        for wanted in [
+            "add plugin: blame",
+            "/p/run.sh --fast",
+            ":blame",
+            "Start and test",
+            " Add ",
+            "Cancel",
+        ] {
+            assert!(text.contains(wanted), "{wanted}: {text}");
+        }
+        popup.open_found(vec![candidate(
+            "blame",
+            Some("key b is already bound to Quit"),
+        )]);
+        popup.key(KeyCode::Enter, 0);
+        assert!(drawn(&popup).contains("key b is already bound to Quit"));
     }
 
     #[test]

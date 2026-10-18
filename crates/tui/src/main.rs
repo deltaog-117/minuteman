@@ -60,6 +60,7 @@ mod picker_view;
 mod plugin_action;
 mod plugin_program;
 mod plugin_roster;
+mod plugin_source;
 mod plugin_views;
 mod plugins_popup;
 mod popup_shell;
@@ -1719,7 +1720,9 @@ fn run(
 
         // Mirrors the order the key handling below checks these in, so the pill always names
         // what the next keystroke will actually do.
-        let mode = if pending_leader {
+        let mode = if plugins_menu.as_ref().is_some_and(PluginsPopup::picking) {
+            hud::Mode::PickPlugin
+        } else if pending_leader {
             hud::Mode::Leader
         } else if let (Some(chord), true) = (shell_chord, shells.is_some()) {
             match chord {
@@ -2083,7 +2086,7 @@ fn run(
                     }
                     continue;
                 }
-                if plugins_menu.is_some() {
+                if plugins_menu.as_ref().is_some_and(|popup| !popup.picking()) {
                     if matches!(mouse.kind, MouseEventKind::Down(_)) {
                         plugins_menu = None;
                     }
@@ -3002,10 +3005,56 @@ fn run(
                     }
                     continue;
                 }
-                if let Some(popup) = plugins_menu.as_mut() {
+                if let Some(popup) = plugins_menu.as_mut().filter(|popup| popup.picking()) {
+                    // The browser has the keyboard; only these two keys are the menu's.
+                    match key.code {
+                        KeyCode::Esc => {
+                            popup.pick_cancel();
+                            continue;
+                        }
+                        KeyCode::Enter => {
+                            if let Some(entry) = browser.selected_entry() {
+                                match plugin_source::choose(&entry.path, entry.is_dir) {
+                                    plugin_source::Choice::Enter => {}
+                                    plugin_source::Choice::NotAFolder => {
+                                        app.status =
+                                            Some("that is a file: choose a plugin folder".into());
+                                        continue;
+                                    }
+                                    plugin_source::Choice::Chosen(found) => {
+                                        popup.pick_done(Ok(app.candidate(found, &config.keys)));
+                                        continue;
+                                    }
+                                    plugin_source::Choice::Refused(why) => {
+                                        popup.pick_done(Err(why));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(popup) = plugins_menu.as_mut().filter(|popup| !popup.picking()) {
                     let rows = app.plugin_rows().len();
                     match popup.key(key.code, rows) {
                         PluginsOutcome::Stay => {}
+                        PluginsOutcome::OpenAdd => {
+                            popup.open_found(
+                                app.plugin_candidates(browser.current_dir(), &config.keys),
+                            );
+                        }
+                        PluginsOutcome::Browse => {
+                            app.status = Some(
+                                "choose a plugin folder: Enter on it picks it, Esc cancels".into(),
+                            );
+                        }
+                        PluginsOutcome::Test(spec) => {
+                            match app.test_plugin(spec, &config.keys, browser.current_dir()) {
+                                Ok(message) => popup.report(message),
+                                Err(why) => popup.refuse(why),
+                            }
+                        }
                         PluginsOutcome::Close => plugins_menu = None,
                         PluginsOutcome::Toggle(row) => {
                             app.toggle_plugin(row, browser.current_dir());
@@ -4398,7 +4447,7 @@ fn draw(
             config,
         );
     }
-    if let Some(popup) = plugins_menu {
+    if let Some(popup) = plugins_menu.filter(|popup| !popup.picking()) {
         overlay_view::render_plugins(frame, popup, &app.plugin_rows(), config);
     }
     if let Some(popup) = compress {

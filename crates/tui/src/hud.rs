@@ -628,6 +628,8 @@ pub enum Mode {
     BookmarkJump,
     /// `B` was just pressed; the next key names a register to save the browsed directory under.
     BookmarkSet,
+    /// The file browser is choosing a plugin folder for the plugin menu.
+    PickPlugin,
     /// A background copy/move/delete is running.
     Busy,
     Prompt {
@@ -718,6 +720,7 @@ pub fn hints(view: &StatusView<'_>, config: &Config) -> Vec<(String, &'static st
         Mode::BookmarkJump | Mode::BookmarkSet => {
             vec![fixed("a-z 0-9", "register"), fixed("esc", "cancel")]
         }
+        Mode::PickPlugin => vec![fixed("enter", "choose folder"), fixed("esc", "cancel")],
         Mode::Busy => vec![fixed("esc", "cancel"), bound(Action::Cancel, "cancel all")],
         Mode::Prompt {
             text_input: true, ..
@@ -736,6 +739,7 @@ fn mode_pill(mode: Mode, theme: &theming::Theme) -> (String, Color) {
         Mode::Move => ("MOVE", &theme.config_fg),
         Mode::BookmarkJump => ("BOOKMARK", &theme.config_fg),
         Mode::BookmarkSet => ("SET BOOKMARK", &theme.config_fg),
+        Mode::PickPlugin => ("PICK PLUGIN", &theme.config_fg),
         Mode::Busy => ("BUSY", &theme.archive_fg),
         Mode::Prompt {
             label, destructive, ..

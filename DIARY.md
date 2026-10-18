@@ -8367,6 +8367,56 @@ API version in the manifest; a check of keys and `:` words when a drop-in is swi
 
 ---
 
+## 2026-10-18 — Adding a plugin by picking, not typing
+
+**Context.** The add form had eight text rows and only the Folder row could save typing. The goal
+was an add flow that asks for nothing typed: the user points at a plugin and the manifest supplies
+the rest, the way a drop-in already does.
+
+**Decision.** Chosen as COA B of three: a found list and a review card (A), plus choosing the
+folder in the file browser itself. The popup's old `form` became an `Add` flow with three stages,
+`Found`, `Review` and `Form`; the form is the "Manual…" row at the end of the list and is
+otherwise unchanged. `plugin_source::find` looks at the browsed folder and the folders directly
+in it (one level, 500 at most, so a folder of repositories cannot slow the list), and the caller
+attaches each plugin's `conflict` reason before the user sees it, so the card can refuse an add
+before anything is started.
+
+**Choosing a folder.** The chooser (`--chooser-file`) is a launch mode that writes an answer to a
+file, so it could not be called from inside a running app. Instead the popup has a `picking` flag:
+while it is set the menu draws nothing and hears nothing, the status bar shows `PICK PLUGIN`, and
+`main` gives the browser the keyboard except for two keys. `Enter` asks `plugin_source::choose`
+what the row under the cursor is: a folder with a manifest is chosen, any other folder is entered
+by the browser as usual, and a file is refused (it would otherwise be opened). `Esc` ends the
+pick. The mouse reaches the browser too while picking, because the menu's "any click closes it"
+rule is now skipped. A double-click enters a folder rather than choosing it; choosing is `Enter`.
+
+**Start and test.** `PluginHost::spawn` returns once the process is started, and the handshake
+arrives later on the render loop, so the test starts the program, stops it again and reports
+`starts`. It does not check the handshake or the API version; that belongs to `mman plugin check`,
+which is still open.
+
+**Trade-offs.** `Esc` on the review card goes back by scanning the browsed folder again, so a
+plugin chosen from another folder is not on the list after backing out of it. The card is
+read-only: to change a keybinding the user edits the manifest, or picks "Manual…". `scripts/vfs-gate`
+gained an entry for `plugin_source.rs`, because plugin folders are programs run on this machine.
+
+**Verification.** `scripts/check` passes. New tests: the found list orders the folder itself
+first and its subfolders by name, looks one level down only, leaves out listed and unreadable ones,
+and finds every plugin folder exactly once (property test); `choose` returns chosen, enter,
+refused and not-a-folder; the popup tests cover review, test, refused add, cancel, picking hiding
+the menu, and a refused folder explaining itself; two draw tests check the found list and the
+review card. Against the real binary on a PTY through `pyte`, with `HOME` pointed at a scratch
+folder: the list showed `bad` (cannot be added yet) and `blame`, the card for `bad` showed its
+key conflict and `Enter` on Cancel went back, the card for `blame` showed `cat`, `:blamer` and the
+buttons, `t` then `Enter` said `blame starts`, Add wrote the `[[plugin]]` table to `local.toml`,
+`Tab` showed the `PICK PLUGIN` pill with the menu hidden, `Enter` on `far` went in and `j` `Enter`
+on `gem` opened its card, and `Esc` returned to the list.
+
+**Left open.** A handshake check in Start and test; `plugin_dirs` in `config.toml` to scan folders
+the user names; a double-click that chooses; `mman plugin check` and `add`.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

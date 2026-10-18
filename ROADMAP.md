@@ -2311,14 +2311,21 @@ draws.
   table and its switch names are deleted; a plugin declared in `config.toml` is refused), and `a`
   opens the add form (name, command, arguments, keys, `:` commands, events, `provides`), which
   refuses a name, key or `:` word something else has, starts the program before writing
-  anything, and keeps the plugin in `local.toml`. Done; the manifest that will fill the form in
-  is under "Easier plugin authoring and adding".
+  anything, and keeps the plugin in `local.toml`. Adding no longer starts with that form: `a` lists
+  the plugins found in the browsed folder, `Enter` opens a read-only review card (command, keys,
+  `:` words, events, and a conflict if there is one) with Start and test, Add and Cancel, and
+  `Tab` lets the file browser choose a plugin folder (status pill `PICK PLUGIN`); the form is the
+  last row, "Manual…". Done; the manifest that fills it in is under "Easier plugin authoring and
+  adding".
 - **Easier plugin authoring and adding** – done so far: a `plugin.toml` manifest (the keys of a
   `[[plugin]]` table plus a `description`; `{dir}` and a leading `./` in `command` refer to its
   folder) and the drop-in directory `~/.config/minuteman/plugins/<name>/`, found at launch and
   listed in the plugin menu as `drop-in`, off until switched on; a name already taken keeps its
   owner and the drop-in is reported; a bad manifest is reported and skipped. The add form takes
-  a folder (its first row) and fills the rest from the manifest. Still to do: an API version in
+  a folder (its first row) and fills the rest from the manifest, and the menu's found list and
+  folder picker read the same manifest without typing. Still to do: a handshake check in the
+  review card's Start and test (it only shows that the program starts), a `plugin_dirs` list in
+  `config.toml` for the folders the found list scans, choosing a folder with a double-click, an API version in
   the manifest, a check of keys and `:` words when a drop-in is switched on; `mman plugin new <name> --lang
   python|rust|sh` for a working skeleton; `mman plugin check <name>` to start a plugin once and verify the handshake, the API version and key collisions;
   `mman plugin add <path or git url>`; reloading plugin config without a restart. A curated index
@@ -2630,7 +2637,11 @@ draws.
    checkout `cargo build -p wiring`).
    Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. Press `V` until the title says `atlas` (the last view before the list): the same map as before,
+1. Press `space p`, then `a`: the plugins found in the browsed folder are listed with their
+   descriptions (put a folder with a `plugin.toml` in it to try); `Enter` opens the review card
+   (`t` then `Enter` starts the program once, `Tab` then `Enter` adds it), and `Tab` on the list
+   hands the file browser the choice: `Enter` on a folder holding a `plugin.toml` picks it, `Esc`
+   goes back. Before that: press `V` until the title says `atlas` (the last view before the list): the same map as before,
    now drawn by `mman-atlas` — `Enter` zooms in, `Backspace` out, `o` opens in the browser, `a`
    swaps size on disk for apparent size once zoomed (on the map `a` is still the appearance
    popup). Move `mman` alone somewhere without `mman-atlas` and the view says how to get it.

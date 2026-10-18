@@ -65,6 +65,7 @@ use crate::open;
 use crate::picker_popup::PickerPopup;
 use crate::plugin_program::{self, Program};
 use crate::plugin_roster::{self, ConfigSwitches, Origin};
+use crate::plugin_source::{self, Candidate};
 use crate::plugin_views::Slots;
 use crate::remote_open;
 use crate::search_job::{SearchJob, SearchState};
@@ -1156,6 +1157,51 @@ impl App {
             Err(e) => format!("plugin {name}: added, but could not save to local.toml: {e}"),
         });
         Ok(())
+    }
+
+    /// The plugins the menu can offer to add from `dir`: the folder itself and each folder in it
+    /// with a `plugin.toml`, without those the menu already lists, each with the reason it cannot
+    /// be added yet (a name, key or `:` word taken) if there is one.
+    pub fn plugin_candidates(&self, dir: &Path, keys: &KeyMap) -> Vec<Candidate> {
+        let listed: Vec<PathBuf> = self
+            .plugin_roster
+            .iter()
+            .filter_map(|entry| entry.folder.clone())
+            .collect();
+        plugin_source::find(dir, &listed)
+            .into_iter()
+            .map(|found| self.candidate(found, keys))
+            .collect()
+    }
+
+    /// `found` with the reason it cannot be added now, if there is one.
+    pub fn candidate(&self, found: DropIn, keys: &KeyMap) -> Candidate {
+        let issue = plugin_roster::conflict(&self.plugin_roster, &found.spec, keys);
+        Candidate { found, issue }
+    }
+
+    /// Starts the plugin once and stops it again, to show that its program runs, without adding
+    /// it or writing anything. Refused for the reasons [`add_plugin`](Self::add_plugin) refuses.
+    ///
+    /// # Errors
+    ///
+    /// The reason, when something already has the plugin's name, a key or a `:` word, or when its
+    /// program will not start.
+    pub fn test_plugin(
+        &mut self,
+        raw: RawPluginSpec,
+        keys: &KeyMap,
+        cwd: &Path,
+    ) -> Result<String, String> {
+        if let Some(why) = plugin_roster::conflict(&self.plugin_roster, &raw, keys) {
+            return Err(why);
+        }
+        let name = raw.name.clone();
+        let spec = PluginSpec::from(raw);
+        self.start_plugin(&spec, cwd)
+            .map_err(|e| format!("could not start {name}: {e}"))?;
+        self.plugins.remove(&name);
+        Ok(format!("{name} starts"))
     }
 
     /// The program behind row `index`, when the menu may delete it: a bundled plugin's, found,

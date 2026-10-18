@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Adding a plugin no longer starts with a form. `space p` then `a` opens a list of the plugins
+  found in the browsed folder (the folder itself and each folder directly in it that holds a
+  `plugin.toml`, except those the menu already lists), each with its description; a plugin that
+  something already conflicts with (its name, a key or a `:` word) says so. `Enter` on one opens a
+  review card that shows its command, arguments, keys, `:` words and events, read from the
+  manifest, with three buttons: Start and test (starts the program once and stops it again, to show
+  that it runs), Add (writes it to `local.toml`) and Cancel. A plugin that conflicts cannot be
+  tested or added, and the card starts on Cancel. `Tab` (or "Browse for a folder…") hides the menu
+  and lets the file browser choose the folder: the status bar shows a `PICK PLUGIN` pill, `Enter`
+  on a folder holding a `plugin.toml` chooses it, `Enter` on any other folder goes into it, `Enter`
+  on a file is refused, and `Esc` goes back. "Manual…" opens the old form unchanged. Nothing has to
+  be typed on the way. Author: deltaog-117.
 - The add-plugin form takes a folder: its first row, "Folder", accepts the path of a plugin's
   folder (or of its `plugin.toml`; `~` and paths relative to the browsed folder work). Enter on
   that row, or moving off it, reads the manifest and fills the name, command, arguments, keys,
