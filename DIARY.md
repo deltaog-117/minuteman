@@ -107,6 +107,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Plugin Menu, First Slice | A core popup (`space p`) that switches any plugin on and off live and keeps the switched-off names in `local.toml` (COA B, step one); installing and fetching plugins from the menu rejected (COA C) | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, `git` and `hud` | Four small cycles in a set order (COA A); the menu switches `git` and `hud` through `local.toml`, with `git_status = false` kept as a veto; one cycle for all of it (C) and own plugins first (B) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, Own Plugins in `local.toml` | `[[plugin]]` tables in `local.toml` merged after `config.toml`'s, `d` removes them with a question; one approach, no COAs asked (the roadmap fixed it) | ✅ Confirmed |
+| 2026-10-18 | Plugin Menu, the Add Form | A multi-row text form modelled on the compress form, refusing clashes and unstartable programs before anything is written (COA A); a one-question-at-a-time prompt (B) and a `:plugin add` command (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Menu, Deleting a Program | A `d` key and an inline `y`/`n` question naming the file, its size and the reinstall command; only a plain file of the running user (COA A); moving it to the trash (B) and printing the commands only (C) not taken | ✅ Confirmed |
 
 ---
@@ -8233,6 +8234,48 @@ row and printed "removed"; `local.toml` then held the other plugin and `disabled
 untouched; `d` on the `config.toml` plugin said "declared in config.toml; remove it there".
 
 **Left open.** The add form, which will write the same tables.
+
+---
+
+## 2026-10-18 — The plugin menu's add form
+
+**Decision.** Three ways were put forward and COA A chosen: a form with one text row per field of
+a `[[plugin]]` table, modelled on the compress form. A step-by-step prompt (B) cannot go back to
+fix an earlier answer, and a `:plugin add` command (C) is not the form the roadmap promised and
+makes args and lists awkward to quote. A form also suits the `plugin.toml` manifest still to come,
+whose job will be to prefill these same rows.
+
+**What changed.** `add_plugin_form` holds the rows and checks what the text alone can tell: the
+name (letters, digits, `-` and `_`, 40 at most), a command, keys that `parse_key` accepts (now
+public from `theming`), events `EventKind` knows, and arguments split on spaces except inside
+double quotes. `PluginsPopup` owns the form: `a` opens it and, while it is open, it has every key,
+so `q` or `d` typed into a name cannot close the menu or remove a row; `Outcome` is no longer
+`Copy` because `Add` carries the table. `plugin_roster::conflict` is the pure check that needs the
+rest of the program: a name any listed plugin has, bundled or not; a key the keymap binds or
+another plugin fires; a `:` word in `BUILTIN_WORDS` or another plugin's. `App::add_plugin` runs it,
+then starts the program, and only then writes `Config::add_local_plugin`, so a typo in the command
+leaves nothing behind in `local.toml`. The row goes in after the user's own plugins and before the
+bundled ones, which is where the next launch will list it. `provides` is not checked for clashes
+on purpose: claiming a bundled plugin's action is how it is replaced.
+
+**Trade-offs.** Typing every list into a text row is slower than choosing from a list, but the
+only lists with a closed set are events and keys, and both are validated with the reason named.
+A key or word that clashes is refused rather than left to the first plugin to claim it; the
+registry would have ignored the second silently, which is harder to notice than a form that says no.
+Arguments cannot hold a double quote; none of the bundled plugins need one.
+
+**Verification.** `scripts/check` passes. New tests: the form reads every field from its row, says
+what is wrong for six bad inputs and clears the message on the next key, wraps its focus; a
+property test that a built table always has a valid name and parseable keys, and another on the
+argument splitter; `PluginsPopup` opens the form with `a` even with no rows, gives it every key,
+and hands back an add that a refusal keeps open with the reason; `conflict` for each kind of clash;
+`with_plugin` keeps the others and clears a stale switch; the form is drawn over the list with its
+hints, text and error. Driven in the real `mman` through a PTY with an isolated `XDG_CONFIG_HOME`:
+`a` showed the form; `j` was refused with "key j is already bound to MoveDown" and the form stayed
+open; `9` was accepted, the row appeared as "yours, on" and `local.toml` held the `[[plugin]]`
+table with `on_key = ["9"]`.
+
+**Left open.** The `plugin.toml` manifest and the rest of "Easier plugin authoring and adding".
 
 ---
 

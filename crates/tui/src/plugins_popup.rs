@@ -19,9 +19,12 @@
 //! the only place that draws it and `app` is the only place that starts or stops a plugin.
 
 use crossterm::event::KeyCode;
+use theming::RawPluginSpec;
+
+use crate::add_plugin_form::{self, AddPluginForm};
 
 /// What a keystroke asks the caller to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// Nothing outside the menu; keep it open.
     Stay,
@@ -32,6 +35,9 @@ pub enum Outcome {
     Remove(usize),
     /// The user said yes to the question asked for this row.
     ConfirmRemove(usize),
+    /// The add form was filled in; the caller adds the plugin and either closes the form with
+    /// [`PluginsPopup::close_form`] or hands back why it cannot with [`PluginsPopup::refuse`].
+    Add(RawPluginSpec),
     Close,
 }
 
@@ -46,6 +52,8 @@ struct Asking {
 pub struct PluginsPopup {
     cursor: usize,
     asking: Option<Asking>,
+    /// The form for adding a plugin, while it is open; it has every key until it closes.
+    form: Option<AddPluginForm>,
 }
 
 impl PluginsPopup {
@@ -73,11 +81,38 @@ impl PluginsPopup {
         self.asking.as_ref().map(|asking| asking.lines.as_slice())
     }
 
+    /// The add form, while it is open.
+    pub fn form(&self) -> Option<&AddPluginForm> {
+        self.form.as_ref()
+    }
+
+    /// Closes the add form, back to the list.
+    pub fn close_form(&mut self) {
+        self.form = None;
+    }
+
+    /// Keeps the add form open and says why its plugin was not added.
+    pub fn refuse(&mut self, message: impl Into<String>) {
+        if let Some(form) = &mut self.form {
+            form.set_error(message);
+        }
+    }
+
     /// `j`/`k`/the arrows move with wraparound over `rows` rows; `Enter`, space, `h` and `l`
-    /// switch the plugin under the cursor; `d` asks to remove it; `Esc`/`q` closes the
+    /// switch the plugin under the cursor; `a` opens the form that adds one; `d` asks to remove it; `Esc`/`q` closes the
     /// menu. With no rows nothing but closing does anything. While a question is showing only `y`
     /// (yes) and `n` or `Esc` (no) are heard, so a key pressed for something else cannot delete.
     pub fn key(&mut self, code: KeyCode, rows: usize) -> Outcome {
+        if let Some(form) = &mut self.form {
+            return match form.key(code) {
+                add_plugin_form::Key::Stay => Outcome::Stay,
+                add_plugin_form::Key::Close => {
+                    self.form = None;
+                    Outcome::Stay
+                }
+                add_plugin_form::Key::Submit(spec) => Outcome::Add(spec),
+            };
+        }
         if let Some(asking) = &self.asking {
             return match code {
                 KeyCode::Char('y' | 'Y') => {
@@ -94,6 +129,10 @@ impl PluginsPopup {
         }
         match code {
             KeyCode::Esc | KeyCode::Char('q') => Outcome::Close,
+            KeyCode::Char('a') => {
+                self.form = Some(AddPluginForm::new());
+                Outcome::Stay
+            }
             _ if rows == 0 => Outcome::Stay,
             KeyCode::Char('j') | KeyCode::Down => {
                 self.cursor = (self.cursor + 1) % rows;
@@ -191,6 +230,48 @@ mod tests {
             assert!(popup.question().is_none());
             assert_eq!(popup.key(KeyCode::Esc, 2), Outcome::Close);
         }
+    }
+
+    #[test]
+    fn a_opens_the_form_which_takes_every_key_until_it_closes_or_adds() {
+        let mut popup = PluginsPopup::new();
+        // Even with no rows, and even for keys the list would act on.
+        assert_eq!(popup.key(KeyCode::Char('a'), 0), Outcome::Stay);
+        assert!(popup.form().is_some());
+        for c in ['q', 'd', 'j', 'a'] {
+            assert_eq!(popup.key(KeyCode::Char(c), 3), Outcome::Stay);
+        }
+        assert_eq!(
+            popup.form().unwrap().value(add_plugin_form::Row::Name),
+            "qdja"
+        );
+        assert_eq!(popup.key(KeyCode::Esc, 3), Outcome::Stay);
+        assert!(popup.form().is_none());
+        assert_eq!(popup.key(KeyCode::Esc, 3), Outcome::Close);
+    }
+
+    #[test]
+    fn a_filled_form_asks_to_add_and_a_refusal_keeps_it_open_with_the_reason() {
+        let mut popup = PluginsPopup::new();
+        popup.key(KeyCode::Char('a'), 1);
+        for c in "blame".chars() {
+            popup.key(KeyCode::Char(c), 1);
+        }
+        popup.key(KeyCode::Tab, 1);
+        for c in "true".chars() {
+            popup.key(KeyCode::Char(c), 1);
+        }
+        let Outcome::Add(spec) = popup.key(KeyCode::Enter, 1) else {
+            panic!("expected an add");
+        };
+        assert_eq!(
+            (spec.name.as_str(), spec.command.as_str()),
+            ("blame", "true")
+        );
+        popup.refuse("that name is taken");
+        assert_eq!(popup.form().unwrap().error(), Some("that name is taken"));
+        popup.close_form();
+        assert!(popup.form().is_none());
     }
 
     proptest! {

@@ -47,7 +47,7 @@ use plugin_host::{
 };
 use shared::{LocalVfs, Vfs, VfsError};
 use shell_overlay::CommandOutcome;
-use theming::{Config, OpenRule, OpenWith, PluginSpec, PreviewHook};
+use theming::{Config, KeyMap, OpenRule, OpenWith, PluginSpec, PreviewHook, RawPluginSpec};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::associations::{self, Associations};
@@ -1087,6 +1087,53 @@ impl App {
                 format!("plugin {name}: switched {verb}, but could not save to local.toml: {e}")
             }
         });
+    }
+
+    /// Adds the plugin the menu's form describes: refused with the reason when something already
+    /// has its name, a key or a `:` word, or when its program will not start; otherwise it is
+    /// running, listed as one of the user's own, and kept in `local.toml`. Nothing is written
+    /// for a plugin that did not start. The change is made when the save fails, and the status
+    /// line says so.
+    pub fn add_plugin(
+        &mut self,
+        raw: RawPluginSpec,
+        keys: &KeyMap,
+        cwd: &Path,
+    ) -> Result<(), String> {
+        if let Some(why) = plugin_roster::conflict(&self.plugin_roster, &raw, keys) {
+            return Err(why);
+        }
+        let name = raw.name.clone();
+        let spec = PluginSpec::from(raw.clone());
+        self.start_plugin(&spec, cwd)
+            .map_err(|e| format!("could not start {name}: {e}"))?;
+        self.plugin_disabled.retain(|kept| *kept != name);
+        self.plugin_enabled.retain(|kept| *kept != name);
+        self.plugin_menu_kept.push(name.clone());
+        // Where the next launch will list it: after the user's own, before the bundled ones.
+        let at = self
+            .plugin_roster
+            .iter()
+            .take_while(|entry| entry.origin == Origin::Yours)
+            .count();
+        self.plugin_roster.insert(
+            at,
+            plugin_roster::Entry {
+                name: name.clone(),
+                origin: Origin::Yours,
+                provides: spec.provides.clone(),
+                spec: Some(spec),
+                locked: None,
+                enabled: true,
+                default_on: true,
+                kept_by_menu: true,
+            },
+        );
+        self.status = Some(match Config::add_local_plugin(raw) {
+            Ok(()) => format!("plugin {name}: added"),
+            Err(e) => format!("plugin {name}: added, but could not save to local.toml: {e}"),
+        });
+        Ok(())
     }
 
     /// The program behind row `index`, when the menu may delete it: a bundled plugin's, found,

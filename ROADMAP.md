@@ -2308,8 +2308,11 @@ draws.
   confirmation naming the file, its size and the reinstall command (only a plain file the user
   owns; a link, another user's file and a plugin of your own are refused), and `[[plugin]]`
   tables in `local.toml` are started with the others and removed with `d` (a question, then the
-  table and its switch names are deleted; a plugin declared in `config.toml` is refused); still
-  to do: the add form.
+  table and its switch names are deleted; a plugin declared in `config.toml` is refused), and `a`
+  opens the add form (name, command, arguments, keys, `:` commands, events, `provides`), which
+  refuses a name, key or `:` word something else has, starts the program before writing
+  anything, and keeps the plugin in `local.toml`. Done; the manifest that will fill the form in
+  is under "Easier plugin authoring and adding".
 - **Easier plugin authoring and adding** – a `plugin.toml` manifest beside a plugin (name, command,
   keys, `provides`, API version) so adding one is "point at a path" and the form fills itself in;
   a drop-in `~/.config/minuteman/plugins/<name>/` directory found without a config edit;

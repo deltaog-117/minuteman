@@ -26,6 +26,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use theming::{Config, Hsv, Theme};
 
+use crate::add_plugin_form::{AddPluginForm, Row as AddPluginRow};
 use crate::app::PluginRow;
 use crate::appearance_popup::{
     self, AppearancePopup, AppearanceView, ManageView, PICKER_EXTRA_LINES, Page,
@@ -778,6 +779,10 @@ pub fn render_plugins(
     rows: &[PluginRow],
     config: &Config,
 ) {
+    if let Some(form) = popup.form() {
+        render_add_plugin(frame, form, config);
+        return;
+    }
     let theme = &config.theme;
     // A question replaces the hint line and needs the lines of the question beyond it.
     let question = popup.question();
@@ -846,10 +851,82 @@ pub fn render_plugins(
             )
         })),
         None => lines.push(Line::styled(
-            "j/k moves, Enter switches on or off, d removes, Esc closes",
+            "j/k moves, Enter switches on or off, a adds, d removes, Esc closes",
             dim,
         )),
     }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Label column of the add-plugin form, wide enough for ": commands".
+const ADD_PLUGIN_LABEL_COLUMN: usize = 12;
+
+/// Draws the form that adds a plugin: one text row per field with the focused row highlighted and
+/// a bar where typing goes, an empty row showing what it takes, and any error on the line under
+/// the rows.
+fn render_add_plugin(frame: &mut Frame<'_>, form: &AddPluginForm, config: &Config) {
+    let theme = &config.theme;
+    let area = panel_area(frame.area(), AddPluginRow::ALL.len());
+    style::cast_shadow(frame.buffer_mut(), area, config);
+    frame.render_widget(Clear, area);
+    let block = style::themed_block(config, "add plugin", true);
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    frame.render_widget(block, area);
+    style::paint_floating_gradient(frame.buffer_mut(), area, config);
+
+    let label_style = style::styled(
+        Style::default().fg(style::color(&theme.accent_fg)),
+        config.styles.title,
+    );
+    let value_style = Style::default().fg(style::color(&theme.file_fg));
+    let dim_style = Style::default().fg(style::color(&theme.border_fg));
+    let selected_style = Style::default()
+        .bg(style::color(&theme.selection_bg))
+        .fg(style::color(&theme.file_fg));
+    let value_width = usize::from(inner.width).saturating_sub(ADD_PLUGIN_LABEL_COLUMN);
+
+    let mut lines = vec![Line::raw("")];
+    lines.extend(AddPluginRow::ALL.iter().enumerate().map(|(i, &row)| {
+        let focused = i == form.cursor();
+        let base = if focused {
+            selected_style
+        } else {
+            Style::default()
+        };
+        let typed = form.value(row);
+        let mut spans = vec![Span::styled(
+            pad_to(row.label(), ADD_PLUGIN_LABEL_COLUMN),
+            label_style.patch(base),
+        )];
+        if typed.is_empty() {
+            spans.push(Span::styled(
+                fit_width(row.hint(), value_width.saturating_sub(1)),
+                dim_style.patch(base),
+            ));
+        } else {
+            spans.push(Span::styled(
+                fit_tail(typed, value_width.saturating_sub(1)),
+                value_style.patch(base),
+            ));
+            if focused {
+                spans.push(Span::styled("▏", value_style.patch(base)));
+            }
+        }
+        Line::from(spans)
+    }));
+    lines.push(feedback_line(
+        form.error(),
+        None,
+        usize::from(inner.width),
+        theme,
+    ));
+    lines.push(Line::styled(
+        fit_width(
+            "↑/↓ or Tab move, Enter adds, Esc cancels",
+            usize::from(inner.width),
+        ),
+        dim_style,
+    ));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1392,6 +1469,33 @@ mod tests {
         }
         assert!(text.contains("archive▏.zip"), "{text}");
         assert!(text.contains("compress: 2 items"));
+    }
+
+    #[test]
+    fn the_plugin_menu_draws_the_add_form_over_the_list_with_hints_text_and_error() {
+        use crossterm::event::KeyCode;
+        let mut popup = PluginsPopup::new();
+        popup.key(KeyCode::Char('a'), 0);
+        for c in "blame".chars() {
+            popup.key(KeyCode::Char(c), 0);
+        }
+        popup.key(KeyCode::Enter, 0);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_plugins(frame, &popup, &[], &config()))
+            .unwrap();
+        let text = screen_text(&terminal);
+        for wanted in [
+            "add plugin",
+            "blame▏",
+            ": commands",
+            "required, the program to run",
+            "the command is empty",
+            "Enter adds",
+        ] {
+            assert!(text.contains(wanted), "{wanted}: {text}");
+        }
+        assert!(!text.contains("no plugins"), "{text}");
     }
 
     #[test]

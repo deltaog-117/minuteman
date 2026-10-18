@@ -281,6 +281,14 @@ fn without_plugin(mut local: RawLocal, name: &str) -> (RawLocal, bool) {
     (local, found)
 }
 
+/// `local` with `spec` kept as one of the menu's plugins, after any of the same name, and with
+/// the name out of both switch lists so a stale switch cannot start the new plugin off.
+fn with_plugin(mut local: RawLocal, spec: RawPluginSpec) -> RawLocal {
+    let (mut local, _) = without_plugin(std::mem::take(&mut local), &spec.name);
+    local.plugin.get_or_insert_with(Vec::new).push(spec);
+    local
+}
+
 /// `appearance.toml`: the whole look in one file.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -644,6 +652,16 @@ impl Config {
             Self::save_local(&local)?;
         }
         Ok(found)
+    }
+
+    /// Keeps `spec` in `local.toml` as one of the plugins the plugin menu holds, leaving everything
+    /// else in the file as it is on disk. A plugin of the same name there is replaced.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from writing the file; never fatal for the caller.
+    pub fn add_local_plugin(spec: RawPluginSpec) -> io::Result<()> {
+        Self::save_local(&with_plugin(Self::stored_local(), spec))
     }
 
     /// `local.toml` as it is on disk now; empty if absent or unreadable (no warning, as the screen
@@ -1032,6 +1050,27 @@ mod tests {
         assert_eq!(config.plugins[0].command, "true");
         assert_eq!(config.plugins.len(), 2);
         assert_eq!(config.local_plugin_names, ["twice"]);
+    }
+
+    #[test]
+    fn adding_a_plugin_keeps_the_others_and_clears_a_stale_switch() {
+        let local = RawLocal {
+            plugin: Some(vec![mine("a")]),
+            disabled_plugins: Some(vec!["b".into(), "git".into()]),
+            view: Some("grid".into()),
+            ..Default::default()
+        };
+        let after = with_plugin(local, mine("b"));
+        assert_eq!(after.plugin, Some(vec![mine("a"), mine("b")]));
+        assert_eq!(after.disabled_plugins, Some(vec!["git".to_string()]));
+        assert_eq!(after.view.as_deref(), Some("grid"));
+
+        let replaced = with_plugin(after, mine("a"));
+        assert_eq!(replaced.plugin, Some(vec![mine("b"), mine("a")]));
+        assert_eq!(
+            with_plugin(RawLocal::default(), mine("c")).plugin,
+            Some(vec![mine("c")])
+        );
     }
 
     #[test]

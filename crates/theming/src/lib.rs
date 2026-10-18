@@ -34,7 +34,7 @@ pub use config::{
     Config, CustomTheme, HookKind, OpenRule, OpenWith, PluginSpec, PreviewHook, RangeModifier,
     RawLocal, RawPluginSpec,
 };
-pub use keymap::{Action, KeyMap};
+pub use keymap::{Action, KeyMap, parse_key};
 pub use palette::TerminalPalette;
 pub use panels::{ColumnLayout, PanelsConfig, RawPanels};
 pub use shape::{BORDER_STYLES, Gap, GradientFlow, GradientScope, RawShape, Shape, TitleAlign};

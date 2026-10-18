@@ -28,9 +28,10 @@
 //! off unless `system_hud = true`, so `local.toml` keeps the names switched on for them; which
 //! list a plugin belongs to is its `default_on`.
 
-use theming::PluginSpec;
+use theming::{KeyMap, PluginSpec, RawPluginSpec, parse_key};
 
 use crate::bundled::Listed;
+use crate::command::BUILTIN_WORDS;
 
 /// Where a plugin comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +134,53 @@ fn locked_reason(listed: &Listed, switches: ConfigSwitches) -> Option<String> {
         _ if listed.spec.is_none() => Some("not installed".into()),
         _ => None,
     }
+}
+
+/// Why `spec`, a plugin the add form describes, cannot join `entries`, or `None` if it can: its
+/// name is taken (a bundled plugin's too, installed or not), one of its keys is already bound by
+/// the interface or fires another plugin, or one of its `:` words is a built-in command or
+/// another plugin's. Keys and words are refused rather than left to the first to claim them, as
+/// a plugin that silently never fires is harder to find than a form that says no.
+pub fn conflict(entries: &[Entry], spec: &RawPluginSpec, keys: &KeyMap) -> Option<String> {
+    if let Some(taken) = entries.iter().find(|entry| entry.name == spec.name) {
+        return Some(format!(
+            "a {} plugin called {} already exists",
+            taken.origin.label(),
+            spec.name
+        ));
+    }
+    for word in &spec.on_key {
+        let Some(code) = parse_key(word) else {
+            continue;
+        };
+        if let Some(action) = keys.resolve(code) {
+            return Some(format!("key {word} is already bound to {action:?}"));
+        }
+        let user = entries.iter().find(|entry| {
+            entry
+                .spec
+                .as_ref()
+                .is_some_and(|s| s.on_keys.contains(&code))
+        });
+        if let Some(entry) = user {
+            return Some(format!("key {word} already fires plugin {}", entry.name));
+        }
+    }
+    for word in &spec.commands {
+        if BUILTIN_WORDS.contains(&word.as_str()) {
+            return Some(format!(":{word} is a built-in command"));
+        }
+        let user = entries.iter().find(|entry| {
+            entry
+                .spec
+                .as_ref()
+                .is_some_and(|s| s.commands.iter().any(|c| c == word))
+        });
+        if let Some(entry) = user {
+            return Some(format!(":{word} already runs plugin {}", entry.name));
+        }
+    }
+    None
 }
 
 /// The names to keep in `local.toml` after `name` is switched on or off: the old list without the
@@ -328,6 +376,67 @@ mod tests {
         assert_eq!(disabled_after(&off, "git", false), ["git"]);
         assert_eq!(disabled_after(&off, "finder", false), ["finder", "git"]);
         assert!(disabled_after(&off, "git", true).is_empty());
+    }
+
+    fn raw(name: &str) -> RawPluginSpec {
+        RawPluginSpec {
+            name: name.to_string(),
+            command: "true".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_new_plugin_conflicts_with_a_taken_name_a_bound_key_or_a_taken_command_word() {
+        let keys = theming::Config::from_sources(None, None, None).keys;
+        // A key the interface leaves unbound, whichever that is.
+        let free = ('A'..='Z')
+            .map(|c| c.to_string())
+            .find(|c| keys.resolve(parse_key(c).unwrap()).is_none())
+            .unwrap();
+        let mut mine = spec("mine");
+        mine.on_keys = vec![parse_key(&free).unwrap()];
+        mine.commands = vec!["blame".to_string()];
+        let entries = build(
+            &[mine],
+            vec![listed("finder", false)],
+            ALL_ON,
+            &[],
+            &[],
+            &[],
+        );
+
+        assert_eq!(conflict(&entries, &raw("fresh"), &keys), None);
+        for taken in ["mine", "finder"] {
+            let said = conflict(&entries, &raw(taken), &keys).unwrap();
+            assert!(said.contains("already exists"), "{said}");
+        }
+        let mut wants_key = raw("a");
+        wants_key.on_key = vec![free];
+        assert!(
+            conflict(&entries, &wants_key, &keys)
+                .unwrap()
+                .contains("fires plugin mine")
+        );
+        wants_key.on_key = vec!["j".to_string()];
+        assert!(
+            conflict(&entries, &wants_key, &keys)
+                .unwrap()
+                .contains("bound to MoveDown")
+        );
+        let mut wants_word = raw("a");
+        wants_word.commands = vec!["blame".to_string()];
+        assert!(
+            conflict(&entries, &wants_word, &keys)
+                .unwrap()
+                .contains("runs plugin mine")
+        );
+        wants_word.commands = vec![BUILTIN_WORDS[0].to_string()];
+        assert!(
+            conflict(&entries, &wants_word, &keys)
+                .unwrap()
+                .contains("built-in")
+        );
     }
 
     proptest! {

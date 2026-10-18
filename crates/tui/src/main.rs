@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+mod add_plugin_form;
 mod alt_keys;
 mod anim;
 mod app;
@@ -3016,6 +3017,12 @@ fn run(
                         PluginsOutcome::ConfirmRemove(row) => {
                             app.confirm_removal(row);
                             popup.clamp(app.plugin_rows().len());
+                        }
+                        PluginsOutcome::Add(spec) => {
+                            match app.add_plugin(spec, &config.keys, browser.current_dir()) {
+                                Ok(()) => popup.close_form(),
+                                Err(why) => popup.refuse(why),
+                            }
                         }
                     }
                     continue;

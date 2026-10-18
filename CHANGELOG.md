@@ -8,12 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The plugin menu can add a plugin of your own: `a` opens a form with a row each for the name, the
+  command, its arguments (`"quoted"` if one holds a space), its keys, its `:` commands, the events
+  it follows and the actions it provides. Enter checks it and says what is wrong without closing
+  the form: an empty or odd name, a word that is not a key or an event, a name that already
+  exists (bundled plugins included), a key the interface already binds or another plugin
+  fires, a `:` word that is a built-in command or another plugin's, or a program that will not
+  start. Only a plugin that started is kept in `local.toml`, and it is listed and running at
+  once. Author: deltaog-117.
 - Plugins of your own can live in `local.toml`: `[[plugin]]` tables there (same fields as in
   `config.toml`) are started after the ones in `config.toml`, listed in the plugin menu, and `d` on
   one asks whether to remove it, then deletes its table and its switched-off or switched-on name
   from `local.toml` and stops it. The program itself is left alone. A `[[plugin]]` in `config.toml`
   is refused with "declared in config.toml; remove it there", and a name `config.toml` already uses
-  wins over the same name in `local.toml`. The add form is the next step. Author: deltaog-117.
+  wins over the same name in `local.toml`. Author: deltaog-117.
 - The plugin menu can delete a bundled plugin's program: `d` on a row asks, naming the file, its
   size and the command that installs it again (`cargo install --path plugins/<name>`), and only `y`
   deletes it; `n` or `Esc` keeps it. It stops the running plugin first and leaves the row as "not
