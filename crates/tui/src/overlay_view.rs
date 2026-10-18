@@ -1714,6 +1714,7 @@ mod tests {
                     ..theming::RawPluginSpec::default()
                 },
                 description: "shows who last changed the line".into(),
+                api_version: None,
             },
             issue: issue.map(Into::into),
         }

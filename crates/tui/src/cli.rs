@@ -16,8 +16,8 @@
 
 //! Command-line parsing: `minuteman [--cwd-file <path>] [--chooser-file <path> [--pick <kind>]
 //! [--pick-name <name>]] [start_dir]`, `minuteman init
-//! <bash|zsh|fish>`, `minuteman init-terminal <kitty|alacritty|wezterm>`, `minuteman init-appearance`, and
-//! `minuteman glyphs`.
+//! <bash|zsh|fish>`, `minuteman init-terminal <kitty|alacritty|wezterm>`, `minuteman init-appearance`,
+//! `minuteman glyphs`, and `minuteman plugin check <name or folder>`.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -40,6 +40,8 @@ pub enum Command {
     InitAppearance,
     /// Print a sample of every glyph set, to see which ones the terminal's font can draw.
     Glyphs,
+    /// Start one plugin for half a second and say whether it looks healthy, then exit.
+    PluginCheck(String),
     Run(RunArgs),
 }
 
@@ -73,6 +75,8 @@ pub enum CliError {
     UnknownPick(String),
     /// `--pick` or `--pick-name` given without anywhere to write the answer.
     PickWithoutChooserFile(&'static str),
+    /// `plugin` without `check` and the one thing to check.
+    PluginUsage,
 }
 
 impl fmt::Display for CliError {
@@ -105,13 +109,14 @@ impl fmt::Display for CliError {
                 "unsupported pick '{name}' (expected file, files, directory, or save)"
             ),
             Self::PickWithoutChooserFile(flag) => write!(f, "{flag} needs --chooser-file"),
+            Self::PluginUsage => write!(f, "usage: plugin check <plugin name or folder>"),
         }
     }
 }
 
 impl std::error::Error for CliError {}
 
-/// Parses everything after the program name. `init`, `init-terminal` and `glyphs` as the
+/// Parses everything after the program name. `init`, `init-terminal`, `plugin` and `glyphs` as the
 /// *first* argument are subcommands (browse a directory literally named one of those as
 /// `./init`).
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliError> {
@@ -133,6 +138,16 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, CliErr
         if is_first && arg == "glyphs" {
             return match args.next() {
                 None => Ok(Command::Glyphs),
+                Some(extra) => Err(CliError::ExtraArgument(PathBuf::from(extra))),
+            };
+        }
+        if is_first && arg == "plugin" {
+            if args.next().is_none_or(|word| word != "check") {
+                return Err(CliError::PluginUsage);
+            }
+            let target = args.next().ok_or(CliError::PluginUsage)?;
+            return match args.next() {
+                None => Ok(Command::PluginCheck(target.to_string_lossy().into_owned())),
                 Some(extra) => Err(CliError::ExtraArgument(PathBuf::from(extra))),
             };
         }
@@ -391,6 +406,24 @@ mod tests {
         assert_eq!(
             parse_strs(&["glyphs", "nerd"]),
             Err(CliError::ExtraArgument("nerd".into()))
+        );
+    }
+
+    #[test]
+    fn plugin_check_takes_exactly_one_target() {
+        assert_eq!(
+            parse_strs(&["plugin", "check", "git"]),
+            Ok(Command::PluginCheck("git".into()))
+        );
+        assert_eq!(parse_strs(&["plugin"]), Err(CliError::PluginUsage));
+        assert_eq!(parse_strs(&["plugin", "check"]), Err(CliError::PluginUsage));
+        assert_eq!(
+            parse_strs(&["plugin", "new", "x"]),
+            Err(CliError::PluginUsage)
+        );
+        assert_eq!(
+            parse_strs(&["plugin", "check", "a", "b"]),
+            Err(CliError::ExtraArgument("b".into()))
         );
     }
 

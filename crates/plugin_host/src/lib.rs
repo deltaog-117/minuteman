@@ -30,6 +30,7 @@ pub mod host;
 mod life;
 mod mailbox;
 mod picker;
+pub mod probe;
 pub mod protocol;
 mod registry;
 pub mod serve;

@@ -439,6 +439,7 @@ mod tests {
                 provides: vec!["find".into()],
             },
             description: "Shows who changed a line".into(),
+            api_version: None,
         }
     }
 

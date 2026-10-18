@@ -1176,17 +1176,19 @@ impl App {
 
     /// `found` with the reason it cannot be added now, if there is one.
     pub fn candidate(&self, found: DropIn, keys: &KeyMap) -> Candidate {
-        let issue = plugin_roster::conflict(&self.plugin_roster, &found.spec, keys);
+        let issue = plugin_roster::api_mismatch(found.api_version)
+            .or_else(|| plugin_roster::conflict(&self.plugin_roster, &found.spec, keys));
         Candidate { found, issue }
     }
 
-    /// Starts the plugin once and stops it again, to show that its program runs, without adding
-    /// it or writing anything. Refused for the reasons [`add_plugin`](Self::add_plugin) refuses.
+    /// Starts the plugin once and watches it for half a second (see `plugin_host::probe`), to show
+    /// that its program runs and does not complain, without adding it or writing anything.
+    /// Refused for the reasons [`add_plugin`](Self::add_plugin) refuses.
     ///
     /// # Errors
     ///
-    /// The reason, when something already has the plugin's name, a key or a `:` word, or when its
-    /// program will not start.
+    /// The reason, when something already has the plugin's name, a key or a `:` word, when its
+    /// program will not start, or when it ends or logs an error at once.
     pub fn test_plugin(
         &mut self,
         raw: RawPluginSpec,
@@ -1198,10 +1200,15 @@ impl App {
         }
         let name = raw.name.clone();
         let spec = PluginSpec::from(raw);
-        self.start_plugin(&spec, cwd)
-            .map_err(|e| format!("could not start {name}: {e}"))?;
-        self.plugins.remove(&name);
-        Ok(format!("{name} starts"))
+        plugin_host::probe::probe(
+            &name,
+            &spec.command,
+            &spec.args,
+            cwd,
+            plugin_host::probe::WINDOW,
+        )
+        .map_err(|e| format!("could not start {name}: {e}"))?
+        .verdict(&name)
     }
 
     /// The program behind row `index`, when the menu may delete it: a bundled plugin's, found,
@@ -7374,6 +7381,51 @@ mod tests {
             events: Vec::new(),
             provides: vec!["find".to_string()],
         }
+    }
+
+    #[test]
+    fn start_and_test_reports_what_the_program_does_in_the_first_half_second() {
+        let mut fx = Fixture::new("start-and-test");
+        let keys = KeyMap::default();
+        let raw = |name: &str, script: &str| RawPluginSpec {
+            name: name.into(),
+            command: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+            ..RawPluginSpec::default()
+        };
+        let calm = fx.app.test_plugin(raw("calm", "sleep 30"), &keys, &fx.root);
+        assert_eq!(calm, Ok("calm starts and keeps running".to_string()));
+        let brief = fx.app.test_plugin(raw("brief", "exit 2"), &keys, &fx.root);
+        assert_eq!(
+            brief,
+            Err("brief ended at start: exit status: 2".to_string())
+        );
+        assert_eq!(
+            fx.app.plugin_rows().len(),
+            0,
+            "testing adds nothing to the menu"
+        );
+    }
+
+    #[test]
+    fn a_found_plugin_built_for_another_api_version_carries_that_as_its_issue() {
+        let fx = Fixture::new("found-api");
+        let found = |api_version| DropIn {
+            dir: fx.root.join("p"),
+            spec: RawPluginSpec {
+                name: "p".into(),
+                command: "true".into(),
+                ..RawPluginSpec::default()
+            },
+            description: String::new(),
+            api_version,
+        };
+        let keys = KeyMap::default();
+        assert_eq!(fx.app.candidate(found(None), &keys).issue, None);
+        let newer = fx
+            .app
+            .candidate(found(Some(plugin_host::API_VERSION + 1)), &keys);
+        assert!(newer.issue.is_some_and(|why| why.contains("plugin API")));
     }
 
     #[test]

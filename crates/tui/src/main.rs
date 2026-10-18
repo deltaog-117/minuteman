@@ -58,6 +58,7 @@ mod overlay_view;
 mod picker_popup;
 mod picker_view;
 mod plugin_action;
+mod plugin_check;
 mod plugin_program;
 mod plugin_roster;
 mod plugin_source;
@@ -802,6 +803,19 @@ fn main() -> Result<()> {
                 println!("{}", glyphs::sample(set));
             }
             return Ok(());
+        }
+        Ok(cli::Command::PluginCheck(target)) => {
+            let cwd = std::env::current_dir()?;
+            return match plugin_check::run(&target, &Config::load(), &cwd) {
+                Ok(report) => {
+                    println!("{report}");
+                    Ok(())
+                }
+                Err(report) => {
+                    eprintln!("{report}");
+                    std::process::exit(1);
+                }
+            };
         }
         Ok(cli::Command::Run(args)) => args,
         Err(e) => {

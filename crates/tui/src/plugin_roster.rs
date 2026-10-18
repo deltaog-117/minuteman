@@ -194,6 +194,19 @@ fn locked_reason(listed: &Listed, switches: ConfigSwitches) -> Option<String> {
     }
 }
 
+/// Why a manifest that says it was written for plugin protocol `declared` cannot run here, or
+/// `None` when it says nothing or names the version this build speaks.
+pub fn api_mismatch(declared: Option<u32>) -> Option<String> {
+    declared
+        .filter(|version| *version != plugin_host::API_VERSION)
+        .map(|version| {
+            format!(
+                "written for plugin API {version}; this build speaks {}",
+                plugin_host::API_VERSION
+            )
+        })
+}
+
 /// Why `spec`, a plugin the add form describes, cannot join `entries`, or `None` if it can: its
 /// name is taken (a bundled plugin's too, installed or not), one of its keys is already bound by
 /// the interface or fires another plugin, or one of its `:` words is a built-in command or
@@ -408,6 +421,15 @@ mod tests {
             "command = 'true'",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_manifest_for_another_api_version_is_named_and_one_that_says_nothing_passes() {
+        let ours = plugin_host::API_VERSION;
+        assert_eq!(api_mismatch(None), None);
+        assert_eq!(api_mismatch(Some(ours)), None);
+        let why = api_mismatch(Some(ours + 1)).expect("another version is refused");
+        assert!(why.contains(&(ours + 1).to_string()) && why.contains(&ours.to_string()));
     }
 
     #[test]

@@ -17,7 +17,8 @@
 //! Drop-in plugins: a folder under `~/.config/minuteman/plugins/` holding a `plugin.toml`.
 //!
 //! The manifest uses the keys of a `[[plugin]]` table (`name`, `command`, `args`, `on_key`,
-//! `commands`, `events`, `provides`) plus a `description`, so a plugin moves between the two by
+//! `commands`, `events`, `provides`) plus a `description` and an optional `api_version` (the
+//! plugin protocol version it was written for), so a plugin moves between the two by
 //! copying the lines. `name` may be left out, and is then the folder's name. In `command` and
 //! `args`, `{dir}` stands for the plugin's folder, and a `command` that begins with `./` is taken
 //! from it, so a plugin can ship its program beside the manifest and run from wherever it is put.
@@ -65,6 +66,7 @@ struct RawManifest {
     #[serde(flatten)]
     spec: RawPluginSpec,
     description: String,
+    api_version: Option<u32>,
 }
 
 /// A plugin found in a folder: its table, ready to start, and where it came from.
@@ -73,6 +75,9 @@ pub struct DropIn {
     pub dir: PathBuf,
     pub spec: RawPluginSpec,
     pub description: String,
+    /// The plugin protocol version the plugin was written for, when its manifest says so. Left
+    /// out, the plugin is not checked before it starts.
+    pub api_version: Option<u32>,
 }
 
 impl DropIn {
@@ -115,6 +120,7 @@ impl DropIn {
             dir: dir.to_path_buf(),
             spec,
             description: raw.description.trim().to_string(),
+            api_version: raw.api_version,
         })
     }
 
@@ -212,6 +218,18 @@ mod tests {
         assert_eq!(found.spec.events, ["dir_changed"]);
         assert_eq!(found.spec.provides, ["find"]);
         assert_eq!(found.description, "Counts files.");
+    }
+
+    #[test]
+    fn the_api_version_is_optional() {
+        let found = at("/p/a", "command = 'x'\napi_version = 1").unwrap();
+        assert_eq!(found.api_version, Some(1));
+        let found = at("/p/a", "command = 'x'").unwrap();
+        assert_eq!(found.api_version, None);
+        assert!(matches!(
+            at("/p/a", "command = 'x'\napi_version = 'one'"),
+            Err(ManifestError::Malformed(_))
+        ));
     }
 
     #[test]

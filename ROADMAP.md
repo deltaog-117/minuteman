@@ -2334,12 +2334,19 @@ draws.
   listed in the plugin menu as `drop-in`, off until switched on; a name already taken keeps its
   owner and the drop-in is reported; a bad manifest is reported and skipped. The add form takes
   a folder (its first row) and fills the rest from the manifest, and the menu's found list and
-  folder picker read the same manifest without typing. Still to do: a handshake check in the
-  review card's Start and test (it only shows that the program starts), a `plugin_dirs` list in
-  `config.toml` for the folders the found list scans, choosing a folder with a double-click, an API version in
-  the manifest, a check of keys and `:` words when a drop-in is switched on; `mman plugin new <name> --lang
-  python|rust|sh` for a working skeleton; `mman plugin check <name>` to start a plugin once and verify the handshake, the API version and key collisions;
-  `mman plugin add <path or git url>`; reloading plugin config without a restart. A curated index
+  folder picker read the same manifest without typing. Also done: Start and test is a passive
+  half-second probe (`plugin_host::probe`: start, send `init`, watch, stop; it reports that the
+  program stayed up, finished, ended with a status, closed its output or logged an error), the
+  manifest takes an optional `api_version` whose mismatch blocks Test and Add, and `mman plugin
+  check <name or folder>` runs the same probe and holds a manifest's version, keys and `:` words
+  against what is taken (COA A; a plugin does not answer `init`, so "handshake" means what the
+  probe can see, and an additive `ready` message stays an option). Still to do: Start and test
+  runs on the interface's thread, so a healthy plugin holds the screen for the half second; the
+  version check is not applied when the add form is filled from a folder; a `plugin_dirs` list in
+  `config.toml` for the folders the found list scans, choosing a folder with a double-click, a check
+  of keys and `:` words when a drop-in is switched on; `mman plugin new <name> --lang
+  python|rust|sh` for a working skeleton; `mman plugin add <path or git url>`; reloading a
+  hand-edited config without a restart (switching a plugin from the menu is already live). A curated index
   and one-step install wait for a sandbox or a declared, enforced permission list (see the
   community plugin ecosystem under the long-term vision).
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -2649,7 +2656,10 @@ draws.
    checkout `cargo build -p wiring`).
    Add `eval "$(mman init zsh)"` to `~/.zshrc`, reopen the terminal, run
    `mman`, navigate somewhere, and press `Q` — your shell should follow; `q` should not.
-1. Press `space p`, then `a`: the plugins found in the browsed folder are listed with their
+1. Run `mman plugin check git` (a name the plugin menu lists) or `mman plugin check ~/path/to/folder`
+   (a folder with a `plugin.toml`): it starts the plugin for half a second and prints one line,
+   exiting 1 when something is wrong; add `api_version = 99` to a manifest to see it refused. Then
+   press `space p`, then `a`: the plugins found in the browsed folder are listed with their
    descriptions (put a folder with a `plugin.toml` in it to try); `Enter` opens the review card
    (`t` then `Enter` starts the program once, `Tab` then `Enter` adds it), and `Tab` on the list
    hands the file browser the choice: `Enter` on a folder holding a `plugin.toml` picks it, `Esc`

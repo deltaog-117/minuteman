@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mman plugin check <name or folder>` starts one plugin for half a second and says whether it looks
+  healthy: it keeps running, it finishes at once (allowed), it ended at start with its exit status,
+  closed its output, or logged an error (a plugin built for another protocol version says so
+  there). The target is a folder holding a `plugin.toml` or the name of a plugin the menu lists. For
+  a manifest it also checks the `api_version` and the keys and `:` words against the interface and
+  the other plugins. It exits with status 1 on any problem and leaves nothing running. Author:
+  deltaog-117.
+- A `plugin.toml` can say `api_version = 1`, the plugin protocol version the plugin was written for.
+  A plugin that names another version shows that as its issue in the plugin menu's review card, and
+  cannot be tested or added; one that says nothing is not checked. Author: deltaog-117.
 - A `.tar.gz` that was slow to open opens at once the next time. Its list of files is kept in
   `~/.cache/minuteman/archive-index` (private to you, 32 archives at most) and used while the
   archive keeps the size and time it had; one that opens in under a quarter of a second is not
@@ -266,6 +276,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previews, search, disk usage and copying out that already went through the `Vfs` work as before.
 
 ### Changed
+- "Start and test" in the plugin review card now watches the program for half a second after
+  starting it, and says what it saw: still running, finished at once, ended at start with its exit
+  status, or an error it logged. Before, it only showed that the program could be started. The
+  wait ends as soon as the program does, and nothing is left running. Author: deltaog-117.
 - A `.tar.gz` is no longer refused for inflating to more than 512 MiB: opening one may now take up
   to 120 seconds, after which it is an error that says to extract it instead. A listing is still
   never cut short quietly. Author: deltaog-117.

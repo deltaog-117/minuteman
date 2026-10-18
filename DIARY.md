@@ -111,6 +111,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Plugin Menu, Deleting a Program | A `d` key and an inline `y`/`n` question naming the file, its size and the reinstall command; only a plain file of the running user (COA A); moving it to the trash (B) and printing the commands only (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Plugin Authoring, Manifest and Drop-ins | A `plugin.toml` with a `[[plugin]]` table's keys, found in `plugins/<name>/` of the config directory and listed off until switched on (COA B); the manifest alone (A) and the full `mman plugin` CLI first (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Large `.tar.gz` Archives | A 120 s time budget instead of the 512 MiB cap, and the listing of a slow one kept in the cache folder (COA A) | ✅ Confirmed |
+| 2026-10-18 | Plugin Start Check | A passive half-second probe shared by the review card and `mman plugin check`, plus an optional `api_version` in the manifest (COA A); an acknowledgement message (B) and a static-only check (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -8461,6 +8462,53 @@ about 0.3 s and from the cache in about 0.1 ms.
 **Left open.** The first open of a very large archive, and opening a file inside one, still
 inflate from the start; checkpoints (B) would remove both. A hand-edited cache file can show a
 wrong listing, since the cache is trusted as the user's own.
+
+---
+
+### Plugin Start Check: a Passive Half-Second Probe
+
+**Date:** 2026-10-18
+**Author:** deltaog-117
+**Status:** Confirmed
+
+**Problem.** "Start and test" in the plugin review card only showed that the program could be
+spawned; it was then dropped at once. There was nothing to verify beyond that, because a plugin
+never answers `init`: each bundled plugin compares `api_version` and, on a mismatch, logs an error
+and exits. The manifest also could not say which protocol version a plugin was written for.
+
+**Options.** (A) a passive probe: start, send `init`, watch for a short window, stop; report that
+it stayed up, finished, crashed, or logged an error; (B) an additive `ready` message from plugin to
+host, which needs a change in all nine bundled plugins and leaves older ones "unknown"; (C) a
+static check with no process (command resolves, manifest parses, version in range, no collisions).
+A was chosen: it says something new about a running program without touching the wire that every
+plugin shares, and its report type can carry B's `ready` later.
+
+**Decision.** `plugin_host::probe` is std-only: a reader thread forwards the plugin's stdout lines
+over a channel, and the wait is one timed receive of 500 ms, not a poll, so it costs nothing
+between uses and ends the moment the process does (the output closing). The verdict is `Stayed`,
+`Finished` (status 0 is allowed, as everywhere else), `Crashed(status)` or `ClosedOutput`, plus
+every `error`-level log line; any logged error fails the check even if the exit was clean. The
+process is always killed and reaped. The manifest gained an optional `api_version`; the review
+card shows a mismatch as the candidate's issue, which already blocks Test and Add before anything
+starts. `mman plugin check <name or folder>` takes a folder holding a `plugin.toml` or a name the
+menu lists, runs the same probe, and for a manifest also checks the version and the keys and `:`
+words against the interface and the other plugins (the plugin's own roster entry excluded); it
+exits 1 on any problem.
+
+**Verification.** `scripts/check` passes. New tests: the probe against `sh` programs that stay,
+exit 0, exit 3, log an error then exit 0, close their output and run on, and do not exist; the
+probe returns long before its window when the process exits; `init` reaches the program; a
+property test that a report is healthy only when nothing was logged and the program stayed or
+finished cleanly; the manifest's `api_version` parsed, optional and typed; the version mismatch
+text; the CLI grammar; `check` on healthy, wrong-version (nothing started), crashing, missing,
+conflicting, malformed and unknown targets; and `test_plugin` and `candidate` on the app. By hand
+against the compiled `mman`: `plugin check git` (the real `mman-git`) starts and keeps running.
+
+**Left open.** "Start and test" still runs on the interface's thread, so a healthy plugin holds the
+screen for the half second. The version check is not applied when the add form is filled from a
+folder, and `check` is not given a plugin's keys and words for a bundled or `config.toml` plugin
+(they were settled at load). `mman plugin new`, `plugin_dirs`, a double-click to choose a folder
+and reloading config by hand-edit are unchanged.
 
 ---
 

@@ -446,6 +446,7 @@ mod tests {
                     ..RawPluginSpec::default()
                 },
                 description: String::new(),
+                api_version: None,
             },
             issue: issue.map(Into::into),
         }
