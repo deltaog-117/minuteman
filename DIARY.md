@@ -113,6 +113,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Plugin Menu, `plugin_dirs` | A read-only `plugin_dirs` list in `config.toml`, scanned one level deep after the browsed folder (COA A); a list the picker adds to (B) and background scanning into the roster (C) not taken | ✅ Confirmed |
 | 2026-10-18 | Large `.tar.gz` Archives | A 120 s time budget instead of the 512 MiB cap, and the listing of a slow one kept in the cache folder (COA A) | ✅ Confirmed |
 | 2026-10-18 | Plugin Start Check | A passive half-second probe shared by the review card and `mman plugin check`, plus an optional `api_version` in the manifest (COA A); an acknowledgement message (B) and a static-only check (C) not taken | ✅ Confirmed |
+| 2026-10-19 | Plugin Quick-Start Page | One short `docs/plugins.md` written from the commands as run, linked from the README (COA none: documentation only) | ✅ Confirmed |
 
 ---
 
@@ -8592,6 +8593,29 @@ repeated entries, no home), the scan order and the single listing with a missing
 the config field's default and parsing. Not tried by hand in the running interface.
 
 **Left open.** Adding or removing a folder from the menu, and reloading `config.toml` without a restart.
+
+---
+
+### Plugin Quick-Start Page
+
+**Date:** 2026-10-19
+**Status:** Confirmed
+
+**Context.** `plugin new`, `plugin check`, `plugin add` and `plugin_dirs` landed over four commits, and
+the only place that described them together was the roadmap and the changelog, which are written for
+the maintainer, not for someone who wants to write a plugin.
+
+**Decision.** A single page, `docs/plugins.md`, in the order an author meets things: make, check,
+switch on, manifest, conversation, add, where the menu looks. It was written after running each
+command against the built binary with a throwaway config folder, so the output lines it quotes
+(`hello starts and keeps running`, `written for plugin API 99; this build speaks 1`, the exit codes)
+are the real ones. It states only what was seen; the full event list and the canvas and `ask`
+requests are left out until they have a reference of their own. The README links to it from the
+plugin section.
+
+**Verification.** `scripts/check` passes. No code changed.
+
+**Left open.** A reference for every event and request a plugin can use, and a Rust skeleton.
 
 ---
 

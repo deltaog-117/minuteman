@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `docs/plugins.md`, a quick start for writing a plugin: making one with `mman plugin new`, trying
+  it with `mman plugin check`, switching it on in the plugin menu, the manifest keys, the messages
+  a plugin reads and writes, installing one with `mman plugin add`, and `plugin_dirs`. Author:
+  deltaog-117.
 - `plugin_dirs = ["~/code/mman-plugins"]` in `config.toml` names folders the plugin menu's found
   list scans as well as the folder being browsed (`space`, `p`, `a`). Each is read like the browsed
   one: itself and the folders directly inside it that hold a `plugin.toml`. `~` is the home; an

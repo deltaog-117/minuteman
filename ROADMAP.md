@@ -1915,6 +1915,10 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   languages, `check` on each, `add` from outside, and a refusal for an existing folder, a taken
   name, a folder already in place and one with no manifest; then over a PTY the two plugins,
   switched on, answered `:hello` and `:py` on the status bar.
+- ✅ **Plugin quick start (`docs/plugins.md`)** – one page for a plugin author: `plugin new`, `plugin
+  check`, switching it on with `space p`, the manifest keys, the one-line-per-JSON-object
+  conversation, `plugin add` and its limits, and `plugin_dirs`. Every command and message in it was
+  run against the built binary with a throwaway config folder. Documentation only; no code changed.
 
 ## 🔴 High Priority: a small core and bundled plugins
 

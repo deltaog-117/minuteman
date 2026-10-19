@@ -104,6 +104,8 @@ mman
 mman /path/to/dir
 ```
 
+To write a plugin of your own, see [docs/plugins.md](docs/plugins.md).
+
 The fuzzy finder is a plugin that ships with Minuteman and starts by itself when `mman-finder` is
 next to `mman` (or on your `PATH`). Without it everything else works, and `f` says how to get it.
 A `[[plugin]]` of your own that lists `provides = ["find"]` takes its place (see
