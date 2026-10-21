@@ -114,6 +114,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Large `.tar.gz` Archives | A 120 s time budget instead of the 512 MiB cap, and the listing of a slow one kept in the cache folder (COA A) | ✅ Confirmed |
 | 2026-10-18 | Plugin Start Check | A passive half-second probe shared by the review card and `mman plugin check`, plus an optional `api_version` in the manifest (COA A); an acknowledgement message (B) and a static-only check (C) not taken | ✅ Confirmed |
 | 2026-10-19 | Plugin Quick-Start Page | One short `docs/plugins.md` written from the commands as run, linked from the README (COA none: documentation only) | ✅ Confirmed |
+| 2026-10-21 | Sandboxed WASM Plugins | `wasmi` behind an off-by-default `wasm` feature, one launch decision, a read-only trust check with no wildcard arm, and memory and idle-time limits on a thread of its own (COA A); `wasmtime`/Extism (B) and a permission manifest with writes (C) not taken | ✅ Confirmed |
 
 ---
 
@@ -8616,6 +8617,61 @@ plugin section.
 **Verification.** `scripts/check` passes. No code changed.
 
 **Left open.** A reference for every event and request a plugin can use, and a Rust skeleton.
+
+---
+
+### Sandboxed WASM Plugins: a Read-Only First Cut
+
+**Date:** 2026-10-21
+**Status:** Confirmed
+
+**Context.** Plugins are programs run with the user's own permissions. That is right for code the
+user wrote, and wrong the day someone shares a plugin with a stranger. The roadmap held a sandboxed
+tier back until that day; the plugin commands are now complete enough that the tier can be built
+against a stable protocol instead of guessing.
+
+**Options.**
+
+| COA | Approach | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|---|
+| A | `wasmi`, same line protocol over in-memory pipes, read-only trust | Small, pure Rust, no change to what a plugin says | Slower than a JIT; no writes yet | M |
+| B | `wasmtime` or Extism with a host-function API | Fast; ready-made plugin kit | Roughly doubles the binary; a second API beside the protocol | H |
+| C | A, plus a per-plugin permission manifest allowing writes now | Covers more plugins | A permission format that must then be kept stable, designed before any user asked | H |
+
+**Decision.** A. The module talks the protocol a process plugin already talks, so the host's
+request handling is shared and only the transport differs. The feature is off by default because
+nothing else needs `wasmi`, and a build without it says how to turn it on rather than failing
+quietly. `launch.rs` decides process or module once, so nothing after it can mix the two.
+
+What a module may ask is settled in one place, `Trust::check`. Its match has no wildcard arm, so a
+request added to the protocol later fails the build until someone decides about it. The first cut
+answers reads below the browsed folder (after `canonicalize`, so a link or `..` that leads out is
+refused), the interface requests, and refuses every change to a file and `run_action`, which can
+reach a key's delete. The refusal carries a reason the plugin can log. The check happens before the
+host reads, so a link swapped in by another program between the two could still get through; a
+module cannot make links itself, which is the part this can promise.
+
+The module runs on its own thread because the WASI layer is synchronous. Memory is capped at
+64 MiB. Time is metered in slices of fuel, and after each slice the thread checks whether the host
+asked it to stop and whether the module has read its input within one second. A module waiting for
+input burns no fuel, so a plugin that sleeps between events for hours is fine; one that computes for
+over a second without reading is ended, with the reason reported. The limit is wall-clock time
+checked at slice ends, so a slow build only notices it later.
+
+**Measured** (release build, `wasm_cost`, run by hand): a module starts to its first log line in a
+median of 312 µs over 25 starts, and one `get_state` round trip takes a mean of 31.5 µs over 2,000.
+The binary-size cost (estimated at about 2 MB) was not measured on a release build.
+
+**Verification.** `scripts/check` passes, now including clippy and tests with `--features wasm`.
+New tests: a symlink in the browsed folder that leads out, a delete refused inside the browsed
+folder, a read outside it refused while a `:` word can still be registered, a module that hogs the
+CPU, a file that is not a module, ignored arguments, and the build-without-the-feature message.
+`vfs-gate` allows `sandbox.rs` and `wasm.rs` their local-disk access with a reason each. Not tried
+by hand in the running interface, and no module compiled from Rust or another language has been run;
+the tests use hand-written WAT.
+
+**Left open.** Writes behind a permission manifest, an API version handshake for modules, a worked
+Rust example, and the binary size on a release build.
 
 ---
 

@@ -41,13 +41,14 @@ use plugin_api::{
 };
 use serde_json::json;
 use shared::{FileKind, LocalVfs, Vfs};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 
 use crate::actions::{ActionLink, ActionRequest};
 use crate::error::PluginError;
+use crate::launch::Launch;
 use crate::life::{self, Exit, Life, PluginInfo, PluginState, Verdict};
 use crate::mailbox::{Mailbox, Queued};
 use crate::picker::{UiLink, UiRequest};
@@ -56,6 +57,7 @@ use crate::protocol::{
     WireEntry,
 };
 use crate::registry::SharedRegistry;
+use crate::sandbox::Trust;
 use crate::serve::{Pending, ServeLink};
 use crate::tally::Tallies;
 use crate::walk::Walks;
@@ -1027,7 +1029,7 @@ impl PluginManager {
 /// has been folded into the plugin's mailbox is written whenever the queue is idle; a write that
 /// waits on a full pipe holds both back, which is what lets the mailbox keep folding.
 async fn write_loop(
-    mut stdin: ChildStdin,
+    mut stdin: impl AsyncWrite + Unpin,
     mut rx: UnboundedReceiver<String>,
     mailbox: Arc<Mailbox>,
 ) {
@@ -1059,9 +1061,10 @@ async fn write_loop(
 /// executed on the blocking pool and replied to over `stdin_tx`, and a malformed line is reported the same way `log` is (with a reply if it carried an `id`).
 async fn read_loop(
     plugin: String,
-    stdout: ChildStdout,
+    stdout: impl AsyncRead + Unpin,
     stdin_tx: UnboundedSender<String>,
     pending: Arc<Pending>,
+    trust: Trust,
     wiring: Wiring,
     handle: tokio::runtime::Handle,
 ) {
@@ -1122,6 +1125,23 @@ async fn read_loop(
             }
             Ok(Incoming::UnknownNotification) => {}
             Ok(Incoming::Request { id, request }) => {
+                // The folder is read only for a sandboxed plugin, which is the only one it judges.
+                let verdict = if trust == Trust::Full {
+                    Ok(())
+                } else {
+                    let browsed = state_rx.borrow().cwd.clone();
+                    trust.check(&request, &browsed)
+                };
+                if let Err(refused) = verdict {
+                    let message = refused.to_string();
+                    let _ = logs_tx.send(LogMessage {
+                        plugin: plugin.clone(),
+                        level: LogLevel::Warn,
+                        message: format!("request refused: {message}"),
+                    });
+                    let _ = stdin_tx.send(protocol::err_response(&id, message));
+                    continue;
+                }
                 let reply = match request {
                     PluginRequest::GetState => Ok(state_json(&state_rx.borrow())),
                     PluginRequest::RegisterCommand { name } => registry
@@ -1240,6 +1260,11 @@ async fn reap(
             ran_for: life.age(),
         },
     };
+    conclude(plugin, exit, &logs_tx, &life);
+}
+
+/// Records how a plugin ended and reports it when it was a crash the host did not cause.
+fn conclude(plugin: String, exit: Exit, logs_tx: &UnboundedSender<LogMessage>, life: &Life) {
     if let Exit::Crashed { status, .. } = &exit
         && !life.was_stopped_by_host()
     {
@@ -1252,8 +1277,59 @@ async fn reap(
     life.set_exit(exit);
 }
 
-/// Spawns one plugin process with the three tasks that drive it, and queues its `init` event.
+/// The same as `reap` for a module: waits for its thread to report, stopping it first when the
+/// host asks. A module the sandbox ended for using its time is named as such, since "exited" would
+/// hide the reason.
+#[cfg(feature = "wasm")]
+async fn reap_module(
+    plugin: String,
+    mut ended: tokio::sync::oneshot::Receiver<crate::wasm::Ending>,
+    stop: Arc<AtomicBool>,
+    logs_tx: UnboundedSender<LogMessage>,
+    life: Arc<Life>,
+) {
+    use crate::wasm::Ending;
+    let ending = tokio::select! {
+        ending = &mut ended => ending,
+        () = life.stop_requested() => {
+            stop.store(true, Ordering::Release);
+            ended.await
+        }
+    };
+    let crashed = |status: String| Exit::Crashed {
+        status,
+        ran_for: life.age(),
+    };
+    let exit = match ending {
+        Ok(Ending::Finished) => Exit::Finished,
+        Ok(other) => crashed(other.to_string()),
+        Err(_) => crashed("its thread ended without saying why".to_string()),
+    };
+    conclude(plugin, exit, &logs_tx, &life);
+}
+
+/// Starts one plugin: a program as a child process, or a `.wasm` module in the sandbox. Either
+/// way it gets the three tasks that drive it, and its `init` event queued.
 fn start(
+    handle: &Handle,
+    name: &str,
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    wiring: Wiring,
+) -> Result<Process, PluginError> {
+    match Launch::of(command, args) {
+        Launch::Process { command, args } => {
+            start_process(handle, name, command, args, cwd, wiring)
+        }
+        Launch::Wasm {
+            module,
+            ignored_args,
+        } => start_module(handle, name, module, ignored_args, cwd, wiring),
+    }
+}
+
+fn start_process(
     handle: &Handle,
     name: &str,
     command: &str,
@@ -1283,9 +1359,88 @@ fn start(
 
     let stdin = child.stdin.take().expect("spawned with a piped stdin");
     let stdout = child.stdout.take().expect("spawned with a piped stdout");
+    let life = Life::new();
+    let reaper = reap(name.to_string(), child, logs_tx, Arc::clone(&life));
+    Ok(wire(
+        handle,
+        name,
+        (stdin, stdout),
+        reaper,
+        life,
+        Trust::Full,
+        cwd,
+        wiring,
+    ))
+}
+
+/// Starts a `.wasm` plugin in the sandbox, or says why it cannot be: this build has no support
+/// for it, or the module is not acceptable.
+fn start_module(
+    handle: &Handle,
+    name: &str,
+    module: &Path,
+    ignored_args: bool,
+    cwd: &Path,
+    wiring: Wiring,
+) -> Result<Process, PluginError> {
+    #[cfg(feature = "wasm")]
+    {
+        let guest = crate::wasm::spawn(name, module, crate::wasm::Limits::standard())?;
+        if ignored_args {
+            let _ = wiring.logs_tx.send(LogMessage {
+                plugin: name.to_string(),
+                level: LogLevel::Warn,
+                message:
+                    "a sandboxed plugin is given no arguments; the configured ones are ignored"
+                        .to_string(),
+            });
+        }
+        let life = Life::new();
+        let reaper = reap_module(
+            name.to_string(),
+            guest.ended,
+            guest.stop,
+            wiring.logs_tx.clone(),
+            Arc::clone(&life),
+        );
+        Ok(wire(
+            handle,
+            name,
+            (guest.to_guest, guest.from_guest),
+            reaper,
+            life,
+            Trust::Sandboxed,
+            cwd,
+            wiring,
+        ))
+    }
+    #[cfg(not(feature = "wasm"))]
+    {
+        let _ = (handle, module, ignored_args, cwd, wiring);
+        Err(PluginError::Wasm {
+            name: name.to_string(),
+            reason: crate::launch::NO_WASM_SUPPORT.to_string(),
+        })
+    }
+}
+
+/// Connects a started plugin's two pipes and its reaper to the three tasks, and queues `init`.
+#[allow(clippy::too_many_arguments)]
+fn wire(
+    handle: &Handle,
+    name: &str,
+    (stdin, stdout): (
+        impl AsyncWrite + Unpin + Send + 'static,
+        impl AsyncRead + Unpin + Send + 'static,
+    ),
+    reaper: impl std::future::Future<Output = ()> + Send + 'static,
+    life: Arc<Life>,
+    trust: Trust,
+    cwd: &Path,
+    wiring: Wiring,
+) -> Process {
     let (stdin_tx, stdin_rx) = unbounded_channel::<String>();
     let mailbox = Arc::new(Mailbox::default());
-    let life = Life::new();
     let pending = Arc::new(Pending::default());
     let serve = wiring.serve.clone();
 
@@ -1295,10 +1450,11 @@ fn start(
         stdout,
         stdin_tx.clone(),
         Arc::clone(&pending),
+        trust,
         wiring,
         handle.clone(),
     ));
-    handle.spawn(reap(name.to_string(), child, logs_tx, Arc::clone(&life)));
+    handle.spawn(reaper);
 
     let init = protocol::HostEvent::new(protocol::EVENT_INIT, cwd.to_path_buf(), Vec::new());
     let _ = stdin_tx.send(init.to_line());
@@ -1307,11 +1463,11 @@ fn start(
         serve.attach(stdin_tx.clone(), pending, Arc::clone(&life));
     }
 
-    Ok(Process {
+    Process {
         stdin_tx,
         mailbox,
         life,
-    })
+    }
 }
 
 /// Runs one plugin-requested `file_ops` call synchronously against the local filesystem — always

@@ -23,4 +23,6 @@ pub enum PluginError {
         #[source]
         source: std::io::Error,
     },
+    #[error("cannot run WebAssembly plugin '{name}': {reason}")]
+    Wasm { name: String, reason: String },
 }

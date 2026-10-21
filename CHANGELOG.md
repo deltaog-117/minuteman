@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A plugin whose `command` ends in `.wasm` runs as a WebAssembly module in a sandbox, in a build made
+  with `--features wasm` (off by default; a build without it says how to enable it when such a
+  plugin starts). The module gets no folders, environment, arguments or network. It can read the
+  folder being browsed and below it (a link or `..` that leads out is refused), use state, `:`
+  words, pickers and questions, and nothing that changes a file or runs an interface action. It is
+  held to 64 MiB of memory and ended after a second of computing without reading its input.
+  Author: deltaog-117.
 - `docs/plugins.md`, a quick start for writing a plugin: making one with `mman plugin new`, trying
   it with `mman plugin check`, switching it on in the plugin menu, the manifest keys, the messages
   a plugin reads and writes, installing one with `mman plugin add`, and `plugin_dirs`. Author:

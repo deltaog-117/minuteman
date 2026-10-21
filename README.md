@@ -534,7 +534,7 @@ crates/
 ├── shell_overlay/      # spawns a real, interactive $SHELL, inheriting stdio directly
 ├── preview/            # detects + decodes image files (terminal-agnostic; text preview: WIP)
 ├── trash/              # (stub, WIP) trash + undo history
-├── plugin_host/        # out-of-process, any-language plugin host (JSON-RPC over stdio); WASM tier: WIP
+├── plugin_host/        # out-of-process, any-language plugin host (JSON-RPC over stdio); sandboxed WASM tier behind the `wasm` feature
 ├── plugin_api/         # the plain data and line helpers a plugin and the host share
 ├── vfs_remote/         # routes `ssh://` paths to the plugin that serves them
 └── portal_backend/     # `mman-portal`: the desktop portal's file chooser, answered by `mman`

@@ -30,6 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::PluginError;
+use crate::launch::Launch;
 use crate::protocol::{self, EVENT_INIT, HostEvent, Incoming, LogLevel};
 
 /// How long the probe watches a plugin that is still running.
@@ -85,6 +86,104 @@ impl Report {
 ///
 /// [`PluginError::Spawn`] when the program cannot be started.
 pub fn probe(
+    name: &str,
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    window: Duration,
+) -> Result<Report, PluginError> {
+    match Launch::of(command, args) {
+        Launch::Process { command, args } => probe_process(name, command, args, cwd, window),
+        Launch::Wasm { module, .. } => probe_module(name, module, cwd, window),
+    }
+}
+
+/// The same check for a `.wasm` module: start it in the sandbox, send `init`, watch, stop it. A
+/// module the sandbox ends for its time use reads as a crash here, as it would while running.
+#[cfg(feature = "wasm")]
+fn probe_module(
+    name: &str,
+    module: &Path,
+    cwd: &Path,
+    window: Duration,
+) -> Result<Report, PluginError> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    use crate::wasm::{self, Ending, Limits};
+
+    let guest = wasm::spawn(name, module, Limits::standard())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(|source| PluginError::Spawn {
+            name: name.to_string(),
+            command: module.display().to_string(),
+            source,
+        })?;
+    Ok(runtime.block_on(async move {
+        let wasm::Guest {
+            mut to_guest,
+            from_guest,
+            mut ended,
+            stop,
+        } = guest;
+        let init = HostEvent::new(EVENT_INIT, cwd.to_path_buf(), Vec::new());
+        let _ = to_guest.write_all(init.to_line().as_bytes()).await;
+
+        let mut lines = tokio::io::BufReader::new(from_guest).lines();
+        let mut errors = Vec::new();
+        let deadline = tokio::time::Instant::now() + window;
+        let output_closed = loop {
+            match tokio::time::timeout_at(deadline, lines.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    if let Ok(Incoming::Log {
+                        level: LogLevel::Error,
+                        message,
+                    }) = protocol::parse_line(&line)
+                    {
+                        errors.push(message);
+                    }
+                }
+                Ok(Ok(None) | Err(_)) => break true,
+                Err(_) => break false,
+            }
+        };
+        let outcome = |ending: Ending| match ending {
+            Ending::Finished => Outcome::Finished,
+            other => Outcome::Crashed(other.to_string()),
+        };
+        let outcome = if output_closed {
+            match tokio::time::timeout(EXIT_GRACE, &mut ended).await {
+                Ok(Ok(ending)) => outcome(ending),
+                _ => Outcome::ClosedOutput,
+            }
+        } else {
+            match ended.try_recv() {
+                Ok(ending) => outcome(ending),
+                Err(_) => Outcome::Stayed,
+            }
+        };
+        // The module notices within a slice (or a poll, if it is waiting for input) and ends.
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        drop(to_guest);
+        Report { outcome, errors }
+    }))
+}
+
+#[cfg(not(feature = "wasm"))]
+fn probe_module(
+    name: &str,
+    _module: &Path,
+    _cwd: &Path,
+    _window: Duration,
+) -> Result<Report, PluginError> {
+    Err(PluginError::Wasm {
+        name: name.to_string(),
+        reason: crate::launch::NO_WASM_SUPPORT.to_string(),
+    })
+}
+
+fn probe_process(
     name: &str,
     command: &str,
     args: &[String],
@@ -259,6 +358,117 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.errors, ["got init"]);
+    }
+
+    #[cfg(feature = "wasm")]
+    mod module {
+        use super::*;
+
+        fn module(label: &str, wat: &str) -> String {
+            let dir =
+                std::env::temp_dir().join(format!("mman-probe-{}-{label}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("p.wasm");
+            std::fs::write(&path, wat::parse_str(wat).expect("valid WAT")).unwrap();
+            path.to_str().unwrap().to_string()
+        }
+
+        fn run(label: &str, wat: &str, window: Duration) -> Result<Report, PluginError> {
+            probe("t", &module(label, wat), &[], Path::new("/"), window)
+        }
+
+        /// Writes an `error` log line, then waits for input until it ends.
+        fn complains(message: &str) -> String {
+            let line = format!(
+                "{{\"jsonrpc\":\"2.0\",\"method\":\"log\",\"params\":{{\"level\":\"error\",\"message\":\"{message}\"}}}}\n"
+            );
+            let escaped: String = line.bytes().map(|b| format!("\\{b:02x}")).collect();
+            format!(
+                r#"(module
+                    (import "wasi_snapshot_preview1" "fd_read" (func $fd_read (param i32 i32 i32 i32) (result i32)))
+                    (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
+                    (memory (export "memory") 1)
+                    (data (i32.const 1024) "{escaped}")
+                    (func (export "_start")
+                        (i32.store (i32.const 0) (i32.const 1024))
+                        (i32.store (i32.const 4) (i32.const {}))
+                        (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 8)))
+                        (i32.store (i32.const 16) (i32.const 2048))
+                        (i32.store (i32.const 20) (i32.const 64))
+                        (loop $again
+                            (drop (call $fd_read (i32.const 0) (i32.const 16) (i32.const 1) (i32.const 24)))
+                            (br_if $again (i32.load (i32.const 24))))))"#,
+                line.len()
+            )
+        }
+
+        const WAITS: &str = r#"(module
+            (import "wasi_snapshot_preview1" "fd_read" (func $fd_read (param i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "_start")
+                (i32.store (i32.const 16) (i32.const 2048))
+                (i32.store (i32.const 20) (i32.const 64))
+                (loop $again
+                    (drop (call $fd_read (i32.const 0) (i32.const 16) (i32.const 1) (i32.const 24)))
+                    (br_if $again (i32.load (i32.const 24))))))"#;
+
+        #[test]
+        fn a_module_that_waits_for_input_stays_and_is_stopped() {
+            let started = Instant::now();
+            let report = run("waits", WAITS, Duration::from_millis(150)).unwrap();
+            assert_eq!(report.outcome, Outcome::Stayed);
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+
+        #[test]
+        fn a_module_that_returns_at_once_has_finished() {
+            let report = run(
+                "returns",
+                r#"(module (memory (export "memory") 1) (func (export "_start")))"#,
+                LONG,
+            )
+            .unwrap();
+            assert_eq!(report.outcome, Outcome::Finished);
+        }
+
+        #[test]
+        fn a_module_that_traps_at_start_is_a_crash() {
+            let report = run(
+                "traps",
+                r#"(module (memory (export "memory") 1) (func (export "_start") unreachable))"#,
+                LONG,
+            )
+            .unwrap();
+            assert!(
+                matches!(report.outcome, Outcome::Crashed(_)),
+                "{:?}",
+                report.outcome
+            );
+        }
+
+        #[test]
+        fn an_error_a_module_logs_is_named() {
+            let report = run(
+                "complains",
+                &complains("api_version 9"),
+                Duration::from_millis(300),
+            )
+            .unwrap();
+            assert_eq!(report.errors, ["api_version 9"]);
+            assert_eq!(report.verdict("t"), Err("t reported: api_version 9".into()));
+        }
+
+        #[test]
+        fn a_file_that_is_not_a_module_is_a_wasm_error_not_a_spawn_of_a_program() {
+            let path = module("garbage", "(module)");
+            std::fs::write(&path, b"not wasm").unwrap();
+            let result = probe("t", &path, &[], Path::new("/"), LONG);
+            assert!(
+                matches!(result, Err(PluginError::Wasm { .. })),
+                "{result:?}"
+            );
+        }
     }
 
     proptest! {

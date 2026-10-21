@@ -40,6 +40,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # `preview::load_image`, so no format-decoder features are needed here.
 image = { version = "0.25.10", default-features = false }
 
+[features]
+# Lets a plugin whose command ends in `.wasm` run in a sandbox (see `plugin_host`). Off by default.
+wasm = ["plugin_host/wasm"]
+
 [dev-dependencies]
 proptest = "1.11"
 # `png` so image_preview's tests can write a real decodable picture for a plugin to "hand over".

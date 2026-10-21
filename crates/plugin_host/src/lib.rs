@@ -27,15 +27,19 @@
 mod actions;
 pub mod error;
 pub mod host;
+mod launch;
 mod life;
 mod mailbox;
 mod picker;
 pub mod probe;
 pub mod protocol;
 mod registry;
+mod sandbox;
 pub mod serve;
 mod tally;
 mod walk;
+#[cfg(feature = "wasm")]
+mod wasm;
 
 pub use actions::ActionRequest;
 pub use error::PluginError;

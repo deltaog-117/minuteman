@@ -1919,6 +1919,16 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   check`, switching it on with `space p`, the manifest keys, the one-line-per-JSON-object
   conversation, `plugin add` and its limits, and `plugin_dirs`. Every command and message in it was
   run against the built binary with a throwaway config folder. Documentation only; no code changed.
+- ✅ **Plugin system, stage 2 — sandboxed WebAssembly plugins (first cut, read-only)** – a plugin
+  whose `command` ends in `.wasm` runs inside a `wasmi` sandbox instead of as a process, behind an
+  off-by-default `wasm` cargo feature (`cargo install --path crates/tui --features wasm`; a build
+  without it says so when such a plugin is started). The module speaks the same line protocol over
+  in-memory pipes and is given no folders, environment, arguments or network. It may read the
+  folder being browsed and below it (symlinks and `..` resolved first), talk to the interface
+  (state, `:` words, pickers, questions), and nothing else: every request that changes a file, and
+  `run_action`, is refused with a reason it can log. Memory is capped at 64 MiB and a module that
+  computes for over a second without reading its input is ended. In a release build a module
+  starts in about 0.3 ms and a `get_state` round trip takes about 32 µs.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2472,7 +2482,7 @@ draws.
   SFTP v3 gives times in whole seconds and no inode, link count or allocated size, so Inspect
   leaves those out. The `openssh` crate is Unix only, and this was
   not built or tried on Windows.
-- **Plugin system, stage 2 — WASM plugin host (Extism), sandboxed, opt-in** – a second, sandboxed
+- **Plugin system, stage 2 remainder — WASM host (first cut done, see Completed)** – a second, sandboxed
   plugin tier alongside the stage-1 out-of-process JSON-RPC host (see Completed): a plugin
   compiled to WASM gets no ambient filesystem/network/process access by default, only what a
   versioned host API (`read_dir`, `get_selection`, `spawn_preview`, keybind registration,
@@ -2488,8 +2498,10 @@ draws.
   operations in a second. Kept behind a cargo feature and initialized only when a WASM plugin is
   configured: wasmtime would roughly double the binary (an estimated +8 to 15 MB over today's
   ~13.9 MB release build), `wasmi` about +1 to 2 MB but slower — spike both before choosing.
-  Deferred until plugins have users asking for hooks and someone wants to share a plugin with
-  others; building it earlier is guessing at an API that must then be kept stable.
+  Built so far: the `wasmi` host, the read-only trust check, the limits and their tests (see
+  Completed). Still open: write operations behind a per-plugin permission manifest, an API version
+  handshake for modules, a worked Rust example module, the binary-size cost measured on a release
+  build, and the Extism-style registry that would make running strangers' code the common case.
 - **Action registry, as its own cycle (optional)** – the string names and `run_action` entry
   point now exist for plugins (see the sixth stage 1.5 cycle above); what remains is a `disabled_actions` config list, useful without any plugin
   (uniform keys, menus and `:` commands, easier tests). Pure addition: the existing `match` on

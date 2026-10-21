@@ -4,3 +4,6 @@ cargo fmt --all -- --check
 scripts/vfs-gate
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# The sandbox is behind a feature the workspace build leaves off, so it is checked on its own.
+cargo clippy -p plugin_host --all-targets --features wasm -- -D warnings
+cargo test -p plugin_host --features wasm
