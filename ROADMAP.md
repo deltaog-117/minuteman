@@ -1929,6 +1929,15 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   `run_action`, is refused with a reason it can log. Memory is capped at 64 MiB and a module that
   computes for over a second without reading its input is ended. In a release build a module
   starts in about 0.3 ms and a `get_state` round trip takes about 32 µs.
+- ✅ **Plugin system, stage 2 — a worked Rust example module** – `examples/plugins/wasm_stats` is a
+  standalone crate (own `[workspace]`, only `serde_json`, about 100 KiB built) that counts a
+  folder on `:wstats` and, on `:wtouch NAME`, tries a write and logs the sandbox's refusal. It
+  checks `api_version` in `init` and ends with a logged error on a mismatch, holds events that
+  arrive while a reply is awaited, and has its own unit tests. `plugin_host/tests/wasm_example.rs`
+  builds it for `wasm32-wasip1` and runs it through the real sandbox (the count, the refusal, and
+  that `new.txt` was not created); on a machine without that rust target it prints that it skipped
+  and passes. `mman plugin check` accepts its `plugin.toml`. `docs/plugins.md` has the steps. First
+  run of a module compiled from Rust and not hand-written WAT.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2500,7 +2509,8 @@ draws.
   ~13.9 MB release build), `wasmi` about +1 to 2 MB but slower — spike both before choosing.
   Built so far: the `wasmi` host, the read-only trust check, the limits and their tests (see
   Completed). Still open: write operations behind a per-plugin permission manifest, an API version
-  handshake for modules, a worked Rust example module, the binary-size cost measured on a release
+  handshake for modules (the example checks `api_version` itself; the host does not yet refuse a
+  module that declares another), the binary-size cost measured on a release
   build, and the Extism-style registry that would make running strangers' code the common case.
 - **Action registry, as its own cycle (optional)** – the string names and `run_action` entry
   point now exist for plugins (see the sixth stage 1.5 cycle above); what remains is a `disabled_actions` config list, useful without any plugin

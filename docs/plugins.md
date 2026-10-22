@@ -87,3 +87,24 @@ plugin_dirs = ["~/code/mman-plugins"]
 Each folder is read like the browsed one: itself, and the folders directly inside it that hold a
 `plugin.toml`. `~` is your home; an entry that is not an absolute path or not a folder is ignored.
 It is read at startup.
+
+## Write one in Rust, for the sandbox
+
+A plugin can also be a WebAssembly module, which the program runs in a sandbox: no folders,
+environment or network of its own, read-only access to the folder being browsed and below it.
+`examples/plugins/wasm_stats/` is a complete one in Rust: it counts the files in the browsed folder
+on `:wstats`, and `:wtouch NAME` shows the sandbox refusing a write.
+
+```sh
+rustup target add wasm32-wasip1
+cd examples/plugins/wasm_stats
+cargo build --release --target wasm32-wasip1
+mkdir -p ~/.config/minuteman/plugins/wasm-stats
+cp plugin.toml target/wasm32-wasip1/release/wasm_stats.wasm ~/.config/minuteman/plugins/wasm-stats/
+mman plugin check wasm-stats
+```
+
+Switch it on in the plugin menu as above. Your `mman` must be built with the `wasm` feature
+(`cargo install --path crates/tui --features wasm`); one built without it says so when the plugin
+starts. The module reads and writes the same lines as any plugin, and ends with an error line if
+the host's `api_version` in `init` is not the one it was written for.

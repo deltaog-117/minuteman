@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `examples/plugins/wasm_stats`, a worked Rust plugin for the WebAssembly sandbox: `:wstats` counts
+  the files, folders and bytes in the browsed folder, and `:wtouch NAME` shows the sandbox refusing
+  a write. It is its own crate, built for `wasm32-wasip1` with only `serde_json`, and the steps are
+  in `docs/plugins.md`. A test builds it and runs it in the real sandbox when that rust target is
+  installed. Author: deltaog-117.
 - A plugin whose `command` ends in `.wasm` runs as a WebAssembly module in a sandbox, in a build made
   with `--features wasm` (off by default; a build without it says how to enable it when such a
   plugin starts). The module gets no folders, environment, arguments or network. It can read the

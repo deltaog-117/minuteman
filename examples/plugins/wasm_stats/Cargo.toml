@@ -1,0 +1,20 @@
+[package]
+name = "wasm_stats"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+authors = ["deltaog-117"]
+description = "A worked example of a Minuteman plugin written in Rust and run in the WebAssembly sandbox."
+publish = false
+
+# Standalone on purpose: it is built for another target (`wasm32-wasip1`) than the program, and a
+# plugin should show only what a plugin needs, so it is not a member of the main workspace.
+[workspace]
+
+[dependencies]
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

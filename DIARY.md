@@ -114,6 +114,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Large `.tar.gz` Archives | A 120 s time budget instead of the 512 MiB cap, and the listing of a slow one kept in the cache folder (COA A) | ✅ Confirmed |
 | 2026-10-18 | Plugin Start Check | A passive half-second probe shared by the review card and `mman plugin check`, plus an optional `api_version` in the manifest (COA A); an acknowledgement message (B) and a static-only check (C) not taken | ✅ Confirmed |
 | 2026-10-19 | Plugin Quick-Start Page | One short `docs/plugins.md` written from the commands as run, linked from the README (COA none: documentation only) | ✅ Confirmed |
+| 2026-10-22 | Rust Example WASM Plugin | A standalone crate outside the workspace with only `serde_json`, run by a test that skips when the `wasm32-wasip1` target is missing (documentation and test only, no COAs) | ✅ Confirmed |
 | 2026-10-21 | Sandboxed WASM Plugins | `wasmi` behind an off-by-default `wasm` feature, one launch decision, a read-only trust check with no wildcard arm, and memory and idle-time limits on a thread of its own (COA A); `wasmtime`/Extism (B) and a permission manifest with writes (C) not taken | ✅ Confirmed |
 
 ---
@@ -8672,6 +8673,37 @@ the tests use hand-written WAT.
 
 **Left open.** Writes behind a permission manifest, an API version handshake for modules, a worked
 Rust example, and the binary size on a release build.
+
+---
+
+### Rust Example WASM Plugin
+
+**Date:** 2026-10-22
+**Status:** Confirmed
+
+**Context.** The sandbox shipped with tests written in hand-made WAT, so nothing compiled from a
+real language had ever run on it. A plugin author also had no Rust example to copy.
+
+**Decision.** `examples/plugins/wasm_stats` is a plain Rust program on `std::io`, built for
+`wasm32-wasip1`. It is outside the main workspace on purpose (own `[workspace]` table): the
+workspace builds for the host, a plugin should show only what a plugin needs, and it depends on
+`serde_json` alone, not `plugin_api`, whose dependencies were not built for that target. The
+cost is that the request and event shapes are written as JSON in the example instead of shared types;
+the unit tests in the example pin the shapes it relies on.
+
+A test in `plugin_host` builds it and runs it through `PluginManager`. It skips, saying why, when the
+rust target is not installed: the target is a fact about the machine, and making `scripts/check`
+fail without it would block every contributor who never touches plugins.
+
+**Verification.** `scripts/check` passes; the example's own tests and clippy pass; the module is
+about 100 KiB; the new test passed against the real sandbox (the handshake reply, the folder
+count, and the refused write leaving no file); `mman plugin check` on the folder says it starts and
+keeps running. Not tried: the module in the running interface by hand.
+
+**Found.** Nothing wrong in the sandbox; a module compiled by rustc started on the first run.
+
+**Left open.** The host does not yet refuse a module that declares another API version (the example
+does it itself), writes behind a permission manifest, and the release-build size cost.
 
 ---
 

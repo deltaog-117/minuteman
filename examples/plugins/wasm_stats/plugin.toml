@@ -1,0 +1,8 @@
+name = "wasm-stats"
+description = "Counts the files in the browsed folder; a Rust example for the WebAssembly sandbox."
+command = "./wasm_stats.wasm"
+api_version = 1
+
+commands = ["wstats", "wtouch"]
+on_key = ""
+events = []
