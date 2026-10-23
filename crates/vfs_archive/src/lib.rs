@@ -189,6 +189,14 @@ impl ArchiveVfs {
 }
 
 impl Vfs for ArchiveVfs {
+    /// An archive is read-only, so only a folder outside one has anything to watch.
+    fn watch(&self, path: &Path, wake: shared::Wake) -> Option<shared::WatchGuard> {
+        match Self::inside(path) {
+            Ok(false) => self.inner.watch(path, wake),
+            _ => None,
+        }
+    }
+
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>, VfsError> {
         if !Self::inside(path)? {
             return self.inner.list_dir(path);

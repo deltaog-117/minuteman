@@ -18,9 +18,11 @@
 //! mini-shell, a `:` command or another program appears without the user having to navigate
 //! away and back.
 //!
-//! The standard library has no way to be told about filesystem changes, so this polls: a few
-//! times a second it re-lists the browsed directory (and its parent) on the blocking pool and
-//! lets `BrowserState::apply_listing` compare the result with what is on screen. Comparing whole
+//! A backend that can say when a folder changes (`Vfs::watch`) starts a listing the moment it
+//! does; one that cannot is polled: a few times a second the browsed directory (and its parent)
+//! is re-listed on the blocking pool and `BrowserState::apply_listing` compares the result with
+//! what is on screen. A watched folder is still listed now and then, as a net under events that
+//! were lost or never sent. Comparing whole
 //! listings — names, sizes, modified times, permissions — rather than a directory's own mtime is
 //! what catches a file being written to in place, which never touches its directory's mtime.
 //! Going through `Vfs::list_dir` also means any future backend gets this for free.
@@ -30,10 +32,11 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use browser::BrowserState;
-use shared::{Cancel, DirEntryInfo, Vfs};
+use shared::{Cancel, DirEntryInfo, Vfs, WatchGuard};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Time between the start of one background listing and the next. Long enough that the extra
@@ -42,10 +45,22 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 const INTERVAL: Duration = Duration::from_millis(500);
 /// A folder on another machine is re-read far less often: each look costs several round trips.
 const REMOTE_INTERVAL: Duration = Duration::from_secs(5);
+/// A folder whose changes are announced is listed this often anyway.
+const WATCHED_INTERVAL: Duration = Duration::from_secs(5);
+/// The least time between two listings started by announced changes, so a copy writing thousands
+/// of files is read a few times a second instead of once per file.
+const MIN_GAP: Duration = Duration::from_millis(100);
 
 /// One background listing: the directory it was taken from, and its parent. `None` when the
 /// directory could not be read (e.g. it was just deleted) — the screen keeps what it has.
 type Snapshot = Option<(PathBuf, Vec<DirEntryInfo>, Vec<DirEntryInfo>)>;
+
+/// The watches on the browsed folder and its parent, and the folder they were set for.
+struct Watches {
+    dir: PathBuf,
+    /// Empty when the backend cannot watch the folder, which is then polled.
+    _guards: Vec<WatchGuard>,
+}
 
 pub struct LiveRefresh {
     tx: UnboundedSender<Snapshot>,
@@ -60,6 +75,9 @@ pub struct LiveRefresh {
     /// Something this program did changed the folder: list again as soon as no listing is
     /// running, without waiting for the interval.
     dirty: bool,
+    /// Set by a watch from its own thread when the folder changes.
+    woken: Arc<AtomicBool>,
+    watches: Option<Watches>,
 }
 
 impl LiveRefresh {
@@ -73,7 +91,33 @@ impl LiveRefresh {
             in_flight: None,
             last_started: None,
             dirty: false,
+            woken: Arc::new(AtomicBool::new(false)),
+            watches: None,
         }
+    }
+
+    /// Watches `dir` and its parent (the listing refreshes both) unless that is already so.
+    /// Returns whether changes in `dir` will be announced.
+    fn sync_watches(&mut self, dir: &std::path::Path) -> bool {
+        if self.watches.as_ref().is_none_or(|w| w.dir != dir) {
+            // The old watches go first: a folder may be too close to the user's watch limit for
+            // both sets at once.
+            self.watches = None;
+            let wake: shared::Wake = {
+                let woken = Arc::clone(&self.woken);
+                Arc::new(move || woken.store(true, Ordering::Release))
+            };
+            let mut guards = Vec::new();
+            if let Some(guard) = self.vfs.watch(dir, Arc::clone(&wake)) {
+                guards.push(guard);
+                guards.extend(dir.parent().and_then(|parent| self.vfs.watch(parent, wake)));
+            }
+            self.watches = Some(Watches {
+                dir: dir.to_path_buf(),
+                _guards: guards,
+            });
+        }
+        self.watches.as_ref().is_some_and(|w| !w._guards.is_empty())
     }
 
     /// Asks for a fresh listing at the next [`poll`](Self::poll). For a change made by this
@@ -109,16 +153,21 @@ impl LiveRefresh {
             cancel.cancel();
         }
 
+        let watched = self.sync_watches(browser.current_dir());
         let interval = if shared::ssh_path::is_remote(browser.current_dir()) {
             REMOTE_INTERVAL
+        } else if watched {
+            WATCHED_INTERVAL
         } else {
             INTERVAL
         };
-        let due = self.dirty
-            || self
-                .last_started
-                .is_none_or(|started| now.duration_since(started) >= interval);
+        let since_last = self.last_started.map(|started| now.duration_since(started));
+        let announced =
+            self.woken.load(Ordering::Acquire) && since_last.is_none_or(|t| t >= MIN_GAP);
+        let due = self.dirty || announced || since_last.is_none_or(|t| t >= interval);
         if due && self.in_flight.is_none() {
+            // Cleared before the listing starts, so a change during it asks for another.
+            self.woken.store(false, Ordering::Release);
             let (dir, cancel) = (browser.current_dir().to_path_buf(), Cancel::new());
             self.in_flight = Some((dir.clone(), cancel.clone()));
             self.dirty = false;
@@ -233,6 +282,50 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    #[test]
+    fn a_change_in_a_watched_folder_shows_before_the_polling_interval_would_find_it() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let root = scratch_dir("watched");
+        let work = root.join("work");
+        let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
+        let mut live = LiveRefresh::new(runtime.handle().clone(), Arc::new(LocalVfs));
+        // The first poll starts the first listing and sets the watches.
+        live.poll(&mut browser, Instant::now());
+        assert!(live.sync_watches(&work));
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(work.join("new.txt"), b"x").unwrap();
+
+        // Polled alone, the next listing is 500 ms after the first, ~450 ms from now.
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let mut seen = false;
+        while Instant::now() < deadline && !seen {
+            live.poll(&mut browser, Instant::now());
+            seen = browser
+                .current_entries()
+                .iter()
+                .any(|e| e.name == "new.txt");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(seen);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_watched_is_polled() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let root = scratch_dir("unwatched");
+        let work = root.join("work");
+        let mut browser = BrowserState::new(&LocalVfs, work.clone()).unwrap();
+        // `Slow` keeps the default `watch`, which declines.
+        let mut live = LiveRefresh::new(
+            runtime.handle().clone(),
+            Arc::new(crate::test_vfs::Slow::new(Duration::ZERO)),
+        );
+        live.poll(&mut browser, Instant::now());
+        assert!(!live.sync_watches(&work));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

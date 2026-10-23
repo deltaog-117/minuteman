@@ -1938,6 +1938,19 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   that `new.txt` was not created); on a machine without that rust target it prints that it skipped
   and passes. `mman plugin check` accepts its `plugin.toml`. `docs/plugins.md` has the steps. First
   run of a module compiled from Rust and not hand-written WAT.
+- ✅ **Event-driven refresh** – a new `Vfs::watch(path, wake)` method (default: `None`, "cannot
+  tell") returns a guard that calls `wake` when the folder changes and stops when dropped.
+  `LocalVfs` implements it with the `notify` crate (inotify on Linux) behind `shared`'s `watch`
+  feature, which only `tui` turns on, so the plugins do not carry it; `ArchiveVfs` and `SshVfs`
+  pass a local path through to the disk and answer `None` for anything inside an archive or on
+  another machine. `LiveRefresh` watches the browsed folder and its parent and starts a listing as
+  soon as one is announced (at most every 100 ms, so a copy of thousands of files is read a few
+  times a second); a watched folder is still listed every 5 s as a net under lost events, and a
+  folder that cannot be watched (a backend without it, or the user's inotify limit spent) is
+  polled every 500 ms as before. Access events are ignored, since listing a folder would otherwise
+  announce itself. Measured against the real release binary through a pty: a file made outside
+  appears after 0.11–0.19 s whatever the timer's phase, against 0.14–0.58 s polled. The release
+  binary grew from 9,839,568 to 10,059,728 bytes (+215 KiB, +2.2%).
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2660,10 +2673,12 @@ draws.
   to `local.toml`); it cannot be set per folder; folders cannot be listed after files or mixed in;
   there is no natural ordering of numbers in names (`f2` before `f10`); and an owner or extension
   key is not offered.
-- **Event-driven refresh (inotify) instead of polling** – the live refresh re-lists the browsed
-  directory twice a second, which costs one `readdir` plus a `stat` per entry and can lag a
-  change by about half a second. Worth replacing with `notify` only if that is noticeable in very
-  large directories; it would need a watch method on `Vfs` so a remote backend can offer its own.
+- **Event-driven refresh, follow-ups** – done (see Completed). Still to do: only the browsed folder
+  and its parent are watched, so a folder in the preview column, the grid's thumbnails and the
+  atlas view still rely on the next listing; a remote folder and a folder inside an archive are
+  still polled (an `ssh` backend could watch with `inotifywait` on the far side); the 5 s net and
+  the 100 ms gap are constants, not settings; a very large tree can exhaust the inotify watch
+  limit, in which case the folder silently falls back to polling and nothing says so.
 - **Show all of a `:` command's output** – the status line holds eight lines for five seconds.
   A scrollable output pane (or a pager) would make `:ls -l` or `:git status` usable.
 - **Cancel a `:` command's whole process tree** – `Esc` kills the `sh` it started but not a

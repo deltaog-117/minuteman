@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::error::VfsError;
+use crate::watch::{Wake, WatchGuard};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntryInfo {
@@ -120,6 +121,15 @@ pub fn create_dir_all(vfs: &dyn Vfs, path: &Path) -> Result<(), VfsError> {
 ///
 /// `shared::conformance::check_backend` is the test a backend must pass.
 pub trait Vfs: Send + Sync {
+    /// Calls `wake` whenever something in the folder `path` changes, until the returned guard is
+    /// dropped. `None` when this backend cannot tell (the default), and the caller keeps polling
+    /// `list_dir` instead. `wake` runs on a thread of the backend's, so it must only flag work
+    /// and return. A wake may be spurious or coalesce several changes, so it is a cue to list
+    /// again, never a description of what changed.
+    fn watch(&self, _path: &Path, _wake: Wake) -> Option<WatchGuard> {
+        None
+    }
+
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>, VfsError>;
     fn is_dir(&self, path: &Path) -> bool;
     fn exists(&self, path: &Path) -> bool;
@@ -268,6 +278,10 @@ fn convert(metadata: &std::fs::Metadata) -> Metadata {
 pub struct LocalVfs;
 
 impl Vfs for LocalVfs {
+    fn watch(&self, path: &Path, wake: Wake) -> Option<WatchGuard> {
+        crate::watch::watch_local(path, wake)
+    }
+
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>, VfsError> {
         if !path.is_dir() {
             return Err(VfsError::NotADirectory(path.to_path_buf()));

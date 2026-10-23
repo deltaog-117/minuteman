@@ -8757,6 +8757,36 @@ its originals through the form.
 **Left open.** Undoing one entry on its own, an overwrite, a permanent delete, and a history that
 survives a restart.
 
+### Event-Driven Refresh
+
+**Date:** 2026-10-23
+**Status:** Confirmed
+
+**Context.** The live refresh re-listed the browsed folder twice a second, which costs a `readdir`
+and a `stat` per entry and lags a change by up to half a second. The roadmap asked for a watch
+method on `Vfs` so a remote backend can offer its own. Three courses of action were weighed: a
+watcher in `tui` that only nudges `LiveRefresh`, a `Vfs::watch` method, and applying each event as
+a patch to the listing.
+
+**Decision.** `Vfs::watch(path, wake) -> Option<WatchGuard>`, default `None`. The watcher is only a
+cue: `wake` sets a flag and the existing list-and-compare code stays the source of truth, so a
+lost event, an inotify overflow or a backend without watching costs only latency, never
+correctness. `notify` is an optional dependency of `shared` (`watch` feature, on only in `tui`) so
+the plugin programs do not link it, and it is built without its default features. Access events are
+dropped, because listing a folder opens it and would announce itself in a loop. Announced listings
+are spaced 100 ms apart; the safety net is 5 s for a watched folder. Patching the listing from
+each event was set aside: rename pairs and overflow need a full re-list anyway.
+
+**Verification.** `scripts/check` passes. New tests: a created file wakes the caller, listing does
+not, a dropped guard stops the wakes, a missing folder cannot be watched, a watched change shows
+within 300 ms where polling would take 450, and a backend that declines is polled. In a pty run of
+the real release binary, eight files made from outside appeared after 0.11 to 0.19 s each, and
+0.14 to 0.58 s with the watcher compiled out. The binary grew from 9,839,568 to 10,059,728 bytes,
+more than the 50 to 150 KiB guessed beforehand.
+
+**Left open.** Watching the preview column's folder, a remote or archive folder, and telling the
+user when the watch limit is spent.
+
 ---
 
 ---

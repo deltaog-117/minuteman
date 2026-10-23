@@ -10,7 +10,7 @@ name = "mman"
 path = "src/main.rs"
 
 [dependencies]
-shared = { path = "../shared" }
+shared = { path = "../shared", features = ["watch"] }
 browser = { path = "../browser" }
 file_ops = { path = "../file_ops" }
 shell_overlay = { path = "../shell_overlay" }

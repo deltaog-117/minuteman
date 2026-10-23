@@ -268,6 +268,14 @@ impl SshVfs {
 }
 
 impl Vfs for SshVfs {
+    /// A folder on another machine is polled; only this machine's disk can tell us.
+    fn watch(&self, path: &Path, wake: shared::Wake) -> Option<shared::WatchGuard> {
+        match Self::route(path) {
+            Ok(Route::Local) => self.inner.watch(path, wake),
+            _ => None,
+        }
+    }
+
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>, VfsError> {
         match Self::route(path)? {
             Route::Local => self.inner.list_dir(path),

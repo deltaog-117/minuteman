@@ -36,6 +36,7 @@ pub mod tally;
 pub mod usage;
 pub mod usage_view;
 pub mod vfs;
+pub mod watch;
 
 pub use archive_path::{Format, Mount, Route, is_archive, is_inside, route};
 pub use cancel::Cancel;
@@ -48,6 +49,7 @@ pub use ssh_path::{Host, Location, Remote, Target, TargetError, User, is_remote}
 pub use vfs::{
     DirEntryInfo, FileKind, LocalVfs, Metadata, ReadSeek, ScanEntry, Vfs, WriteSeek, create_dir_all,
 };
+pub use watch::{Wake, WatchGuard};
 
 /// Whether reading `path` may take long enough that the interface must not wait for it: it is on
 /// another machine, or in an archive whose table of contents is read by a plugin. Anything else

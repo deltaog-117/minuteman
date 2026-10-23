@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The file lists update the moment something changes in the browsed folder or its parent, instead
+  of up to half a second later: a new `Vfs::watch` method lets a backend announce changes, and the
+  local disk does (inotify through the `notify` crate). A folder that cannot be watched, such as
+  one on another machine or inside an archive, is polled as before, and a watched one is still
+  re-read every five seconds in case an event is lost. The binary is about 215 KiB larger.
+  Author: deltaog-117.
 - A finished compress or extract can be undone with `z` and redone with `Z`. Undo sends the archive
   (or the unpacked folder, with everything in it) to the trash and restores the originals a compress
   trashed, or the archive an extract trashed; redo takes them back out. A compress or extract that

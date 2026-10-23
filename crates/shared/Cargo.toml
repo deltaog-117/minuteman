@@ -11,6 +11,12 @@ thiserror = "2.0.20"
 libc = "0.2"
 # Times shown in this machine's zone, for the Inspect plugin and the file lists.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Tells `LocalVfs::watch` when a folder changes. Optional so a plugin that links `shared` for its
+# types does not carry an inotify watcher it never starts.
+notify = { version = "8.2", default-features = false, optional = true }
+
+[features]
+watch = ["dep:notify"]
 
 [dev-dependencies]
 proptest = "1.11"
