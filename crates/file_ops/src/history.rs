@@ -22,6 +22,9 @@
 //! that may have changed since: a created file is removed only while it is still empty, and an
 //! undone copy goes to the trash instead of being deleted.
 //!
+//! An archive or a folder an extract made is not empty, so it is not a `Created`: undoing it sends
+//! it to the trash and redoing it takes it back out, so the contents are never lost.
+//!
 //! Not recorded, because they cannot be put back: a permanent delete, an overwrite, and anything
 //! a shell command does.
 
@@ -59,6 +62,22 @@ pub enum Change {
     Copied { src: PathBuf, dst: PathBuf },
     /// `path` was sent to the desktop trash, where it is now `item`.
     Trashed { path: PathBuf, item: Trashed },
+    /// A compress or an extract wrote `path`, which did not exist before. `held` is where it sits
+    /// in the trash while the change is undone, and `None` while it is in place.
+    Produced {
+        path: PathBuf,
+        product: Product,
+        held: Option<Trashed>,
+    },
+}
+
+/// What a `Change::Produced` is, for the status line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Product {
+    /// The archive a compress wrote.
+    Archive,
+    /// The folder an extract unpacked into.
+    Folder,
 }
 
 impl Change {
@@ -93,11 +112,28 @@ impl Change {
                     item,
                 });
             }
+            Change::Produced {
+                path,
+                product,
+                held,
+            } => {
+                let item = held
+                    .as_ref()
+                    .ok_or_else(|| UndoError::Missing(path.clone()))?;
+                trash::restore(item)?;
+                return Ok(Change::Produced {
+                    path: path.clone(),
+                    product: *product,
+                    held: None,
+                });
+            }
         }
         Ok(self.clone())
     }
 
-    fn revert(&self, vfs: &dyn Vfs) -> Result<(), UndoError> {
+    /// Takes the change back and returns it as it now stands: an undone `Produced` sits in the
+    /// trash under a handle the record must keep, so it can be redone.
+    fn revert(&self, vfs: &dyn Vfs) -> Result<Change, UndoError> {
         match self {
             Change::Created { path, is_dir } => {
                 if !vfs.exists(path) {
@@ -123,8 +159,26 @@ impl Change {
                 crate::trash(dst)?;
             }
             Change::Trashed { item, .. } => trash::restore(item)?,
+            Change::Produced { path, product, .. } => {
+                if !vfs.exists(path) {
+                    return Err(UndoError::Missing(path.clone()));
+                }
+                let before = trash::snapshot()?;
+                crate::trash(path)?;
+                let item = trash::claim(&before, std::slice::from_ref(path))?
+                    .pop()
+                    .flatten()
+                    .ok_or_else(|| {
+                        trash::TrashError::from("the trashed item could not be found again")
+                    })?;
+                return Ok(Change::Produced {
+                    path: path.clone(),
+                    product: *product,
+                    held: Some(item),
+                });
+            }
         }
-        Ok(())
+        Ok(self.clone())
     }
 
     /// The verb for the status line.
@@ -135,12 +189,22 @@ impl Change {
             Change::Moved { .. } => "move",
             Change::Copied { .. } => "copy",
             Change::Trashed { .. } => "trash",
+            Change::Produced {
+                product: Product::Archive,
+                ..
+            } => "compress",
+            Change::Produced {
+                product: Product::Folder,
+                ..
+            } => "extract",
         }
     }
 
     fn subject(&self) -> &Path {
         match self {
-            Change::Created { path, .. } | Change::Trashed { path, .. } => path,
+            Change::Created { path, .. }
+            | Change::Trashed { path, .. }
+            | Change::Produced { path, .. } => path,
             Change::Moved { to, .. } => to,
             Change::Copied { dst, .. } => dst,
         }
@@ -398,19 +462,25 @@ impl Batch {
         let mut stop = None;
         let (done, left) = match direction {
             Direction::Undo => {
-                let mut reverted = 0;
+                let mut reverted = Vec::with_capacity(changes.len());
                 for change in changes.iter().rev() {
-                    let ended = Self::before(step, change)
-                        .or_else(|| change.revert(vfs).err().map(Stop::Failed));
-                    if ended.is_some() {
-                        stop = ended;
+                    if let Some(cancelled) = Self::before(step, change) {
+                        stop = Some(cancelled);
                         break;
                     }
-                    reverted += 1;
+                    match change.revert(vfs) {
+                        Ok(taken_back) => reverted.push(taken_back),
+                        Err(error) => {
+                            stop = Some(Stop::Failed(error));
+                            break;
+                        }
+                    }
                 }
                 let mut left = changes;
-                let done = left.split_off(left.len() - reverted);
-                (done, left)
+                left.truncate(left.len() - reverted.len());
+                // Oldest first, as a redo applies them.
+                reverted.reverse();
+                (reverted, left)
             }
             Direction::Redo => {
                 let mut done = Vec::with_capacity(changes.len());
@@ -640,6 +710,79 @@ mod tests {
         // And it can be undone once more: redo refreshed the record of where it went.
         assert!(matches!(history.undo(&LocalVfs), Report::Done { .. }));
         assert!(path.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn undoing_a_made_archive_trashes_it_with_its_contents_and_redo_takes_it_back() {
+        let dir = scratch("produced");
+        let archive = dir.join("a.zip");
+        std::fs::write(&archive, b"not empty").unwrap();
+        let mut history = History::default();
+        entry(
+            &mut history,
+            Change::Produced {
+                path: archive.clone(),
+                product: Product::Archive,
+                held: None,
+            },
+        );
+
+        assert!(matches!(history.undo(&LocalVfs), Report::Done { .. }));
+        assert!(!archive.exists());
+        assert!(matches!(history.redo(&LocalVfs), Report::Done { .. }));
+        assert_eq!(std::fs::read(&archive).unwrap(), b"not empty");
+        // The record followed the file through the trash both ways, so it undoes again.
+        assert!(matches!(history.undo(&LocalVfs), Report::Done { .. }));
+        assert!(!archive.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn undoing_an_extract_trashes_the_whole_folder() {
+        let dir = scratch("unpacked");
+        let folder = dir.join("out");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("inside"), b"x").unwrap();
+        let mut history = History::default();
+        entry(
+            &mut history,
+            Change::Produced {
+                path: folder.clone(),
+                product: Product::Folder,
+                held: None,
+            },
+        );
+
+        assert!(matches!(history.undo(&LocalVfs), Report::Done { .. }));
+        assert!(!folder.exists());
+        assert!(matches!(history.redo(&LocalVfs), Report::Done { .. }));
+        assert_eq!(std::fs::read(folder.join("inside")).unwrap(), b"x");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_made_archive_that_is_gone_is_reported_and_stays_on_the_stack() {
+        let dir = scratch("produced-gone");
+        let archive = dir.join("a.zip");
+        let mut history = History::default();
+        entry(
+            &mut history,
+            Change::Produced {
+                path: archive,
+                product: Product::Archive,
+                held: None,
+            },
+        );
+
+        assert!(matches!(
+            history.undo(&LocalVfs),
+            Report::Failed {
+                error: UndoError::Missing(_),
+                ..
+            }
+        ));
+        assert!(history.can_undo());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

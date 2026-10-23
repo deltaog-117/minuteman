@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A finished compress or extract can be undone with `z` and redone with `Z`. Undo sends the archive
+  (or the unpacked folder, with everything in it) to the trash and restores the originals a compress
+  trashed, or the archive an extract trashed; redo takes them back out. A compress or extract that
+  replaced something already there, or stopped before its job finished, is not recorded. The history
+  popup now opens with `U` by default (`history = [...]` in the keys table still rebinds it).
+  Author: deltaog-117.
 - `examples/plugins/wasm_stats`, a worked Rust plugin for the WebAssembly sandbox: `:wstats` counts
   the files, folders and bytes in the browsed folder, and `:wtouch NAME` shows the sandbox refusing
   a write. It is its own crate, built for `wasm32-wasip1` with only `serde_json`, and the steps are

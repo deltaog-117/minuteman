@@ -2414,8 +2414,12 @@ draws.
   is asked for again after a wrong one but there is no limit on tries; legacy ZipCrypto archives
   can be opened (they are common) but are never written; and encrypted archives cannot be
   previewed beyond their listing.
-- **Undo history, follow-ups** – the history popup (`:history`) lists the stack but can only go back to a row, not undo one entry on its own, and has no key by default; a compress that
-  trashed its originals, an extract, a permanent delete and an overwrite are not recorded (holding
+- **Undo history, follow-ups** – done: a finished compress and a finished extract are recorded (the
+  archive or the unpacked folder goes to the trash on undo and comes back on redo, and the
+  originals a compress trashed are restored with it), and `:history` has the default key `U`. Still
+  to do: the history popup lists the stack but can only go back to a row, not undo one entry on its
+  own; one that replaced an existing archive or folder is not recorded, and neither are a permanent
+  delete and an overwrite (holding
   deleted and overwritten data in an app-owned area would make them undoable, at the cost of
   `X` no longer being immediate); a cancelled paste that had already finished its current item
   still records it, but one interrupted mid-item records nothing for that item; on platforms

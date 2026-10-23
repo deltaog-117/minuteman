@@ -34,7 +34,7 @@ use anyhow::Result;
 use browser::search::{KEPT, Outcome as SearchOutcome, Query, rank_entries};
 use browser::{BrowserState, MovePlan};
 use crossterm::event::{KeyCode, KeyEvent};
-use file_ops::history::{Batch, Change, Finished, History, Report, TrashTracker};
+use file_ops::history::{Batch, Change, Finished, History, Product, Report, TrashTracker};
 use file_ops::{ConflictPolicy, FileOpsError, Outcome};
 use plugin_api::{
     ArchiveDone, ArchiveProgress, ArchiveStatus, ArchiveWork, CompressJob, Conflict,
@@ -480,6 +480,10 @@ struct ArchiveRun {
     /// For each job of the request, the paths to send to the trash once that job has written its
     /// archive (a compress that deletes its originals, an extract that deletes its archive).
     trash_after: Vec<Vec<PathBuf>>,
+    /// For each job that will write something new, its index and what it writes, so the undo
+    /// history can take it back. A job whose output was already there (replaced or skipped) has
+    /// none: that cannot be put back.
+    made: Vec<(usize, PathBuf, Product)>,
     /// An extract, kept so a password the plugin asks for can start it again.
     again: Option<PendingExtract>,
     /// Since when the plugin's process has not been running with no result, so a plugin that
@@ -3577,6 +3581,7 @@ impl App {
         kind: BulkKind,
         work: ArchiveWork,
         trash_after: Vec<Vec<PathBuf>>,
+        made: Vec<(usize, PathBuf, Product)>,
         again: Option<PendingExtract>,
     ) -> Result<(), String> {
         if self.is_busy() {
@@ -3587,11 +3592,14 @@ impl App {
         if !self.plugins.dispatch_archive(job, work) {
             return Err(self.missing_notice("archive"));
         }
+        self.start_history_batch();
+        self.untracked = 0;
         let (tx, rx, cancel) = Self::archive_channel();
         self.archive_run = Some(ArchiveRun {
             job,
             tx,
             trash_after,
+            made,
             again,
             gone_since: None,
         });
@@ -3638,6 +3646,7 @@ impl App {
             true => jobs.iter().map(|job| vec![job.archive.clone()]).collect(),
             false => Vec::new(),
         };
+        let made = self.new_outputs(jobs.iter().map(|job| job.dest.as_path()), Product::Folder);
         let work = ArchiveWork::Extract {
             jobs: jobs.clone(),
             policy: Self::conflict_of(policy),
@@ -3648,7 +3657,7 @@ impl App {
             policy,
             delete_archives,
         };
-        self.start_archive(BulkKind::Extract, work, trash_after, Some(again))
+        self.start_archive(BulkKind::Extract, work, trash_after, made, Some(again))
     }
 
     /// Starts one archive job per entry of `jobs`, in order, stopping at the first failure. With
@@ -3692,6 +3701,7 @@ impl App {
             true => jobs.iter().map(|job| job.sources.clone()).collect(),
             false => Vec::new(),
         };
+        let made = self.new_outputs(jobs.iter().map(|job| job.out.as_path()), Product::Archive);
         let work = ArchiveWork::Compress {
             jobs,
             format,
@@ -3699,7 +3709,21 @@ impl App {
             policy: Self::conflict_of(policy),
             password,
         };
-        self.start_archive(BulkKind::Compress, work, trash_after, None)
+        self.start_archive(BulkKind::Compress, work, trash_after, made, None)
+    }
+
+    /// The jobs whose output is not there yet, with the index of each, to be recorded once the
+    /// job has written it.
+    fn new_outputs<'a>(
+        &self,
+        outputs: impl Iterator<Item = &'a Path>,
+        product: Product,
+    ) -> Vec<(usize, PathBuf, Product)> {
+        outputs
+            .enumerate()
+            .filter(|(_, path)| !lexists(self.vfs.as_ref(), path))
+            .map(|(index, path)| (index, path.to_path_buf(), product))
+            .collect()
     }
 
     /// Passes the archive plugin's progress on to the running operation, unless it is about a
@@ -3741,6 +3765,17 @@ impl App {
             ArchiveStatus::Cancelled => Err(FileOpsError::Cancelled),
             ArchiveStatus::Failed { message } => Err(FileOpsError::Plugin(message)),
         };
+        for (_, path, product) in run
+            .made
+            .iter()
+            .filter(|(index, ..)| done.finished.contains(index))
+        {
+            self.history.record(Change::Produced {
+                path: path.clone(),
+                product: *product,
+                held: None,
+            });
+        }
         let to_trash: Vec<PathBuf> = done
             .finished
             .iter()
@@ -3755,16 +3790,24 @@ impl App {
         }
         self.handle.spawn_blocking(move || {
             let mut result = outcome;
+            // Started first so what lands in the trash can be told from what was already there.
+            let tracker = TrashTracker::start();
+            let mut sent = Vec::new();
             for path in &to_trash {
-                if let Err(e) = trash_here(path) {
-                    // What failed in the archive stays the headline; a path that stayed behind is
-                    // only worth saying when the archive itself was fine.
-                    if result.is_ok() {
-                        result = Err(e);
+                match trash_here(path) {
+                    Ok(()) => sent.push(path.clone()),
+                    Err(e) => {
+                        // What failed in the archive stays the headline; a path that stayed
+                        // behind is only worth saying when the archive itself was fine.
+                        if result.is_ok() {
+                            result = Err(e);
+                        }
+                        break;
                     }
-                    break;
                 }
             }
+            let (changes, untracked) = tracker.finish(&sent);
+            let _ = tx.send(BulkMsg::Trashed { changes, untracked });
             let _ = tx.send(BulkMsg::Done(result));
         });
     }
@@ -4564,6 +4607,72 @@ mod tests {
         f.archive_ends(2, &[0], ArchiveStatus::Completed);
         f.wait_for_idle();
         assert_eq!(f.app.status.as_deref(), Some("extract complete"));
+    }
+
+    #[test]
+    fn a_finished_compress_is_one_undo_step_that_trashes_the_archive_and_redo_takes_it_back() {
+        let mut f = Fixture::new("archive-undo").with_archiver();
+        f.run("touch a.txt");
+        select_named(&mut f, "a.txt");
+        f.run("compress a.zip");
+        // What the plugin would have written.
+        std::fs::write(f.root.join("a.zip"), b"packed").unwrap();
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+        f.wait_for_idle();
+        assert_eq!(f.app.status.as_deref(), Some("undid compress a.zip"));
+        assert_eq!(f.listed(), vec!["a.txt"]);
+
+        f.app.redo(&mut f.browser, &LocalVfs).unwrap();
+        f.wait_for_idle();
+        assert_eq!(f.listed(), vec!["a.txt", "a.zip"]);
+        assert_eq!(std::fs::read(f.root.join("a.zip")).unwrap(), b"packed");
+    }
+
+    #[test]
+    fn a_finished_extract_is_one_undo_step_that_trashes_the_unpacked_folder() {
+        let mut f = Fixture::new("extract-undo").with_archiver();
+        std::fs::write(f.root.join("pack.tar.gz"), b"").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "pack.tar.gz");
+        f.run("extract");
+        let dest = f.root.join("pack");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("inside"), b"x").unwrap();
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
+
+        f.app.undo(&mut f.browser, &LocalVfs).unwrap();
+        f.wait_for_idle();
+        assert_eq!(f.app.status.as_deref(), Some("undid extract pack"));
+        assert_eq!(f.listed(), vec!["pack.tar.gz"]);
+
+        f.app.redo(&mut f.browser, &LocalVfs).unwrap();
+        f.wait_for_idle();
+        assert_eq!(std::fs::read(dest.join("inside")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn an_archive_that_replaced_another_or_never_finished_is_not_recorded() {
+        let mut f = Fixture::new("archive-unrecorded").with_archiver();
+        f.run("touch a.txt");
+        std::fs::write(f.root.join("old.zip"), b"older").unwrap();
+        f.browser.reload(&LocalVfs).unwrap();
+        select_named(&mut f, "a.txt");
+
+        f.run("compress old.zip");
+        f.press(KeyCode::Char('o'));
+        f.archive_ends(1, &[0], ArchiveStatus::Completed);
+        f.wait_for_idle();
+        select_named(&mut f, "a.txt");
+        f.run("compress b.zip");
+        f.archive_ends(2, &[], ArchiveStatus::Cancelled);
+        f.wait_for_idle();
+
+        // Only the `touch` is there to take back.
+        assert_eq!(f.app.history.summary().undo, vec!["create a.txt"]);
     }
 
     #[test]

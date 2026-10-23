@@ -279,7 +279,7 @@ impl Default for RawKeyMap {
             extract: vec!["E".into()],
             undo: vec!["z".into()],
             redo: vec!["Z".into()],
-            history: vec![],
+            history: vec!["U".into()],
             delete: vec!["x".into()],
             delete_permanently: vec!["X".into()],
             rename: vec!["r".into()],

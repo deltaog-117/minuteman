@@ -115,6 +115,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-18 | Plugin Start Check | A passive half-second probe shared by the review card and `mman plugin check`, plus an optional `api_version` in the manifest (COA A); an acknowledgement message (B) and a static-only check (C) not taken | ✅ Confirmed |
 | 2026-10-19 | Plugin Quick-Start Page | One short `docs/plugins.md` written from the commands as run, linked from the README (COA none: documentation only) | ✅ Confirmed |
 | 2026-10-22 | Rust Example WASM Plugin | A standalone crate outside the workspace with only `serde_json`, run by a test that skips when the `wasm32-wasip1` target is missing (documentation and test only, no COAs) | ✅ Confirmed |
+| 2026-10-23 | Undo for Compress and Extract | A new `Change::Produced` that undoes by trashing the output and redoes by restoring it, not `Created` (which only removes empty files) | ✅ Confirmed |
 | 2026-10-21 | Sandboxed WASM Plugins | `wasmi` behind an off-by-default `wasm` feature, one launch decision, a read-only trust check with no wildcard arm, and memory and idle-time limits on a thread of its own (COA A); `wasmtime`/Extism (B) and a permission manifest with writes (C) not taken | ✅ Confirmed |
 
 ---
@@ -8727,6 +8728,34 @@ a matching version filling them. The first full run showed one failure in the `t
 restore test that did not repeat on a clean tree or on the next run. Not tried: the form by hand.
 
 **Left open.** The check of keys and `:` words when a drop-in is switched on.
+
+### Undo for Compress and Extract
+
+**Date:** 2026-10-23
+**Status:** Confirmed
+
+**Context.** The plan was to record a compress and an extract with the existing `Created` and
+`Trashed` changes. Reading `history.rs` showed that was wrong for the output: `Created` is removed
+only while it is empty and is redone as an empty file, and an archive or an unpacked folder is
+neither.
+
+**Decision.** A new `Change::Produced { path, product, held }`. Undo sends the output to the trash
+and keeps the handle in `held`; redo restores it from there. To keep that handle, `Change::revert`
+now returns the change as it stands, as `apply` already did, and an undo batch hands the refreshed
+changes to the redo stack. The interface records a job's output only if the path did not exist when
+the request started and the plugin lists the job as finished, so a replaced or skipped output, which
+cannot be put back, and a cancelled job are never recorded. The originals a compress trashes, and
+the archive an extract trashes, are now tracked like any trash, so undo restores them. Considered
+and set aside: recording only the trashed originals, which would leave an undone compress with its
+archive still on disk. The key for `:history` is `U`, which nothing else uses.
+
+**Verification.** `scripts/check` passes. New tests cover undo and redo of an archive and of a
+folder with contents, a missing output staying on the stack, and the interface not recording a
+replaced or cancelled job. Not tried: the real `mman-archive` by hand, or a compress that trashes
+its originals through the form.
+
+**Left open.** Undoing one entry on its own, an overwrite, a permanent delete, and a history that
+survives a restart.
 
 ---
 
