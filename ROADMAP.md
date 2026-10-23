@@ -2391,9 +2391,9 @@ draws.
   probe can see, and an additive `ready` message stays an option). Start and test runs in the
   background (`probe_job`), so the screen stays live during the half second. `mman plugin new <name>
   [--lang sh|python]` writes a working skeleton and `mman plugin add <folder>` checks and copies a
-  local plugin folder into the drop-in directory (COA B). Still to do: the
-  version check is not applied when the add form is filled from a folder; choosing a folder with a
-  double-click, a check
+  local plugin folder into the drop-in directory (COA B). The add form
+  now refuses a folder whose manifest names another `api_version`. Still to do: choosing a folder
+  with a double-click, a check
   of keys and `:` words when a drop-in is switched on; the `rust` skeleton for `mman plugin new`
   (the generated crate has nowhere to get `plugin_api` until it is published); `mman plugin add`
   from a git URL (waits for a sandbox); reloading a

@@ -34,6 +34,8 @@ use crossterm::event::KeyCode;
 use plugin_host::EventKind;
 use theming::{DropIn, RawPluginSpec, parse_key};
 
+use crate::plugin_roster;
+
 /// The manifest's file name, so a path that names the file means its folder.
 const MANIFEST_FILE: &str = theming::dropin::MANIFEST;
 
@@ -143,9 +145,14 @@ impl AddPluginForm {
     ///
     /// # Errors
     ///
-    /// The reason, when an argument holds a double quote: the arguments row has no way to write
-    /// one, and filling it with the quote dropped would add a different plugin than the manifest's.
+    /// The reason, when the manifest was written for another plugin API (the rows would only
+    /// invite adding a plugin that cannot run), or when an argument holds a double quote: the
+    /// arguments row has no way to write one, and filling it with the quote dropped would add a
+    /// different plugin than the manifest's.
     pub fn fill(&mut self, found: &DropIn) -> Result<(), String> {
+        if let Some(why) = plugin_roster::api_mismatch(found.api_version) {
+            return Err(why);
+        }
         let spec = &found.spec;
         let args = join_args(&spec.args)?;
         self.values[Row::Name as usize] = spec.name.clone();
@@ -455,6 +462,18 @@ mod tests {
         assert_eq!(form.note(), Some("Shows who changed a line"));
         let spec = form.build().unwrap();
         assert_eq!(spec, found(&["--x", "a b"]).spec);
+    }
+
+    #[test]
+    fn a_manifest_for_another_api_version_is_refused_and_leaves_the_rows_alone() {
+        let mut form = AddPluginForm::new();
+        typed(&mut form, &[(Row::Name, "mine")]);
+        let mut old = found(&[]);
+        old.api_version = Some(plugin_host::API_VERSION + 1);
+        assert!(form.fill(&old).unwrap_err().contains("plugin API"));
+        assert_eq!(form.value(Row::Name), "mine");
+        old.api_version = Some(plugin_host::API_VERSION);
+        assert!(form.fill(&old).is_ok());
     }
 
     #[test]

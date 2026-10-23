@@ -587,6 +587,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Author: deltaog-117.
 
 ### Fixed
+- The plugin menu's add form refuses a manifest written for another plugin API when it is filled
+  from a folder, saying which versions differ and leaving the typed rows alone, as the found list,
+  `mman plugin check` and `mman plugin add` already did. Author: deltaog-117.
 - Browsing for a plugin folder could not choose a folder that has no `plugin.toml` in a way that
   explained itself, and could never choose the folder being browsed: `Enter` only went into it.
   `Q` now chooses the folder under the cursor, or the browsed folder when the cursor is on a file,

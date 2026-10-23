@@ -8707,6 +8707,29 @@ does it itself), writes behind a permission manifest, and the release-build size
 
 ---
 
+### Add Form Refuses a Manifest for Another API Version
+
+**Date:** 2026-10-23
+**Status:** Confirmed
+
+**Context.** Filling the add form from a folder read the manifest but never looked at its
+`api_version`, so a plugin written for another protocol could be filled in and edited until Add,
+where it was refused late. The found list, `mman plugin check` and `mman plugin add` already
+refused it.
+
+**Decision.** `AddPluginForm::fill` now asks `plugin_roster::api_mismatch` first and returns the reason, which
+the popup already shows under the form. It refuses before touching any row, so what the user had
+typed stays. This was the smallest place: one check at the point the manifest enters the form, with
+the same message and the same function as the other three paths, so they cannot drift apart.
+
+**Verification.** `scripts/check` passes; a new test covers a mismatch leaving the rows alone and
+a matching version filling them. The first full run showed one failure in the `trash` crate's
+restore test that did not repeat on a clean tree or on the next run. Not tried: the form by hand.
+
+**Left open.** The check of keys and `:` words when a drop-in is switched on.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines
