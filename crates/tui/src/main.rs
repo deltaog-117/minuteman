@@ -3063,6 +3063,10 @@ fn run(
                             history = None;
                             app.start_history_walk(browser, vfs, walk)?;
                         }
+                        history_popup::Key::Only(pick) => {
+                            history = None;
+                            app.start_history_single(browser, vfs, pick)?;
+                        }
                     }
                     continue;
                 }

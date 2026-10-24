@@ -55,7 +55,7 @@ use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
 use crate::extract_popup::{self, ExtractPopup};
-use crate::history_popup::{HistoryPopup, Side, Walk};
+use crate::history_popup::{HistoryPopup, Pick, Side, Walk};
 use crate::inspect_panel::InspectPanel;
 use crate::line_edit::LineEdit;
 use crate::live_refresh::LiveRefresh;
@@ -4114,6 +4114,41 @@ impl App {
                 Side::Redo => ("redo", "redid"),
             };
             self.report_history(browser, vfs, verb, past, Report::Empty)?;
+        }
+        Ok(())
+    }
+
+    /// Takes back (or does again) just the entry `pick` names, on the worker. The entries around
+    /// it stay recorded; if a later one stands in its way the step's own checks refuse it and it
+    /// keeps its place.
+    pub fn start_history_single(
+        &mut self,
+        browser: &mut BrowserState,
+        vfs: &dyn Vfs,
+        pick: Pick,
+    ) -> Result<()> {
+        if self.is_busy() {
+            self.status = Some("an operation is already in progress".into());
+            return Ok(());
+        }
+        let depth = pick.depth.saturating_sub(1);
+        let (kind, verb, past, batch) = match pick.side {
+            Side::Undo => (
+                BulkKind::Undo,
+                "undo",
+                "undid",
+                self.history.begin_undo_at(depth),
+            ),
+            Side::Redo => (
+                BulkKind::Redo,
+                "redo",
+                "redid",
+                self.history.begin_redo_at(depth),
+            ),
+        };
+        match batch {
+            Some(batch) => self.spawn_history(kind, batch),
+            None => self.report_history(browser, vfs, verb, past, Report::Empty)?,
         }
         Ok(())
     }

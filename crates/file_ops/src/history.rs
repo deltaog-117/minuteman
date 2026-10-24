@@ -366,18 +366,34 @@ impl History {
     /// thread), or `None` when there is nothing to take back. Until `finish` hands the result
     /// back, the entry is on neither stack.
     pub fn begin_undo(&mut self) -> Option<Batch> {
+        self.begin_undo_at(0)
+    }
+
+    /// Takes the entry `depth` places from the newest (0 is the one `begin_undo` takes) off the
+    /// undo stack, leaving the others where they are. Entries recorded after it are not touched,
+    /// so a step that depended on them is refused by its own checks and the entry goes back to
+    /// the place it came from.
+    pub fn begin_undo_at(&mut self, depth: usize) -> Option<Batch> {
         self.commit();
-        self.undo.pop().map(|entry| Batch {
-            direction: Direction::Undo,
-            changes: entry.changes,
-        })
+        Self::take(&mut self.undo, depth, Direction::Undo)
     }
 
     /// Takes the newest entry that was undone off the redo stack, like `begin_undo`.
     pub fn begin_redo(&mut self) -> Option<Batch> {
-        self.redo.pop().map(|entry| Batch {
-            direction: Direction::Redo,
-            changes: entry.changes,
+        self.begin_redo_at(0)
+    }
+
+    /// Takes the entry `depth` places from the next one to redo, like `begin_undo_at`.
+    pub fn begin_redo_at(&mut self, depth: usize) -> Option<Batch> {
+        Self::take(&mut self.redo, depth, Direction::Redo)
+    }
+
+    fn take(stack: &mut Vec<Entry>, depth: usize, direction: Direction) -> Option<Batch> {
+        let index = stack.len().checked_sub(depth.checked_add(1)?)?;
+        Some(Batch {
+            direction,
+            index,
+            changes: stack.remove(index).changes,
         })
     }
 
@@ -387,6 +403,7 @@ impl History {
     pub fn finish(&mut self, finished: Finished) -> Report {
         let Finished {
             direction,
+            index,
             label,
             done,
             left,
@@ -400,7 +417,9 @@ impl History {
             carried_out.push(Entry { changes: done });
         }
         if !left.is_empty() {
-            remaining.push(Entry { changes: left });
+            // Back where it was taken from; the stack can only have grown since if it was the top.
+            let at = index.min(remaining.len());
+            remaining.insert(at, Entry { changes: left });
         }
         match stop {
             None => Report::Done { label },
@@ -449,6 +468,8 @@ enum Direction {
 #[derive(Debug)]
 pub struct Batch {
     direction: Direction,
+    /// Where in its stack the entry sat, so what is left of it can go back there.
+    index: usize,
     changes: Vec<Change>,
 }
 
@@ -457,7 +478,11 @@ impl Batch {
     /// redo applies from the oldest to the newest. `step` is told which path is about to be
     /// touched and may stop the batch before it by returning `Break`.
     pub fn run(self, vfs: &dyn Vfs, step: &mut ProgressFn<'_>) -> Finished {
-        let Batch { direction, changes } = self;
+        let Batch {
+            direction,
+            index,
+            changes,
+        } = self;
         let label = label(&changes);
         let mut stop = None;
         let (done, left) = match direction {
@@ -503,6 +528,7 @@ impl Batch {
         };
         Finished {
             direction,
+            index,
             label,
             done,
             left,
@@ -526,6 +552,7 @@ enum Stop {
 #[derive(Debug)]
 pub struct Finished {
     direction: Direction,
+    index: usize,
     label: String,
     /// The steps carried out, in the state they now stand in (a redone trash has a new handle).
     done: Vec<Change>,
@@ -566,6 +593,67 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn one_entry_can_be_undone_without_the_ones_after_it() {
+        let dir = scratch("single");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::write(&a, b"").unwrap();
+        std::fs::write(&b, b"").unwrap();
+        let mut history = History::default();
+        for path in [&a, &b] {
+            entry(
+                &mut history,
+                Change::Created {
+                    path: path.clone(),
+                    is_dir: false,
+                },
+            );
+        }
+
+        let batch = history.begin_undo_at(1).unwrap();
+        let finished = batch.run(&LocalVfs, &mut |_| ControlFlow::Continue(()));
+        assert!(matches!(history.finish(finished), Report::Done { .. }));
+
+        assert_eq!(listing(&dir), ["b"]);
+        assert_eq!(history.summary().undo, ["create b"]);
+        assert_eq!(history.summary().redo, ["create a"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_refused_single_undo_returns_to_its_own_place() {
+        let dir = scratch("refused");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::write(&a, b"precious").unwrap();
+        std::fs::write(&b, b"").unwrap();
+        let mut history = History::default();
+        for path in [&a, &b] {
+            entry(
+                &mut history,
+                Change::Created {
+                    path: path.clone(),
+                    is_dir: false,
+                },
+            );
+        }
+
+        let batch = history.begin_undo_at(1).unwrap();
+        let finished = batch.run(&LocalVfs, &mut |_| ControlFlow::Continue(()));
+        assert!(matches!(history.finish(finished), Report::Failed { .. }));
+
+        assert_eq!(history.summary().undo, ["create b", "create a"]);
+        assert!(!history.can_redo());
+        assert_eq!(std::fs::read(&a).unwrap(), b"precious");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_depth_past_the_stack_takes_nothing() {
+        let mut history = History::default();
+        assert!(history.begin_undo_at(0).is_none());
+        assert!(history.begin_redo_at(usize::MAX).is_none());
     }
 
     #[test]

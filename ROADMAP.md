@@ -2429,9 +2429,9 @@ draws.
   previewed beyond their listing.
 - **Undo history, follow-ups** – done: a finished compress and a finished extract are recorded (the
   archive or the unpacked folder goes to the trash on undo and comes back on redo, and the
-  originals a compress trashed are restored with it), and `:history` has the default key `U`. Still
-  to do: the history popup lists the stack but can only go back to a row, not undo one entry on its
-  own; one that replaced an existing archive or folder is not recorded, and neither are a permanent
+  originals a compress trashed are restored with it), and `:history` has the default key `U`, and
+  `u` on a row of the popup undoes or redoes just that entry (a later entry in its way makes the
+  step refuse and the entry keeps its place). Still to do: one that replaced an existing archive or folder is not recorded, and neither are a permanent
   delete and an overwrite (holding
   deleted and overwritten data in an app-owned area would make them undoable, at the cost of
   `X` no longer being immediate); a cancelled paste that had already finished its current item

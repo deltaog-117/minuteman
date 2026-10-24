@@ -8789,6 +8789,34 @@ user when the watch limit is spent.
 
 ---
 
+### Undo One History Entry on Its Own
+
+**Date:** 2026-10-24
+**Status:** Confirmed
+
+**Context.** The history popup could only go back to a row, undoing every entry newer than it.
+Three courses of action were weighed: run the chosen entry alone and let each step's own checks
+refuse a conflict (A), also undo the later entries that touch the same paths (B), and refuse up
+front when a later entry shares a path (C).
+
+**Decision.** A. `History::begin_undo_at(depth)` and `begin_redo_at(depth)` take one entry out of
+its stack, and `Batch` remembers its position so what is left of a refused or cancelled entry goes
+back to that place instead of the top. `u` on a popup row asks for it; `Enter` keeps meaning "go
+back to here". Every `revert` already checks its target and aborts instead of overwriting, so an
+entry whose later neighbour changed the same path fails with the existing message and nothing is
+lost. B was set aside as a surprising side effect, C because it would duplicate those checks and
+could refuse an undo that would have worked.
+
+**Verification.** `scripts/check` passes. New tests: an entry in the middle is undone and lands on
+the redo stack while the newer one stays, a refused middle entry returns to its own place and the
+file is untouched, a depth past the stack takes nothing, and `u` on an undo and a redo row asks
+for that row alone.
+
+**Left open.** An undone middle entry sits on top of the redo stack, so redoing it comes before
+older redo entries; mouse selection of a single row.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

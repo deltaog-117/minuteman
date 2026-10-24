@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `u` on a row of the `:history` popup undoes or redoes just that entry and leaves the ones around
+  it recorded. If a newer entry stands in its way the step is refused with the usual message and
+  the entry keeps its place in the list.
 - The file lists update the moment something changes in the browsed folder or its parent, instead
   of up to half a second later: a new `Vfs::watch` method lets a backend announce changes, and the
   local disk does (inotify through the `notify` crate). A folder that cannot be watched, such as

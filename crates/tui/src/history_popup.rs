@@ -21,7 +21,8 @@
 //!
 //! Entries depend on the ones recorded after them, so a row never undoes one entry on its own:
 //! choosing a row asks for every entry down to and including it ([`Walk`]), newest first, which
-//! is the same order repeated `undo` presses would take.
+//! is the same order repeated `undo` presses would take. `u` is the exception the user asks for
+//! by name: it runs just that one row ([`Pick`]) and leaves the entries around it alone.
 
 use crossterm::event::KeyCode;
 use file_ops::history::Summary;
@@ -51,12 +52,21 @@ pub struct Walk {
     pub entries: usize,
 }
 
+/// What `u` on a row asks for: that one entry, `depth` places from the nearest one of `side`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pick {
+    pub side: Side,
+    /// At least one; the nearest entry is 1, as in [`Row::depth`].
+    pub depth: usize,
+}
+
 /// What a keystroke asks the caller to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Stay,
     Close,
     Run(Walk),
+    Only(Pick),
 }
 
 /// One row as it is drawn.
@@ -140,13 +150,22 @@ impl HistoryPopup {
         })
     }
 
+    /// What `u` on the row under the cursor asks for.
+    pub fn pick(&self) -> Option<Pick> {
+        self.row(self.cursor).map(|row| Pick {
+            side: row.side,
+            depth: row.depth,
+        })
+    }
+
     /// Up, down, `j` and `k` move, wrapping; `Home` and `End` jump; `Enter` runs the row under the
-    /// cursor; `Esc` and `q` close.
+    /// cursor and everything between; `u` runs only that row; `Esc` and `q` close.
     pub fn key(&mut self, code: KeyCode) -> Key {
         let last = self.len() - 1;
         match code {
             KeyCode::Esc | KeyCode::Char('q') => return Key::Close,
             KeyCode::Enter => return self.walk().map_or(Key::Stay, Key::Run),
+            KeyCode::Char('u') => return self.pick().map_or(Key::Stay, Key::Only),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.cursor = if self.cursor == last {
                     0
@@ -222,6 +241,28 @@ mod tests {
             Key::Run(Walk {
                 side: Side::Redo,
                 entries: 1
+            })
+        );
+    }
+
+    #[test]
+    fn u_asks_for_only_the_row_under_the_cursor() {
+        let mut popup = popup(&["c", "b", "a"], &["d"]);
+        popup.key(KeyCode::Down);
+        assert_eq!(
+            popup.key(KeyCode::Char('u')),
+            Key::Only(Pick {
+                side: Side::Undo,
+                depth: 2
+            })
+        );
+
+        popup.key(KeyCode::End);
+        assert_eq!(
+            popup.key(KeyCode::Char('u')),
+            Key::Only(Pick {
+                side: Side::Redo,
+                depth: 1
             })
         );
     }

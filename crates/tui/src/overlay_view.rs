@@ -556,7 +556,7 @@ pub fn render_history(frame: &mut Frame<'_>, popup: &HistoryPopup, config: &Conf
     }));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "↑/↓ move, Enter go back to here, Esc close",
+        "↑/↓ move, Enter go back to here, u only this one, Esc close",
         dim_style,
     ));
     frame.render_widget(Paragraph::new(lines), inner);
