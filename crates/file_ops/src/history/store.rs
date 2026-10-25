@@ -17,16 +17,20 @@
 //! The undo history as text, so it can be kept between sessions.
 //!
 //! One line per change, fields separated by a tab (`<tab>` below), with `\`, tab, newline and carriage return escaped inside a
-//! field; an entry ends with a `-` line, and `@ undo` / `@ redo` say which stack the entries after
-//! it belong to (oldest first). The first line names the format, so a later one can be told apart.
+//! field; an entry starts with a `#` line naming it (see `EntryId`), ends with a `-` line, and
+//! `@ undo` / `@ redo` say which stack the entries after it belong to (oldest first). The first line
+//! names the format, so a later one can be told apart. Format 1, which has no `#` lines, is still
+//! read; an entry without one is named by its place in the file.
 //!
 //! ```text
-//! mman-history 1
+//! mman-history 2
 //! @ undo
+//! # 19c2f3a1b2c-1f4d-0
 //! M<tab>/home/a/old.txt<tab>/home/a/new.txt
 //! T<tab>/home/a/gone.txt<tab>/home/a/.local/share/Trash/info/gone.txt.trashinfo<tab>1760000000
 //! -
 //! @ redo
+//! # 19c2f3a1b2d-1f4d-1
 //! P<tab>/home/a/out.zip<tab>a
 //! -
 //! ```
@@ -42,10 +46,12 @@ use std::path::PathBuf;
 
 use trash::{TrashEntry, Trashed};
 
-use super::{Change, Direction, Entry, History, Product};
+use super::{Change, Direction, Entry, EntryId, History, Product};
 
 const HEADER_NAME: &str = "mman-history";
-const VERSION: &str = "1";
+pub(super) const VERSION: &str = "2";
+/// Formats this version reads: the current one and the one before entries had ids.
+const READABLE: [&str; 2] = ["1", VERSION];
 
 /// Why a saved history could not be read at all.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -62,6 +68,80 @@ pub struct Restored {
     pub history: History,
     /// Entries left out because they could not be trusted any more (see the module docs).
     pub dropped: usize,
+    /// The entries the file holds that `history` does not: the dropped ones and the oldest ones
+    /// past the capacity. A `Merger` given these does not write them back.
+    pub forgotten: Vec<EntryId>,
+}
+
+/// One entry of a saved history as it stands in the text: named, and with its lines unread.
+pub(super) struct Block<'a> {
+    pub id: EntryId,
+    pub lines: Vec<&'a str>,
+}
+
+/// The entries of a saved history, sorted into the stack they were listed under.
+pub(super) struct Blocks<'a> {
+    pub undo: Vec<Block<'a>>,
+    pub redo: Vec<Block<'a>>,
+    /// Entries that could not be sorted into either: no `-`, or under no known `@` line.
+    pub stray: usize,
+}
+
+/// Splits a saved history into entries without reading what is in them, so the same pass serves
+/// `decode` and the merge of two files.
+///
+/// # Errors
+///
+/// The text does not start with a first line of a format this version reads.
+pub(super) fn parse_blocks(text: &str) -> Result<Blocks<'_>, DecodeError> {
+    let mut lines = text.lines();
+    match lines.next().and_then(|l| l.strip_prefix(HEADER_NAME)) {
+        Some(rest)
+            if rest
+                .strip_prefix(' ')
+                .is_some_and(|v| READABLE.contains(&v)) => {}
+        Some(rest) if rest.starts_with(' ') => {
+            return Err(DecodeError::Version(rest.trim().to_owned()));
+        }
+        _ => return Err(DecodeError::NotHistory),
+    }
+
+    let mut blocks = Blocks {
+        undo: Vec::new(),
+        redo: Vec::new(),
+        stray: 0,
+    };
+    let mut side = None;
+    let mut open: Option<(Option<EntryId>, Vec<&str>)> = None;
+    // Counts every entry that ends, so an unnamed one gets the same name in every session.
+    let mut seen = 0;
+    for line in lines.filter(|line| !line.is_empty()) {
+        if let Some(name) = line.strip_prefix("@ ") {
+            blocks.stray += usize::from(open.take().is_some());
+            side = match name {
+                "undo" => Some(Direction::Undo),
+                "redo" => Some(Direction::Redo),
+                _ => None,
+            };
+        } else if line == "-" {
+            let (id, lines) = open.take().unwrap_or_default();
+            let id = id.unwrap_or_else(|| EntryId::legacy(seen));
+            seen += 1;
+            match side {
+                Some(Direction::Undo) => blocks.undo.push(Block { id, lines }),
+                Some(Direction::Redo) => blocks.redo.push(Block { id, lines }),
+                None => blocks.stray += 1,
+            }
+        } else {
+            let (id, lines) = open.get_or_insert_with(|| (None, Vec::new()));
+            match line.strip_prefix("# ").map(str::parse) {
+                Some(Ok(named)) if id.is_none() && lines.is_empty() => *id = Some(named),
+                _ => lines.push(line),
+            }
+        }
+    }
+    blocks.stray += usize::from(open.is_some());
+    Ok(blocks)
 }
 
 impl History {
@@ -70,9 +150,13 @@ impl History {
     /// cannot be written (see the module docs) is left out.
     pub fn encode(&self) -> String {
         let mut out = format!("{HEADER_NAME} {VERSION}\n");
-        let pending = (!self.pending.is_empty()).then(|| Entry {
-            changes: self.pending.clone(),
-        });
+        let pending = self
+            .pending_id
+            .filter(|_| !self.pending.is_empty())
+            .map(|id| Entry {
+                id,
+                changes: self.pending.clone(),
+            });
         out.push_str("@ undo\n");
         for entry in self.undo.iter().chain(pending.as_ref()) {
             write_entry(&mut out, entry, Direction::Undo);
@@ -91,67 +175,62 @@ impl History {
     ///
     /// # Errors
     ///
-    /// The text does not start with this format's first line.
+    /// The text does not start with a first line of a format this version reads.
     pub fn decode(
         text: &str,
         capacity: usize,
         live: &[TrashEntry],
     ) -> Result<Restored, DecodeError> {
-        let mut lines = text.lines();
-        match lines.next().and_then(|l| l.strip_prefix(HEADER_NAME)) {
-            Some(rest) if rest.strip_prefix(' ') == Some(VERSION) => {}
-            Some(rest) if rest.starts_with(' ') => {
-                return Err(DecodeError::Version(rest.trim().to_owned()));
-            }
-            _ => return Err(DecodeError::NotHistory),
-        }
+        let blocks = parse_blocks(text)?;
         let held: HashMap<(&str, i64), &TrashEntry> = live
             .iter()
             .map(|entry| ((entry.id.as_str(), entry.deleted), entry))
             .collect();
 
-        let (mut undo, mut redo) = (Vec::new(), Vec::new());
-        let mut dropped = 0;
-        let mut side = None;
-        // `Some(None)` is an entry already known to be bad; it still reads on to its `-`.
-        let mut open: Option<Option<Vec<Change>>> = None;
-        for line in lines.filter(|line| !line.is_empty()) {
-            if let Some(name) = line.strip_prefix("@ ") {
-                dropped += usize::from(open.take().is_some());
-                side = match name {
-                    "undo" => Some(Direction::Undo),
-                    "redo" => Some(Direction::Redo),
-                    _ => None,
-                };
-            } else if line == "-" {
-                match (open.take(), side) {
-                    (Some(Some(changes)), Some(side)) if !changes.is_empty() => {
-                        let stack = match side {
-                            Direction::Undo => &mut undo,
-                            Direction::Redo => &mut redo,
-                        };
-                        stack.push(Entry { changes });
+        let mut history = History::with_capacity(capacity);
+        let mut dropped = blocks.stray;
+        let mut forgotten = Vec::new();
+        for (stack, side, from) in [
+            (&mut history.undo, Direction::Undo, blocks.undo),
+            (&mut history.redo, Direction::Redo, blocks.redo),
+        ] {
+            let mut entries = Vec::new();
+            for block in from {
+                match block_changes(&block, side, &held) {
+                    Some(changes) => entries.push(Entry {
+                        id: block.id,
+                        changes,
+                    }),
+                    None => {
+                        dropped += 1;
+                        forgotten.push(block.id);
                     }
-                    _ => dropped += 1,
-                }
-            } else {
-                let entry = open.get_or_insert_with(|| Some(Vec::new()));
-                let change = side.and_then(|side| parse_change(line, side, &held));
-                match (entry.as_mut(), change) {
-                    (Some(changes), Some(change)) => changes.push(change),
-                    _ => *entry = None,
                 }
             }
+            let excess = entries.len().saturating_sub(history.capacity);
+            forgotten.extend(entries.iter().take(excess).map(|entry| entry.id));
+            stack.extend(entries.into_iter().skip(excess));
         }
-        dropped += usize::from(open.is_some());
-
-        let mut history = History::with_capacity(capacity);
-        for (stack, from) in [(&mut history.undo, undo), (&mut history.redo, redo)] {
-            let excess = from.len().saturating_sub(history.capacity);
-            stack.extend(from.into_iter().skip(excess));
-        }
-        Ok(Restored { history, dropped })
+        Ok(Restored {
+            history,
+            dropped,
+            forgotten,
+        })
     }
+}
+
+/// Every line of `block` as a change, or `None` when one does not read or there are none.
+fn block_changes(
+    block: &Block<'_>,
+    side: Direction,
+    held: &HashMap<(&str, i64), &TrashEntry>,
+) -> Option<Vec<Change>> {
+    let changes: Vec<Change> = block
+        .lines
+        .iter()
+        .map(|line| parse_change(line, side, held))
+        .collect::<Option<_>>()?;
+    (!changes.is_empty()).then_some(changes)
 }
 
 fn write_entry(out: &mut String, entry: &Entry, side: Direction) {
@@ -161,6 +240,7 @@ fn write_entry(out: &mut String, entry: &Entry, side: Direction) {
         .map(|change| change_line(change, side))
         .collect();
     if let Some(lines) = lines {
+        out.push_str(&format!("# {}\n", entry.id));
         for line in lines {
             out.push_str(&line);
             out.push('\n');
@@ -343,7 +423,14 @@ mod tests {
     }
 
     fn entry(changes: Vec<Change>) -> Entry {
-        Entry { changes }
+        Entry {
+            id: EntryId::fresh(),
+            changes,
+        }
+    }
+
+    fn changes_of(entries: &[Entry]) -> Vec<Vec<Change>> {
+        entries.iter().map(|e| e.changes.clone()).collect()
     }
 
     fn moved(from: &str, to: &str) -> Change {
@@ -363,6 +450,38 @@ mod tests {
 
     fn restore(history: &History, live: &[TrashEntry]) -> Restored {
         History::decode(&history.encode(), 100, live).unwrap()
+    }
+
+    #[test]
+    fn an_entry_keeps_its_name_through_a_save_and_a_load() {
+        let original = history(vec![entry(vec![moved("/h/a", "/h/b")])], vec![]);
+        let restored = restore(&original, &[]);
+        assert_eq!(restored.history.undo[0].id, original.undo[0].id);
+    }
+
+    #[test]
+    fn a_batch_keeps_one_name_while_recorded_and_once_committed() {
+        let mut history = History::default();
+        history.record(moved("/h/a", "/h/b"));
+        let while_recorded = parse_blocks(&history.encode()).unwrap().undo[0].id;
+        history.commit();
+        assert_eq!(history.undo[0].id, while_recorded);
+    }
+
+    #[test]
+    fn what_decode_leaves_out_is_listed_as_forgotten() {
+        let live = [item("/t/info/a.trashinfo", "/h/a", 7)];
+        let gone = entry(vec![Change::Trashed {
+            path: "/h/gone".into(),
+            item: Trashed::from(&item("/t/info/x.trashinfo", "/h/gone", 3)),
+        }]);
+        let old = entry(vec![moved("/h/o", "/h/p")]);
+        let kept = entry(vec![moved("/h/a", "/h/b")]);
+        let original = history(vec![old.clone(), gone.clone(), kept], vec![]);
+
+        let restored = History::decode(&original.encode(), 1, &live).unwrap();
+
+        assert_eq!(restored.forgotten, [gone.id, old.id]);
     }
 
     #[test]
@@ -446,8 +565,8 @@ mod tests {
         let restored = restore(&original, &[]);
 
         assert_eq!(
-            restored.history.undo,
-            vec![entry(vec![moved("/h/c", "/h/d")])]
+            changes_of(&restored.history.undo),
+            [vec![moved("/h/c", "/h/d")]]
         );
         assert!(!restored.history.can_redo());
     }
@@ -487,12 +606,11 @@ mod tests {
         let restored = History::decode(text, 100, &[]).unwrap();
 
         assert_eq!(
-            restored.history.undo,
-            vec![
-                entry(vec![moved("/h/a", "/h/b")]),
-                entry(vec![moved("/h/e", "/h/f")]),
-            ]
+            changes_of(&restored.history.undo),
+            [vec![moved("/h/a", "/h/b")], vec![moved("/h/e", "/h/f")],]
         );
+        // Unnamed entries get a name from their place in the file, dropped ones counted.
+        assert_eq!(restored.history.undo[1].id, EntryId::legacy(4));
         assert_eq!(restored.dropped, 4);
     }
 
@@ -531,8 +649,8 @@ mod tests {
             DecodeError::NotHistory
         );
         assert_eq!(
-            History::decode("mman-history 2\n@ undo\n", 100, &[]).unwrap_err(),
-            DecodeError::Version("2".into())
+            History::decode("mman-history 3\n@ undo\n", 100, &[]).unwrap_err(),
+            DecodeError::Version("3".into())
         );
     }
 

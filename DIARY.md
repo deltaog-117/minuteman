@@ -117,6 +117,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-22 | Rust Example WASM Plugin | A standalone crate outside the workspace with only `serde_json`, run by a test that skips when the `wasm32-wasip1` target is missing (documentation and test only, no COAs) | ✅ Confirmed |
 | 2026-10-23 | Undo for Compress and Extract | A new `Change::Produced` that undoes by trashing the output and redoes by restoring it, not `Created` (which only removes empty files) | ✅ Confirmed |
 | 2026-10-25 | Undo History Between Sessions | A hand-written line format in `file_ops::history`, saved atomically by one writer thread in the state folder and checked against the trash on load (COA A) | ✅ Confirmed |
+| 2026-10-25 | Undo History, Shared Between Sessions | Entries named by an id and merged under a file lock at each save, written back as ours plus what other sessions saved and we did not remove; a newer format is never overwritten (COA B) | ✅ Confirmed |
 | 2026-10-21 | Sandboxed WASM Plugins | `wasmi` behind an off-by-default `wasm` feature, one launch decision, a read-only trust check with no wildcard arm, and memory and idle-time limits on a thread of its own (COA A); `wasmtime`/Extism (B) and a permission manifest with writes (C) not taken | ✅ Confirmed |
 
 ---
@@ -8859,6 +8860,53 @@ third session.
 
 **Left open.** Two `mman` at once overwrite each other's history; a file from a newer format is
 read as empty and then overwritten; a write that fails is reported in the status line but not
+retried until the next change.
+
+---
+
+### Undo History, Shared Between Sessions
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+**Context.** The history file had two gaps left open by the cycle that created it: two `mman`
+running at once each wrote their whole in-memory history over the file, so the last to save won, and
+a file in a newer format was read as empty and then overwritten by the next save. Three courses of
+action were weighed: only refusing to write a newer format (A), merging under a lock with entries
+named by an id (B), and one file per session (C).
+
+**Decision.** B, with A's guard inside it. Every entry has an `EntryId` (creation time in
+milliseconds, process id, counter), written as a `#` line, and the format is now 2; format 1 is
+still read and its entries are named by their place in the file, so every session reading the same
+old file names them alike. Saving takes an exclusive `flock` on `history.lock` (`File::lock`, no new
+dependency), reads the file, and writes `ours ∪ (theirs ∖ removed)` through the same temporary file
+and rename as before. `removed` is every entry this session once held and no longer does, found by
+comparing successive saves, plus what loading left out (gone trash items, damaged lines, entries
+past the capacity); without that a forgotten entry would be read back from the file for ever.
+Pending batches keep one id from the first recorded change to the commit, and what is left of a
+cancelled undo keeps the entry's id. The merge works on the text, not on the changes, so an entry
+whose trash item is gone here is still carried for a session that can use it. Entries the session
+shares with the file are written as the session has them, so the last session to save decides which
+stack a shared entry is on; foreign undo entries are put among ours by id order, and foreign redo
+entries go under ours, so the next redo is always one this session made. A newer format on disk is
+handled twice: at load it starts an empty history, says so and never starts the writer, and if the
+file turns newer while the session runs, the writer reports it once and stops. A is set aside as the
+whole answer because it leaves concurrency open; C because a launch would then load a blend of old
+sessions with no rule for which still count.
+
+**Verification.** `scripts/check` passes. New tests: ids are unique, ordered and survive a text
+round trip (property); a merge keeps both sessions' entries in turn, does not write back what was
+removed or what loading forgot, orders foreign entries by time, trims the oldest past the capacity,
+carries a format 1 file whole and is stable when merged over itself (property); a newer format is
+neither loaded nor written, and four threads saving at once end with all twenty entries. The
+`file_ops` tests were run six times each with and without the change. One run of the whole suite
+failed `undoing_an_extract_trashes_the_whole_folder` inside the `trash` crate (an `unwrap` on
+`None` in `freedesktop.rs`) and did not fail again.
+
+**Left open.** The merged file reaches a running session's memory only at its next launch, so one
+session cannot undo what another did without restarting; an entry that another session removed
+comes back if this one still holds it; two sessions that undid the same entry each save it on
+their own stack and the second undo is refused by its own checks; a write that fails is still not
 retried until the next change.
 
 ---

@@ -36,8 +36,12 @@ use trash::Trashed;
 
 use crate::{ConflictPolicy, FileOpsError, ProgressFn};
 
+mod id;
+mod merge;
 mod store;
 
+pub use id::EntryId;
+pub use merge::Merger;
 pub use store::{DecodeError, Restored};
 
 /// How many entries are kept before the oldest is forgotten.
@@ -275,6 +279,8 @@ impl TrashTracker {
 /// A batch of changes that is undone and redone as one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
+    /// Names the entry across sessions, so two histories saved to one file can be told apart.
+    id: EntryId,
     changes: Vec<Change>,
 }
 
@@ -306,6 +312,9 @@ pub struct History {
     redo: Vec<Entry>,
     /// Changes of a batch still running, committed as one entry by `commit`.
     pending: Vec<Change>,
+    /// The id the batch in progress will have once committed, so the file names it the same before
+    /// and after.
+    pending_id: Option<EntryId>,
     capacity: usize,
     /// Counts every change to what the stacks (or the batch in progress) hold, so a caller that
     /// keeps the history on disk can tell whether there is anything new to write.
@@ -324,6 +333,7 @@ impl History {
             undo: Vec::new(),
             redo: Vec::new(),
             pending: Vec::new(),
+            pending_id: None,
             capacity: capacity.max(1),
             revision: 0,
         }
@@ -337,6 +347,7 @@ impl History {
     /// Adds one finished step to the batch in progress.
     pub fn record(&mut self, change: Change) {
         self.revision += 1;
+        self.pending_id.get_or_insert_with(EntryId::fresh);
         self.pending.push(change);
     }
 
@@ -350,6 +361,7 @@ impl History {
         self.revision += 1;
         self.redo.clear();
         self.undo.push(Entry {
+            id: self.pending_id.take().unwrap_or_else(EntryId::fresh),
             changes: std::mem::take(&mut self.pending),
         });
         if self.undo.len() > self.capacity {
@@ -407,10 +419,12 @@ impl History {
 
     fn take(stack: &mut Vec<Entry>, depth: usize, direction: Direction) -> Option<Batch> {
         let index = stack.len().checked_sub(depth.checked_add(1)?)?;
+        let Entry { id, changes } = stack.remove(index);
         Some(Batch {
             direction,
             index,
-            changes: stack.remove(index).changes,
+            id,
+            changes,
         })
     }
 
@@ -421,6 +435,7 @@ impl History {
         let Finished {
             direction,
             index,
+            id,
             label,
             done,
             left,
@@ -432,12 +447,16 @@ impl History {
             Direction::Redo => (&mut self.undo, &mut self.redo),
         };
         if !done.is_empty() {
-            carried_out.push(Entry { changes: done });
+            carried_out.push(Entry {
+                id: EntryId::fresh(),
+                changes: done,
+            });
         }
         if !left.is_empty() {
             // Back where it was taken from; the stack can only have grown since if it was the top.
             let at = index.min(remaining.len());
-            remaining.insert(at, Entry { changes: left });
+            // What is left is the same entry, shorter, so another session holding it still matches.
+            remaining.insert(at, Entry { id, changes: left });
         }
         match stop {
             None => Report::Done { label },
@@ -488,6 +507,7 @@ pub struct Batch {
     direction: Direction,
     /// Where in its stack the entry sat, so what is left of it can go back there.
     index: usize,
+    id: EntryId,
     changes: Vec<Change>,
 }
 
@@ -499,6 +519,7 @@ impl Batch {
         let Batch {
             direction,
             index,
+            id,
             changes,
         } = self;
         let label = label(&changes);
@@ -547,6 +568,7 @@ impl Batch {
         Finished {
             direction,
             index,
+            id,
             label,
             done,
             left,
@@ -571,6 +593,7 @@ enum Stop {
 pub struct Finished {
     direction: Direction,
     index: usize,
+    id: EntryId,
     label: String,
     /// The steps carried out, in the state they now stand in (a redone trash has a new handle).
     done: Vec<Change>,

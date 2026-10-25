@@ -71,6 +71,7 @@ use crate::plugin_views::Slots;
 use crate::probe_job::{ProbeJob, ProbePoll};
 use crate::remote_open;
 use crate::search_job::{SearchJob, SearchState};
+use file_ops::history::Merger;
 use shared::cargo_fit::{Carry, Load};
 use shared::usage_view::DiskUsageView;
 
@@ -926,7 +927,12 @@ impl App {
         if loaded.notice.is_some() {
             self.status = loaded.notice;
         }
-        self.history_file = Some(HistoryFile::start(path));
+        // A file in a newer format is neither read nor written: this session's history stays in
+        // memory and the newer one keeps its file.
+        if loaded.writable {
+            let merger = Merger::new(file_ops::history::DEFAULT_CAPACITY, loaded.forgotten);
+            self.history_file = Some(HistoryFile::start(path, merger));
+        }
         self
     }
 

@@ -2435,14 +2435,18 @@ draws.
   `$XDG_STATE_HOME/minuteman/history` (`~/.local/state/...` when unset), written after each change
   by a thread of its own and read at launch; an entry whose trash item is gone, or whose lines are
   damaged, is left out with a notice, and a change on another machine or at a path that is not
-  UTF-8 is not written. Still to do: one that replaced an existing archive or folder is not recorded, and neither are a permanent
+  UTF-8 is not written; two `mman` running at once now save into one history (each entry has an
+  id, a save takes a lock and writes this session's entries with the ones other sessions saved and
+  this one did not remove), and a file in a newer format is neither read nor overwritten. Still to
+  do: one that replaced an existing archive or folder is not recorded, and neither are a permanent
   delete and an overwrite (holding
   deleted and overwritten data in an app-owned area would make them undoable, at the cost of
   `X` no longer being immediate); a cancelled paste that had already finished its current item
   still records it, but one interrupted mid-item records nothing for that item; on platforms
-  whose trash cannot be read back (macOS) a trash is not undoable; two `mman` running at once
-  each save their own history over the file (the last to save wins); and a file saved by a newer
-  format is read as empty and then overwritten.
+  whose trash cannot be read back (macOS) a trash is not undoable; the merged file reaches a running
+  session only at its next launch (adopting other sessions' entries live is not done); an entry
+  another session removed comes back while this one still holds it; and two sessions that undid
+  the same entry each keep it on their own stack.
 - **Archive browsing, follow-ups** – an archive inside an archive is a file of the outer one and
   cannot be entered; nothing can be changed inside an archive (adding, deleting or renaming an
   entry would mean rewriting it); a file is held in memory when opened (256 MiB at most), so a large

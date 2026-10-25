@@ -24,12 +24,13 @@
 //! new one, never half of either. Two `mman` running at once each write their own history over the
 //! file; the last one to save wins.
 
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
-use file_ops::history::History;
+use file_ops::history::{DecodeError, EntryId, History, Merger};
 
 /// The file the history is kept in: `$XDG_STATE_HOME/minuteman/history`, or
 /// `~/.local/state/minuteman/history` when that is unset. `None` when neither variable names an
@@ -51,6 +52,11 @@ pub struct Loaded {
     /// What to tell the user, when something was left out or the file could not be read; `None`
     /// when it was read whole, or when there was no file yet.
     pub notice: Option<String>,
+    /// What the file holds that `history` leaves out, for `HistoryFile::start`.
+    pub forgotten: Vec<EntryId>,
+    /// `false` when the file was saved by a newer `mman`: writing this session's history over it
+    /// would destroy what that version kept.
+    pub writable: bool,
 }
 
 /// Reads the history saved at `path`. Anything that goes wrong starts an empty history and says
@@ -59,6 +65,8 @@ pub fn load(path: &Path, capacity: usize) -> Loaded {
     let empty = |notice: Option<String>| Loaded {
         history: History::with_capacity(capacity),
         notice,
+        forgotten: Vec::new(),
+        writable: true,
     };
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -70,6 +78,8 @@ pub fn load(path: &Path, capacity: usize) -> Loaded {
     let live = trash::entries().unwrap_or_default();
     match History::decode(&text, capacity, &live) {
         Ok(restored) => Loaded {
+            forgotten: restored.forgotten,
+            writable: true,
             history: restored.history,
             notice: (restored.dropped > 0).then(|| {
                 format!(
@@ -77,6 +87,12 @@ pub fn load(path: &Path, capacity: usize) -> Loaded {
                     restored.dropped
                 )
             }),
+        },
+        Err(e @ DecodeError::Version(_)) => Loaded {
+            writable: false,
+            ..empty(Some(format!(
+                "starting with an empty undo history, and leaving the file as it is: {e}"
+            )))
         },
         Err(e) => empty(Some(format!("starting with an empty undo history: {e}"))),
     }
@@ -91,17 +107,31 @@ pub struct HistoryFile {
 }
 
 impl HistoryFile {
-    pub fn start(path: PathBuf) -> Self {
+    /// `merger` carries what this session knows of the file; see `Merger`.
+    pub fn start(path: PathBuf, mut merger: Merger) -> Self {
         let (texts, queue) = mpsc::channel::<String>();
         let (failed, failures) = mpsc::channel();
         let writer = std::thread::spawn(move || {
+            // Set once the file turns out to be in a format this version must not overwrite; it
+            // is said once and every later text is let go.
+            let mut frozen = false;
             while let Ok(mut text) = queue.recv() {
                 while let Ok(newer) = queue.try_recv() {
                     text = newer;
                 }
-                if let Err(e) = write_atomically(&path, &text) {
+                if frozen {
+                    continue;
+                }
+                match save_merged(&path, &mut merger, &text) {
+                    Ok(()) => {}
+                    Err(SaveError::Newer(reason)) => {
+                        frozen = true;
+                        let _ = failed.send(reason);
+                    }
                     // The receiver is gone only when the app is already shutting down.
-                    let _ = failed.send(e.to_string());
+                    Err(SaveError::Io(e)) => {
+                        let _ = failed.send(e.to_string());
+                    }
                 }
             }
         });
@@ -136,6 +166,59 @@ impl Drop for HistoryFile {
             let _ = writer.join();
         }
     }
+}
+
+enum SaveError {
+    /// The file on disk was saved by a newer version and is left alone.
+    Newer(String),
+    Io(io::Error),
+}
+
+impl From<io::Error> for SaveError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// Writes `ours` into the file together with what other sessions saved there. The lock is held
+/// from the read to the rename: without it two sessions could each read the old file and the
+/// later rename would drop the other's entries.
+fn save_merged(path: &Path, merger: &mut Merger, ours: &str) -> Result<(), SaveError> {
+    if let Some(folder) = path.parent() {
+        create_private_folder(folder)?;
+    }
+    let lock = open_lock(path)?;
+    lock.lock()?;
+    let theirs = match std::fs::read(path) {
+        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let text = match merger.merge(ours, theirs.as_deref()) {
+        Ok(text) => text,
+        Err(e @ DecodeError::Version(_)) => {
+            return Err(SaveError::Newer(format!(
+                "the file was saved by a newer mman, so this session's history is not saved: {e}"
+            )));
+        }
+        // Not a history at all: a lone session has always overwritten that.
+        Err(DecodeError::NotHistory) => merger
+            .merge(ours, None)
+            .map_err(|e| io::Error::other(e.to_string()))?,
+    };
+    // `lock` is released when it goes out of scope, after the rename.
+    Ok(write_atomically(path, &text)?)
+}
+
+fn open_lock(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path.with_extension("lock"))
 }
 
 /// The history names where the user's files are, so the file is for the user alone.
@@ -187,6 +270,10 @@ fn write_private(path: &Path, text: &str) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    fn start(path: PathBuf) -> HistoryFile {
+        HistoryFile::start(path, Merger::new(100, []))
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "minuteman-history-file-{name}-{}-{:?}",
@@ -222,7 +309,7 @@ mod tests {
     fn what_was_saved_is_there_after_the_writer_is_dropped() {
         let dir = scratch("saved");
         let file = dir.join("deeper").join("history");
-        let writer = HistoryFile::start(file.clone());
+        let writer = start(file.clone());
         let mut history = History::default();
         history.record(file_ops::history::Change::Moved {
             from: "/h/a".into(),
@@ -238,8 +325,16 @@ mod tests {
 
         assert_eq!(loaded.notice, None);
         assert_eq!(loaded.history.encode(), history.encode());
-        let leftovers = std::fs::read_dir(file.parent().unwrap()).unwrap().count();
-        assert_eq!(leftovers, 1, "no temporary file is left behind");
+        let mut left: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["history", "history.lock"],
+            "no temporary file is left behind"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -260,7 +355,7 @@ mod tests {
             .for_each(|change| history.record(change));
         history.commit();
         let saved = dir.join("state").join("history");
-        let writer = HistoryFile::start(saved.clone());
+        let writer = start(saved.clone());
         writer.save(history.encode());
         drop(writer);
 
@@ -280,7 +375,7 @@ mod tests {
         let dir = scratch("private");
         let file = dir.join("state").join("history");
         drop({
-            let writer = HistoryFile::start(file.clone());
+            let writer = start(file.clone());
             writer.save(History::default().encode());
             writer
         });
@@ -291,6 +386,76 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn committed(path: &str) -> History {
+        let mut history = History::default();
+        history.record(file_ops::history::Change::Created {
+            path: path.into(),
+            is_dir: false,
+        });
+        history.commit();
+        history
+    }
+
+    #[test]
+    fn a_file_in_a_newer_format_is_not_loaded_nor_written() {
+        let dir = scratch("newer");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("history");
+        std::fs::write(&file, "mman-history 9\nwhat a later version keeps\n").unwrap();
+
+        let loaded = load(&file, 100);
+        assert!(!loaded.writable);
+        assert!(loaded.notice.unwrap().contains("format 9"));
+
+        // A session that started before the newer one wrote must not overwrite it either.
+        let writer = start(file.clone());
+        writer.save(committed("/h/a").encode());
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while writer.take_failure().is_none() {
+            assert!(std::time::Instant::now() < give_up, "nothing was reported");
+            std::thread::yield_now();
+        }
+        drop(writer);
+
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "mman-history 9\nwhat a later version keeps\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sessions_saving_at_once_keep_each_others_entries() {
+        let dir = scratch("sessions");
+        let file = dir.join("history");
+        let sessions: Vec<_> = (0..4)
+            .map(|n| {
+                let file = file.clone();
+                std::thread::spawn(move || {
+                    let writer = start(file);
+                    let mut history = History::default();
+                    for i in 0..5 {
+                        history.record(file_ops::history::Change::Created {
+                            path: format!("/h/s{n}-{i}").into(),
+                            is_dir: false,
+                        });
+                        history.commit();
+                        writer.save(history.encode());
+                    }
+                })
+            })
+            .collect();
+        sessions
+            .into_iter()
+            .for_each(|s| s.join().expect("a session panicked"));
+
+        let mut loaded = load(&file, 100);
+
+        assert_eq!(loaded.notice, None);
+        assert_eq!(loaded.history.summary().undo.len(), 20);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_write_that_cannot_happen_is_reported_once() {
         let dir = scratch("blocked");
@@ -298,7 +463,7 @@ mod tests {
         // A plain file where the folder should be.
         let file = dir.join("in-the-way").join("history");
         std::fs::write(dir.join("in-the-way"), "").unwrap();
-        let writer = HistoryFile::start(file);
+        let writer = start(file);
         writer.save("x".into());
 
         let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);

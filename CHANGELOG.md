@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Several `mman` can run at once without losing each other's undo history: each save takes a lock
+  on `history.lock` next to the file and writes this session's entries together with the ones other
+  sessions saved, so none is overwritten. The history is shared on disk; a session sees what
+  another did the next time it starts. An entry you discarded (by making a new change after an
+  undo, or past the 100 kept) is not brought back by a later save. The file is now format 2 (each
+  entry has a name); format 1 files are still read. Author: deltaog-117.
+- A history file saved by a newer `mman` is left alone: this one starts with an empty history, says
+  so in the status line, and does not write over the file (before, it read the file as empty and
+  overwrote it). If the file turns newer while `mman` is open, saving stops with one message.
+  Author: deltaog-117.
 - The undo history is kept between sessions: `z`, `Z` and `:history` still work after `mman` is
   closed and opened again. It is saved in `$XDG_STATE_HOME/minuteman/history` (or
   `~/.local/state/minuteman/history`), a file only you can read, after every change and without
