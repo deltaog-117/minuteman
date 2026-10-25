@@ -36,6 +36,10 @@ use trash::Trashed;
 
 use crate::{ConflictPolicy, FileOpsError, ProgressFn};
 
+mod store;
+
+pub use store::{DecodeError, Restored};
+
 /// How many entries are kept before the oldest is forgotten.
 pub const DEFAULT_CAPACITY: usize = 100;
 
@@ -303,6 +307,9 @@ pub struct History {
     /// Changes of a batch still running, committed as one entry by `commit`.
     pending: Vec<Change>,
     capacity: usize,
+    /// Counts every change to what the stacks (or the batch in progress) hold, so a caller that
+    /// keeps the history on disk can tell whether there is anything new to write.
+    revision: u64,
 }
 
 impl Default for History {
@@ -318,11 +325,18 @@ impl History {
             redo: Vec::new(),
             pending: Vec::new(),
             capacity: capacity.max(1),
+            revision: 0,
         }
+    }
+
+    /// Changes whenever the history does; equal values mean nothing needs writing again.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Adds one finished step to the batch in progress.
     pub fn record(&mut self, change: Change) {
+        self.revision += 1;
         self.pending.push(change);
     }
 
@@ -333,6 +347,7 @@ impl History {
         if self.pending.is_empty() {
             return;
         }
+        self.revision += 1;
         self.redo.clear();
         self.undo.push(Entry {
             changes: std::mem::take(&mut self.pending),
@@ -375,6 +390,7 @@ impl History {
     /// the place it came from.
     pub fn begin_undo_at(&mut self, depth: usize) -> Option<Batch> {
         self.commit();
+        self.revision += 1;
         Self::take(&mut self.undo, depth, Direction::Undo)
     }
 
@@ -385,6 +401,7 @@ impl History {
 
     /// Takes the entry `depth` places from the next one to redo, like `begin_undo_at`.
     pub fn begin_redo_at(&mut self, depth: usize) -> Option<Batch> {
+        self.revision += 1;
         Self::take(&mut self.redo, depth, Direction::Redo)
     }
 
@@ -409,6 +426,7 @@ impl History {
             left,
             stop,
         } = finished;
+        self.revision += 1;
         let (carried_out, remaining) = match direction {
             Direction::Undo => (&mut self.redo, &mut self.undo),
             Direction::Redo => (&mut self.undo, &mut self.redo),

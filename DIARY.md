@@ -116,6 +116,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-19 | Plugin Quick-Start Page | One short `docs/plugins.md` written from the commands as run, linked from the README (COA none: documentation only) | ✅ Confirmed |
 | 2026-10-22 | Rust Example WASM Plugin | A standalone crate outside the workspace with only `serde_json`, run by a test that skips when the `wasm32-wasip1` target is missing (documentation and test only, no COAs) | ✅ Confirmed |
 | 2026-10-23 | Undo for Compress and Extract | A new `Change::Produced` that undoes by trashing the output and redoes by restoring it, not `Created` (which only removes empty files) | ✅ Confirmed |
+| 2026-10-25 | Undo History Between Sessions | A hand-written line format in `file_ops::history`, saved atomically by one writer thread in the state folder and checked against the trash on load (COA A) | ✅ Confirmed |
 | 2026-10-21 | Sandboxed WASM Plugins | `wasmi` behind an off-by-default `wasm` feature, one launch decision, a read-only trust check with no wildcard arm, and memory and idle-time limits on a thread of its own (COA A); `wasmtime`/Extism (B) and a permission manifest with writes (C) not taken | ✅ Confirmed |
 
 ---
@@ -8814,6 +8815,51 @@ for that row alone.
 
 **Left open.** An undone middle entry sits on top of the redo stack, so redoing it comes before
 older redo entries; mouse selection of a single row.
+
+---
+
+### Undo History Between Sessions
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+**Context.** The undo and redo stacks lived in memory, so closing `mman` lost them. Three courses
+of action were weighed: a hand-written line format in `file_ops` saved after each change (A),
+`serde` and JSON with a mirror type for the trash handle (B), and saving only on exit and on a
+timer (C).
+
+**Decision.** A. `History::encode` and `decode` are pure text functions in a child module of
+`history`, so they reach the private stacks without widening anything; the tui owns the file and
+the thread. A needs no dependency, the format is a few line kinds, and `Trashed` wraps a foreign
+type that serde could not derive anyway. C was set aside because a crash is exactly when undo is
+wanted. Four choices follow from what a saved handle means. A trash handle is the trash's own name
+for an item, so on load it is kept only when an item with that name and time is still listed
+(`trash::entries`, read once for the whole file), and an entry that names a gone item is dropped
+whole instead of failing at undo time. A handle in the redo stack is already spent (the item was
+restored by the undo), so none is written and a placeholder (`Trashed::spent`) stands in. A path
+that is not absolute (another machine's) or not UTF-8 is never written, so a restored change cannot
+run against whatever folder the next session starts in. A batch still being recorded is written as
+the entry it will become, without the redo stack, matching what committing it does; an undo or redo
+in flight is not written at all, since its entry is on neither stack until it ends. `History` got a
+revision counter so the loop writes only when something changed. The writer keeps the newest text
+it was handed, writes it to a temporary file and renames it over the real one, with mode 0600 in a
+0700 folder because the file lists the user's paths.
+
+**Verification.** `scripts/check` passes except `a_plugin_that_stops_without_an_answer_ends_the_operation_after_a_moment`,
+which also fails on the commit before this change in this environment (its `sh` stand-in plugin
+never exits within 5 s). New tests: every kind of change round-trips, a gone or reused-name trash
+item drops its entry and keeps the others, a pending batch is written without the redo, a remote or
+non-UTF-8 path is never written, a damaged line drops only its entry, a handle in the wrong stack
+is refused, the capacity keeps the newest, other text is refused by its first line, property tests
+for the round trip over awkward path characters and for `decode` never panicking, a real trashed
+file restored by a history that was saved and loaded, file modes, a failed write reported once, and
+no temporary file left. In a pty run of the debug binary, a `:touch` was saved at quit, listed by
+`:history` in the next session, undone from the popup there with `u`, and listed under redo in a
+third session.
+
+**Left open.** Two `mman` at once overwrite each other's history; a file from a newer format is
+read as empty and then overwritten; a write that fails is reported in the status line but not
+retried until the next change.
 
 ---
 

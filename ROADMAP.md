@@ -2431,13 +2431,18 @@ draws.
   archive or the unpacked folder goes to the trash on undo and comes back on redo, and the
   originals a compress trashed are restored with it), and `:history` has the default key `U`, and
   `u` on a row of the popup undoes or redoes just that entry (a later entry in its way makes the
-  step refuse and the entry keeps its place). Still to do: one that replaced an existing archive or folder is not recorded, and neither are a permanent
+  step refuse and the entry keeps its place), and the history is kept between sessions in
+  `$XDG_STATE_HOME/minuteman/history` (`~/.local/state/...` when unset), written after each change
+  by a thread of its own and read at launch; an entry whose trash item is gone, or whose lines are
+  damaged, is left out with a notice, and a change on another machine or at a path that is not
+  UTF-8 is not written. Still to do: one that replaced an existing archive or folder is not recorded, and neither are a permanent
   delete and an overwrite (holding
   deleted and overwritten data in an app-owned area would make them undoable, at the cost of
   `X` no longer being immediate); a cancelled paste that had already finished its current item
   still records it, but one interrupted mid-item records nothing for that item; on platforms
-  whose trash cannot be read back (macOS) a trash is not undoable; and the history is not kept
-  between sessions.
+  whose trash cannot be read back (macOS) a trash is not undoable; two `mman` running at once
+  each save their own history over the file (the last to save wins); and a file saved by a newer
+  format is read as empty and then overwritten.
 - **Archive browsing, follow-ups** – an archive inside an archive is a file of the outer one and
   cannot be entered; nothing can be changed inside an archive (adding, deleting or renaming an
   entry would mean rewriting it); a file is held in memory when opened (256 MiB at most), so a large

@@ -22,6 +22,7 @@ declare -A allowed=(
   [crates/theming/src/dropin.rs]="the drop-in plugin folders of the app's own config directory"
   [crates/shared/src/devices/topology.rs]="reads this machine's /sys to see how its disks are wired, which are not paths a Vfs serves"
   [crates/shared/src/devices/probe.rs]="reads this machine's /proc and /sys to list its disks, which are not paths a Vfs serves"
+  [crates/tui/src/history_file.rs]="keeps the undo history in the app's own state folder on this machine"
   [crates/tui/src/cli.rs]="writes the --cwd-file the shell wrapper reads, and the --chooser-file the portal backend reads"
   [crates/tui/src/main.rs]="resolves the start directory from the command line, before any backend exists"
   [crates/portal_backend/src/session.rs]="the portal backend hands mman a scratch file on this machine and reads the answer back, and looks at this machine's HOME and runtime dir"

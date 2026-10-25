@@ -51,6 +51,43 @@ pub fn send(path: &Path) -> Result<(), TrashError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trashed(os_trash::TrashItem);
 
+impl Trashed {
+    /// The trash's own name for the item, as text; `None` when it is not valid UTF-8, which a
+    /// file that remembers it cannot hold.
+    pub fn id(&self) -> Option<&str> {
+        self.0.id.to_str()
+    }
+
+    /// When it was trashed, in seconds since the Unix epoch. Together with `id` it tells an item
+    /// from a later one that was given the same name.
+    pub fn deleted(&self) -> i64 {
+        self.0.time_deleted
+    }
+
+    /// A handle for something that is not in the trash (any more), for a record that needs one
+    /// only to name `path`. Restoring it fails; `None` for a path with no file name.
+    pub fn spent(path: &Path) -> Option<Self> {
+        Some(Self(os_trash::TrashItem {
+            id: OsString::new(),
+            name: path.file_name()?.to_owned(),
+            original_parent: path.parent()?.to_path_buf(),
+            time_deleted: 0,
+        }))
+    }
+}
+
+impl From<&TrashEntry> for Trashed {
+    /// The handle for an item a listing returned, so it can be restored.
+    fn from(entry: &TrashEntry) -> Self {
+        Self(os_trash::TrashItem {
+            id: OsString::from(&entry.id),
+            name: OsString::from(&entry.name),
+            original_parent: entry.original_dir.clone(),
+            time_deleted: entry.deleted,
+        })
+    }
+}
+
 /// What the trash held at one moment, so whatever appears after it can be told apart from what
 /// was already there.
 #[derive(Debug, Clone)]

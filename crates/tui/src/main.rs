@@ -43,6 +43,7 @@ mod glyphs;
 mod gradient;
 mod grid_view;
 mod hex_dump;
+mod history_file;
 mod history_popup;
 mod hud;
 mod image_preview;
@@ -900,8 +901,11 @@ fn main() -> Result<()> {
     // freezes the render loop. Kept alive for the rest of `main` — dropping it would shut the
     // pool down out from under any operation still running.
     let runtime = tokio::runtime::Runtime::new()?;
-    let mut app = App::new(runtime.handle().clone())
-        .with_vfs(Arc::clone(&vfs))
+    let mut app = App::new(runtime.handle().clone()).with_vfs(Arc::clone(&vfs));
+    if let Some(path) = history_file::state_file() {
+        app = app.with_history_file(path);
+    }
+    let mut app = app
         .with_archive_link(archive_link)
         .with_ssh_link(ssh_link)
         .with_git_status(config.git_status)
@@ -963,6 +967,8 @@ fn main() -> Result<()> {
     );
 
     drop(guard);
+    // The last change goes to the writer before `app` is dropped, which waits for it.
+    app.save_history();
     // Written after the terminal is restored, and even when the loop failed: whoever is waiting
     // on the file reads an empty one as "backed out" rather than hanging on a missing answer.
     let (chooser, picked) = app.take_chooser();
@@ -1529,6 +1535,7 @@ fn run(
             return Ok(());
         }
         app.poll_bulk(browser, vfs)?;
+        app.save_history();
         app.poll_search(browser);
         app.poll_nav(browser);
         if let Some((name, verdict)) = app.poll_plugin_test()

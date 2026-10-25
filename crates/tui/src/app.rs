@@ -55,6 +55,7 @@ use crate::command::{self, Command};
 use crate::compress_popup::{self, CompressPopup};
 use crate::deck::DeckState;
 use crate::extract_popup::{self, ExtractPopup};
+use crate::history_file::{self, HistoryFile};
 use crate::history_popup::{HistoryPopup, Pick, Side, Walk};
 use crate::inspect_panel::InspectPanel;
 use crate::line_edit::LineEdit;
@@ -592,6 +593,10 @@ pub struct App {
     history_walk: Option<HistoryWalk>,
     /// `:history` was typed; `take_history_request` hands it to the loop, which owns the popup.
     history_requested: bool,
+    /// Where the history is kept between sessions, and the `History::revision` last handed to it
+    /// (see `save_history`). `None` when no state folder could be found.
+    history_file: Option<HistoryFile>,
+    history_saved: u64,
     /// How many items of the trash batch just run could not be tracked for undo, for the status line.
     untracked: usize,
     live: LiveRefresh,
@@ -683,6 +688,8 @@ impl App {
             history: History::default(),
             history_walk: None,
             history_requested: false,
+            history_file: None,
+            history_saved: 0,
             untracked: 0,
             live: LiveRefresh::new(handle.clone(), Arc::clone(&vfs)),
             resynced: false,
@@ -907,6 +914,42 @@ impl App {
     pub fn with_archive_link(mut self, link: Arc<plugin_host::ServeLink>) -> Self {
         self.plugins.set_serve_link(link);
         self
+    }
+
+    /// Keeps the undo history in `path` from now on, after bringing back what an earlier session
+    /// left there. A file that cannot be read starts an empty history and says why in the status
+    /// line; it never stops the program starting.
+    pub fn with_history_file(mut self, path: PathBuf) -> Self {
+        let loaded = history_file::load(&path, file_ops::history::DEFAULT_CAPACITY);
+        self.history_saved = loaded.history.revision();
+        self.history = loaded.history;
+        if loaded.notice.is_some() {
+            self.status = loaded.notice;
+        }
+        self.history_file = Some(HistoryFile::start(path));
+        self
+    }
+
+    /// Hands the history to the file writer if it changed since the last call. Call once per
+    /// render tick, and once more before the program ends. While an undo or redo runs its entry is
+    /// on neither stack, so nothing is written until it is back: the file never lacks an entry
+    /// that is only in flight.
+    pub fn save_history(&mut self) {
+        let Some(file) = self.history_file.as_ref() else {
+            return;
+        };
+        if let Some(failure) = file.take_failure() {
+            self.status = Some(format!("could not save the undo history: {failure}"));
+        }
+        let in_flight = matches!(
+            self.bulk.as_ref().map(|bulk| &bulk.kind),
+            Some(BulkKind::Undo | BulkKind::Redo)
+        );
+        let revision = self.history.revision();
+        if revision != self.history_saved && !in_flight {
+            file.save(self.history.encode());
+            self.history_saved = revision;
+        }
     }
 
     /// Uses `link` to reach the plugin that serves the paths on remote machines: the one the `Vfs`
@@ -4858,7 +4901,11 @@ mod tests {
             provides: vec!["archive".to_string()],
         };
         let handle = f._runtime.handle().clone();
-        f.app = std::mem::replace(&mut f.app, App::new(handle)).with_plugins(vec![spec], &f.root);
+        // The stand-in must be the only archive plugin: with `mman-archive` installed, the real
+        // one is found too and keeps `archiver_running` true after the stand-in is gone.
+        f.app = std::mem::replace(&mut f.app, App::new(handle))
+            .with_plugin_switches(vec!["archive".to_string()], Vec::new())
+            .with_plugins(vec![spec], &f.root);
         f.run("touch a.txt");
         select_named(&mut f, "a.txt");
         f.run("compress a.zip");

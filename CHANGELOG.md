@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The undo history is kept between sessions: `z`, `Z` and `:history` still work after `mman` is
+  closed and opened again. It is saved in `$XDG_STATE_HOME/minuteman/history` (or
+  `~/.local/state/minuteman/history`), a file only you can read, after every change and without
+  holding up the screen. An entry whose item has since left the trash, or whose lines are damaged,
+  is left out and a message in the status line says how many; a change made on another machine is
+  not kept. Author: deltaog-117.
 - `u` on a row of the `:history` popup undoes or redoes just that entry and leaves the ones around
   it recorded. If a newer entry stands in its way the step is refused with the usual message and
   the entry keeps its place in the list.
