@@ -30,8 +30,9 @@
 //! The merge works on the text, not on the changes in it, so an entry that cannot be brought back
 //! here (its trash item is gone) is still carried for the session that can.
 //!
-//! What is not decided: an entry another session removed comes back if this one still holds it,
-//! and the merged file reaches this session's memory only at its next launch.
+//! What is not decided: an entry another session removed comes back if this one still holds it.
+//! The merged file reaches this session's memory when it takes the entries in (`History::adopt`),
+//! which `forgotten_by` serves.
 
 use std::collections::HashSet;
 
@@ -97,6 +98,17 @@ impl Merger {
 }
 
 impl Merger {
+    /// What this session has let go of, for taking in another session's file: every entry it
+    /// removed, and every one it held at the last save that `ours` (what it holds now) no longer
+    /// has, since that removal is not recorded until the next save.
+    pub fn forgotten_by(&self, ours: &HashSet<EntryId>) -> HashSet<EntryId> {
+        self.removed
+            .iter()
+            .chain(self.held.difference(ours))
+            .copied()
+            .collect()
+    }
+
     /// The blocks of the file that this session has not seen or removed.
     fn unseen<'a>(&self, blocks: Vec<Block<'a>>) -> Vec<Block<'a>> {
         blocks
@@ -257,6 +269,18 @@ mod tests {
 
         assert_eq!(paths_in(&merged), ["/h/a", "/h/b", "/h/c"]);
         assert!(merged.starts_with("mman-history 2\n"));
+    }
+
+    #[test]
+    fn an_entry_removed_but_not_yet_saved_counts_as_forgotten() {
+        let mut merger = Merger::new(100, []);
+        let history = history_of(&["/h/x"]);
+        merger.merge(&history.encode(), None).unwrap();
+
+        let forgotten = merger.forgotten_by(&HashSet::new());
+
+        assert_eq!(forgotten, history.ids());
+        assert!(merger.forgotten_by(&history.ids()).is_empty());
     }
 
     proptest! {

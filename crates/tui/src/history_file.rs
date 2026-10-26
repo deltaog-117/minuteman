@@ -21,13 +21,14 @@
 //! up the render loop, and a burst of changes costs one write: the thread writes the newest text
 //! it was handed and skips the ones a newer text has already overtaken. Each write goes to a
 //! temporary file that is then renamed over the real one, so a crash leaves the old history or the
-//! new one, never half of either. Two `mman` running at once each write their own history over the
-//! file; the last one to save wins.
+//! new one, never half of either. Two `mman` running at once save into one file (see `Merger`), and a
+//! session takes in what the other saved when asked (`adopt_into`), not before.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
 use file_ops::history::{DecodeError, EntryId, History, Merger};
@@ -100,6 +101,10 @@ pub fn load(path: &Path, capacity: usize) -> Loaded {
 
 /// The writer thread and the way to it.
 pub struct HistoryFile {
+    path: PathBuf,
+    /// Shared with the writer thread; it is locked only to merge or to ask what was let go, never
+    /// across a read or a write of the file.
+    merger: Arc<Mutex<Merger>>,
     /// `None` only while dropping, which closes it to tell the thread to finish.
     texts: Option<Sender<String>>,
     failures: Receiver<String>,
@@ -108,34 +113,40 @@ pub struct HistoryFile {
 
 impl HistoryFile {
     /// `merger` carries what this session knows of the file; see `Merger`.
-    pub fn start(path: PathBuf, mut merger: Merger) -> Self {
+    pub fn start(path: PathBuf, merger: Merger) -> Self {
+        let merger = Arc::new(Mutex::new(merger));
         let (texts, queue) = mpsc::channel::<String>();
         let (failed, failures) = mpsc::channel();
-        let writer = std::thread::spawn(move || {
-            // Set once the file turns out to be in a format this version must not overwrite; it
-            // is said once and every later text is let go.
-            let mut frozen = false;
-            while let Ok(mut text) = queue.recv() {
-                while let Ok(newer) = queue.try_recv() {
-                    text = newer;
-                }
-                if frozen {
-                    continue;
-                }
-                match save_merged(&path, &mut merger, &text) {
-                    Ok(()) => {}
-                    Err(SaveError::Newer(reason)) => {
-                        frozen = true;
-                        let _ = failed.send(reason);
+        let writer = std::thread::spawn({
+            let (path, merger) = (path.clone(), Arc::clone(&merger));
+            move || {
+                // Set once the file turns out to be in a format this version must not overwrite; it
+                // is said once and every later text is let go.
+                let mut frozen = false;
+                while let Ok(mut text) = queue.recv() {
+                    while let Ok(newer) = queue.try_recv() {
+                        text = newer;
                     }
-                    // The receiver is gone only when the app is already shutting down.
-                    Err(SaveError::Io(e)) => {
-                        let _ = failed.send(e.to_string());
+                    if frozen {
+                        continue;
+                    }
+                    match save_merged(&path, &merger, &text) {
+                        Ok(()) => {}
+                        Err(SaveError::Newer(reason)) => {
+                            frozen = true;
+                            let _ = failed.send(reason);
+                        }
+                        // The receiver is gone only when the app is already shutting down.
+                        Err(SaveError::Io(e)) => {
+                            let _ = failed.send(e.to_string());
+                        }
                     }
                 }
             }
         });
         Self {
+            path,
+            merger,
             texts: Some(texts),
             failures,
             writer: Some(writer),
@@ -149,6 +160,25 @@ impl HistoryFile {
             // loudly; there is nowhere left to save to.
             let _ = texts.send(text);
         }
+    }
+
+    /// Takes into `history` what other sessions saved that it does not hold, and returns how many
+    /// entries that was. Run on the thread that owns `history`, when the user is about to look at
+    /// it or use it: never while an undo or redo is running, whose entry is on neither stack.
+    ///
+    /// # Errors
+    ///
+    /// The file could not be read, or is not a history this version reads.
+    pub fn adopt_into(&self, history: &mut History) -> Result<usize, String> {
+        let text = match std::fs::read(&self.path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.to_string()),
+        };
+        let skip = merger_guard(&self.merger).forgotten_by(&history.ids());
+        history
+            .adopt(&text, &skip, || trash::entries().unwrap_or_default())
+            .map_err(|e| e.to_string())
     }
 
     /// The reason the latest write failed, once, if one did since the last call.
@@ -183,7 +213,7 @@ impl From<io::Error> for SaveError {
 /// Writes `ours` into the file together with what other sessions saved there. The lock is held
 /// from the read to the rename: without it two sessions could each read the old file and the
 /// later rename would drop the other's entries.
-fn save_merged(path: &Path, merger: &mut Merger, ours: &str) -> Result<(), SaveError> {
+fn save_merged(path: &Path, merger: &Mutex<Merger>, ours: &str) -> Result<(), SaveError> {
     if let Some(folder) = path.parent() {
         create_private_folder(folder)?;
     }
@@ -194,20 +224,28 @@ fn save_merged(path: &Path, merger: &mut Merger, ours: &str) -> Result<(), SaveE
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
-    let text = match merger.merge(ours, theirs.as_deref()) {
-        Ok(text) => text,
-        Err(e @ DecodeError::Version(_)) => {
-            return Err(SaveError::Newer(format!(
-                "the file was saved by a newer mman, so this session's history is not saved: {e}"
-            )));
+    let text = {
+        let mut merger = merger_guard(merger);
+        match merger.merge(ours, theirs.as_deref()) {
+            Ok(text) => text,
+            Err(e @ DecodeError::Version(_)) => {
+                return Err(SaveError::Newer(format!(
+                    "the file was saved by a newer mman, so this session's history is not saved: {e}"
+                )));
+            }
+            // Not a history at all: a lone session has always overwritten that.
+            Err(DecodeError::NotHistory) => merger
+                .merge(ours, None)
+                .map_err(|e| io::Error::other(e.to_string()))?,
         }
-        // Not a history at all: a lone session has always overwritten that.
-        Err(DecodeError::NotHistory) => merger
-            .merge(ours, None)
-            .map_err(|e| io::Error::other(e.to_string()))?,
     };
     // `lock` is released when it goes out of scope, after the rename.
     Ok(write_atomically(path, &text)?)
+}
+
+/// The merger holds only sets of ids, so what a panicking holder left is still consistent.
+fn merger_guard(merger: &Mutex<Merger>) -> MutexGuard<'_, Merger> {
+    merger.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn open_lock(path: &Path) -> io::Result<File> {
@@ -482,5 +520,61 @@ mod tests {
         assert_eq!(writer.take_failure(), None);
         drop(writer);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_takes_in_what_another_saved_while_it_ran() {
+        let dir = scratch("adopt");
+        let file = dir.join("history");
+        let (one, two) = (start(file.clone()), start(file.clone()));
+        let mut mine = committed("/h/mine");
+        one.save(mine.encode());
+        two.save(committed("/h/theirs").encode());
+        // The writers run on their own threads: wait until both entries are in the file.
+        for _ in 0..200 {
+            if std::fs::read_to_string(&file).is_ok_and(|t| t.contains("/h/theirs")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(one.adopt_into(&mut mine), Ok(1));
+        assert_eq!(one.adopt_into(&mut mine), Ok(0), "taken once");
+        assert!(mine.encode().contains("/h/theirs"));
+        drop((one, two));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_entry_let_go_of_before_the_next_save_is_not_taken_back() {
+        let dir = scratch("adopt-removed");
+        let file = dir.join("history");
+        let session = start(file.clone());
+        session.save(committed("/h/gone").encode());
+        // Waits for the writer to have merged it, which is when the merger learns it was held.
+        for _ in 0..200 {
+            if file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut now_empty = History::default();
+
+        let adopted = session.adopt_into(&mut now_empty);
+
+        assert_eq!(adopted, Ok(0));
+        assert!(!now_empty.can_undo());
+        drop(session);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_file_adopts_nothing() {
+        let dir = scratch("adopt-missing");
+        let writer = start(dir.join("history"));
+
+        assert_eq!(writer.adopt_into(&mut History::default()), Ok(0));
+        drop(writer);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

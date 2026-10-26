@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A running `mman` now sees the undo entries other running sessions saved: opening the history
+  popup, pressing `z` or `Z` first takes in what the shared file holds that this session does
+  not. They are placed by the time they were made, and an entry you discarded is not brought back.
+  Before, you had to restart to see them. The popup does not change while it is open. Author:
+  deltaog-117.
 - Several `mman` can run at once without losing each other's undo history: each save takes a lock
   on `history.lock` next to the file and writes this session's entries together with the ones other
   sessions saved, so none is overwritten. The history is shared on disk; a session sees what

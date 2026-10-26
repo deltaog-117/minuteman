@@ -118,6 +118,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-23 | Undo for Compress and Extract | A new `Change::Produced` that undoes by trashing the output and redoes by restoring it, not `Created` (which only removes empty files) | ✅ Confirmed |
 | 2026-10-25 | Undo History Between Sessions | A hand-written line format in `file_ops::history`, saved atomically by one writer thread in the state folder and checked against the trash on load (COA A) | ✅ Confirmed |
 | 2026-10-25 | Undo History, Shared Between Sessions | Entries named by an id and merged under a file lock at each save, written back as ours plus what other sessions saved and we did not remove; a newer format is never overwritten (COA B) | ✅ Confirmed |
+| 2026-10-26 | Undo History, Adopting Other Sessions' Entries | Pull the file in when the user opens `U` or presses `u`/redo, add-only into the live stacks (COA C); pulling after our own save (A) and watching the file (B) set aside | ✅ Confirmed |
 | 2026-10-21 | Sandboxed WASM Plugins | `wasmi` behind an off-by-default `wasm` feature, one launch decision, a read-only trust check with no wildcard arm, and memory and idle-time limits on a thread of its own (COA A); `wasmtime`/Extism (B) and a permission manifest with writes (C) not taken | ✅ Confirmed |
 
 ---
@@ -8910,6 +8911,46 @@ their own stack and the second undo is refused by its own checks; a write that f
 retried until the next change.
 
 ---
+
+---
+
+### Undo History, Adopting Other Sessions' Entries
+
+**Date:** 2026-10-26
+**Status:** Confirmed
+
+**Context.** Sessions already saved into one history file, but a running session read it only at
+launch, so an entry another session recorded stayed invisible until a restart. Three courses of
+action were weighed on when to take the file in: after our own save (A), the moment the file
+changes by watching it (B), and when the user is about to look at or use the history (C).
+
+**Decision.** C. `History::adopt` takes the entries of the file that the session neither holds nor
+has let go of, add-only, into the live stacks: a foreign undo entry goes before the first of ours
+that is newer (ids start with the creation time), a foreign redo entry goes under ours, and both
+stacks are trimmed to the capacity. It runs from `z`, `Z` and the opening of the `U` popup, and
+nowhere else: the popup's picks and walks index into the list it showed, so the stacks must not
+shift under them, and an undo in flight has its entry on neither stack. "Let go of" needs the
+`Merger`, which until now lived on the writer thread alone; it is now behind a `Mutex` shared with
+that thread, locked only around a merge or a question, never across file I/O. `forgotten_by` answers
+with every entry the session removed, plus every one it held at its last save that it no longer
+has, because a removal is recorded only at the next save and an entry cleared a moment ago must not
+come back from the file. The trash is listed only when there is something to adopt. A was set
+aside because the entries arrive only when the user does something themselves, B because its one
+gain, a popup that updates while open, costs a second watcher and the ordering races of changing the
+stacks under the user, with a silent failure mode (the inotify limit) already on the roadmap.
+
+**Verification.** `scripts/check` passes. New tests: adoption orders a foreign entry among ours by
+time, takes nothing the second time, skips what is in `skip`, puts a foreign redo entry under ours,
+does not list the trash when there is nothing to take, trims the oldest past the capacity, refuses
+a newer format, and never repeats an entry or exceeds the capacity (property); `forgotten_by` counts
+an entry removed but not yet saved; through the file, one session takes in what a second saved,
+only once, never takes back an entry it let go of before its next save, and a missing file adopts
+nothing. Two `dir_preview` tests failed once in a full parallel run and passed alone, with and
+without the change.
+
+**Left open.** The popup does not update while it is open; the adopted entries make the next save
+write once more (harmless, the merge is stable); an entry another session removed comes back while
+this one still holds it; two sessions that undid the same entry each keep it on their own stack.
 
 ---
 

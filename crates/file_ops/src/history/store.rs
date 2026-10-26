@@ -41,7 +41,7 @@
 //! that is not absolute (another machine's) or not UTF-8 is not written at all, so a restored
 //! change never runs against a folder the next session happens to start in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use trash::{TrashEntry, Trashed};
@@ -182,10 +182,7 @@ impl History {
         live: &[TrashEntry],
     ) -> Result<Restored, DecodeError> {
         let blocks = parse_blocks(text)?;
-        let held: HashMap<(&str, i64), &TrashEntry> = live
-            .iter()
-            .map(|entry| ((entry.id.as_str(), entry.deleted), entry))
-            .collect();
+        let held = index_trash(live);
 
         let mut history = History::with_capacity(capacity);
         let mut dropped = blocks.stray;
@@ -217,6 +214,91 @@ impl History {
             forgotten,
         })
     }
+}
+
+impl History {
+    /// The id of every entry held, on either stack or in the batch in progress.
+    pub fn ids(&self) -> HashSet<EntryId> {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .map(|entry| entry.id)
+            .chain(self.pending_id)
+            .collect()
+    }
+
+    /// Takes in the entries of `text` (a saved history, as another session left it) that this one
+    /// neither holds nor is in `skip`, and returns how many it took. A foreign undo entry goes
+    /// before the first of ours that is newer, so the stack stays in the order things were done;
+    /// a foreign redo entry goes under ours, so the next redo stays one this session made. An
+    /// entry that cannot be brought back (its trash item is gone) is left out, and stays in the
+    /// file for the sessions that can. `live` is called, at most once, only when there is
+    /// something to take in, since listing the trash is the slow part.
+    ///
+    /// # Errors
+    ///
+    /// The text does not start with a first line of a format this version reads.
+    pub fn adopt(
+        &mut self,
+        text: &str,
+        skip: &HashSet<EntryId>,
+        live: impl FnOnce() -> Vec<TrashEntry>,
+    ) -> Result<usize, DecodeError> {
+        let blocks = parse_blocks(text)?;
+        let known = self.ids();
+        let unseen = |block: &Block<'_>| !known.contains(&block.id) && !skip.contains(&block.id);
+        let (undo, redo): (Vec<_>, Vec<_>) = (
+            blocks.undo.into_iter().filter(unseen).collect(),
+            blocks.redo.into_iter().filter(unseen).collect(),
+        );
+        if undo.is_empty() && redo.is_empty() {
+            return Ok(0);
+        }
+
+        let live = live();
+        let held = index_trash(&live);
+        let restore = |blocks: Vec<Block<'_>>, side| {
+            let mut entries: Vec<Entry> = blocks
+                .iter()
+                .filter_map(|block| {
+                    block_changes(block, side, &held).map(|changes| Entry {
+                        id: block.id,
+                        changes,
+                    })
+                })
+                .collect();
+            entries.sort_by_key(|entry| entry.id);
+            entries
+        };
+        let (undo, redo) = (
+            restore(undo, Direction::Undo),
+            restore(redo, Direction::Redo),
+        );
+        let adopted = undo.len() + redo.len();
+        if adopted == 0 {
+            return Ok(0);
+        }
+
+        for entry in undo {
+            // `self.undo` is not sorted (a redone entry is old and last), so look for the first
+            // newer one instead of searching.
+            let at = self.undo.iter().position(|ours| ours.id > entry.id);
+            self.undo.insert(at.unwrap_or(self.undo.len()), entry);
+        }
+        self.redo.splice(0..0, redo);
+        for stack in [&mut self.undo, &mut self.redo] {
+            let excess = stack.len().saturating_sub(self.capacity);
+            stack.drain(..excess);
+        }
+        self.revision += 1;
+        Ok(adopted)
+    }
+}
+
+fn index_trash(live: &[TrashEntry]) -> HashMap<(&str, i64), &TrashEntry> {
+    live.iter()
+        .map(|entry| ((entry.id.as_str(), entry.deleted), entry))
+        .collect()
 }
 
 /// Every line of `block` as a change, or `None` when one does not read or there are none.
@@ -706,6 +788,147 @@ mod tests {
         ) {
             let text = format!("mman-history 1\n{}", body.join("\n"));
             let _ = History::decode(&text, 100, &[]);
+        }
+    }
+
+    fn created_history(paths: &[&str]) -> History {
+        let mut history = History::default();
+        for path in paths {
+            history.record(Change::Created {
+                path: (*path).into(),
+                is_dir: false,
+            });
+            history.commit();
+        }
+        history
+    }
+
+    fn created_paths(stack: &[Entry]) -> Vec<String> {
+        stack
+            .iter()
+            .flat_map(|entry| &entry.changes)
+            .filter_map(|change| match change {
+                Change::Created { path, .. } => Some(path.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What an undo does to the stacks, without touching the disk.
+    fn undone(mut history: History) -> History {
+        let entry = history.undo.pop().unwrap();
+        history.redo.push(entry);
+        history
+    }
+
+    #[test]
+    fn adopting_puts_a_foreign_entry_among_ours_by_time() {
+        let early = created_history(&["/h/early"]).encode();
+        let mut ours = created_history(&["/h/late"]);
+
+        let adopted = ours.adopt(&early, &HashSet::new(), Vec::new).unwrap();
+
+        assert_eq!(adopted, 1);
+        assert_eq!(created_paths(&ours.undo), ["/h/early", "/h/late"]);
+    }
+
+    #[test]
+    fn adopting_twice_takes_nothing_the_second_time() {
+        let theirs = created_history(&["/h/a", "/h/b"]).encode();
+        let mut ours = History::default();
+
+        let first = ours.adopt(&theirs, &HashSet::new(), Vec::new).unwrap();
+        let again = ours.adopt(&theirs, &HashSet::new(), Vec::new).unwrap();
+
+        assert_eq!((first, again), (2, 0));
+    }
+
+    #[test]
+    fn an_entry_in_skip_is_not_adopted() {
+        let theirs = created_history(&["/h/a"]).encode();
+        let id = parse_blocks(&theirs).unwrap().undo[0].id;
+        let mut ours = History::default();
+
+        let adopted = ours.adopt(&theirs, &HashSet::from([id]), Vec::new).unwrap();
+
+        assert_eq!(adopted, 0);
+        assert!(!ours.can_undo());
+    }
+
+    #[test]
+    fn a_foreign_redo_entry_goes_under_ours() {
+        let theirs = undone(created_history(&["/h/theirs"]));
+        let mut ours = undone(created_history(&["/h/ours"]));
+
+        ours.adopt(&theirs.encode(), &HashSet::new(), Vec::new)
+            .unwrap();
+
+        // The next redo (the last) stays the one this session made.
+        assert_eq!(created_paths(&ours.redo), ["/h/theirs", "/h/ours"]);
+    }
+
+    #[test]
+    fn nothing_is_listed_from_the_trash_when_there_is_nothing_to_adopt() {
+        let theirs = created_history(&["/h/a"]).encode();
+        let mut ours = History::default();
+        ours.adopt(&theirs, &HashSet::new(), Vec::new).unwrap();
+
+        ours.adopt(&theirs, &HashSet::new(), || {
+            panic!("the trash was listed for nothing")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn adopting_past_the_capacity_drops_the_oldest() {
+        let theirs = created_history(&["/h/1", "/h/2"]).encode();
+        let mut ours = History::with_capacity(2);
+        ours.record(Change::Created {
+            path: "/h/3".into(),
+            is_dir: false,
+        });
+        ours.commit();
+
+        ours.adopt(&theirs, &HashSet::new(), Vec::new).unwrap();
+
+        assert_eq!(created_paths(&ours.undo), ["/h/2", "/h/3"]);
+    }
+
+    #[test]
+    fn a_file_in_a_newer_format_is_not_adopted() {
+        let mut ours = History::default();
+
+        let error = ours
+            .adopt("mman-history 9\n", &HashSet::new(), Vec::new)
+            .unwrap_err();
+
+        assert_eq!(error, DecodeError::Version("9".into()));
+    }
+
+    proptest! {
+        #[test]
+        fn adopting_never_repeats_an_entry_nor_exceeds_the_capacity(
+            mine in prop::collection::vec("[a-z]{1,4}", 0..6),
+            theirs in prop::collection::vec("[a-z]{1,4}", 0..6),
+            capacity in 1usize..5,
+        ) {
+            let as_paths = |names: &[String]| -> Vec<String> {
+                names.iter().map(|n| format!("/h/{n}")).collect()
+            };
+            let (mine, theirs) = (as_paths(&mine), as_paths(&theirs));
+            let mut ours = History::with_capacity(capacity);
+            for path in &mine {
+                ours.record(Change::Created { path: path.into(), is_dir: false });
+                ours.commit();
+            }
+            let file =
+                created_history(&theirs.iter().map(String::as_str).collect::<Vec<_>>()).encode();
+
+            ours.adopt(&file, &HashSet::new(), Vec::new).unwrap();
+
+            prop_assert!(ours.undo.len() <= capacity);
+            let ids = ours.undo.iter().map(|e| e.id).collect::<HashSet<_>>();
+            prop_assert_eq!(ids.len(), ours.undo.len(), "no entry twice");
         }
     }
 }

@@ -936,6 +936,18 @@ impl App {
         self
     }
 
+    /// Takes in what other running sessions saved, so `u`, redo and the history popup see their
+    /// entries without a restart. Only where the user is about to look at the stacks: the popup
+    /// picks and walks index into the list it showed, which must not shift under them.
+    fn adopt_shared_history(&mut self) {
+        let Some(file) = self.history_file.as_ref() else {
+            return;
+        };
+        if let Err(reason) = file.adopt_into(&mut self.history) {
+            self.status = Some(format!("could not read the shared undo history: {reason}"));
+        }
+    }
+
     /// Hands the history to the file writer if it changed since the last call. Call once per
     /// render tick, and once more before the program ends. While an undo or redo runs its entry is
     /// on neither stack, so nothing is written until it is back: the file never lacks an entry
@@ -4103,6 +4115,7 @@ impl App {
             self.status = Some("an operation is already in progress".into());
             return Ok(());
         }
+        self.adopt_shared_history();
         match self.history.begin_undo() {
             Some(batch) => self.spawn_history(BulkKind::Undo, batch),
             None => self.report_history(browser, vfs, "undo", "undid", Report::Empty)?,
@@ -4116,6 +4129,7 @@ impl App {
             self.status = Some("an operation is already in progress".into());
             return Ok(());
         }
+        self.adopt_shared_history();
         match self.history.begin_redo() {
             Some(batch) => self.spawn_history(BulkKind::Redo, batch),
             None => self.report_history(browser, vfs, "redo", "redid", Report::Empty)?,
@@ -4126,6 +4140,9 @@ impl App {
     /// The history popup's content, or `None` with the reason on the status line when there is
     /// nothing to take back or do again.
     pub fn begin_history_popup(&mut self) -> Option<HistoryPopup> {
+        if !self.is_busy() {
+            self.adopt_shared_history();
+        }
         let popup = HistoryPopup::new(self.history.summary());
         if popup.is_none() {
             self.status = Some("nothing to undo or redo".into());

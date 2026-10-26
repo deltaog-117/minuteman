@@ -2443,8 +2443,9 @@ draws.
   deleted and overwritten data in an app-owned area would make them undoable, at the cost of
   `X` no longer being immediate); a cancelled paste that had already finished its current item
   still records it, but one interrupted mid-item records nothing for that item; on platforms
-  whose trash cannot be read back (macOS) a trash is not undoable; the merged file reaches a running
-  session only at its next launch (adopting other sessions' entries live is not done); an entry
+  whose trash cannot be read back (macOS) a trash is not undoable; a running session takes in the
+  other sessions' entries when the history popup opens and on `z` or `Z`, not while the popup is
+  open (watching the file for that is not done); an entry
   another session removed comes back while this one still holds it; and two sessions that undid
   the same entry each keep it on their own stack.
 - **Archive browsing, follow-ups** – an archive inside an archive is a file of the outer one and
