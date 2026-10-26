@@ -2444,8 +2444,9 @@ draws.
   `X` no longer being immediate); a cancelled paste that had already finished its current item
   still records it, but one interrupted mid-item records nothing for that item; on platforms
   whose trash cannot be read back (macOS) a trash is not undoable; a running session takes in the
-  other sessions' entries when the history popup opens and on `z` or `Z`, not while the popup is
-  open (watching the file for that is not done); an entry
+  other sessions' entries when the history popup opens and on `z` or `Z`, and while the popup is
+  open as they are saved (the file's folder is watched, with the modified time as the fallback; the
+  cursor stays on its entry); an entry
   another session removed comes back while this one still holds it; and two sessions that undid
   the same entry each keep it on their own stack.
 - **Archive browsing, follow-ups** – an archive inside an archive is a file of the outer one and

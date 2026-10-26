@@ -8952,6 +8952,38 @@ without the change.
 write once more (harmless, the merge is stable); an entry another session removed comes back while
 this one still holds it; two sessions that undid the same entry each keep it on their own stack.
 
+### Undo History Popup, Updating While Open
+
+**Date:** 2026-10-26
+**Status:** Confirmed
+
+**Context.** A running session took in the other sessions' entries only when the popup opened or
+on `z`/`Z`, so a popup left open went stale. The popup picks by position, so rows appearing above
+the cursor could make `Enter` act on a different entry than the one shown. Three courses of action
+were weighed: a manual refresh key (A), checking the file's modified time on each tick (B), and
+watching the file (C).
+
+**Decision.** C. `HistoryFile` watches the history file's folder with the same `Vfs::watch` the
+folder refresh uses; a wake sets a flag, and `take_changed` hands it out once. Without a watch (the
+folder does not exist before the first save, or the inotify limit is spent) it compares the file's
+modified time instead, which is B as the fallback. Once per tick while the popup is open, and not
+while an undo or redo is running (its entry is on neither stack), `App::refresh_history_popup`
+adopts and, when something came in, rebuilds the rows from a new `Summary`. `Summary` now carries
+each row's `EntryId`, and `HistoryPopup::refresh` puts the cursor back on the entry it was on, so an
+`Enter` or `u` still acts on the row the user saw. Our own saves also wake the watch; the adoption
+then finds nothing and the popup is left alone.
+
+**Verification.** `scripts/check` passes. New tests: an entry added above the cursor leaves it on the
+same entry, the same for a redo row when the undo list grows, an empty summary changes nothing; a
+second session's save is announced by the watch, and without a watch a new modified time is
+announced once.
+
+**Left open.** An entry another session removed still comes back while this one holds it, and two
+sessions that undid the same entry each keep it on their own stack. A watch on the state folder is
+one more inotify watch per session.
+
+---
+
 ---
 
 ## 🧠 Usage Guidelines

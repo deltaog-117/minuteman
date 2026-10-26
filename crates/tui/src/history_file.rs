@@ -22,16 +22,21 @@
 //! it was handed and skips the ones a newer text has already overtaken. Each write goes to a
 //! temporary file that is then renamed over the real one, so a crash leaves the old history or the
 //! new one, never half of either. Two `mman` running at once save into one file (see `Merger`), and a
-//! session takes in what the other saved when asked (`adopt_into`), not before.
+//! session takes in what the other saved when asked (`adopt_into`), not before. To know when
+//! asking is worthwhile, the file's folder is watched like a browsed one (`take_changed`), or the
+//! file's modified time compared when the folder cannot be watched.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::SystemTime;
 
 use file_ops::history::{DecodeError, EntryId, History, Merger};
+use shared::{LocalVfs, Vfs, Wake, WatchGuard};
 
 /// The file the history is kept in: `$XDG_STATE_HOME/minuteman/history`, or
 /// `~/.local/state/minuteman/history` when that is unset. `None` when neither variable names an
@@ -109,6 +114,15 @@ pub struct HistoryFile {
     texts: Option<Sender<String>>,
     failures: Receiver<String>,
     writer: Option<JoinHandle<()>>,
+    /// Set by the watch on the file's folder from its own thread; any write there sets it,
+    /// including this session's own saves, which `take_changed` callers answer with an `adopt_into`
+    /// that finds nothing new.
+    woken: Arc<AtomicBool>,
+    /// `None` when the folder could not be watched (it does not exist before the first save, or
+    /// the user's watch limit is spent), which `take_changed` answers by comparing `seen`.
+    watch: Option<WatchGuard>,
+    /// The file's modified time at the last `take_changed`, for when there is no watch.
+    seen: Option<SystemTime>,
 }
 
 impl HistoryFile {
@@ -144,13 +158,37 @@ impl HistoryFile {
                 }
             }
         });
+        let woken = Arc::new(AtomicBool::new(false));
+        let watch = path.parent().and_then(|folder| {
+            let wake: Wake = {
+                let woken = Arc::clone(&woken);
+                Arc::new(move || woken.store(true, Ordering::Release))
+            };
+            LocalVfs.watch(folder, wake)
+        });
         Self {
             path,
             merger,
             texts: Some(texts),
             failures,
             writer: Some(writer),
+            woken,
+            watch,
+            seen: None,
         }
+    }
+
+    /// Whether the file may have changed since the last call, so that taking it in could find
+    /// something. A false alarm costs one read of a small file; a missed change would leave the
+    /// popup stale, so when in doubt this says yes.
+    pub fn take_changed(&mut self) -> bool {
+        if self.watch.is_some() {
+            return self.woken.swap(false, Ordering::AcqRel);
+        }
+        let modified = std::fs::metadata(&self.path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        std::mem::replace(&mut self.seen, modified) != modified
     }
 
     /// Hands `text` to the writer. Returns at once.
@@ -565,6 +603,52 @@ mod tests {
         assert_eq!(adopted, Ok(0));
         assert!(!now_empty.can_undo());
         drop(session);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Calls `take_changed` until it says yes, for up to two seconds.
+    fn changed_soon(file: &mut HistoryFile) -> bool {
+        for _ in 0..200 {
+            if file.take_changed() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    fn another_session_saving_is_announced_by_the_watch() {
+        let dir = scratch("announce");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("history");
+        let mut mine = start(file.clone());
+        assert!(mine.watch.is_some(), "the folder exists, so it is watched");
+        assert!(!mine.take_changed(), "nothing happened yet");
+
+        let theirs = start(file);
+        theirs.save(committed("/h/theirs").encode());
+
+        assert!(changed_soon(&mut mine));
+        drop((mine, theirs));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn without_a_watch_a_new_modified_time_is_the_announcement() {
+        let dir = scratch("poll");
+        let file = dir.join("history");
+        // The folder does not exist yet, so it cannot be watched.
+        let mut mine = start(file.clone());
+        assert!(mine.watch.is_none());
+        assert!(!mine.take_changed(), "no file, and none seen before");
+
+        let theirs = start(file);
+        theirs.save(committed("/h/theirs").encode());
+
+        assert!(changed_soon(&mut mine));
+        assert!(!mine.take_changed(), "said once per change");
+        drop((mine, theirs));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

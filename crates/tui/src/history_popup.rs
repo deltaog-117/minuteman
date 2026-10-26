@@ -25,7 +25,7 @@
 //! by name: it runs just that one row ([`Pick`]) and leaves the entries around it alone.
 
 use crossterm::event::KeyCode;
-use file_ops::history::Summary;
+use file_ops::history::{EntryId, Summary};
 
 /// Which stack a row belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +81,10 @@ pub struct Row<'a> {
 pub struct HistoryPopup {
     undo: Vec<String>,
     redo: Vec<String>,
+    /// Each row's entry id, as in [`Summary`], so [`refresh`](Self::refresh) can keep the cursor
+    /// on the entry it was on.
+    undo_ids: Vec<EntryId>,
+    redo_ids: Vec<EntryId>,
     cursor: usize,
 }
 
@@ -93,8 +97,43 @@ impl HistoryPopup {
         Some(Self {
             undo: summary.undo,
             redo: summary.redo,
+            undo_ids: summary.undo_ids,
+            redo_ids: summary.redo_ids,
             cursor: 0,
         })
+    }
+
+    /// Lists `summary` instead, with the cursor still on the entry it was on: entries another
+    /// session added can land above it, and an `Enter` must still act on the row that was shown.
+    /// An empty summary is ignored, since a popup with no row has no cursor to keep.
+    pub fn refresh(&mut self, summary: Summary) {
+        if summary.undo.is_empty() && summary.redo.is_empty() {
+            return;
+        }
+        let anchor = self.anchor();
+        self.undo = summary.undo;
+        self.redo = summary.redo;
+        self.undo_ids = summary.undo_ids;
+        self.redo_ids = summary.redo_ids;
+        let found = anchor.and_then(|id| {
+            let in_undo = self.undo_ids.iter().position(|other| *other == id);
+            in_undo.or_else(|| {
+                let at = self.redo_ids.iter().position(|other| *other == id)?;
+                Some(self.undo.len() + at)
+            })
+        });
+        // Entries are only ever added here, so a lost anchor means the one under the cursor was
+        // taken off by this session; the nearest row is as good a place as any.
+        self.cursor = found.unwrap_or(self.cursor).min(self.len() - 1);
+    }
+
+    /// The id of the entry under the cursor.
+    fn anchor(&self) -> Option<EntryId> {
+        match self.cursor.checked_sub(self.undo.len()) {
+            None => self.undo_ids.get(self.cursor),
+            Some(at) => self.redo_ids.get(at),
+        }
+        .copied()
     }
 
     pub fn len(&self) -> usize {
@@ -194,8 +233,68 @@ mod tests {
         HistoryPopup::new(Summary {
             undo: undo.iter().map(|s| (*s).to_owned()).collect(),
             redo: redo.iter().map(|s| (*s).to_owned()).collect(),
+            ..Summary::default()
         })
         .unwrap()
+    }
+
+    /// Entries named by their labels, each with an id of its own that `entry` gives again for the
+    /// same label within one test.
+    fn summary(ids: &mut Vec<(String, EntryId)>, undo: &[&str], redo: &[&str]) -> Summary {
+        let mut id_of = |label: &str| {
+            if let Some((_, id)) = ids.iter().find(|(name, _)| name == label) {
+                return *id;
+            }
+            let id = EntryId::fresh();
+            ids.push((label.to_owned(), id));
+            id
+        };
+        Summary {
+            undo: undo.iter().map(|s| (*s).to_owned()).collect(),
+            redo: redo.iter().map(|s| (*s).to_owned()).collect(),
+            undo_ids: undo.iter().map(|s| id_of(s)).collect(),
+            redo_ids: redo.iter().map(|s| id_of(s)).collect(),
+        }
+    }
+
+    #[test]
+    fn an_entry_added_above_the_cursor_leaves_the_cursor_on_the_same_entry() {
+        let mut ids = Vec::new();
+        let mut popup = HistoryPopup::new(summary(&mut ids, &["b", "a"], &["c"])).unwrap();
+        popup.key(KeyCode::Down);
+        assert_eq!(popup.row(popup.cursor()).unwrap().label, "a");
+
+        popup.refresh(summary(&mut ids, &["new", "b", "a"], &["c"]));
+
+        assert_eq!(popup.row(popup.cursor()).unwrap().label, "a");
+        assert_eq!(
+            popup.pick(),
+            Some(Pick {
+                side: Side::Undo,
+                depth: 3
+            })
+        );
+    }
+
+    #[test]
+    fn the_cursor_on_a_redo_row_follows_it_when_the_undo_list_grows() {
+        let mut ids = Vec::new();
+        let mut popup = HistoryPopup::new(summary(&mut ids, &["a"], &["d", "c"])).unwrap();
+        popup.key(KeyCode::End);
+        assert_eq!(popup.row(popup.cursor()).unwrap().label, "c");
+
+        popup.refresh(summary(&mut ids, &["b", "a"], &["d", "c"]));
+
+        assert_eq!(popup.row(popup.cursor()).unwrap().label, "c");
+    }
+
+    #[test]
+    fn refreshing_with_nothing_listed_changes_nothing() {
+        let mut popup = popup(&["a"], &[]);
+
+        popup.refresh(Summary::default());
+
+        assert_eq!(popup.len(), 1);
     }
 
     #[test]
@@ -298,8 +397,12 @@ mod tests {
         ) {
             prop_assume!(undo + redo > 0);
             let labels = |n: usize| (0..n).map(|i| i.to_string()).collect();
-            let mut popup = HistoryPopup::new(Summary { undo: labels(undo), redo: labels(redo) })
-                .unwrap();
+            let mut popup = HistoryPopup::new(Summary {
+                undo: labels(undo),
+                redo: labels(redo),
+                ..Summary::default()
+            })
+            .unwrap();
             for step in moves {
                 popup.key([KeyCode::Down, KeyCode::Up, KeyCode::Home, KeyCode::End][usize::from(step)]);
                 let first = popup.first_visible(capacity);

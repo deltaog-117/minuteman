@@ -298,11 +298,16 @@ pub enum Report {
     Cancelled { label: String },
 }
 
-/// What `History::summary` lists: one label per entry, next-to-run first.
+/// What `History::summary` lists: one label per entry, next-to-run first, and the id of each, so
+/// a list drawn from an earlier summary can find its place again in a later one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
     pub undo: Vec<String>,
     pub redo: Vec<String>,
+    /// `undo[i]`'s id; the same length as `undo`.
+    pub undo_ids: Vec<EntryId>,
+    /// `redo[i]`'s id; the same length as `redo`.
+    pub redo_ids: Vec<EntryId>,
 }
 
 /// The undo and redo stacks.
@@ -383,9 +388,12 @@ impl History {
     pub fn summary(&mut self) -> Summary {
         self.commit();
         let labels = |stack: &[Entry]| stack.iter().rev().map(|e| label(&e.changes)).collect();
+        let ids = |stack: &[Entry]| stack.iter().rev().map(|e| e.id).collect();
         Summary {
             undo: labels(&self.undo),
             redo: labels(&self.redo),
+            undo_ids: ids(&self.undo),
+            redo_ids: ids(&self.redo),
         }
     }
 

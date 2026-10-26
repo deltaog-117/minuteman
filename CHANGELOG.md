@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The history popup (`U`) now shows undo entries another running `mman` saves while it is open,
+  without being closed and reopened. The cursor stays on the entry it was on, so `Enter` and `u`
+  still act on the row you saw. It uses the same file-change notice as the folder refresh, and
+  falls back to checking the file's modified time when the folder cannot be watched. Author:
+  deltaog-117.
 - A running `mman` now sees the undo entries other running sessions saved: opening the history
   popup, pressing `z` or `Z` first takes in what the shared file holds that this session does
   not. They are placed by the time they were made, and an entry you discarded is not brought back.

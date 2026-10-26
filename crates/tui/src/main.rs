@@ -1536,6 +1536,9 @@ fn run(
         }
         app.poll_bulk(browser, vfs)?;
         app.save_history();
+        if let Some(popup) = history.as_mut() {
+            app.refresh_history_popup(popup);
+        }
         app.poll_search(browser);
         app.poll_nav(browser);
         if let Some((name, verdict)) = app.poll_plugin_test()

@@ -939,12 +939,28 @@ impl App {
     /// Takes in what other running sessions saved, so `u`, redo and the history popup see their
     /// entries without a restart. Only where the user is about to look at the stacks: the popup
     /// picks and walks index into the list it showed, which must not shift under them.
-    fn adopt_shared_history(&mut self) {
+    fn adopt_shared_history(&mut self) -> usize {
         let Some(file) = self.history_file.as_ref() else {
+            return 0;
+        };
+        file.adopt_into(&mut self.history).unwrap_or_else(|reason| {
+            self.status = Some(format!("could not read the shared undo history: {reason}"));
+            0
+        })
+    }
+
+    /// Lets an open history popup show what another session saved since it was drawn. Run once
+    /// per render tick while the popup is open. Does nothing while an undo or redo runs, whose
+    /// entry is on neither stack, and leaves the announcement for the next tick.
+    pub fn refresh_history_popup(&mut self, popup: &mut HistoryPopup) {
+        if self.is_busy() {
+            return;
+        }
+        let Some(file) = self.history_file.as_mut() else {
             return;
         };
-        if let Err(reason) = file.adopt_into(&mut self.history) {
-            self.status = Some(format!("could not read the shared undo history: {reason}"));
+        if file.take_changed() && self.adopt_shared_history() > 0 {
+            popup.refresh(self.history.summary());
         }
     }
 

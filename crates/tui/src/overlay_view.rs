@@ -1847,6 +1847,7 @@ mod tests {
         HistoryPopup::new(file_ops::history::Summary {
             undo: labels("undo", undo),
             redo: labels("redo", redo),
+            ..file_ops::history::Summary::default()
         })
         .unwrap()
     }
