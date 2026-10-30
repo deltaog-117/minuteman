@@ -120,6 +120,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-25 | Undo History, Shared Between Sessions | Entries named by an id and merged under a file lock at each save, written back as ours plus what other sessions saved and we did not remove; a newer format is never overwritten (COA B) | ✅ Confirmed |
 | 2026-10-26 | Undo History, Adopting Other Sessions' Entries | Pull the file in when the user opens `U` or presses `u`/redo, add-only into the live stacks (COA C); pulling after our own save (A) and watching the file (B) set aside | ✅ Confirmed |
 | 2026-10-21 | Sandboxed WASM Plugins | `wasmi` behind an off-by-default `wasm` feature, one launch decision, a read-only trust check with no wildcard arm, and memory and idle-time limits on a thread of its own (COA A); `wasmtime`/Extism (B) and a permission manifest with writes (C) not taken | ✅ Confirmed |
+| 2026-10-30 | Reloading Plugins From Edited Config | `:plugins reload`, on request, plugins only: a strict loader that refuses a file that does not parse, and a pure plan of what to stop, start and restart (COA A); a save-triggered watcher (B) and a reload of theme and keys (C) set aside | ✅ Confirmed |
 
 ---
 
@@ -8981,6 +8982,45 @@ announced once.
 **Left open.** An entry another session removed still comes back while this one holds it, and two
 sessions that undid the same entry each keep it on their own stack. A watch on the state folder is
 one more inotify watch per session.
+
+### Reloading Plugins From Edited Config
+
+**Date:** 2026-10-30
+**Status:** Confirmed
+
+**Context.** The config files were read once at launch; only the plugin menu's own switches were
+live. Editing a `[[plugin]]` by hand meant a restart. Three courses of action were weighed: a
+`:plugins reload` command that re-applies plugins (A), a watcher that does the same on every save
+(B), and a command that re-applies everything, theme and keys included (C).
+
+**Decision.** A. `Config::load` never fails, so a typo would read as "no plugins" and a reload built
+on it would stop every plugin. `Config::try_load` reports a `config.toml` or `local.toml` that does
+not parse and prints nothing (the interface owns the terminal); a broken `appearance.toml` falls
+back to defaults, as nothing in a reload reads it. `plugin_reload::plan` is a pure function from the
+running specs and the wanted specs to `stop`, `start` and `restart`; `PluginSpec` gained `PartialEq`
+to compare them. `App::reload_plugins` rebuilds the menu's list from the fresh config (the build
+was lifted out of `with_plugins` into `rebuild_roster`, so a launch and a reload build it the same
+way), applies the plan and reports it. It is `:plugins reload` and not `:reload`: it needs no new
+reserved word, so a user plugin that declared `reload` keeps working, and it sits beside
+`:plugins restart`. The command only sets a flag, as `:history` does; the loop owns the config and
+runs the reload. Two smaller changes went in with it: switching a drop-in on now runs the same
+key and `:` word check as adding one (against plugins that are on, since one that is off holds
+nothing), and a double-click in the folder picker goes through the same choice as `Enter`
+(`settle_pick`).
+
+**Verification.** `scripts/check` passes. New tests: a property test that applying the plan to any
+running list gives exactly the wanted list (a name listed twice counts once) and that planning from
+the wanted list changes nothing; the strict loader agrees with the lenient one on text that parses,
+names each file that does not, and ignores a broken `appearance.toml`; a reload with real
+processes starts one plugin, stops one, restarts one whose arguments changed, and a second reload
+changes nothing; a drop-in whose key a running plugin holds is refused, and is not once that plugin
+is off; `plugins reload` parses with no argument only. The double-click was not driven through a
+terminal: it shares `settle_pick` with `Enter`, but the mouse branch itself has no test.
+
+**Left open.** B is the same reload behind a watcher and a wait for the last change; C needs the
+config to be replaceable while the loop runs. A plugin that failed to start at launch and was not
+changed is not tried again by a reload (`:plugins restart` does that). A config-declared plugin's
+keys are not checked against others on reload, as they are not at launch.
 
 ---
 

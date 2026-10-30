@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `:plugins reload` reads `config.toml` and `local.toml` again while `mman` runs and makes the
+  running plugins the ones a fresh launch would start: new ones are started, ones no longer wanted
+  are stopped, and ones whose command, arguments, keys, `:` words, events or `provides` changed are
+  started again. The status line says which. A file that does not parse changes nothing and is
+  named. Theme, key bindings and preview hooks still need a restart. Author: deltaog-117.
+- In the plugin menu, a double-click on a folder while choosing a plugin folder chooses it, as
+  `Enter` does; a folder without a `plugin.toml` is entered as before. Author: deltaog-117.
+- Switching a drop-in plugin on from the menu is refused, with the reason, when one of its keys or
+  `:` words is now used by the interface or by a plugin that is on. Before, it started and its key
+  or word never fired. Author: deltaog-117.
 - The history popup (`U`) now shows undo entries another running `mman` saves while it is open,
   without being closed and reopened. The cursor stays on the entry it was on, so `Enter` and `u`
   still act on the row you saw. It uses the same file-change notice as the folder refresh, and

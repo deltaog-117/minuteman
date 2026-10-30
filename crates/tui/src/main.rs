@@ -63,6 +63,7 @@ mod plugin_add;
 mod plugin_check;
 mod plugin_new;
 mod plugin_program;
+mod plugin_reload;
 mod plugin_roster;
 mod plugin_source;
 mod plugin_views;
@@ -577,6 +578,34 @@ fn apply_device_event(event: DeckEvent, app: &mut App, browser: &mut BrowserStat
         DeckEvent::Goto(path, text) => {
             let plan = browser.plan_goto(&path);
             app.begin_move(browser, plan, Some(text), "device");
+        }
+    }
+}
+
+/// What choosing the row `path` does while the plugin menu is picking a plugin folder, from
+/// either `Enter` or a double-click: a folder holding a manifest is handed to the menu's review
+/// card, one the manifest of which is refused says why, and a file is told off. Returns whether
+/// the row was settled; `false` means an ordinary folder, which the browser then enters.
+fn settle_pick(
+    popup: &mut PluginsPopup,
+    app: &mut App,
+    keys: &theming::KeyMap,
+    path: &Path,
+    is_dir: bool,
+) -> bool {
+    match plugin_source::choose(path, is_dir) {
+        plugin_source::Choice::Enter => false,
+        plugin_source::Choice::NotAFolder => {
+            app.status = Some("that is a file: choose a plugin folder".into());
+            true
+        }
+        plugin_source::Choice::Chosen(found) => {
+            popup.pick_done(Ok(app.candidate(found, keys)));
+            true
+        }
+        plugin_source::Choice::Refused(why) => {
+            popup.pick_done(Err(why));
+            true
         }
     }
 }
@@ -1737,6 +1766,21 @@ fn run(
             history = app.begin_history_popup();
         }
 
+        if app.take_reload_request() {
+            match Config::try_load() {
+                Ok(fresh) => {
+                    app.reload_plugins(&fresh, browser.current_dir());
+                }
+                // A file that does not parse would read as "no plugins", so nothing is touched.
+                Err(why) => {
+                    app.status = Some(format!(
+                        "plugins not reloaded, left as they are: {}",
+                        why.join("; ")
+                    ));
+                }
+            }
+        }
+
         if let Some(mut panes) = shells.take() {
             let area = shell_area(terminal.size()?.into(), shell_offset, shell_size);
             let exited = panes.poll_exits()?;
@@ -2548,6 +2592,22 @@ fn run(
                                 } else {
                                     clicks.register(hit, Instant::now())
                                 };
+                                // While the plugin menu is choosing a folder, opening a row is
+                                // choosing it, as `Enter` is: a folder with a manifest is picked
+                                // and any other is entered as usual.
+                                if let (Hit::CurrentRow(index), Click::Double | Click::Open) =
+                                    (hit, click)
+                                    && let Some(popup) =
+                                        plugins_menu.as_mut().filter(|popup| popup.picking())
+                                    && let Some((path, is_dir)) = browser
+                                        .current_entries()
+                                        .get(index)
+                                        .map(|entry| (entry.path.clone(), entry.is_dir))
+                                    && settle_pick(popup, app, &config.keys, &path, is_dir)
+                                {
+                                    browser.select_index(index);
+                                    continue;
+                                }
                                 // Read before the click is applied: opening a directory moves
                                 // the cursor into it, and the file to open is the one clicked.
                                 let file_to_open = match (hit, click) {
@@ -3088,23 +3148,10 @@ fn run(
                             continue;
                         }
                         KeyCode::Enter => {
-                            if let Some(entry) = browser.selected_entry() {
-                                match plugin_source::choose(&entry.path, entry.is_dir) {
-                                    plugin_source::Choice::Enter => {}
-                                    plugin_source::Choice::NotAFolder => {
-                                        app.status =
-                                            Some("that is a file: choose a plugin folder".into());
-                                        continue;
-                                    }
-                                    plugin_source::Choice::Chosen(found) => {
-                                        popup.pick_done(Ok(app.candidate(found, &config.keys)));
-                                        continue;
-                                    }
-                                    plugin_source::Choice::Refused(why) => {
-                                        popup.pick_done(Err(why));
-                                        continue;
-                                    }
-                                }
+                            if let Some(entry) = browser.selected_entry()
+                                && settle_pick(popup, app, &config.keys, &entry.path, entry.is_dir)
+                            {
+                                continue;
                             }
                         }
                         KeyCode::Char('Q') => {
@@ -3161,7 +3208,7 @@ fn run(
                             plugins_menu = None;
                         }
                         PluginsOutcome::Toggle(row) => {
-                            app.toggle_plugin(row, browser.current_dir());
+                            app.toggle_plugin(row, &config.keys, browser.current_dir());
                         }
                         PluginsOutcome::Remove(row) => {
                             if let Some(lines) = app.removal_question(row) {

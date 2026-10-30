@@ -2405,12 +2405,18 @@ draws.
   background (`probe_job`), so the screen stays live during the half second. `mman plugin new <name>
   [--lang sh|python]` writes a working skeleton and `mman plugin add <folder>` checks and copies a
   local plugin folder into the drop-in directory (COA B). The add form
-  now refuses a folder whose manifest names another `api_version`. Still to do: choosing a folder
-  with a double-click, a check
-  of keys and `:` words when a drop-in is switched on; the `rust` skeleton for `mman plugin new`
+  now refuses a folder whose manifest names another `api_version`. Also done: a double-click on a
+  row while the menu is choosing a folder chooses it as `Enter` does (a folder without a manifest
+  is entered as usual); switching a drop-in on is refused, with the reason, when a key or `:` word
+  of it is now held by the interface or by a plugin that is on; and `:plugins reload` reads
+  `config.toml` and `local.toml` again and starts, stops or restarts plugins to match, so what runs
+  is what a fresh launch would start (COA A: plugins only, on request). A file that does not parse
+  changes nothing and is named in the status line. Theme, key bindings and `[[preview_hook]]`
+  still need a restart. Still to do: the `rust` skeleton for `mman plugin new`
   (the generated crate has nowhere to get `plugin_api` until it is published); `mman plugin add`
-  from a git URL (waits for a sandbox); reloading a
-  hand-edited config without a restart (switching a plugin from the menu is already live). A curated index
+  from a git URL (waits for a sandbox); reloading when the file is saved, with no command (COA B,
+  a watcher on the config folder calling the same reload, with a wait for the last change); reload
+  of the theme and keys (COA C, needs the config to be replaceable while the loop runs). A curated index
   and one-step install wait for a sandbox or a declared, enforced permission list (see the
   community plugin ecosystem under the long-term vision).
 - **Archives, remainder** – `rar` (extract-only, proprietary), `7z`, and `xz`/`zstd`/`bzip2`
@@ -2724,7 +2730,13 @@ draws.
 
 ## 🎯 Next Actions (Immediate)
 
-0. `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
+0. Edit `~/.config/minuteman/config.toml` (add, remove or change a `[[plugin]]`, or `git_status`)
+   or `local.toml` while `mman` runs, then type `:plugins reload`: the status line says what was
+   started, stopped or restarted, and a typo in either file is named and changes nothing. Also:
+   `space p`, `a`, `Tab`, then double-click a folder holding a `plugin.toml`: its review card
+   opens; and switching on a drop-in whose key another running plugin uses is refused with the
+   reason.
+   Before that: `cargo install --path crates/tui` (installs one executable, `mman`; make sure `~/.cargo/bin`
    is on your `PATH`) and `cargo install --path plugins/finder` (the fuzzy finder, `mman-finder`,
    which `f` now needs next to it; from a checkout `cargo build -p finder` once does it), and
    `cargo install --path plugins/git` (`mman-git`, which the status bar's git segment now needs;

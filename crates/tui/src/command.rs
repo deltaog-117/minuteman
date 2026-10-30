@@ -65,6 +65,9 @@ pub enum Command {
     PluginRestart {
         name: String,
     },
+    /// `:plugins reload`: reads the config files again and starts, stops or restarts plugins to
+    /// match them.
+    PluginReload,
     /// A command line for `sh -c`, run in the browsed directory.
     Shell(String),
     /// A command line for `sh -c` that gets the real terminal — the program draws on it and reads
@@ -146,7 +149,7 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
                 None => Ok(Some(Command::Shell(line.into()))),
             }
         }
-        // Like `plugin`, only these two exact forms are the built-in; any other `plugins ...` line
+        // Like `plugin`, only these exact forms are the built-in; any other `plugins ...` line
         // is left to whatever `plugins` program is on the path.
         "plugins" if line[name.len()..].trim().is_empty() => Ok(Some(Command::Plugins)),
         "plugins" if !uses_shell_syntax(line) => {
@@ -154,6 +157,7 @@ pub fn parse(buffer: &str, interactive: &[String]) -> Result<Option<Command>, St
                 [verb, plugin] if verb == "restart" => Ok(Some(Command::PluginRestart {
                     name: plugin.clone(),
                 })),
+                [verb] if verb == "reload" => Ok(Some(Command::PluginReload)),
                 _ => Ok(Some(Command::Shell(line.into()))),
             }
         }
@@ -423,6 +427,15 @@ mod tests {
             Ok(Some(Command::PluginRestart {
                 name: "my plugin".into()
             }))
+        );
+    }
+
+    #[test]
+    fn plugins_reload_takes_no_name() {
+        assert_eq!(parse("plugins reload"), Ok(Some(Command::PluginReload)));
+        assert_eq!(
+            parse("plugins reload now"),
+            Ok(Some(Command::Shell("plugins reload now".into())))
         );
     }
 

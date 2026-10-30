@@ -130,7 +130,7 @@ pub struct RawPluginSpec {
     pub provides: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginSpec {
     pub name: String,
     pub command: String,
@@ -527,10 +527,75 @@ impl Config {
         appearance: Option<&str>,
         local: Option<&str>,
     ) -> Self {
-        let config: RawConfig = parse("config.toml", config);
-        let appearance: RawAppearance = parse("appearance.toml", appearance);
-        let local: RawLocal = parse("local.toml", local);
+        Self::from_raw(
+            parse("config.toml", config),
+            parse("appearance.toml", appearance),
+            parse("local.toml", local),
+        )
+    }
 
+    /// Like [`load`](Self::load), but a file that exists and cannot be used is an error instead
+    /// of defaults, so a caller that already runs on an earlier config can keep it. Only
+    /// `config.toml` and `local.toml` count, being the files the plugins come from; a broken
+    /// `appearance.toml` falls back to defaults without a word, as nothing here reads it. Nothing
+    /// is printed, since the interface owns the terminal.
+    ///
+    /// # Errors
+    ///
+    /// One line for each of `config.toml` and `local.toml` that cannot be read or parsed.
+    pub fn try_load() -> Result<Self, Vec<String>> {
+        let read = |file: &str, path: Option<PathBuf>| match path.map(std::fs::read_to_string) {
+            None => Ok(None),
+            Some(Ok(text)) => Ok(Some(text)),
+            Some(Err(e)) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Some(Err(e)) => Err(format!("{file}: {e}")),
+        };
+        let texts = (
+            read("config.toml", Self::config_path()),
+            read("appearance.toml", Self::appearance_path()),
+            read("local.toml", Self::local_path()),
+        );
+        let (config, appearance, local) = match texts {
+            (Ok(config), Ok(appearance), Ok(local)) => (config, appearance, local),
+            (config, _, local) => {
+                return Err([config.err(), local.err()].into_iter().flatten().collect());
+            }
+        };
+        let mut fresh =
+            Self::try_from_sources(config.as_deref(), appearance.as_deref(), local.as_deref())?;
+        if let Some(dir) = Self::dropin_dir() {
+            let found = dropin::scan(&dir);
+            fresh.dropins = found.found;
+            fresh.dropin_notices = found.notices;
+        }
+        Ok(fresh)
+    }
+
+    /// [`from_sources`](Self::from_sources) that refuses text of `config.toml` or `local.toml`
+    /// which does not parse. Split out from `try_load` so it can be tested without the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// One line for each of the two files whose text is malformed.
+    pub fn try_from_sources(
+        config: Option<&str>,
+        appearance: Option<&str>,
+        local: Option<&str>,
+    ) -> Result<Self, Vec<String>> {
+        let config = parse_strict::<RawConfig>("config.toml", config);
+        let local = parse_strict::<RawLocal>("local.toml", local);
+        match (config, local) {
+            (Ok(config), Ok(local)) => {
+                let appearance = appearance
+                    .and_then(|text| toml::from_str::<RawAppearance>(text).ok())
+                    .unwrap_or_default();
+                Ok(Self::from_raw(config, appearance, local))
+            }
+            (config, local) => Err([config.err(), local.err()].into_iter().flatten().collect()),
+        }
+    }
+
+    fn from_raw(config: RawConfig, appearance: RawAppearance, local: RawLocal) -> Self {
         let appearance_theme = RawTheme {
             shape: appearance.theme.shape.clone().overlay(appearance.shape),
             ..appearance.theme
@@ -714,6 +779,18 @@ impl Config {
     fn config_dir() -> Option<PathBuf> {
         directories::ProjectDirs::from("", "", "minuteman")
             .map(|dirs| dirs.config_dir().to_path_buf())
+    }
+}
+
+/// Parses `text` as `T`; absent text is the default and malformed text is a line naming `file`.
+fn parse_strict<T: DeserializeOwned + Default>(
+    file: &str,
+    text: Option<&str>,
+) -> Result<T, String> {
+    match text.map(toml::from_str::<T>) {
+        None => Ok(T::default()),
+        Some(Ok(value)) => Ok(value),
+        Some(Err(err)) => Err(format!("{file}: {}", err.message())),
     }
 }
 
@@ -1022,6 +1099,33 @@ mod tests {
                 .as_deref(),
             Some("details")
         );
+    }
+
+    #[test]
+    fn try_from_sources_agrees_with_from_sources_on_text_that_parses() {
+        let config = "[[plugin]]\nname = \"a\"\ncommand = \"x\"\n";
+        let local = "disabled_plugins = [\"git\"]\n";
+        let strict = Config::try_from_sources(Some(config), None, Some(local)).unwrap();
+        let lenient = Config::from_sources(Some(config), None, Some(local));
+        assert_eq!(strict.plugins, lenient.plugins);
+        assert_eq!(strict.disabled_plugins, lenient.disabled_plugins);
+        assert!(Config::try_from_sources(None, None, None).is_ok());
+    }
+
+    #[test]
+    fn try_from_sources_names_each_file_that_does_not_parse() {
+        let bad = "[[plugin]\nname =";
+        let both = Config::try_from_sources(Some(bad), None, Some(bad)).unwrap_err();
+        assert_eq!(both.len(), 2);
+        assert!(both[0].starts_with("config.toml: "));
+        assert!(both[1].starts_with("local.toml: "));
+        let one = Config::try_from_sources(None, None, Some(bad)).unwrap_err();
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn a_broken_appearance_file_does_not_stop_try_from_sources() {
+        assert!(Config::try_from_sources(None, Some("[theme"), None).is_ok());
     }
 
     #[test]

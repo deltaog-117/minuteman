@@ -65,6 +65,7 @@ use crate::nav_job::{NavJob, NavPoll};
 use crate::open;
 use crate::picker_popup::PickerPopup;
 use crate::plugin_program::{self, Program};
+use crate::plugin_reload;
 use crate::plugin_roster::{self, ConfigSwitches, Origin};
 use crate::plugin_source::{self, Candidate};
 use crate::plugin_views::Slots;
@@ -594,6 +595,9 @@ pub struct App {
     history_walk: Option<HistoryWalk>,
     /// `:history` was typed; `take_history_request` hands it to the loop, which owns the popup.
     history_requested: bool,
+    /// `:plugins reload` was typed; `take_reload_request` hands it to the loop, which owns the
+    /// config the files are read into.
+    reload_requested: bool,
     /// Where the history is kept between sessions, and the `History::revision` last handed to it
     /// (see `save_history`). `None` when no state folder could be found.
     history_file: Option<HistoryFile>,
@@ -689,6 +693,7 @@ impl App {
             history: History::default(),
             history_walk: None,
             history_requested: false,
+            reload_requested: false,
             history_file: None,
             history_saved: 0,
             untracked: 0,
@@ -1034,30 +1039,12 @@ impl App {
     /// than treated as fatal — the same "one bad entry must never take the whole session down"
     /// rule `theming::Config::load` already follows for a malformed config file.
     pub fn with_plugins(mut self, specs: Vec<PluginSpec>, cwd: &Path) -> Self {
-        let listing = crate::bundled::listing(&specs, &self.preview_hooks);
-        let found: Vec<PluginSpec> = listing
-            .iter()
-            .filter_map(|listed| listed.spec.clone())
-            .collect();
+        let (found, skipped) = self.rebuild_roster(&specs);
         // Without a previewer the column shows only names; say why instead of leaving it a mystery.
         // A previewer the user switched off is not missing, so only what was not found counts.
         if let Some(notice) = crate::bundled::missing_previewer(&specs, &found) {
             self.status = Some(notice);
         }
-        let roster = plugin_roster::build(
-            &specs,
-            listing,
-            ConfigSwitches {
-                git_status: self.git_status,
-                system_hud: self.system_hud,
-            },
-            &self.plugin_disabled,
-            &self.plugin_enabled,
-            &self.plugin_menu_kept,
-        );
-        let (roster, skipped) =
-            plugin_roster::with_dropins(roster, &self.plugin_dropins, &self.plugin_enabled);
-        self.plugin_roster = roster;
         let notices: Vec<String> = self.dropin_notices.iter().cloned().chain(skipped).collect();
         if !notices.is_empty() {
             self.status = Some(notices.join("; "));
@@ -1074,6 +1061,88 @@ impl App {
             }
         }
         self
+    }
+
+    /// Lists every plugin the menu shows from `specs` (the `[[plugin]]` tables), the bundled ones
+    /// and the drop-ins, with the switches the app holds. Returns the specs of the bundled
+    /// plugins that are installed and a line for each drop-in left out because its name is taken.
+    fn rebuild_roster(&mut self, specs: &[PluginSpec]) -> (Vec<PluginSpec>, Vec<String>) {
+        let listing = crate::bundled::listing(specs, &self.preview_hooks);
+        let found: Vec<PluginSpec> = listing
+            .iter()
+            .filter_map(|listed| listed.spec.clone())
+            .collect();
+        let roster = plugin_roster::build(
+            specs,
+            listing,
+            ConfigSwitches {
+                git_status: self.git_status,
+                system_hud: self.system_hud,
+            },
+            &self.plugin_disabled,
+            &self.plugin_enabled,
+            &self.plugin_menu_kept,
+        );
+        let (roster, skipped) =
+            plugin_roster::with_dropins(roster, &self.plugin_dropins, &self.plugin_enabled);
+        self.plugin_roster = roster;
+        (found, skipped)
+    }
+
+    /// The specs of the plugins the menu has switched on.
+    fn enabled_specs(&self) -> Vec<PluginSpec> {
+        self.plugin_roster
+            .iter()
+            .filter(|entry| entry.enabled)
+            .filter_map(|entry| entry.spec.clone())
+            .collect()
+    }
+
+    /// Makes the running plugins the ones a launch with `fresh` would start: the ones it no longer
+    /// wants are stopped, the new ones started and the ones it describes differently started
+    /// again. The plugin menu is rebuilt from `fresh`, so its lists and switches follow the files.
+    /// A plugin that will not start is named in the status line and the rest carry on. Nothing
+    /// but plugins is read from `fresh`.
+    pub fn reload_plugins(&mut self, fresh: &Config, cwd: &Path) {
+        let before = self.enabled_specs();
+        self.git_status = fresh.git_status;
+        self.system_hud = fresh.system_hud;
+        self.plugin_disabled.clone_from(&fresh.disabled_plugins);
+        self.plugin_enabled.clone_from(&fresh.enabled_plugins);
+        self.plugin_menu_kept.clone_from(&fresh.local_plugin_names);
+        self.plugin_dropins.clone_from(&fresh.dropins);
+        self.dropin_notices.clone_from(&fresh.dropin_notices);
+        let (_, skipped) = self.rebuild_roster(&fresh.plugins);
+
+        let plan = plugin_reload::plan(&before, &self.enabled_specs());
+        for name in &plan.stop {
+            self.plugins.remove(name);
+        }
+        for spec in &plan.restart {
+            self.plugins.remove(&spec.name);
+        }
+        let failed: Vec<String> = plan
+            .restart
+            .iter()
+            .chain(&plan.start)
+            .filter_map(|spec| {
+                self.start_plugin(spec, cwd)
+                    .err()
+                    .map(|e| format!("{}: {e}", spec.name))
+            })
+            .collect();
+        let line = plan.summary(&failed);
+        let notices: Vec<String> = self.dropin_notices.iter().cloned().chain(skipped).collect();
+        self.status = Some(if notices.is_empty() {
+            line
+        } else {
+            format!("{line}; {}", notices.join("; "))
+        });
+    }
+
+    /// Whether `:plugins reload` was typed since the last call.
+    pub fn take_reload_request(&mut self) -> bool {
+        std::mem::take(&mut self.reload_requested)
     }
 
     /// Sets the plugins the plugin menu switched off and the ones it switched on although they
@@ -1156,9 +1225,10 @@ impl App {
 
     /// Switches the plugin on row `index` of the menu: a running one is stopped and forgotten, an
     /// off one is started, and the list of switched-off plugins is saved to `local.toml`. A row
-    /// the menu cannot switch says why instead. The change is already made when the save fails,
-    /// and the status line says so.
-    pub fn toggle_plugin(&mut self, index: usize, cwd: &Path) {
+    /// the menu cannot switch says why instead, and so does a drop-in whose keys or `:` words
+    /// something running has taken since it was found. The change is already made when the save
+    /// fails, and the status line says so.
+    pub fn toggle_plugin(&mut self, index: usize, keys: &KeyMap, cwd: &Path) {
         let Some(entry) = self.plugin_roster.get(index) else {
             return;
         };
@@ -1172,6 +1242,10 @@ impl App {
             let Some(spec) = entry.spec.clone() else {
                 return;
             };
+            if let Some(why) = self.dropin_conflict(index, keys) {
+                self.status = Some(format!("plugin {name}: not switched on: {why}"));
+                return;
+            }
             if let Err(e) = self.start_plugin(&spec, cwd) {
                 self.status = Some(format!("plugin {name}: could not start: {e}"));
                 return;
@@ -1194,6 +1268,25 @@ impl App {
                 format!("plugin {name}: switched {verb}, but could not save to local.toml: {e}")
             }
         });
+    }
+
+    /// Why the drop-in on row `index` cannot be switched on, or `None` when it can or the row is
+    /// not a drop-in: its name, a key or a `:` word is held by the interface or by a plugin that
+    /// is switched on. A plugin switched off holds nothing.
+    fn dropin_conflict(&self, index: usize, keys: &KeyMap) -> Option<String> {
+        let folder = self.plugin_roster.get(index)?.folder.as_ref()?;
+        let dropin = self
+            .plugin_dropins
+            .iter()
+            .find(|found| found.dir == *folder)?;
+        let running: Vec<plugin_roster::Entry> = self
+            .plugin_roster
+            .iter()
+            .enumerate()
+            .filter(|(at, entry)| *at != index && entry.enabled)
+            .map(|(_, entry)| entry.clone())
+            .collect();
+        plugin_roster::conflict(&running, &dropin.spec, keys)
     }
 
     /// Adds the plugin the menu's form describes: refused with the reason when something already
@@ -3034,6 +3127,7 @@ impl App {
                     Restart::Failed(why) => format!("plugin {name}: could not restart: {why}"),
                 });
             }
+            Ok(Some(Command::PluginReload)) => self.reload_requested = true,
             Ok(Some(Command::Shell(line))) if self.run_plugin_command(browser, &line) => {}
             Ok(Some(Command::Shell(line))) => self.spawn_shell_command(browser, line),
             Ok(Some(Command::Interactive(line))) if self.is_busy() => {
@@ -7681,6 +7775,109 @@ mod tests {
             0,
             "testing adds nothing to the menu"
         );
+    }
+
+    /// A drop-in whose manifest is a long sleep, firing on `key`.
+    fn sleeper_dropin(root: &Path, name: &str, key: &str) -> DropIn {
+        DropIn {
+            dir: root.join(name),
+            spec: RawPluginSpec {
+                name: name.into(),
+                command: "sh".into(),
+                args: vec!["-c".into(), "sleep 30".into()],
+                on_key: vec![key.into()],
+                ..RawPluginSpec::default()
+            },
+            description: String::new(),
+            api_version: None,
+        }
+    }
+
+    #[test]
+    fn a_drop_in_whose_key_a_running_plugin_holds_is_not_switched_on() {
+        let mut fx = Fixture::new("dropin-key-taken");
+        let handle = fx._runtime.handle().clone();
+        fx.app = App::new(handle)
+            .with_plugin_switches(Vec::new(), vec!["first".into()])
+            .with_dropins(
+                vec![
+                    sleeper_dropin(&fx.root, "first", "z"),
+                    sleeper_dropin(&fx.root, "second", "z"),
+                ],
+                Vec::new(),
+            )
+            .with_plugins(Vec::new(), &fx.root);
+        let keys = KeyMap::default();
+        let row = |fx: &Fixture, name: &str| {
+            fx.app
+                .plugin_roster
+                .iter()
+                .position(|entry| entry.name == name)
+                .expect("the drop-in is listed")
+        };
+
+        let second = row(&fx, "second");
+        fx.app.toggle_plugin(second, &keys, &fx.root);
+        let status = fx.app.status.clone().unwrap_or_default();
+        assert!(
+            status.contains("not switched on")
+                && status.contains("key z already fires plugin first"),
+            "{status}"
+        );
+        assert!(!fx.app.plugin_roster[second].enabled);
+
+        // A plugin that is switched off holds no key, so only the running one counts.
+        let first = row(&fx, "first");
+        assert_eq!(
+            fx.app.dropin_conflict(second, &keys),
+            Some("key z already fires plugin first".into())
+        );
+        fx.app.plugin_roster[first].enabled = false;
+        assert_eq!(fx.app.dropin_conflict(second, &keys), None);
+    }
+
+    #[test]
+    fn reloading_starts_stops_and_restarts_to_match_the_new_config() {
+        let mut fx = Fixture::new("reload-plugins");
+        let handle = fx._runtime.handle().clone();
+        let table = |name: &str, sleep: &str| {
+            format!(
+                "[[plugin]]\nname = \"{name}\"\ncommand = \"sh\"\nargs = [\"-c\", \"sleep {sleep}\"]\n"
+            )
+        };
+        let before =
+            Config::from_sources(Some(&(table("a", "30") + &table("b", "30"))), None, None);
+        let after = Config::from_sources(Some(&(table("b", "31") + &table("c", "30"))), None, None);
+        fx.app = App::new(handle).with_plugins(before.plugins.clone(), &fx.root);
+        fn running(fx: &Fixture) -> Vec<&str> {
+            fx.app.plugins.names()
+        }
+        assert!(running(&fx).contains(&"a") && running(&fx).contains(&"b"));
+
+        fx.app.reload_plugins(&after, &fx.root);
+        let names = running(&fx);
+        assert!(!names.contains(&"a"), "{names:?}");
+        assert!(names.contains(&"b") && names.contains(&"c"), "{names:?}");
+        let status = fx.app.status.clone().unwrap_or_default();
+        assert_eq!(
+            status,
+            "plugins reloaded: started c; stopped a; restarted b"
+        );
+
+        fx.app.reload_plugins(&after, &fx.root);
+        assert_eq!(
+            fx.app.status.as_deref(),
+            Some("plugins reloaded: nothing changed")
+        );
+    }
+
+    #[test]
+    fn plugins_reload_waits_for_the_loop_to_read_the_files() {
+        let mut fx = Fixture::new("reload-request");
+        assert!(!fx.app.take_reload_request());
+        let _ = fx.flow("plugins reload");
+        assert!(fx.app.take_reload_request());
+        assert!(!fx.app.take_reload_request());
     }
 
     #[test]
