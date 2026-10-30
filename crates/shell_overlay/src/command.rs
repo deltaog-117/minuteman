@@ -62,9 +62,33 @@ pub enum CommandOutcome {
     Cancelled,
 }
 
+/// Kills the shell and every process still in its group. Called before the shell is reaped, so
+/// the group id (the shell's pid) cannot yet belong to anyone else. A process that started its own
+/// session or group (`setsid`, a daemon) is out of reach and survives.
+fn kill_tree(child: &mut std::process::Child) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let group = libc::pid_t::try_from(child.id())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        // SAFETY: `killpg` only takes integers; `group` is the group `run_command` created for
+        // this still-unreaped child.
+        if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+            return Ok(());
+        }
+        // ESRCH: the group is already gone, which is what was asked for.
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        Err(error)
+    }
+    #[cfg(not(unix))]
+    child.kill()
+}
+
 /// Runs `command` through `sh -c` with `cwd` as its working directory and blocks until it
-/// finishes or `cancel` is set (which kills the shell — a process it already forked into the
-/// background is not tracked and survives).
+/// finishes or `cancel` is set (which kills the shell and the processes it forked, including
+/// background jobs, but not one that left the group with `setsid`).
 ///
 /// # Errors
 ///
@@ -81,6 +105,9 @@ pub fn run_command(cwd: &Path, command: &str, cancel: &AtomicBool) -> io::Result
             .stdin(Stdio::null())
             .stdout(writer.try_clone()?)
             .stderr(writer);
+        // Its own process group, so cancelling can signal everything the shell forked.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut sh, 0);
         sh.spawn()?
         // `sh` (and the write ends it owns) drops here: if it lingered, the reader below would
         // never see end-of-file once the child exits.
@@ -100,7 +127,7 @@ pub fn run_command(cwd: &Path, command: &str, cancel: &AtomicBool) -> io::Result
 
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
-            child.kill()?;
+            kill_tree(&mut child)?;
             child.wait()?;
             return Ok(CommandOutcome::Cancelled);
         }
@@ -208,6 +235,47 @@ mod tests {
         setter.join().unwrap();
         assert_eq!(outcome, CommandOutcome::Cancelled);
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_also_kills_a_process_the_shell_forked_into_the_background() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "minuteman-run-command-bg-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&pid_file);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        let watched = pid_file.clone();
+        let setter = std::thread::spawn(move || {
+            // Cancel only once the background job has written its pid.
+            while !std::fs::read_to_string(&watched).is_ok_and(|s| s.ends_with('\n')) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            flag.store(true, Ordering::Relaxed);
+        });
+
+        let command = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let outcome = run_command(&std::env::temp_dir(), &command, &cancel).unwrap();
+
+        setter.join().unwrap();
+        assert_eq!(outcome, CommandOutcome::Cancelled);
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::fs::remove_file(&pid_file).unwrap();
+        // The orphan is reparented and reaped asynchronously, so give it a moment to vanish.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        // SAFETY: signal 0 only checks that the pid exists.
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: as above.
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "background job survived");
     }
 
     #[test]

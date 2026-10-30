@@ -1951,6 +1951,11 @@ stable, multi-language plugin system. Items are organized by priority, not by ti
   announce itself. Measured against the real release binary through a pty: a file made outside
   appears after 0.11–0.19 s whatever the timer's phase, against 0.14–0.58 s polled. The release
   binary grew from 9,839,568 to 10,059,728 bytes (+215 KiB, +2.2%).
+- ✅ **Cancel a `:` command's whole process tree** – a `:` command now runs in its own process
+  group, and `Esc` kills the group, so a job the shell sent to the background (`sleep 60 &`) dies
+  with it instead of being left running. A program that starts its own session (`setsid`, a
+  daemon) is out of reach and survives; so does a background job when the command finishes on its
+  own, as it did before.
 
 ## 🔴 High Priority: a small core and bundled plugins
 
@@ -2698,8 +2703,6 @@ draws.
   limit, in which case the folder silently falls back to polling and nothing says so.
 - **Show all of a `:` command's output** – the status line holds eight lines for five seconds.
   A scrollable output pane (or a pager) would make `:ls -l` or `:git status` usable.
-- **Cancel a `:` command's whole process tree** – `Esc` kills the `sh` it started but not a
-  process that shell already forked into the background.
 - **Animated border gradient (COA C from the gradient cycle)** – the gradient slowly turning
   around the frame on the existing animation tick, with a speed setting. Belongs on a future
   Motion page with the other animations (focus fade, typewriter preview, splash), each with an

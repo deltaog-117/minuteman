@@ -121,6 +121,7 @@ reasoning throughout the project's lifecycle.*
 | 2026-10-26 | Undo History, Adopting Other Sessions' Entries | Pull the file in when the user opens `U` or presses `u`/redo, add-only into the live stacks (COA C); pulling after our own save (A) and watching the file (B) set aside | ✅ Confirmed |
 | 2026-10-21 | Sandboxed WASM Plugins | `wasmi` behind an off-by-default `wasm` feature, one launch decision, a read-only trust check with no wildcard arm, and memory and idle-time limits on a thread of its own (COA A); `wasmtime`/Extism (B) and a permission manifest with writes (C) not taken | ✅ Confirmed |
 | 2026-10-30 | Reloading Plugins From Edited Config | `:plugins reload`, on request, plugins only: a strict loader that refuses a file that does not parse, and a pure plan of what to stop, start and restart (COA A); a save-triggered watcher (B) and a reload of theme and keys (C) set aside | ✅ Confirmed |
+| 2026-10-30 | Cancelling A `:` Command's Process Tree | Run the shell as the leader of its own process group and `killpg` it on `Esc`; no alternatives weighed, as only one approach was credible | ✅ Confirmed |
 
 ---
 
@@ -9021,6 +9022,34 @@ terminal: it shares `settle_pick` with `Enter`, but the mouse branch itself has 
 config to be replaceable while the loop runs. A plugin that failed to start at launch and was not
 changed is not tried again by a reload (`:plugins restart` does that). A config-declared plugin's
 keys are not checked against others on reload, as they are not at launch.
+
+---
+
+### Cancelling A `:` Command's Process Tree
+
+**Date:** 2026-10-30
+**Status:** Confirmed
+
+**Context.** `Esc` on a running `:` command killed the `sh -c` it had started and nothing else, so
+a job the shell had already sent to the background (`sleep 60 &`) kept running after the cancel.
+Only one approach was credible, so no alternatives were laid out: the options that reach past a
+process group (a cgroup, or making Minuteman a subreaper and walking its children) need Linux-only
+setup far out of proportion to this fix.
+
+**Decision.** `run_command` starts the shell as the leader of a new process group
+(`CommandExt::process_group(0)`), and a cancel sends `SIGKILL` to the whole group with `killpg`
+before the shell is reaped, so the group id cannot yet belong to anyone else. A group that is
+already gone (`ESRCH`) counts as done. Under `sh -c` job control is off, so a background job stays
+in the shell's group. The child no longer shares Minuteman's group, so a `Ctrl-C` typed at the
+terminal no longer reaches it; that is harmless, as stdin is closed and `Esc` is the way to stop it.
+
+**Verification.** `scripts/check` passes. A new test starts `sleep 30 &` through `run_command`,
+cancels once the background job has written its pid, and asserts the pid disappears; the existing
+cancel and backgrounded-process tests still pass. The test first hung because its pid file name
+held `ThreadId(2)`, whose parentheses are a shell syntax error; the path is now quoted.
+
+**Left open.** A program that starts its own session (`setsid`, a daemon) leaves the group and
+survives a cancel. A background job also survives a command that finishes by itself, as before.
 
 ---
 

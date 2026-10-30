@@ -638,6 +638,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Author: deltaog-117.
 
 ### Fixed
+- `Esc` on a running `:` command now stops everything it started, not only the shell: a job the
+  command sent to the background (`sleep 60 &`) used to keep running after the cancel. A program
+  that starts its own session (`setsid`, a daemon) still survives. Author: deltaog-117.
 - The plugin menu's add form refuses a manifest written for another plugin API when it is filled
   from a folder, saying which versions differ and leaving the typed rows alone, as the found list,
   `mman plugin check` and `mman plugin add` already did. Author: deltaog-117.
